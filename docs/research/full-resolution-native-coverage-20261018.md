@@ -1,18 +1,18 @@
 # Full-resolution scene coverage receiver
 
 The frozen [v2 atlas](../protocols/scene-contribution-atlas-v2.json) carries a
-2048×2048 contribution image and a separate2048×2048 numeric coverage image in a
-3168×3168 carrier. This replaces v1's1024×1024 coverage grid without adding a
+2048×2048 contribution image and a separate 2048×2048 numeric coverage image in a
+3168×3168 carrier. This replaces v1's 1024×1024 coverage grid without adding a
 window classification, threshold, extra image, descriptor, or frame queue. It
 changes the image packing contract; it does not increase the transport's actual
 pixel dimensions. Video filtering/compression and ordinary source antialiasing
 still apply.
 
-The scene rectangle is `[560,560,2048,2048]`. Four512-row coverage strips form a
+The scene rectangle is `[560,560,2048,2048]`. Four 512-row coverage strips form a
 windmill around it. Their data origins are `[576,32]`, `[2624,576]`, `[544,2624]`,
-`[32,544]`. Strips1 and3 are rotated: the inverse mapping in texel-center index
-coordinates is `(origin.x + localY, origin.y + 2047 - globalX)`. Strips0 and2
-use `(origin.x + globalX, origin.y + localY)`. Every16-pixel halo continues the
+`[32,544]`. Strips 1 and 3 are rotated: the inverse mapping in texel-center index
+coordinates is `(origin.x + localY, origin.y + 2047 - globalX)`. Strips 0 and 2
+use `(origin.x + globalX, origin.y + localY)`. Every 16-pixel halo continues the
 **global** coverage image; only global image boundaries clamp. The offsets keep
 the corner halos disjoint. The earlier overlapping draft is not admitted.
 
@@ -69,3 +69,32 @@ precision instead of claiming an infinitely exact continuous edge.
 This is focused software/GPU evidence. It is not a new headset, codec, persistent
 installation, physical-eye association or performance result. The unchanged
 legacy GPU suite is inherited evidence, not a newly rerun complete gate.
+
+## Shipping checks (2026-10-18)
+
+The UNIX CMake registration `native_fragment_scene_full_presenter` was executed
+through CTest with the explicit private original input: all four methods passed,
+with no skips. This is one focused CTest, not a complete CTest run.
+
+The actual `VkLayer_frame_pixel_snapshot` Release target built for host x86-64
+and cross-compiled AArch64 with `BUILD_TESTING=OFF`,
+`FRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON`, `FRAME_PIXEL_SYNTHETIC_PRESENTER=ON` and
+`FRAME_PIXEL_RELEASE_RECEIVER=ON`. Both linked with `-Werror`, contained exactly
+one release marker and the new dual candidate pin, and had no `libvulkan`
+dependency. The retained libraries are 182256 and 227328 bytes respectively.
+This cross-build did not bypass or run the preparer's native AArch64 guard and
+is not installation or native-device execution evidence.
+
+Three existing focused installer controls were rerun for stopped upgrade,
+live-update refusal/interrupted recovery, and automatic preparation/reuse. An
+owned filesystem delta also replaced the former v1 candidate/compatibility with
+the actual dual candidate/new compatibility and library, exercising both saved
+enabled values. Production installation transactions preserved each preference;
+unit management and runtime verification were explicit fixture boundaries. The
+real source-checkout verifier rejects the old compatibility pin, causing the
+normal cold rebuild before stopped replacement; old receipt hashes establish
+file ownership rather than admitting old executable code as the new package.
+Small source pins, libraries, logs and receipts are retained privately; all
+compiler/CMake caches were removed after their processes were reaped. Earlier
+168-case GPU, ten Python-method and eight C++-check evidence is reused for
+unchanged areas, without another full-suite or hardware claim.

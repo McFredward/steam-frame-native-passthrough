@@ -485,6 +485,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_fragment_subgroup_presenter.py)
         add_test(NAME native_fragment_scene_presenter COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_fragment_scene_presenter.py)
+        add_test(NAME native_fragment_scene_full_presenter COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_fragment_scene_full_presenter.py)
         add_test(NAME synthetic_presenter_session COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_synthetic_presenter_session.py)
         add_test(NAME scene_presenter_session COMMAND ${Python3_EXECUTABLE} -B
