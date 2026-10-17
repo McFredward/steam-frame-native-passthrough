@@ -57,9 +57,45 @@ This model supports fractional transparency with a correctly prepared source.
 It does not supply refraction of the real room: a game shader that samples its
 own scene background has not sampled the headset's camera.
 
-## Frozen scene profile
+## Frozen scene profiles
 
-The normative contract is
+The receiver recognizes both frozen formats. New integrations should use
+[`scene-contribution-atlas-v2.json`](protocols/scene-contribution-atlas-v2.json),
+whose canonical-profile SHA256 is
+`68ad7a14b094729faffb3ff23cc5b42b2605ae9535e28d55071cd76533aecfc5`.
+The pretty-printed file SHA256 is
+`9ea2c9cd304a296d088659e3bc8e9a316365c8b10e3dfddb459bad08ff11ce9f`.
+
+### Equal-resolution v2
+
+| Field | Profile v2 |
+|---|---|
+| Schema / profile | `ghvr-steamlink-scene-atlas-v2` / `scene-contribution-atlas-v2`, revision 2. |
+| Logical canvas | 3168×3168; actual XR/video dimensions remain unchanged. |
+| RGB contribution | Rectangle `(560,560,2048,2048)`. |
+| Coverage field | 2048×2048, numeric **G**, four 2048×512 strips. Sample the same source RGBA grid as RGB, without an additional coverage box or reconstruction kernel. |
+| Strip data origins | `(576,32)`, `(2624,576)`, `(544,2624)`, `(32,544)`. |
+| Rotations | Strips 1 and 3 are quarter-turned. In texel-center index coordinates, map `(sourceX, localY)` to `origin + (localY, 2047-sourceX)`; other strips use `origin + (sourceX, localY)`. |
+| Halos | 16 logical pixels continuing the global mask, with no overlapping outer rectangles. |
+| Guard | Twelve 32×32 neutral cells, origin `(64,64)`, diagonal stride `(36,36)`. |
+| Guard codes | `104,14,149,250,167,249,185,25,121,144,38,152`, tolerance ±2 codes. |
+| Guard signature | SHA256 `680e95faa7f9b919799026984e1950f9ec2677b31901843f7ac1e78af1913e73`. |
+
+Coordinate, RGB-contribution, transfer and current-image rules remain unchanged.
+Larger coverage allocation trades away RGB area at a fixed carrier resolution;
+it does not increase the user's resolution or bitrate. Genuine source MSAA,
+partial opacity, gradients and positive RGB at A0 remain valid. No object/window
+classification or opacity threshold is introduced. Desktop raster and native GPU
+evidence is recorded in the [focused v2 report](research/full-resolution-native-coverage-20261018.md);
+headset/codec quality and performance remain separate verification boundaries.
+
+`transform_dual()` and the public package generator test the complete v2 guard
+first, then the complete v1 guard. If neither matches, they retain the exact
+original output. Single-profile `transform()` still defaults to unchanged v1.
+
+### Legacy v1
+
+The retained normative v1 contract is
 [`docs/protocols/scene-contribution-atlas-v1.json`](protocols/scene-contribution-atlas-v1.json).
 The canonical-profile SHA256 is
 `2c1ca215715ec7d2d7591eb2a2e8071a15e11fb5f96530927d10ceab7405e30c`.
@@ -181,7 +217,7 @@ current actual eye callback:
     if source is disabled or current coverage is not established:
         submit ordinary current-eye output
     else:
-        pack current-eye contribution E and coverage A into the exact v1 atlas
+        pack current-eye contribution E and coverage A into the exact v2 atlas
         submit that image through the ordinary game/SteamVR path
 ```
 

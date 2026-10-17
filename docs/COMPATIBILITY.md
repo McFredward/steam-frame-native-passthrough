@@ -46,10 +46,13 @@ their respective evidence and limits.
   current eye. A texture with an alpha channel is not enough on its own.
 - Fractional opacity is supported. Arbitrary refractive glass, effects that sample
   a different background and all transparent shader families are not certified.
-- Some window edges and smaller hand boundaries are soft. The current opacity
-  field is 1024² versus 2048² scene colour; filtering, video encoding and original
-  UI shadows can each contribute. Correcting this must preserve genuine partial
-  transparency.
+- The new v2 format gives opacity and scene colour equal 2048² logical grids,
+  removing the legacy v1 mask's extra downsampling and reconstruction filter.
+  The receiver accepts both formats. At a fixed stream resolution, v2 allocates
+  more video area to opacity and less to colour. Desktop GPU tests show sharper
+  coverage while retaining glass and gradients; the final headset picture and
+  streaming cost have not yet been checked. Source antialiasing, video filtering
+  and compression still apply. See the [focused implementation evidence](research/full-resolution-native-coverage-20261018.md).
 - Motion latency and the cost of extra image packing/sampling remain relevant.
   Host GPU measurements are not a Frame performance guarantee. There is no extra
   previous-eye/pair queue in the GloomhavenVR source helper, but the ordinary
