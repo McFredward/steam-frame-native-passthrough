@@ -20,6 +20,8 @@ import pixel_uniform_mapping as ref
 
 F=ref.f32
 WIDTH,HEIGHT=2112,2752
+FULL_PROFILE=scene.load_profile(scene.SPEC_V2)
+LEGACY_PROFILE=scene.load_profile()
 CHARTS=[[F(x) for x in r] for r in [[0,.25,1,.5],[0,0,1,1],[0,.75,1,1],[.13,.29,.81,.73]]]
 BG=[F(x) for x in [.11,.17,.23,1]]
 CASE=struct.Struct('<II32fIIiIII16fI')
@@ -43,16 +45,24 @@ def encoded(rgb,flags):
 
 
 def source_pixel(x,y,c,p):
+    p=FULL_PROFILE if c.get('profile_revision',1)==2 else LEGACY_PROFILE
     chart=CHARTS[c['chart']]
-    ax=(((x+.5)/WIDTH-chart[0])/(chart[2]-chart[0]))*WIDTH
-    ay=(((y+.5)/HEIGHT-chart[1])/(chart[3]-chart[1]))*HEIGHT
+    ax=(((x+.5)/WIDTH-chart[0])/(chart[2]-chart[0]))*p['canvas'][0]
+    ay=(((y+.5)/HEIGHT-chart[1])/(chart[3]-chart[1]))*p['canvas'][1]
     out=[F(.24),F(.53),F(.69),1.]
-    if 32<=ax<2080 and 352<=ay<2400:out=encoded(c['body'],c['flags'])
+    sx,sy,sw,sh=p['scene']
+    if sx<=ax<sx+sw and sy<=ay<sy+sh:out=encoded(c['body'],c['flags'])
     for tile,(ox,oy) in enumerate(p['coverage']['data_origins']):
-        if ox-16<=ax<ox+1040 and oy-16<=ay<oy+272:
-            gx=max(0.,min(1023.,ax-ox-.5));gy=max(0.,min(1023.,ay-oy-.5+tile*256))
-            a={0:0.,1:1.,3:-.2,4:1.2}.get(c['pattern'])
-            if a is None:a=.17+.51*gx/1023.+.21*gy/1023.
+        rotation=p['coverage'].get('rotation_quarter_turns',[0]*4)[tile]
+        size=p['coverage']['size'][0];rows=p['coverage']['tile_rows']
+        w,h=(rows,size) if rotation else (size,rows)
+        if ox-16<=ax<ox+w+16 and oy-16<=ay<oy+h+16:
+            gx=(size-(ay-oy)-.5 if rotation else ax-ox-.5)
+            gy=(ax-ox-.5 if rotation else ay-oy-.5)+tile*rows
+            gx=max(0.,min(size-1.,gx));gy=max(0.,min(size-1.,gy))
+            a={0:0.,1:1.,3:-.2,4:1.2,6:.25,7:.5}.get(c['pattern'])
+            if c['pattern']==5:a=0. if gx<(size-1)/2 else 1.
+            if a is None:a=.17+.51*gx/(size-1)+.21*gy/(size-1)
             out=[F(.31),F(a),F(.68),1.];break
     if c['mode']==7:out=[F(.21),F(.5),F(.72),1.]
     if c['mode'] not in (5,7):
@@ -60,9 +70,9 @@ def source_pixel(x,y,c,p):
         if c['mode']==2:gx-=80
         if c['mode']==3:gx=2112-ax
         if c['mode']==4:gx=64+(ax-64)*2;gy=2400+(ay-2400)*2
-        if 2400<=gy<2432:
-            for i,code in enumerate(p['guard']['codes']):
-                if 64+160*i<=gx<96+160*i:
+        for i,code in enumerate(p['guard']['codes']):
+                ox,oy=[p['guard']['origin'][axis]+i*p['guard']['stride'][axis] for axis in (0,1)]
+                if ox<=gx<ox+32 and oy<=gy<oy+32:
                     if c['mode']==1:code^=0x5a
                     if c['mode']==8 and i==c['cell']:code+=c['delta']
                     out=[F(.31),F(code/255),F(.68),1.];break
@@ -83,20 +93,27 @@ def sample(uv,c,profile):
     return [F(x) for x in result]
 
 
-def tiled_coordinate(q):
+def tiled_coordinate(q,profile=None):
+    profile=profile or LEGACY_PROFILE
     q=[min(F(1-.5/2048),max(F(.5/2048),x)) for x in q]
-    px,py=[ref.sub(ref.mul(x,1024),.5) for x in q]
-    tile=min(3,math.floor(max(py,0)/256))
-    ox,oy=[[16,48],[1072,48],[16,2448],[1072,2448]][tile]
+    size=profile['coverage']['size'][0];rows=profile['coverage']['tile_rows']
+    px,py=[ref.sub(ref.mul(x,size),.5) for x in q]
+    tile=min(3,math.floor(max(py,0)/rows))
+    ox,oy=profile['coverage']['data_origins'][tile]
+    py=ref.sub(py,tile*rows)
+    if profile['coverage'].get('rotation_quarter_turns',[0]*4)[tile]:px,py=py,ref.sub(size-1,px)
     return [ref.div(ref.add(ref.add(ox,px),.5),2112),
-            ref.div(ref.add(ref.add(oy,ref.sub(py,tile*256)),.5),2752)]
+            ref.div(ref.add(ref.add(oy,py),.5),2752)] if profile['revision']==1 else [
+                ref.div(ref.add(ref.add(ox,px),.5),profile['canvas'][0]),
+                ref.div(ref.add(ref.add(oy,py),.5),profile['canvas'][1])]
 
 
-def color_coordinate(q):
+def color_coordinate(q,profile=None):
+    profile=profile or LEGACY_PROFILE
     q=[min(F(1-.5/2048),max(F(.5/2048),x)) for x in q]
     # Match only frozen construction coefficients, not the shader's SSA graph.
-    return [ref.add(ref.mul(F(2048/2112),q[0]),F(32/2112)),
-            ref.add(ref.mul(F(2048/2752),q[1]),F(352/2752))]
+    sx,sy,sw,sh=profile['scene'];w,h=profile['canvas']
+    return [ref.add(ref.mul(F(sw/w),q[0]),F(sx/w)),ref.add(ref.mul(F(sh/h),q[1]),F(sy/h))]
 
 
 def native_panel(q,c,p):
@@ -128,12 +145,13 @@ def cases(profile):
         raster=lambda point:[ref.add(r1[i],ref.mul(ref.sub(r1[i+2],r1[i]),F(point[i]))) for i in (0,1)]+[F(.625),F(.875)]
         body=[F(x) for x in (body or [.35,.65,.25,.375])]
         c={'name':name,'chart':chart,'eye':eye,'flags':0x02018018|((branch&1)<<17)|((branch&2)<<17),
+           'profile_revision':profile['revision'],
            'pattern':pattern,'mode':mode,'cell':cell,'delta':delta,'valid':valid,'slot':slot,'r1':r1,'u':raster(q) if u is None else u,
            'patch':[F(.12),F(.14),0.,0.],'tint':[F(.73),F(.59),F(.91),1.],'body':body}
         c['r0']=(raster([.1,.15])[:2]+raster([.6,.85])[:2] if valid else [0.,0.,1.,1.]) if r0 is None else r0
         if valid:
             q=[ref.div(ref.sub(c['u'][i],r1[i]),ref.sub(r1[i+2],r1[i])) for i in (0,1)]
-            qc,qa=color_coordinate(q),tiled_coordinate(q)
+            qc,qa=color_coordinate(q,profile),tiled_coordinate(q,profile)
             color,_=native_panel(qc,c,profile);mask,raw=native_panel(qa,c,profile)
             aperture=ref.lookup_reference(c['r0'],r1,c['patch'][:2],c['flags'],q)['outer_attenuation']
             expected=[ref.mul(ref.mul(color['blended_rgb'][i],aperture),c['tint'][i]) for i in range(3)]+[ref.mul(min(1.,max(0.,raw)),aperture)]
@@ -167,6 +185,9 @@ def cases(profile):
     add('invalid_R1_reverse',r1=[.8,0.,.2,1.],u=[.5,.5,.625,.875],valid=False)
     add('invalid_R1_NaN',r1=[float('nan'),0.,1.,1.],u=[.5,.5,.625,.875],valid=False)
     add('invalid_u_outside',u=[-1.,.5,.625,.875],valid=False)
+    if profile['revision']==2:
+        for pattern in (6,7):add('full_constant_'+str(pattern),pattern=pattern)
+        for offset in range(-4,5):add('full_edge_'+str(offset),q=(.5+offset/4096,.13),pattern=5,mode=9)
     demand(len(result)<=256,'bounded scene cases')
     return result
 
@@ -177,7 +198,7 @@ def pack(cases,coordinates=False):
         expected=[*c['qa'],c['raw_g'],c['original_aperture']] if coordinates and c['valid'] else c['expected']
         values=c['u']+c['r0']+c['r1']+c['patch']+c['tint']+expected+c['body']+BG
         extra=c['color_u']+c['mask_u']+[c['color_aperture'],c['mask_aperture'],c['original_aperture']]+c['inverse_g']+[c['color_weight'],c['mask_weight']]
-        records.append(CASE.pack(c['eye'],c['flags'],*values,c['mode'],c['cell'],c['delta'],c['chart'],int(c['valid']),c['slot'],*extra,c['pattern']))
+        records.append(CASE.pack(c['eye'],c['flags'],*values,c['mode'],c['cell'],c['delta'],c['chart'],int(c['valid']),c['slot'],*extra,c['pattern']+(256 if c.get('profile_revision',1)==2 else 0)))
     return b'SCENEAT1'+struct.pack('<I',len(records))+b''.join(records)
 
 
@@ -196,30 +217,48 @@ def mutated(binary,record,mode):
         if mode=='coordinates' and op==62 and a==(504,ids['output']):
             out.append(scene.ssa.Instruction(80,(9,bound,ids['mapped_qa'],ids['raw_component_g'],ids['original_aperture'])))
             item=scene.ssa.Instruction(62,(504,bound));bound+=1;count+=1
+        if mode=='wrong_rotation' and op==169 and a[1] in (ids['rotated_pixel_x'],ids['rotated_pixel_y']):
+            item=scene.ssa.Instruction(83,(8,a[1],a[4]));count+=1
         out.append(item)
-    demand(count==({'shared_weight':3}.get(mode,1)),'exact mutation '+mode+': '+str(count));h[3]=bound
+    demand(count==({'shared_weight':3,'wrong_rotation':2}.get(mode,1)),'exact mutation '+mode+': '+str(count));h[3]=bound
     return scene.pack_module(h,out)
 
 
 def main(argv=None):
+    global WIDTH,HEIGHT
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--original',type=Path,required=True);p.add_argument('--record',type=Path,required=True)
     p.add_argument('--sanitizer',action='store_true');p.add_argument('--driver',action='append',choices=['intel','software'])
-    p.add_argument('--mode',action='append',choices=['enabled','off','coordinates','multiply_E_by_A','wrong_bottom_tile','wrong_R1_chart','shared_weight'])
+    p.add_argument('--dual-full',action='store_true',help='New dual-v2/v1 native path only; old full suite remains separate evidence')
+    p.add_argument('--mode',action='append',choices=['enabled','off','coordinates','multiply_E_by_A','wrong_bottom_tile','wrong_R1_chart','shared_weight','wrong_rotation','full_multiply_E_by_A'])
     args=p.parse_args(argv);report={'schema':'native-scene-presenter-gpu-v1','status':'FAILED','steps':[],'devices':[],'native_activation':False,'video_color_chain_proven':False}
     code=1;private=None
     try:
         demand(not args.record.exists(),'exclusive evidence')
-        original=args.original.read_bytes();profile=scene.load_profile();candidate,record=scene.transform(original,profile)
+        original=args.original.read_bytes();profile=scene.load_profile()
+        if args.dual_full:WIDTH=HEIGHT=3168
+        candidate,record=(scene.transform_dual(original) if args.dual_full else scene.transform(original,profile))
         off,_=scene.transform(original,profile,False);demand(off==original,'OFF exact original bytes')
-        owned=cases(profile);report.update(transformation=record,cases=owned)
+        owned=cases(profile)
+        if args.dual_full:
+            legacy=[c for c in owned if c['name'] in ['ON','OFF_same_command','ON_same_command_recovery','coverage_pattern_0','coverage_pattern_1','guard_0_3','guard_11_-3']]
+            full=cases(FULL_PROFILE)
+            # Switch formats/ordinary source with one immutable existing CB.
+            owned=full+legacy+[full[0],full[1],legacy[0],full[2]]
+        report.update(transformation=record,cases=owned)
         modes={'enabled':candidate,'off':off}
-        for mode in ['coordinates','multiply_E_by_A','wrong_bottom_tile','wrong_R1_chart','shared_weight']:modes[mode]=mutated(candidate,record,mode)
+        if args.dual_full:
+            newrecord={**record,'new_ssa_ids':record['v2_ssa_ids']}
+            modes['wrong_rotation']=mutated(candidate,newrecord,'wrong_rotation')
+            modes['full_multiply_E_by_A']=mutated(candidate,newrecord,'multiply_E_by_A')
+        else:
+            for mode in ['coordinates','multiply_E_by_A','wrong_bottom_tile','wrong_R1_chart','shared_weight']:modes[mode]=mutated(candidate,record,mode)
         selected=args.mode or list(modes)
+        demand(all(mode in modes for mode in selected),'selected mode belongs to explicit profile scope')
         with tempfile.TemporaryDirectory(prefix='native-scene-gpu-') as directory:
             private=Path(directory);borrowed=(ROOT/'tests/native-fragment-guarded-presenter-gpu/fixture.cpp').read_text()
             borrowed=borrowed.replace('int main(int argc,char** argv){','int inherited_guard_main(int argc,char** argv){')
             borrowed=borrowed.replace('#include "../native-fragment-ssa-gpu/fixture.cpp"','#include "'+str(ROOT/'tests/native-fragment-ssa-gpu/fixture.cpp')+'"')
-            borrowed=borrowed.replace('constexpr unsigned SourceWidth=688,SourceHeight=548;','constexpr unsigned SourceWidth=2112,SourceHeight=2752;')
+            borrowed=borrowed.replace('constexpr unsigned SourceWidth=688,SourceHeight=548;',f'constexpr unsigned SourceWidth={WIDTH},SourceHeight={HEIGHT};')
             (private/'borrowed_guard_fixture.h').write_text(borrowed)
             fixture=private/'fixture';vertex=private/'vertex.spv'
             compile_flags=['-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer'] if args.sanitizer else ['-O2']
@@ -238,9 +277,12 @@ def main(argv=None):
                     chosen=owned
                     if mode=='coordinates':chosen=[c for c in owned if c['mode']==9 or not c['valid']][:90]
                     if mode not in ['enabled','off','coordinates']:
-                        key={'multiply_E_by_A':'coverage_pattern_0','wrong_bottom_tile':'global_seam_(0.37, 0.75)',
-                             'wrong_R1_chart':'native_routes_(0, 0, 1)','shared_weight':'native_routes_(1, 0, 0)'}[mode]
-                        chosen=owned[:3]+[next(c for c in owned if c['name']==key)]
+                        if mode=='wrong_rotation':
+                            chosen=owned[:3]+[next(c for c in owned if c['profile_revision']==2 and c.get('q',[0,0])[0]==F(.37) and .25<c['q'][1]<.5)]
+                        else:
+                            key={'multiply_E_by_A':'coverage_pattern_0','full_multiply_E_by_A':'coverage_pattern_0','wrong_bottom_tile':'global_seam_(0.37, 0.75)',
+                                 'wrong_R1_chart':'native_routes_(0, 0, 1)','shared_weight':'native_routes_(1, 0, 0)'}[mode]
+                            chosen=([next(c for c in owned if c['name']==key)] if mode=='full_multiply_E_by_A' else owned[:3]+[next(c for c in owned if c['name']==key)])
                     casefile=private/(mode+'.bin');casefile.write_bytes(pack(chosen,mode=='coordinates'))
                     settings=private/(driver+'-'+mode);settings.mkdir();log=settings/'validation.log'
                     (settings/'vk_layer_settings.txt').write_text('khronos_validation.validate_sync = true\nkhronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG\nkhronos_validation.report_flags = error,warn,perf\nkhronos_validation.log_filename = '+str(log)+'\n')
@@ -251,7 +293,7 @@ def main(argv=None):
                     demand('Validation Error' not in result['stderr']+result['validation_log'] and 'SYNC-HAZARD' not in result['validation_log'],'Vulkan/sync '+driver+'/'+mode)
                     if mode in ['enabled','off','coordinates']:
                         demand(result['returncode']==0,'actual GPU '+driver+'/'+mode);result['result']=json.loads(result['stdout'])
-                    else:demand(result['returncode']!=0 and any(x in result['stderr'] for x in ['scene coverage alpha differs','scene contribution RGB differs']),'valid mutant must fail numerical oracle '+mode)
+                    else:demand(result['returncode']!=0 and ('differs' in result['stderr'] and any(x in result['stderr'] for x in ['scene coverage alpha','scene contribution RGB'])),'valid mutant must fail numerical oracle '+mode)
             report['status'],code='PASS',0
     except Exception as error:report['error']=str(error)
     finally:

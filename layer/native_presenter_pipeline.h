@@ -16,8 +16,9 @@ constexpr const char* GuardedFragmentSha256="0aaf356d3789473cd32ff0d60cf5971bc14
 constexpr std::size_t GuardedFragmentBytes=18416;
 // Real image contribution is a distinct protocol: RGB already includes surface
 // opacity and additive emission. It must never enter the straight-RGB decoder.
-constexpr const char* SceneFragmentSha256="57ce6fdaa983765fe12800002a1f3c53be50291586e16a13d5fbcc0bced49cb3";
-constexpr std::size_t SceneFragmentBytes=19224;
+// This exact executable recognizes both frozen scene-atlas v2 and legacy v1.
+constexpr const char* SceneFragmentSha256="9ad1b56a20db039132ad6ec4557fe8ece3fff277316370bcefc9f70ec7aed367";
+constexpr std::size_t SceneFragmentBytes=31960;
 enum class Profile : std::uint8_t { Synthetic, SceneContribution };
 inline const char* fragmentSha256(Profile profile) noexcept {
     return profile == Profile::SceneContribution ? SceneFragmentSha256 : GuardedFragmentSha256;

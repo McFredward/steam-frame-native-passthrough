@@ -1,0 +1,123 @@
+{
+  "schema": "ghvr-steamlink-scene-atlas-v2",
+  "profile": "scene-contribution-atlas-v2",
+  "revision": 2,
+  "canvas": [
+    3168,
+    3168
+  ],
+  "scene": [
+    560,
+    560,
+    2048,
+    2048
+  ],
+  "coordinates": "top-down source texel centers; current original R1 chart",
+  "coverage": {
+    "size": [
+      2048,
+      2048
+    ],
+    "numeric_component": "G",
+    "data_origins": [
+      [
+        576,
+        32
+      ],
+      [
+        2624,
+        576
+      ],
+      [
+        544,
+        2624
+      ],
+      [
+        32,
+        544
+      ]
+    ],
+    "outer_origins": [
+      [
+        560,
+        16
+      ],
+      [
+        2608,
+        560
+      ],
+      [
+        528,
+        2608
+      ],
+      [
+        16,
+        528
+      ]
+    ],
+    "outer_sizes": [
+      [
+        2080,
+        544
+      ],
+      [
+        544,
+        2080
+      ],
+      [
+        2080,
+        544
+      ],
+      [
+        544,
+        2080
+      ]
+    ],
+    "rotation_quarter_turns": [
+      0,
+      1,
+      0,
+      1
+    ],
+    "tile_rows": 512,
+    "halo": 16,
+    "global_halo_continuation": true,
+    "downsample": "none; scene RGB and coverage use the same source sampler at equal spatial resolution"
+  },
+  "source_transfer": "initial production scope: Gamma working space, SDR UNorm eye source, no atlas sRGB conversion; retain ordinary native RGB reconstruction",
+  "rgb_convention": "scene contribution; preserve additive RGB at coverage zero; never multiply by coverage again",
+  "output": "RGB contribution times original aperture/tint; A clamp(raw-G,0,1) times original aperture",
+  "guard": {
+    "origin": [
+      64,
+      64
+    ],
+    "size": [
+      32,
+      32
+    ],
+    "stride": [
+      36,
+      36
+    ],
+    "count": 12,
+    "code_tolerance": 2,
+    "meaning": "format recognition only; not body authentication, provenance or liveness",
+    "signature_preimage": "GloomhavenVR/SteamLink/scene-contribution-atlas-v2\n{\"canvas\":[3168,3168],\"coordinates\":\"top-down source texel centers; current original R1 chart\",\"coverage\":{\"data_origins\":[[576,32],[2624,576],[544,2624],[32,544]],\"downsample\":\"none; scene RGB and coverage use the same source sampler at equal spatial resolution\",\"global_halo_continuation\":true,\"halo\":16,\"numeric_component\":\"G\",\"outer_origins\":[[560,16],[2608,560],[528,2608],[16,528]],\"outer_sizes\":[[2080,544],[544,2080],[2080,544],[544,2080]],\"rotation_quarter_turns\":[0,1,0,1],\"size\":[2048,2048],\"tile_rows\":512},\"guard\":{\"code_tolerance\":2,\"count\":12,\"meaning\":\"format recognition only; not body authentication, provenance or liveness\",\"origin\":[64,64],\"size\":[32,32],\"stride\":[36,36]},\"output\":\"RGB contribution times original aperture/tint; A clamp(raw-G,0,1) times original aperture\",\"profile\":\"scene-contribution-atlas-v2\",\"revision\":2,\"rgb_convention\":\"scene contribution; preserve additive RGB at coverage zero; never multiply by coverage again\",\"scene\":[560,560,2048,2048],\"schema\":\"ghvr-steamlink-scene-atlas-v2\",\"source_transfer\":\"initial production scope: Gamma working space, SDR UNorm eye source, no atlas sRGB conversion; retain ordinary native RGB reconstruction\"}\n",
+    "signature_sha256": "680e95faa7f9b919799026984e1950f9ec2677b31901843f7ac1e78af1913e73",
+    "codes": [
+      104,
+      14,
+      149,
+      250,
+      167,
+      249,
+      185,
+      25,
+      121,
+      144,
+      38,
+      152
+    ]
+  }
+}

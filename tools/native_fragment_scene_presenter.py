@@ -19,8 +19,12 @@ import native_fragment_r1_presenter as presenter
 ssa, recovery, require = presenter.ssa, presenter.recovery, presenter.require
 SPEC = Path(__file__).resolve().parents[1] / "docs/protocols/scene-contribution-atlas-v1.json"
 PROFILE_PIN = "2c1ca215715ec7d2d7591eb2a2e8071a15e11fb5f96530927d10ceab7405e30c"
+SPEC_V2 = SPEC.with_name("scene-contribution-atlas-v2.json")
+PROFILE_V2_PIN = "68ad7a14b094729faffb3ff23cc5b42b2605ae9535e28d55071cd76533aecfc5"
 MARKER = "MRMASK/5 current-r1-scene-contribution-atlas-v1-format-only"
-EXTRA_OPS = frozenset((83, 88, 167, 186, 188, 190, 330))
+MARKER_V2 = "MRMASK/6 current-r1-scene-contribution-atlas-v2-format-only"
+MARKER_DUAL = "MRMASK/7 current-r1-scene-contribution-atlas-v1-v2-format-only"
+EXTRA_OPS = frozenset((83, 88, 167, 186, 188, 190, 245, 330))
 
 
 def profile_contract(profile):
@@ -29,7 +33,7 @@ def profile_contract(profile):
                              ensure_ascii=True, allow_nan=False).encode("ascii")
     except (TypeError, ValueError, UnicodeError):
         recovery.fail("exact finite frozen scene atlas profile required")
-    require(hashlib.sha256(encoded).hexdigest() == PROFILE_PIN,
+    require(hashlib.sha256(encoded).hexdigest() in (PROFILE_PIN, PROFILE_V2_PIN),
             "exact frozen scene atlas profile required; no caller geometry or codes")
     # Seal the accepted contract against subsequent caller mutation.
     result = json.loads(encoded)
@@ -76,7 +80,7 @@ def parse_module(binary):
 
 
 def result_id(item):
-    if item.opcode in (83, 88, 167, 186, 188, 190):
+    if item.opcode in (83, 88, 167, 186, 188, 190, 245):
         return item.operands[1]
     return presenter.atlas.result_id(item)
 
@@ -94,7 +98,7 @@ def _scene_candidate(original, profile, enabled, descriptor_count):
     record.update(source_rgb_convention="scene_contribution", zero_coverage_rgb_is_zero=False,
                   color_policy="native scene RGB reconstruction times original aperture/tint once; never times coverage",
                   output_convention="scene RGB contribution plus independent coverage alpha",
-                  coverage_source_contract="current same-eye scene-contribution-atlas-v1 numeric G",
+                  coverage_source_contract="current same-eye " + profile['profile'] + " numeric G",
                   source_transfer_scope=profile["source_transfer"],
                   additive_or_refraction_contract="additive contribution retained; refraction not established",
                   geometry_policy="clamp panel global q to scene texel centers; original aperture uses unchanged original q")
@@ -130,20 +134,34 @@ def _scene_candidate(original, profile, enabled, descriptor_count):
             "exact two inherited global-q extracts required")
     mask=[]
     qx,qy=[emit(mask,81,8,global_q,i) for i in (0,1)]
-    px=emit(mask,131,8,emit(mask,133,8,qx,constant(1024)),constant(.5))
-    py=emit(mask,131,8,emit(mask,133,8,qy,constant(1024)),constant(.5))
-    # Equivalent to floor(max(py,0)/256) clamped to3, without a new integer
+    size=profile['coverage']['size'][0];rows=profile['coverage']['tile_rows']
+    px=emit(mask,131,8,emit(mask,133,8,qx,constant(size)),constant(.5))
+    py=emit(mask,131,8,emit(mask,133,8,qy,constant(size)),constant(.5))
+    # Equivalent to floor(max(py,0)/tile_rows) clamped to3, without a new integer
     # conversion or dynamic descriptor access. Halos continue the global image.
-    above=[emit(mask,190,96,py,constant(v)) for v in (256,512,768)]
+    above=[emit(mask,190,96,py,constant(v)) for v in (rows,rows*2,rows*3)]
     right=emit(mask,169,96,above[1],above[2],above[0])
-    origin_x=emit(mask,169,8,right,constant(1072),constant(16))
-    origin_y=emit(mask,169,8,above[1],constant(2448),constant(48))
+    if profile['revision']==1:
+        origin_x=emit(mask,169,8,right,constant(1072),constant(16))
+        origin_y=emit(mask,169,8,above[1],constant(2448),constant(48))
+    else:
+        origin_x,origin_y=[constant(v) for v in profile['coverage']['data_origins'][0]]
+        for cond,origin in zip(above,profile['coverage']['data_origins'][1:]):
+            origin_x=emit(mask,169,8,cond,constant(origin[0]),origin_x)
+            origin_y=emit(mask,169,8,cond,constant(origin[1]),origin_y)
     tile_base=constant(0)
-    for cond,value in zip(above,(256,512,768)):
+    for cond,value in zip(above,(rows,rows*2,rows*3)):
         tile_base=emit(mask,169,8,cond,constant(value),tile_base)
-    x=emit(mask,136,8,emit(mask,129,8,emit(mask,129,8,origin_x,px),constant(.5)),constant(2112))
-    local_y=emit(mask,131,8,py,tile_base)
-    y=emit(mask,136,8,emit(mask,129,8,emit(mask,129,8,origin_y,local_y),constant(.5)),constant(2752))
+    if profile['revision']==1:
+        x=emit(mask,136,8,emit(mask,129,8,emit(mask,129,8,origin_x,px),constant(.5)),constant(2112))
+        local_y=emit(mask,131,8,py,tile_base)
+        y=emit(mask,136,8,emit(mask,129,8,emit(mask,129,8,origin_y,local_y),constant(.5)),constant(2752))
+    else:
+        local_y=emit(mask,131,8,py,tile_base)
+        rx=emit(mask,169,8,right,local_y,px)
+        ry=emit(mask,169,8,right,emit(mask,131,8,constant(size-1),px),local_y)
+        x=emit(mask,136,8,emit(mask,129,8,emit(mask,129,8,origin_x,rx),constant(.5)),constant(profile['canvas'][0]))
+        y=emit(mask,136,8,emit(mask,129,8,emit(mask,129,8,origin_y,ry),constant(.5)),constant(profile['canvas'][1]))
     dynamic_qa=make(80,39,ids["mapped_qa"],x,y)
     output=[];clamped=False;replaced_mask=0;replaced_rgb=0
     for index,item in enumerate(instructions):
@@ -165,7 +183,8 @@ def _scene_candidate(original, profile, enabled, descriptor_count):
     record.update(output_bytes=len(binary),output_sha256=hashlib.sha256(binary).hexdigest(),
                   coverage_coordinate_policy="four global-halo tiles selected from clamped current q; no CPU eye table",
                   new_ssa_ids={**ids,"scene_contribution_rgb":ids["premultiplied_rgb"],"scene_global_q":global_q,
-                               "mask_origin_x":origin_x,"mask_origin_y":origin_y,"mask_tile_base":tile_base},
+                               "mask_origin_x":origin_x,"mask_origin_y":origin_y,"mask_tile_base":tile_base,
+                               **({"rotated_pixel_x":rx,"rotated_pixel_y":ry} if profile['revision']==2 else {})},
                   mask_coordinate_ssa={"qx":qx,"qy":qy,"pixel_x":px,"pixel_y":py,
                                        "above":above,"right":right,"mapped_x":x,"mapped_y":y})
     return binary,record
@@ -301,13 +320,14 @@ def transform(original, profile, enabled=True, descriptor_count=1):
     result[function:function] = declarations
     markers = [i for i, item in enumerate(result) if item.opcode == 330]
     require(len(markers) == 1, "one inherited guard marker required")
-    encoded = MARKER.encode("ascii") + b"\0"
+    marker = MARKER if p['revision']==1 else MARKER_V2
+    encoded = marker.encode("ascii") + b"\0"
     encoded += b"\0" * (-len(encoded) % 4)
     result[markers[0]] = make(330, *struct.unpack("<%dI" % (len(encoded) // 4), encoded))
     require(bound <= 65536, "bounded guarded result IDs required")
     header[3] = bound
     binary = pack_module(header, result)
-    record.update(output_sha256=presenter.atlas.probe.digest(binary), output_bytes=len(binary), candidate_marker=MARKER,
+    record.update(output_sha256=presenter.atlas.probe.digest(binary), output_bytes=len(binary), candidate_marker=marker,
                   guard_ssa={"geometry_valid": geometry_valid, "signature_valid": signature_valid,
                              "first_signature_valid": first_valid,
                              "signature_header": signature_header, "remaining_header": remaining_header,
@@ -322,6 +342,139 @@ def transform(original, profile, enabled=True, descriptor_count=1):
     return binary, record
 
 
+def transform_dual(original, enabled=True, descriptor_count=1):
+    """Recognize v2 first, otherwise execute the complete legacy v1 guard/path.
+
+    Both bodies use the original invocation/chart and original image/sampler.
+    No panel fetch is executed before that profile's full signature admission.
+    """
+    v1, old = transform(original, load_profile(), enabled, descriptor_count)
+    if not enabled:
+        return v1, {**old, 'dual_profile_guard': False, 'supported_profiles': [1, 2]}
+    v2, full = transform(original, load_profile(SPEC_V2), True, descriptor_count)
+    header, instructions = parse_module(v1)
+    _, second = parse_module(v2)
+    native_header, _ = ssa.parse_module(original)
+    first_function = next(i for i, x in enumerate(instructions) if x.opcode == 54)
+    second_function = next(i for i, x in enumerate(second) if x.opcode == 54)
+    base = header[3]
+    owned = sorted({result_id(x) for x in second
+                    if result_id(x) is not None and result_id(x) >= native_header[3]})
+    names = {ident: base + index for index, ident in enumerate(owned)}
+    bound = base + len(owned)
+    make = lambda op, *args: ssa.Instruction(op, tuple(args))
+    def renamed(item):
+        a = item.operands
+        # Explicit literal positions: no ID substitution into float words,
+        # ExtInst numbers, component indices or ImageOperands/control masks.
+        literal = {43: set(range(2, len(a))), 81: set(range(3, len(a))),
+                   79: set(range(4, len(a))), 82: set(range(4, len(a))),
+                   12: {3}, 88: {4}, 247: {1}}.get(item.opcode, set())
+        return make(item.opcode, *(v if i in literal else names.get(v, v)
+                                  for i, v in enumerate(a)))
+    declarations = []
+    for item in second[:second_function]:
+        if result_id(item) not in names: continue
+        candidate = renamed(item)
+        if item.opcode in ssa.TYPE_OPS:
+            equivalent = next((x for x in instructions[:first_function] + declarations
+                               if x.opcode == candidate.opcode
+                               and x.operands[1:] == candidate.operands[1:]), None)
+            if equivalent is not None:
+                names[result_id(item)] = result_id(equivalent)
+                continue
+        declarations.append(candidate)
+    guard2 = full['guard_ssa']
+    panel_start = next(i for i, x in enumerate(second)
+                       if x == make(248, guard2['panel_header'])) + 1
+    panel_end = next(i for i in range(panel_start, len(second))
+                     if second[i] == make(249, guard2['signature_merge']))
+    second_panel = [renamed(x) for x in second[panel_start:panel_end]]
+    require(second_panel[-1] == make(62, 504, names[full['new_ssa_ids']['output']]),
+            'exact independent v2 panel store required')
+    def fresh():
+        nonlocal bound
+        ident = bound; bound += 1; return ident
+    constants = {}
+    def constant(value):
+        bits = struct.unpack('<I', struct.pack('<f', value))[0]
+        if bits not in constants:
+            constants[bits] = fresh()
+            declarations.append(make(43, 8, constants[bits], bits))
+        return constants[bits]
+    def emit(target, op, kind, *args):
+        ident = fresh(); target.append(make(op, kind, ident, *args)); return ident
+    def conjunction(target, values):
+        answer = values[0]
+        for value in values[1:]: answer = emit(target, 167, 96, answer, value)
+        return answer
+    zero, one = constant(0), constant(1)
+    more, fail_first, guard_merge, use_v2, use_v1, final_merge = [fresh() for _ in range(6)]
+    first, remaining, windows, cells = [], [], [], []
+    minima = [emit(first, 81, 8, 871, axis) for axis in (0, 1)]
+    maxima = [emit(first, 81, 8, 871, axis) for axis in (2, 3)]
+    spans = [emit(first, 131, 8, hi, lo) for hi, lo in zip(maxima, minima)]
+    false_value = emit(first, 186, 96, zero, one)
+    guard = full['profile']['guard']; canvas = full['profile']['canvas']
+    sampled = None
+    for index, code in enumerate(guard['codes']):
+        target = first if index == 0 else remaining
+        if index in (0, 1): sampled = emit(target, 86, 297, 599, 600)
+        center = [guard['origin'][axis] + guard['stride'][axis]*index + guard['size'][axis]/2
+                  for axis in (0, 1)]
+        xy = [emit(target, 129, 8, lo, emit(target, 133, 8, span, constant(pos/extent)))
+              for lo, span, pos, extent in zip(minima, spans, center, canvas)]
+        coordinate = emit(target, 80, 39, *xy)
+        texel = emit(target, 88, 9, sampled, coordinate, 2, zero)
+        value = emit(target, 81, 8, texel, 1)
+        lo = emit(target, 190, 96, value, constant((code-guard['code_tolerance'])/255))
+        hi = emit(target, 188, 96, value, constant((code+guard['code_tolerance'])/255))
+        windows.extend((lo, hi))
+        cells.append({'index': index, 'center_canvas': center, 'sample': texel, 'g': value})
+    first_valid = conjunction(first, windows[:2])
+    rest_valid = conjunction(remaining, windows[2:])
+    accepted = fresh()
+    first += [make(247, guard_merge, 0), make(250, first_valid, more, fail_first),
+              make(248, more)] + remaining + [make(249, guard_merge),
+              make(248, fail_first), make(249, guard_merge), make(248, guard_merge),
+              make(245, 96, accepted, rest_valid, more, false_value, fail_first),
+              make(247, final_merge, 0), make(250, accepted, use_v2, use_v1),
+              make(248, use_v2)] + second_panel + [make(249, final_merge), make(248, use_v1)]
+    entry = make(248, old['guard_ssa']['signature_header'])
+    out = []; inserted = 0; merge_next = False
+    for item in instructions:
+        if merge_next:
+            require(item == make(249, old['guard_ssa']['final_merge']),
+                    'legacy valid-geometry exit required')
+            out += [make(249, final_merge), make(248, final_merge), item]
+            merge_next = False
+        else:
+            out.append(item)
+            if item == entry: out += first; inserted += 1
+            if item == make(248, old['guard_ssa']['first_signature_merge']): merge_next = True
+    require(inserted == 1, 'one legacy signature-entry splice required')
+    out[first_function:first_function] = declarations
+    marker = MARKER_DUAL.encode('ascii') + b'\0'
+    marker += b'\0' * (-len(marker) % 4)
+    positions = [i for i, item in enumerate(out) if item.opcode == 330]
+    require(len(positions) == 1, 'one dual format marker required')
+    out[positions[0]] = make(330, *struct.unpack('<%dI' % (len(marker)//4), marker))
+    header[3] = bound
+    binary = pack_module(header, out)
+    record = {**old, 'schema': 'native-fragment-scene-presenter-dual-v1-v2',
+              'supported_profiles': [1, 2], 'profile_v2': full['profile'],
+              'coverage_source_contract': 'current same-eye selected frozen v1/v2 numeric G',
+              'dual_profile_guard': True, 'profile_selection': 'valid v2 first, otherwise complete guarded v1, otherwise exact original994',
+              'candidate_marker': MARKER_DUAL, 'output_bytes': len(binary),
+              'output_sha256': hashlib.sha256(binary).hexdigest(),
+              'v2_ssa_ids': {key: names.get(value, value) for key, value in full['new_ssa_ids'].items()},
+              'v2_guard_cells': cells, 'v2_guard_first_valid': first_valid,
+              'v2_guard_valid': accepted, 'dual_merge': final_merge,
+              'guard_sample_budget': {'v2': 12, 'legacy_v1': 13, 'ordinary_first_cells_mismatch': 2},
+              'extra_pixel_planes': False, 'alpha_threshold': False}
+    return binary, record
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("original", "output", "record"):
@@ -329,14 +482,17 @@ def main(argv=None):
     parser.add_argument("--profile", type=Path, default=SPEC)
     parser.add_argument("--disabled", action="store_true")
     parser.add_argument("--owned-descriptor-count", type=int, choices=(1, 3), default=1)
+    parser.add_argument("--dual-profile", action="store_true")
     args = parser.parse_args(argv)
     try:
         require(len({p.absolute() for p in (args.original, args.profile, args.output, args.record)}) == 4,
                 "distinct original/profile/output/record paths required")
         require(not any(p.exists() or p.is_symlink() for p in (args.output, args.record)), "exclusive outputs required")
         profile, profile_sha = recovery.load_json(args.profile)
-        binary, record = transform(recovery.read_owned(args.original, ssa.MAX_BYTES), profile,
-                                   not args.disabled, args.owned_descriptor_count)
+        binary, record = (transform_dual(recovery.read_owned(args.original, ssa.MAX_BYTES),
+                                         not args.disabled, args.owned_descriptor_count)
+                          if args.dual_profile else transform(recovery.read_owned(args.original, ssa.MAX_BYTES), profile,
+                                                              not args.disabled, args.owned_descriptor_count))
         with tempfile.TemporaryDirectory(prefix="private-fragment-guard-") as directory:
             path = Path(directory) / "guarded.spv"
             path.write_bytes(binary)

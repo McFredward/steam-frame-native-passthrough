@@ -35,10 +35,11 @@ ENABLE = b'GHVR_SYNTHETIC_PRESENTER/1\n'
 CONSUMED = b'GHVR_SYNTHETIC_PRESENTER_CONSUMED/1\n'
 CANDIDATE_BYTES = 18416
 CANDIDATE_SHA256 = '0aaf356d3789473cd32ff0d60cf5971bc1473813241657877db5c147bb1d4364'
+# Historical staging ABI name; the exact executable pin now recognizes v1/v2.
 SCENE_PROFILE = 'scene-contribution-atlas-v1'
 SCENE_BUILD_MARKER = b'GHVR_SCENE_PRESENTER_COLD/1\0'
-SCENE_CANDIDATE_BYTES = 19224
-SCENE_CANDIDATE_SHA256 = '57ce6fdaa983765fe12800002a1f3c53be50291586e16a13d5fbcc0bced49cb3'
+SCENE_CANDIDATE_BYTES = 31960
+SCENE_CANDIDATE_SHA256 = '9ad1b56a20db039132ad6ec4557fe8ece3fff277316370bcefc9f70ec7aed367'
 _Profile = namedtuple('_Profile', 'name revision scope stem build_marker enable consumed candidate_bytes candidate_sha256 receiver_schema receiver_mode')
 
 

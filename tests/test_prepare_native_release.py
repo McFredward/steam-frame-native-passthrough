@@ -113,6 +113,17 @@ class PackageTests(unittest.TestCase):
         self.manifest['source_snapshot_sha256'] = p.sha(raw); self.save()
         with self.assertRaisesRegex(p.SafetyError, 'source snapshot differs'): self.verify()
 
+    def test_both_frozen_source_profiles_are_bound(self):
+        source = p.source_snapshot()
+        for revision in (1, 2):
+            name = 'docs/protocols/scene-contribution-atlas-v%d.json' % revision
+            self.assertEqual(source[name], p.sha((ROOT / name).read_bytes()))
+        # A self-updated package manifest cannot omit the new protocol input.
+        del source['docs/protocols/scene-contribution-atlas-v2.json']
+        raw = p.json_bytes(source); self.changed('source-manifest.json', raw)
+        self.manifest['source_snapshot_sha256'] = p.sha(raw); self.save()
+        with self.assertRaisesRegex(p.SafetyError, 'source snapshot differs'): self.verify()
+
     def test_package_file_symlink_hardlink_and_mode_refuse(self):
         target = self.package / p.CANDIDATE; target.unlink(); target.symlink_to(self.files['driver'])
         with self.assertRaises(OSError): self.verify()
@@ -171,8 +182,11 @@ class PackageTests(unittest.TestCase):
     def preparation(self, *, wrong_candidate=False, changed_source=False):
         profile_path = self.base / 'reviewed-fixture-profile.json'; profile_path.write_bytes(self.compat)
         snapshot = p.source_snapshot()
-        module = types.SimpleNamespace(load_profile=lambda: {}, transform=lambda *args:
-            ((b'wrong' if wrong_candidate else self.candidate), {'owned_fixture_only': True}))
+        def dual(original, enabled, descriptor_count):
+            self.assertEqual(original, self.files['fragment'].read_bytes())
+            self.assertIs(enabled, True); self.assertEqual(descriptor_count, 1)
+            return (b'wrong' if wrong_candidate else self.candidate), {'owned_fixture_only': True}
+        module = types.SimpleNamespace(transform_dual=dual)
         calls = []
         def command(argv, log, timeout=600):
             calls.append(argv); Path(log).touch()
@@ -225,7 +239,8 @@ class RealProfileTests(unittest.TestCase):
         profile = p.known_compatibility()
         self.assertEqual(len(profile['runtime_files']), 10)
         self.assertEqual(profile['runtime_files']['fragment']['bytes'], 6620)
-        self.assertEqual(profile['candidate']['bytes'], 19224)
+        self.assertEqual(profile['candidate']['bytes'], 31960)
+        self.assertEqual(profile['candidate']['sha256'], '9ad1b56a20db039132ad6ec4557fe8ece3fff277316370bcefc9f70ec7aed367')
         paths = p.runtime_files(home=Path('/home/owned'))
         self.assertEqual(paths['vulkan_loader'], Path('/home/owned/.local/share/Steam/steamrtarm64/libvulkan.so.1'))
         with mock.patch.object(p, 'COMPATIBILITY_SHA256', '0' * 64):

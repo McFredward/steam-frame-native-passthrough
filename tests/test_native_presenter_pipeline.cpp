@@ -137,7 +137,18 @@ void positive(const char* vertexPath,const char* fragmentPath,const char* candid
 }
 } // namespace creation
 int main(int argc,char** argv){
-    using namespace creation;require(argc==1||argc==4,"optional private VS PS guarded candidate paths");
+    using namespace creation;
+    if(argc==3&&std::string(argv[1])=="--scene-pin"){
+        auto words=load(argv[2]);n::Fragment scene,synthetic;
+        require(n::SceneFragmentBytes==31960&&scene.prepare(words.data(),words.size()*4,n::Profile::SceneContribution),"exact dual v1/v2 scene artifact admitted");
+        require(!synthetic.prepare(words.data(),words.size()*4),"scene is not the historical straight-RGB synthetic artifact");
+        words.back()^=1;n::Fragment corrupted;
+        require(!corrupted.prepare(words.data(),words.size()*4,n::Profile::SceneContribution),"same-size dual mutation never self-authorizes");
+        require(scene.ready()&&scene.words()[words.size()-1]!=(words.back()),"prepared scene owns sealed executable copy");
+        require(!corrupted.prepare(words.data(),19224,n::Profile::SceneContribution),"legacy single-profile executable length is not the new dual capability");
+        std::cout<<"{\"scope\":\"dual-scene-pin-only\",\"checks\":"<<checks<<",\"runtime_hooked\":false}\n";return 0;
+    }
+    require(argc==1||argc==4,"optional private VS PS guarded candidate paths");
     n::Fragment artifact;const std::array<std::uint32_t,5> fake{{0x07230203u,0x10100u,0,8,0}};
     require(!artifact.prepare(fake.data(),fake.size()*4)&&!artifact.ready(),"fake candidate cannot authorize creation");
     Recipe empty;Fixture f;Driver d;driver=&d;auto completed=d.old;
