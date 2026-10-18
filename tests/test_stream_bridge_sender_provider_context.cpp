@@ -1,5 +1,6 @@
 #include "pc/stream-bridge-sender-provider-coverage.h"
 #include <d3d11_4.h>
+#include <d3dcompiler.h>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -27,6 +28,53 @@ void diagnostic(const char* phase,const CoverageGateStats& stats,bool sameCreate
         phase,static_cast<unsigned long long>(stats.hookDraws),static_cast<unsigned long long>(stats.otherDraws),unsigned(sameCreated),
         unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextHookSlots,stats.contextOriginalSlots);
     std::fflush(stdout);
+}
+void pipeline(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Multithread* threading,SenderCoverage& coverage){
+    static const char shader[]=R"(
+cbuffer Color : register(b0) { float4 color; };
+float4 vs_main(uint id:SV_VertexID):SV_Position { return float4(float2(float(id&1u),float(id>>1u))*2.0-1.0,0.0,1.0); }
+float4 ps_main():SV_Target { return color; }
+)";
+    Com<ID3DBlob> vsBytes,psBytes;
+    check(SUCCEEDED(D3DCompile(shader,sizeof shader,nullptr,nullptr,nullptr,"vs_main","vs_5_0",0,0,vsBytes.out(),nullptr)),"own representative native-like VS compiled");
+    check(SUCCEEDED(D3DCompile(shader,sizeof shader,nullptr,nullptr,nullptr,"ps_main","ps_5_0",0,0,psBytes.out(),nullptr)),"own representative native-like PS compiled");
+    Com<ID3D11VertexShader> vs;Com<ID3D11PixelShader> ps;
+    check(SUCCEEDED(device->CreateVertexShader(vsBytes->GetBufferPointer(),vsBytes->GetBufferSize(),nullptr,vs.out()))&&
+        SUCCEEDED(device->CreatePixelShader(psBytes->GetBufferPointer(),psBytes->GetBufferSize(),nullptr,ps.out())),"real native shader objects created");
+    D3D11_BUFFER_DESC bd{};bd.ByteWidth=16;bd.Usage=D3D11_USAGE_DYNAMIC;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;bd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Buffer> cb;check(SUCCEEDED(device->CreateBuffer(&bd,nullptr,cb.out())),"real native mapped constant buffer");
+    D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=4;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
+    td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET;
+    Com<ID3D11Texture2D> target,staging;Com<ID3D11RenderTargetView> view;
+    check(SUCCEEDED(device->CreateTexture2D(&td,nullptr,target.out()))&&SUCCEEDED(device->CreateRenderTargetView(target.p,nullptr,view.out())),"real native RGB target");
+    td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;td.BindFlags=0;
+    check(SUCCEEDED(device->CreateTexture2D(&td,nullptr,staging.out())),"real native RGB verification target");
+    D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
+    Com<ID3D11RasterizerState> rs;check(SUCCEEDED(device->CreateRasterizerState(&raster,rs.out())),"real native rasterizer state");
+    D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;sampler.MaxLOD=D3D11_FLOAT32_MAX;Com<ID3D11SamplerState> sample;
+    check(SUCCEEDED(device->CreateSamplerState(&sampler,sample.out())),"real native sampler state");
+    const auto before=coverage.gateStats().hookDraws;const float color[4]{17.0f/255,29.0f/255,43.0f/255,101.0f/255};
+    for(unsigned frame=0;frame<32;++frame){
+        context->ClearState();if(frame%8==0){threading->SetMultithreadProtected(FALSE);threading->SetMultithreadProtected(TRUE);}
+        context->VSSetShader(vs.p,nullptr,0);context->PSSetShader(ps.p,nullptr,0);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context->RSSetState(rs.p);
+        const D3D11_VIEWPORT viewport{0,0,4,4,0,1};context->RSSetViewports(1,&viewport);context->OMSetRenderTargets(1,&view.p,nullptr);
+        D3D11_MAPPED_SUBRESOURCE mapped{};check(SUCCEEDED(context->Map(cb.p,0,D3D11_MAP_WRITE_DISCARD,0,&mapped)),"real native constant update Map forwarded");
+        std::memcpy(mapped.pData,color,sizeof color);context->Unmap(cb.p,0);context->PSSetConstantBuffers(0,1,&cb.p);context->PSSetSamplers(0,1,&sample.p);
+        if(frame==0)diagnostic("after native-like pipeline bindings",coverage.gateStats(),true);
+        context->Draw(4,0);auto stats=coverage.gateStats();
+        if(stats.hookDraws!=before+frame+1||stats.contextHookSlots!=15)diagnostic("lost after native-like Draw",stats,true);
+        check(stats.hookDraws==before+frame+1&&stats.contextHookSlots==15,"all real rendering frames retain production hooks after native state changes");
+        context->CopyResource(staging.p,target.p);check(SUCCEEDED(context->Map(staging.p,0,D3D11_MAP_READ,0,&mapped)),"real native rendered pixels mapped");
+        const auto* pixel=static_cast<const unsigned char*>(mapped.pData);
+        check(pixel&&pixel[0]==17&&pixel[1]==29&&pixel[2]==43&&pixel[3]==101,"ordinary native RGB and fractional alpha unchanged by observer");context->Unmap(staging.p,0);
+        // The real pinned native PostPresent path queries its device's public
+        // immediate context, flushes and releases it before encoder Copy.
+        Com<ID3D11DeviceContext> post;device->GetImmediateContext(post.out());post->Flush();
+        stats=coverage.gateStats();check(stats.contextHookSlots==15,"native PostPresent getter and Flush preserve dispatch");
+    }
+    check(coverage.gateStats().sourceFrames==0&&coverage.gateStats().certifiedMasks==0,"ordinary native-like frames never fabricate attested source coverage");
 }
 // This is deliberately a real native context, not a fake COM object. The
 // public CreateDevice output is retained on the rendering thread while the
@@ -71,6 +119,7 @@ void run(){
     submittedContext->ClearState();threading->SetMultithreadProtected(FALSE);threading->SetMultithreadProtected(TRUE);
     submittedContext->Draw(0,0);
     check(coverage.gateStats().hookDraws==4,"native ClearState and protection changes retain dispatch hooks");
+    pipeline(device.p,submittedContext.p,threading.p,coverage);
     // Native CopyResource/Map/Unmap still execute through the real installed
     // table and preserve bytes; no fake return-address proof is introduced.
     D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=4;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
