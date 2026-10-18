@@ -3,6 +3,7 @@
 # not proof of a live provider, authenticated peer or safe image composition.
 add_library(sfnp_stream_bridge STATIC
     bridge/stream_bridge_protocol.cpp
+    bridge/stream_bridge_auth.cpp
     bridge/hevc_bridge_sei.cpp
     pc/stream-bridge-sender.cpp
     receiver/stream_bridge_receiver.cpp)
@@ -20,7 +21,7 @@ if(NOT MSVC)
 endif()
 
 if(BUILD_TESTING)
-    foreach(suite stream_bridge_protocol hevc_bridge_sei stream_bridge_sender stream_bridge_receiver)
+    foreach(suite stream_bridge_protocol stream_bridge_auth hevc_bridge_sei stream_bridge_sender stream_bridge_receiver)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE sfnp_stream_bridge)
         if(NOT MSVC)

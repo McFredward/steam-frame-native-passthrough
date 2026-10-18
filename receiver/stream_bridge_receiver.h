@@ -59,6 +59,14 @@ struct AccessUnitResult {
     Result result = Result::Ordinary;
 };
 
+// Verify the exact owned payload from this actual AU once. Authentication must
+// bind its native stream and may bootstrap only a producer HELLO from video.
+// A callback success is a caller-established trust boundary, not a network
+// assertion. It supplies the fixed plaintext and verified binding together.
+using PayloadVerifier = bool (*)(stream_bridge::Bytes, const AccessUnitContext&,
+    std::array<std::uint8_t, stream_bridge::MessageBytes>&,
+    stream_bridge::VerifiedChannel&, void*) noexcept;
+
 enum class NoticeCode : std::uint8_t {
     SenderMissing, SenderIncompatible, Negotiating, PeerConfirmed,
     MetadataObserved, MetadataSelected, EvidenceLost
@@ -89,6 +97,10 @@ public:
     static constexpr std::size_t SurfaceCapacity = 64;
 
     bool begin(const Authority&, const stream_bridge::LocalConfig& receiver) noexcept;
+    // Fresh native stream with no claimed peer channel yet. No outbound message
+    // can be obtained until the first actual video HELLO passes the verifier.
+    bool beginAuthenticated(const Authority&, const stream_bridge::LocalConfig& receiver,
+        PayloadVerifier, void* verifierContext) noexcept;
     void end() noexcept;
     void evidenceLost() noexcept;
     AccessUnitResult observeAccessUnit(stream_bridge::Bytes, const AccessUnitContext&) noexcept;
@@ -119,6 +131,7 @@ private:
         Surface surface{};
     };
     bool matches(const Authority&) const noexcept;
+    bool matchesStream(const Authority&) const noexcept;
     void notice(NoticeCode) noexcept;
     Result recordProbe(const stream_bridge::ProbeMessage&, NativeFrame) noexcept;
     ProbeEntry* find(NativeFrame) noexcept;
@@ -130,6 +143,9 @@ private:
     bool peerSeen_ = false, incompatible_ = false, observed_ = false, selected_ = false;
     std::uint16_t emitted_ = 0, pending_ = 0;
     stream_bridge::Handshake handshake_{};
+    stream_bridge::LocalConfig authenticatedLocal_{};
+    PayloadVerifier verifier_ = nullptr;
+    void* verifierContext_ = nullptr;
     std::array<ProbeEntry, ProbeCapacity> probes_{};
     std::array<SurfaceEntry, SurfaceCapacity> surfaces_{};
 };

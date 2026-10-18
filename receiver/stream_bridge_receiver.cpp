@@ -40,17 +40,45 @@ bool Receiver::begin(const Authority& authority, const stream_bridge::LocalConfi
     return true;
 }
 
+bool Receiver::beginAuthenticated(const Authority& authority,
+        const stream_bridge::LocalConfig& local, PayloadVerifier verifier, void* context) noexcept {
+    end();
+    // This is configuration, not a fabricated VerifiedChannel for bootstrap.
+    stream_bridge::Message test;
+    test.role = local.role; test.buildId = local.buildId; test.senderNonce = local.nonce;
+    test.offered = local.offered; test.required = local.required;
+    std::array<std::uint8_t, stream_bridge::MessageBytes> encoded{};
+    if (!verifier || !nonzero(authority.session) || !authority.streamGeneration ||
+        authority.channel.authenticated || nonzero(authority.channel.binding) ||
+        (everBegan_ && (authority.session == previousSession_ || authority.streamGeneration <= lastGeneration_)) ||
+        local.role != stream_bridge::Role::Receiver ||
+        (local.offered & ~stream_bridge::KnownCapabilities) ||
+        stream_bridge::encode(test, encoded) != stream_bridge::Status::Ok)
+        return false;
+    authority_ = authority; authenticatedLocal_ = local;
+    verifier_ = verifier; verifierContext_ = context;
+    previousSession_ = authority.session; lastGeneration_ = authority.streamGeneration;
+    everBegan_ = active_ = healthy_ = true;
+    return true;
+}
+
 void Receiver::end() noexcept {
     active_ = healthy_ = peerSeen_ = incompatible_ = observed_ = selected_ = false;
     emitted_ = pending_ = 0;
     probes_ = {};
     surfaces_ = {};
     handshake_.reset();
+    authenticatedLocal_ = {};
+    verifier_ = nullptr; verifierContext_ = nullptr;
+}
+
+bool Receiver::matchesStream(const Authority& authority) const noexcept {
+    return active_ && authority.session == authority_.session &&
+        authority.streamGeneration == authority_.streamGeneration;
 }
 
 bool Receiver::matches(const Authority& authority) const noexcept {
-    return active_ && authority.session == authority_.session &&
-        authority.streamGeneration == authority_.streamGeneration &&
+    return matchesStream(authority) &&
         authority.channel.authenticated && authority.channel.binding == authority_.channel.binding;
 }
 
@@ -113,7 +141,9 @@ Result Receiver::recordProbe(const stream_bridge::ProbeMessage& probe, NativeFra
 AccessUnitResult Receiver::observeAccessUnit(stream_bridge::Bytes original,
                                             const AccessUnitContext& context) noexcept {
     AccessUnitResult output{original, Result::Ordinary};
-    if (!matches(context.authority)) { output.result = Result::WrongSession; return output; }
+    if (!(verifier_ ? matchesStream(context.authority) : matches(context.authority))) {
+        output.result = Result::WrongSession; return output;
+    }
     if (!context.sourceBoundaryVerified || !context.completeAnnexBAccessUnit || !context.native.generation) {
         output.result = Result::UnverifiedBoundary; return output;
     }
@@ -125,10 +155,31 @@ AccessUnitResult Receiver::observeAccessUnit(stream_bridge::Bytes original,
             return output;
         }
         if (inspected != stream_bridge::SeiStatus::Ok) { output.result = Result::InvalidOwned; return output; }
-        const stream_bridge::Bytes bytes{payload.data(), payload.size()};
+        stream_bridge::Bytes bytes{payload.data(), payload.size()};
+        std::array<std::uint8_t, stream_bridge::MessageBytes> plaintext{};
+        Authority verifiedAuthority = context.authority;
+        if (verifier_) {
+            stream_bridge::VerifiedChannel channel;
+            if (!verifier_(bytes, context, plaintext, channel, verifierContext_) ||
+                !channel.authenticated || !nonzero(channel.binding)) {
+                output.result = Result::InvalidOwned; return output;
+            }
+            bytes = {plaintext.data(), plaintext.size()};
+            if (!authority_.channel.authenticated) {
+                stream_bridge::Message hello;
+                if (stream_bridge::decode(bytes, hello) != stream_bridge::Status::Ok ||
+                    hello.kind != stream_bridge::Kind::Hello || hello.role != stream_bridge::Role::Producer ||
+                    handshake_.begin(authenticatedLocal_, channel) != stream_bridge::Status::Ok) {
+                    output.result = Result::InvalidOwned; return output;
+                }
+                authority_.channel = channel;
+            }
+            verifiedAuthority.channel = channel;
+            if (!matches(verifiedAuthority)) { output.result = Result::WrongSession; return output; }
+        }
         stream_bridge::Message control;
         if (stream_bridge::decode(bytes, control) == stream_bridge::Status::Ok) {
-            const auto status = receiveControl(bytes, context.authority);
+            const auto status = receiveControl(bytes, verifiedAuthority);
             output.result = status == stream_bridge::Status::Ok || status == stream_bridge::Status::Duplicate
                 ? Result::Handshake : Result::Incompatible;
             return output;
@@ -143,7 +194,7 @@ AccessUnitResult Receiver::observeAccessUnit(stream_bridge::Bytes original,
         }
         if (!handshake_.confirmed()) { output.result = Result::NotConfirmed; return output; }
         if (!healthy_) { output.result = Result::EvidenceLost; return output; }
-        if (stream_bridge::validateProbe(handshake_, probe, context.authority.channel) != stream_bridge::Status::Ok) {
+        if (stream_bridge::validateProbe(handshake_, probe, verifiedAuthority.channel) != stream_bridge::Status::Ok) {
             output.result = Result::InvalidOwned; return output;
         }
         output.result = recordProbe(probe, context.native);
