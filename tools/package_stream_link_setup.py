@@ -79,6 +79,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', required=True, type=Path)
     parser.add_argument('--python-zip', required=True, type=Path)
+    parser.add_argument('--openssh-zip', required=True, type=Path)
     parser.add_argument('--python-sha256', required=True)
     parser.add_argument('--python-source-url', required=True)
     parser.add_argument('--output', required=True, type=Path)
@@ -96,10 +97,14 @@ def main():
     verifier.verify_package(args.bundle.resolve() / 'frame-package')
     files = dict(bundle.files)
     files['steam-link-bundle.json'] = engine.read(args.bundle / 'steam-link-bundle.json', 128 * 1024)
-    for name in ('patch-steam-link.cmd', 'patch-steam-link.sh', 'steam_link_setup.py'):
-        destination = name if name != 'steam_link_setup.py' else 'setup/' + name
+    for name in ('patch-steam-link.cmd', 'patch-steam-link.sh', 'steam_link_setup.py', 'steam_link_setup_ui.py'):
+        destination = 'setup/' + name if name.endswith('.py') else name
         files[destination] = (ROOT / 'setup' / name).read_bytes()
     files.update(windows_python(engine.read(args.python_zip), args.python_sha256, args.python_source_url))
+    dependency_spec = importlib.util.spec_from_file_location('sfnp_dependency_packaging', ROOT / 'tools/package_setup_dependencies.py')
+    dependencies = importlib.util.module_from_spec(dependency_spec); dependency_spec.loader.exec_module(dependencies)
+    ssh_pin = engine.parse(engine.read(ROOT / 'packaging/setup-openssh.json', 16384))
+    files.update(dependencies.windows_openssh(engine.read(args.openssh_zip), ssh_pin))
     raw = assemble(files)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

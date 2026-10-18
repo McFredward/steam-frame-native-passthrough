@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+from contextlib import nullcontext
 import ctypes
 import hashlib
 import hmac
 import ipaddress
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -510,8 +512,29 @@ class Runner:
         return code, bytes(captured)
 
 
+def ssh_program(*, system=None, system_directory=None, bundle_root=None):
+    if (system or platform.system()) != 'Windows':
+        return shutil.which('ssh') or 'ssh'
+    if system_directory is None:
+        from ctypes import wintypes
+        query = ctypes.WinDLL('kernel32', use_last_error=True).GetSystemDirectoryW
+        query.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        query.restype = wintypes.UINT
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = query(buffer, len(buffer))
+        require(0 < size < len(buffer), 'Windows system directory unavailable.')
+        system_directory = Path(buffer.value)
+    candidate = Path(system_directory) / 'OpenSSH/ssh.exe'
+    if candidate.is_file():
+        return str(no_links(candidate))
+    root = Path(bundle_root) if bundle_root is not None else Path(__file__).resolve().parents[1]
+    candidate = no_links(root / 'setup/runtime/openssh/ssh.exe')
+    require(candidate.is_file(), 'The setup download is missing its included SSH client. Run the setup command again.')
+    return str(candidate)
+
+
 def ssh_args(address, login, *, interactive=False):
-    return ['ssh', '-o', 'ConnectTimeout=4', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5',
+    return [ssh_program(), '-o', 'ConnectTimeout=4', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5',
             '-o', 'ServerAliveCountMax=2', '-o', 'StrictHostKeyChecking=' + ('ask' if interactive else 'yes'),
             '-o', 'UpdateHostKeys=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
             '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
@@ -1018,7 +1041,36 @@ def apply(action, bundle, local, remote, pc, frame, challenge):
     return {'reason': 'current', 'pair_id': pair['pair_id'], 'automatic_restart': False}
 
 
-def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
+def load_presentation():
+    # The online bootstrap verifies this exact sibling in the package manifest.
+    # Explicit loading also works in the isolated portable Windows interpreter.
+    path = no_links(Path(__file__).with_name('steam_link_setup_ui.py'))
+    spec = importlib.util.spec_from_file_location('_sfnp_setup_ui', path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def remembered_frame_hosts(local):
+    candidates = []
+    for filename, schema in (('frame-address.json','sfnp-frame-address-v1'),
+                             ('setup-inspection.json',INSPECTION)):
+        try:
+            value = parse(read(local.root / filename, 128 * 1024, private=True))
+            if value.get('schema') != schema:
+                continue
+            candidate = (value.get('frame') or {}).get('host') if schema == INSPECTION else value.get('host')
+            if candidate:
+                candidates.append(host(candidate))
+        except (OSError, SetupError, TypeError, AttributeError):
+            # Unknown/corrupt address hints are never changed, nor a reason to
+            # prevent a new read-only discovery attempt.
+            continue
+    return tuple(dict.fromkeys(candidates))
+
+
+def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discover_frame=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inspect', action='store_true', help='Check PC/Frame setup only; no installation, pairing or restart.')
     parser.add_argument('--check', action='store_true', help='Read-only JSON inventory; no credential or log writes.')
@@ -1028,12 +1080,20 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
     parser.add_argument('--frame', help='Frame IP or DNS name. Credentials are handled only by OpenSSH.')
     parser.add_argument('--user', default='steamos')
     parser.add_argument('--steamvr', type=Path)
+    parser.add_argument('--lang', choices=('en','de'), help='Override the automatically selected setup language.')
     args = parser.parse_args(argv)
     local = local or Local(steamvr=args.steamvr)
     local.apply_started = False
+    ui = None
     try:
         require(not (args.inspect and args.action), '--inspect cannot be combined with an installation action.')
-        pc = local.inventory(inspection=True) if args.inspect else local.inventory()
+        interactive = not args.check and sys.stdin.isatty()
+        presentation = load_presentation() if interactive else None
+        if presentation is not None:
+            ui = presentation.Presenter(input_fn=input_fn, lang=args.lang, input_enabled=True)
+            ui.banner(inspection=args.inspect)
+        with ui.progress('pc_check') if ui else nullcontext():
+            pc = local.inventory(inspection=True) if args.inspect else local.inventory()
         inspection = Inspection(args.bundle) if args.inspect else None
         bundle = None
         if not args.inspect:
@@ -1044,50 +1104,53 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
         challenge = secrets.token_hex(32)
         frame = remote = None
         address = args.frame
-        interactive = not args.check and sys.stdin.isatty()
         request = inspection.request() if inspection else inventory_request(bundle, challenge)
-        if args.inspect and not args.check:
+        if args.inspect and not args.check and ui is None:
             print('Setup inspection only; the new bridge is unavailable. Nothing will be installed, paired or restarted.')
             print('Only a PC inspection report may be saved. OpenSSH may ask to trust the Frame fingerprint or enter its password.')
         if interactive and not address:
-            print('Steam Link Native Passthrough — PC and Frame ' + ('inspection' if args.inspect else 'setup'))
-            print('First we check your PC and Frame. Nothing is installed during this check.')
-            cache = local.root / 'frame-address.json'
-            cached = parse(read(cache, 4096, private=True)) if cache.exists() else {}
-            if cached:
-                require(set(cached) == {'schema','host','user'} and cached['schema'] == 'sfnp-frame-address-v1',
-                        'Unknown cached-address file preserved.')
-            candidates = [cached.get('host'), 'frame.local', 'steamframe.local', 'steam-frame.local']
-            for candidate in dict.fromkeys(value for value in candidates if value):
+            def validate(candidate, *, interactive=False):
                 try:
-                    probe = remote_factory(candidate, args.user)
+                    probe = remote_factory(host(candidate), user(args.user), interactive=interactive)
                     observed = probe.call(request)
-                    if observed.get('architecture') in ('aarch64','arm64'):
-                        address = candidate; break
+                    # A name, SSH port or ARM CPU alone is not Frame identity.
+                    if observed.get('architecture') in ('aarch64','arm64') and any(
+                            observed.get(key) is True for key in ('runtime_compatible','installed','legacy_installed')):
+                        return probe, observed
                 except (OSError, SetupError):
-                    pass
-            if not address and input_fn('Search one private local subnet for SSH devices? [y/N] ').strip().lower() == 'y':
-                found = discover(input_fn('Private subnet, for example 192.168.1.0/24: ').strip())
-                print('SSH hosts: ' + (', '.join(found) if found else 'none'))
-            if not address:
-                address = input_fn('Frame IP or name (Enter to keep only the PC inventory): ').strip() or None
-        if address:
+                    return None
+                return None
+            finder = discover_frame or presentation.find_frame
+            found = finder(validate, cached_hosts=remembered_frame_hosts(local), presenter=ui)
+            if found is not None:
+                address = found.host
+                remote, frame = found.value
+        if address and frame is None:
             remote = remote_factory(host(address), user(args.user), interactive=interactive)
-            frame = remote.call(request)
+            with ui.suspend() if ui else nullcontext():
+                frame = remote.call(request)
+        if frame is not None and address:
+            frame = {**frame, 'host':host(address)}
         if args.inspect:
             report = inspection_report(local, pc, frame, inspection)
             if args.check:
                 print(json.dumps(report, sort_keys=True))
                 return 0
             matches = sum(item['status'] == 'match' for item in report['pc']['files'].values())
-            print('PC SteamVR reference files: ' + str(matches) + '/' + str(len(report['pc']['files'])) + ' match.')
-            print('Frame: ' + ('not connected' if frame is None else
-                  'connected; reference runtime ' + ('matches' if frame.get('runtime_compatible') else 'differs')) + '.')
-            print('This check does not install or prove the new sender/receiver bridge. Ordinary Steam Link is unchanged.')
+            if ui:
+                ui.say('pc_ready' if matches and matches == len(report['pc']['files']) else 'pc_partial')
+                if frame is not None:
+                    ui.say('receiver_ready' if frame.get('runtime_compatible') else 'receiver_changed')
+                ui.say('check_finish')
+            else:
+                print('PC SteamVR reference files: ' + str(matches) + '/' + str(len(report['pc']['files'])) + ' match.')
+                print('Frame: ' + ('not connected' if frame is None else
+                      'connected; reference runtime ' + ('matches' if frame.get('runtime_compatible') else 'differs')) + '.')
+                print('This check does not install or prove the new sender/receiver bridge. Ordinary Steam Link is unchanged.')
             if not args.dry_run:
-                print('Inspection report: ' + str(save_inspection(local, report)))
+                print((ui.text('report') if ui else 'Inspection report: ') + str(save_inspection(local, report)))
             if interactive and not args.dry_run:
-                input_fn('Inspection finished. No bridge was installed; press Enter to close. ')
+                ui.ask('done_prompt')
             return 0
         report = public_report(pc, frame, bundle)
         suggestion = plan(pc, frame, bundle)
@@ -1115,6 +1178,12 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
         print('Rollback: run this assistant again and choose Uninstall. Existing older pairing keys are retained for explicit repair.')
         input_fn('All writes are finished. Close and start SteamVR yourself when convenient; press Enter to exit. ')
         return 0
+    except KeyboardInterrupt:
+        if ui:
+            ui.say('cancelled')
+        else:
+            print('Setup stopped. No automatic restart was performed.', file=sys.stderr)
+        return 130
     except (OSError, SetupError, KeyError, TypeError, ValueError) as error:
         if getattr(local, 'apply_started', False):
             try:

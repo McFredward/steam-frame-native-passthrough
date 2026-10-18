@@ -58,6 +58,7 @@ TEXT = {
         'pc_only': 'Continuing with this PC only.',
         'done': 'done',
         'failed': 'could not finish',
+        'cancelled': 'Setup stopped. No automatic restart was performed.',
     },
     'de': {
         'pc_check': 'SteamVR auf diesem PC wird geprüft',
@@ -83,6 +84,7 @@ TEXT = {
         'pc_only': 'Es wird nur dieser PC geprüft.',
         'done': 'fertig',
         'failed': 'nicht abgeschlossen',
+        'cancelled': 'Einrichtung beendet. Es wurde kein automatischer Neustart ausgeführt.',
     },
 }
 

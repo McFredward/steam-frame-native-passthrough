@@ -5,13 +5,8 @@ set "engine=%~dp0steam_link_setup.py"
 if exist "%~dp0setup\steam_link_setup.py" set "engine=%~dp0setup\steam_link_setup.py"
 set "bundled=%~dp0runtime\python\python.exe"
 if exist "%~dp0setup\runtime\python\python.exe" set "bundled=%~dp0setup\runtime\python\python.exe"
-rem No implicit Python download, administrator request or Steam restart.
-where ssh.exe >nul 2>nul
-if errorlevel 1 (
-  echo OpenSSH Client is required. Enable it in Windows Optional Features, then run this file again.
-  if "%~1"=="" pause
-  exit /b 2
-)
+rem Release archives include Python and a private SSH client. The engine prefers
+rem Windows OpenSSH and uses the included client without changing OS features.
 if exist "%bundled%" (
   "%bundled%" -B "%engine%" %*
   goto done

@@ -11,7 +11,7 @@ param([switch] $InspectionOnly)
     $sfnpEndpoint = '/releases/latest'
     if ($sfnpInspection) {
         $sfnpAsset = 'steam-link-native-passthrough-inspection.zip'
-        $sfnpEndpoint = '/releases/tags/setup-inspection-v1'
+        $sfnpEndpoint = '/releases/tags/setup-inspection-v2'
     }
 
     function Require-Sfnp($Condition, [string] $Message) {
@@ -56,14 +56,22 @@ param([switch] $InspectionOnly)
                 try {
                     $buffer = New-Object byte[] 65536
                     [long] $total = 0
+                    $progressClock = [Diagnostics.Stopwatch]::StartNew()
                     while (($count = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
                         $total += $count
                         Require-Sfnp ($total -le $Limit) 'Download exceeds size bound.'
                         $destination.Write($buffer, 0, $count)
+                        if ($Output -ne '' -and $progressClock.ElapsedMilliseconds -ge 200) {
+                            Write-Progress -Id 1 -Activity 'Preparing the setup assistant' -Status 'Downloading verified tools' -PercentComplete ([Math]::Min(100, [int](100 * $total / $Limit)))
+                            $progressClock.Restart()
+                        }
                     }
                     if ($Output -eq '') { return ,$destination.ToArray() }
                     return
-                } finally { $inputStream.Dispose(); $destination.Dispose() }
+                } finally {
+                    if ($Output -ne '') { Write-Progress -Id 1 -Activity 'Preparing the setup assistant' -Completed }
+                    $inputStream.Dispose(); $destination.Dispose()
+                }
             } finally { $response.Dispose() }
         }
         throw 'Download redirect bound exceeded.'
@@ -83,9 +91,10 @@ param([switch] $InspectionOnly)
         } finally { $inputStream.Dispose(); $memory.Dispose() }
     }
     function Test-SfnpInspectionFile([string] $Name) {
-        return ($Name -cin @('setup-inspection.json','setup/steam_link_setup.py',
+        return ($Name -cin @('setup-inspection.json','setup/steam_link_setup.py','setup/steam_link_setup_ui.py',
             'README.md','README.de.md','README.txt','LICENSE','patch-steam-link.cmd','patch-steam-link.sh') -or
-            $Name.StartsWith('setup/runtime/python/', [StringComparison]::Ordinal))
+            $Name.StartsWith('setup/runtime/python/', [StringComparison]::Ordinal) -or
+            $Name.StartsWith('setup/runtime/openssh/', [StringComparison]::Ordinal))
     }
     function Expand-SfnpPackage([string] $Archive, [string] $Target, [bool] $InspectionOnly = $false) {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -163,7 +172,7 @@ param([switch] $InspectionOnly)
         $release = [Text.Encoding]::UTF8.GetString($releaseBytes) | ConvertFrom-Json
         Require-Sfnp ($release.draft -eq $false -and $release.prerelease -eq $sfnpInspection -and
             $release.tag_name -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') 'No matching public setup release is available.'
-        Require-Sfnp (-not $sfnpInspection -or $release.tag_name -ceq 'setup-inspection-v1') 'Unexpected inspection release tag.'
+        Require-Sfnp (-not $sfnpInspection -or $release.tag_name -ceq 'setup-inspection-v2') 'Unexpected inspection release tag.'
         $assets = @($release.assets | Where-Object { $_.name -ceq $sfnpAsset })
         Require-Sfnp ($assets.Count -eq 1) 'This release has no complete PC/Frame setup package. Nothing was installed.'
         $asset = $assets[0]

@@ -287,17 +287,21 @@ class WizardTests(unittest.TestCase):
 
     def test_interactive_inspection_uses_manual_ssh_fallback_and_saves_only_pc_report(self):
         self.inspection_profile();before={str(p.relative_to(self.framehome)):p.read_bytes()for p in self.framehome.rglob('*')if p.is_file()}
-        attempts=[];prompts=[];answers=iter(('n','192.168.1.5',''))
+        attempts=[];prompts=[];answers=iter(('192.168.1.5',''))
         def factory(address,login,interactive=False):
             attempts.append((address,login,interactive))
             if not interactive:raise s.SetupError('SSH probe unavailable')
             return self.frame
         def answer(prompt):prompts.append(prompt);return next(answers)
+        def finder(validate, **kwargs):
+            helper=s.load_presentation()
+            sources=types.SimpleNamespace(resolve=lambda _:[],named=lambda _:[],lan=lambda:None)
+            return helper.find_frame(validate,sources=sources,connector=lambda *_:False,**kwargs)
         output=io.StringIO()
         with contextlib.redirect_stdout(output),mock.patch('sys.stdin.isatty',return_value=True), \
              mock.patch.object(s,'apply',side_effect=AssertionError('never apply')):
             code=s.main(['--inspect','--bundle',str(self.bundle_root)],local=self.local,
-                        remote_factory=factory,input_fn=answer)
+                        remote_factory=factory,input_fn=answer,discover_frame=finder)
         self.assertEqual(code,0);self.assertEqual(attempts[-1],('192.168.1.5','steamos',True))
         self.assertEqual(self.frame.commands,['inventory-inspect']);self.assertEqual(self.system.calls,[])
         self.assertFalse(any('Choose' in prompt or 'Apply' in prompt for prompt in prompts))
@@ -306,8 +310,36 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(files,['setup-inspection.json'])
         report=s.parse(s.read(self.local.root/'setup-inspection.json',private=True))
         self.assertTrue(report['inspection_only']);self.assertNotIn('pair',json.dumps(report))
-        self.assertIn('new bridge is unavailable',output.getvalue())
-        self.assertIn('Only a PC inspection report',output.getvalue())
+        self.assertIn('nothing will be installed',output.getvalue())
+        self.assertIn('has not been installed',output.getvalue())
+        self.assertFalse(any('subnet' in prompt.lower() for prompt in prompts))
+        self.assertEqual(report['frame']['host'],'192.168.1.5')
+
+    def test_friendly_inspection_reuses_connection_and_remembers_host_in_own_report(self):
+        self.inspection_profile();finds=[];connections=[]
+        def factory(address,login,interactive=False):
+            connections.append((address,interactive));return self.frame
+        def finder(validate, **kwargs):
+            finds.append(kwargs['cached_hosts'])
+            return types.SimpleNamespace(host='192.168.1.5',value=validate('192.168.1.5',interactive=True))
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output),mock.patch('sys.stdin.isatty',return_value=True):
+            for _ in range(2):
+                self.assertEqual(s.main(['--inspect','--lang','en','--bundle',str(self.bundle_root)],local=self.local,
+                    remote_factory=factory,input_fn=lambda _:'',discover_frame=finder),0)
+        self.assertEqual(connections,[('192.168.1.5',True),('192.168.1.5',True)])
+        self.assertEqual(finds,[(),('192.168.1.5',)])
+        self.assertEqual(self.frame.commands,['inventory-inspect','inventory-inspect'])
+        self.assertEqual(self.system.calls,[])
+
+    def test_windows_ssh_selection_prefers_os_and_uses_included_fallback(self):
+        system=self.base/'Windows/System32'
+        bundle=self.base/'download'
+        builtin=system/'OpenSSH/ssh.exe';bundled=bundle/'setup/runtime/openssh/ssh.exe'
+        bundled.parent.mkdir(parents=True);bundled.write_bytes(b'NOT EXECUTED fixture')
+        self.assertEqual(s.ssh_program(system='Windows',system_directory=system,bundle_root=bundle),str(bundled))
+        builtin.parent.mkdir(parents=True);builtin.write_bytes(b'NOT EXECUTED system fixture')
+        self.assertEqual(s.ssh_program(system='Windows',system_directory=system,bundle_root=bundle),str(builtin))
 
     def test_inspect_check_without_frame_never_opens_ssh_or_saves(self):
         self.inspection_profile();before=self.snapshot();output=io.StringIO()

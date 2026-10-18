@@ -9,10 +9,13 @@ on:
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
       - '.github/workflows/setup-tests.yml'
   pull_request:
     paths:
@@ -22,10 +25,13 @@ on:
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
       - '.github/workflows/setup-tests.yml'
   workflow_dispatch:
 
@@ -50,6 +56,8 @@ jobs:
           bash -n get.sh get-preview.sh setup/patch-steam-link.sh
           python -B tests/test_steam_link_setup.py
           python -B tests/test_setup_bootstrap.py
+          python -B tests/test_setup_ui.py
+          python -B tests/test_setup_dependencies.py
   windows-bootstrap:
     runs-on: windows-2025
     timeout-minutes: 3
@@ -81,7 +89,11 @@ jobs:
           print(json.dumps({'python':sys.version, 'public_archive_stat_differences':{name:[getattr(before,name),getattr(opened,name)] for name in fields if getattr(before,name)!=getattr(opened,name)}}))
           '@ | python -B - $archive
           $package = Join-Path $env:RUNNER_TEMP 'setup-inspection.zip'
-          python -B tools/package_setup_inspection.py --python-zip $archive --output $package
+          $sshPin = Get-Content packaging/setup-openssh.json -Raw | ConvertFrom-Json
+          $sshArchive = Join-Path $env:RUNNER_TEMP 'openssh-portable.zip'
+          & curl.exe --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 16777216 --output $sshArchive $sshPin.source_url
+          if ($LASTEXITCODE -ne 0 -or (Get-Item $sshArchive).Length -ne $sshPin.bytes -or (Get-FileHash $sshArchive).Hash.ToLowerInvariant() -cne $sshPin.sha256) { throw 'Official OpenSSH pin differs.' }
+          python -B tools/package_setup_inspection.py --python-zip $archive --openssh-zip $sshArchive --output $package
           if ($LASTEXITCODE -ne 0) { throw 'Inspection packaging failed.' }
           $tokens=$null; $parseErrors=$null
           $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get.ps1'),[ref]$tokens,[ref]$parseErrors)
@@ -95,3 +107,5 @@ jobs:
           $runtime = Expand-SfnpPackage $package $target $true
           & (Join-Path $target $runtime) -I -B tests/test_embedded_setup_runtime.py --package $target
           if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup runtime failed.' }
+          & (Join-Path $target $runtime) -I -B tests/test_setup_ui.py
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup presentation failed.' }

@@ -1,8 +1,41 @@
 #!/usr/bin/env bash
 # Online entry point: no sudo, service restart, or unverified source execution.
 set -euo pipefail
-command -v python3 >/dev/null 2>&1 || { echo 'Python 3.9 or newer is required.' >&2; exit 2; }
-python3 -I -B - "$@" <<'SFNP_BOOTSTRAP_PY'
+sfnp_python=$(command -v python3 || true)
+sfnp_runtime_stage=''
+trap 'if [[ -n "$sfnp_runtime_stage" ]]; then rm -rf -- "$sfnp_runtime_stage"; fi' EXIT
+if [[ -z "$sfnp_python" ]] || ! "$sfnp_python" -I -B -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+    # A private, pinned interpreter replaces a missing/old system Python. This
+    # does not run a package manager, require sudo, or change the user's PATH.
+    case "$(uname -m)" in
+        x86_64)
+            sfnp_python_archive='cpython-3.13.16%2B20261013-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+            sfnp_python_sha='d0080766b6b74aeb81e1949ef0d9a20e6c17f7b160fb295a69b936ccb17660be'
+            sfnp_python_size=35099487 ;;
+        aarch64|arm64)
+            sfnp_python_archive='cpython-3.13.16%2B20261013-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz'
+            sfnp_python_sha='69a30ed26198178732c37b8de0b6b5191479fbacfe526954da776befe38f18e7'
+            sfnp_python_size=29331623 ;;
+        *) echo 'This setup does not yet support your PC architecture.' >&2; exit 2 ;;
+    esac
+    umask 077
+    sfnp_runtime_stage=$(mktemp -d)
+    sfnp_archive="$sfnp_runtime_stage/python.tar.gz"
+    echo 'Preparing the setup assistant: downloading a private Python runtime...'
+    curl --fail --location --show-error --proto '=https' --proto-redir '=https' --max-time 180 \
+        --max-filesize "$sfnp_python_size" \
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/$sfnp_python_archive" \
+        --output "$sfnp_archive"
+    [[ "$(wc -c < "$sfnp_archive")" -eq "$sfnp_python_size" ]] || { echo 'Runtime download is incomplete.' >&2; exit 2; }
+    printf '%s  %s\n' "$sfnp_python_sha" "$sfnp_archive" | sha256sum --check --status
+    tar -tzf "$sfnp_archive" | while IFS= read -r sfnp_entry; do
+        case "$sfnp_entry" in python|python/*) ;; *) echo 'Unexpected runtime path.' >&2; exit 2 ;; esac
+        case "/$sfnp_entry/" in *'/../'*|*'/./'*) echo 'Unsafe runtime path.' >&2; exit 2 ;; esac
+    done
+    tar --extract --gzip --file "$sfnp_archive" --directory "$sfnp_runtime_stage" --no-same-owner --no-same-permissions
+    sfnp_python="$sfnp_runtime_stage/python/bin/python3.13"
+fi
+"$sfnp_python" -I -B - "$@" <<'SFNP_BOOTSTRAP_PY'
 import hashlib
 import json
 import os
@@ -19,7 +52,7 @@ import zipfile
 
 REPO = 'McFredward/steam-link-native-passthrough'
 ASSET = 'steam-link-native-passthrough-setup.zip'
-INSPECTION_TAG = 'setup-inspection-v1'
+INSPECTION_TAG = 'setup-inspection-v2'
 INSPECTION_ASSET = 'steam-link-native-passthrough-inspection.zip'
 MAX_ZIP = 128 * 1024 * 1024
 MAX_FILE = 32 * 1024 * 1024
@@ -92,10 +125,10 @@ def select_asset(release, inspection=False):
 
 
 def inspection_file(name):
-    return (name in {'setup-inspection.json', 'setup/steam_link_setup.py',
+    return (name in {'setup-inspection.json', 'setup/steam_link_setup.py', 'setup/steam_link_setup_ui.py',
                      'README.md', 'README.de.md', 'README.txt', 'LICENSE',
                      'patch-steam-link.cmd', 'patch-steam-link.sh'} or
-            name.startswith('setup/runtime/python/'))
+            name.startswith('setup/runtime/python/') or name.startswith('setup/runtime/openssh/'))
 
 
 def arguments(args):

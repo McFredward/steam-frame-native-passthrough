@@ -18,15 +18,20 @@ curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passth
 ```
 
 These preview launchers pin the reviewed bootstrap by commit and SHA-256 and
-request only the separate `setup-inspection-v1` prerelease archive. Windows
-uses the included official portable Python; no system Python installation is
-needed. Linux requires Python 3.9 or newer, curl and sha256sum. Keep the Frame
-awake on the same network; neither wearing it nor starting a stream is required.
+request only the separate `setup-inspection-v2` prerelease archive. Windows
+includes private Python and an SSH-client fallback; no Python packages, Windows
+optional features or administrator-level installation are required. Linux reuses
+Python 3.9 or newer, or automatically prepares a pinned private interpreter.
+Keep the Frame awake on the same network; neither wearing it nor starting a
+stream is required.
 
-The assistant
-tries a previously provided address and common local Frame names. If they are
-unavailable, enter the Frame's IP address. Searching one private subnet is
-optional and happens only after you agree. OpenSSH handles the usual fingerprint
+The assistant automatically tries its last confirmed Frame, local Frame names,
+nearby device information and one bounded local network search. It never asks
+for a subnet or other network configuration. Manual IP entry is the last fallback.
+The confirmed address stays in the same non-secret inspection report for reuse.
+English/German follow the PC's language. An ASCII header and terminal-only
+progress animation show the steps; animation pauses before input and SSH prompts.
+OpenSSH handles the usual fingerprint
 confirmation and password prompt; no password is saved. Accepting a new SSH
 fingerprint may update your PC's normal OpenSSH known-hosts file.
 

@@ -10,10 +10,13 @@ on:
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
       - '.github/workflows/setup-tests.yml'
   pull_request:
     paths-ignore:
@@ -24,10 +27,13 @@ on:
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
       - '.github/workflows/setup-tests.yml'
   workflow_dispatch:
 
