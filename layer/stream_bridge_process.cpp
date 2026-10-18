@@ -27,6 +27,7 @@ struct Process {
     std::shared_ptr<std::atomic<bool>> connection;std::uint64_t lastConnect=0;
     std::thread worker;std::uint32_t notes=0;bool prepared=false;
     std::array<std::uint32_t,9> sourceNotices{}; // Written only by the receiver worker.
+    std::uint32_t channelNotices=0; // Written only by the local channel worker.
 };
 Process* process() noexcept{
     // The optional pre-main companion must not terminate Steam on allocation
@@ -129,7 +130,20 @@ void workCycle(Process& p,local::State& previous) noexcept{
             if(p.connection)p.connection->store(false,std::memory_order_release);
             if(current==local::State::Connected)p.connection=std::make_shared<std::atomic<bool>>(true);
             if(current==local::State::Lost||current==local::State::Refused)p.writer.invalidateCurrentEpoch();
-            previous=current;note(p,current==local::State::Connected?"local image bridge connected":"local image bridge waiting; ordinary video retained");
+            previous=current;
+            const auto bit=std::uint32_t(1)<<static_cast<unsigned>(current);
+            if(!(p.channelNotices&bit)){
+                p.channelNotices|=bit;
+                switch(current){
+                    case local::State::Connected:note(p,"local image bridge connected");break;
+                    case local::State::Listening:note(p,"local image bridge listening; waiting for the video receiver");break;
+                    case local::State::Connecting:note(p,"local image bridge connecting; ordinary video retained");break;
+                    case local::State::Refused:note(p,"local image bridge refused; endpoint ownership or peer verification failed");break;
+                    case local::State::Lost:note(p,"local image bridge lost; obsolete picture leases revoked");break;
+                    case local::State::Capacity:note(p,"local image bridge capacity refused; ordinary video retained");break;
+                    default:note(p,"local image bridge waiting; ordinary video retained");break;
+                }
+            }
         }
         if(p.kind==ProcessKind::Compositor){
             local::Message message;

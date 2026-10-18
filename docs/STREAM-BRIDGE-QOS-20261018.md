@@ -94,3 +94,46 @@ CI workflow; rendering changes continue to trigger the full native gate.
 
 Public API background: [NVIDIA's reconfiguration guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/nvenc-video-encoder-api-prog-guide/index.html#reconfiguring-an-existing-encode-session).
 The actual supported ABI remains pinned to SDK 11.1.
+
+## Follow-up: a stale local image endpoint
+
+The later paired run loaded the correct updated provider and Frame libraries.
+Its sender reported thousands of same-contract quality adaptations with
+`same=1, reset=0`, instead of continuously destroying admission. This is hardware
+evidence that the earlier QoS repair is active; it is not evidence of successful
+full-resolution output. The game still retained its legacy atlas lease.
+
+The Frame receiver explicitly reported `waiting-local-image-route`. A read-only
+snapshot found a private `receiver.sock` created by the preceding process run,
+but no matching kernel endpoint or process listener. The new compositor tried
+to bind that occupied pathname, refused it and retried the same unrecoverable
+path. Its local channel had never reached `Connected`, so the receiver correctly
+withheld its network handshake. The PC's `waiting-paired-peer` was a consequence
+of that earlier local failure. Receiver stdout is in Steam's output log; reading
+only the compositor journal had hidden this diagnostic context.
+
+The compositor consumer now holds a private, marked, nonblocking advisory lock
+for the entire channel lifetime. A pre-existing socket is reclaimed only when
+its exact private ownership, parent and inode are stable, `/proc/net/unix`
+contains no live endpoint, and a nonblocking connection probe specifically
+returns `ECONNREFUSED`. A live legacy listener is preserved without probing it.
+Foreign files, symlinks, altered lock identities and ambiguous outcomes remain
+refused. The lock inode intentionally persists after stop, preventing two new
+processes from electing independent owners. All checks run on the existing
+non-render channel worker.
+
+The production local-channel fixture now kills an actual owner without cleanup,
+recovers its endpoint, verifies both real peers and transfers complete metadata.
+It also exercises simultaneous process starters, a legacy orphan without a lock,
+live listeners and foreign replacement paths. The original production source
+fails exactly at orphan recovery; the corrected source passes 162 checks and
+ASan/UBSan with leak detection.
+
+Connection logs now distinguish listening, connecting, endpoint/peer refusal
+and loss, with one notice per state. Separate bounded sender counters identify
+native draw/constant/source/output gates using existing observations only.
+Formatting remains on the cold provider worker, with spaced reports and finite
+budgets. The four D3D callsite return addresses were checked against the pinned
+sender binary and remain unchanged. No unproven GPU admission check is relaxed.
+This repair has software and captured-cause evidence; a successful headset
+full-resolution path still requires a subsequent hardware run.

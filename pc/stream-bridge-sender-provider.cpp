@@ -226,6 +226,51 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             reportedSuccess=stats.preservedSuccessful!=0;reportedRejection=stats.preservedRejected!=0;reportedRevoke=stats.revoked!=0;
             nextReconfigureReport=stats.total>~std::uint64_t(0)/8?~std::uint64_t(0):stats.total*8;
         };
+        // Atomic metadata is sampled/formatted only here, never inside a D3D
+        // callback. Refusal populations distinguish the actual first gate from
+        // secondary frame-epoch/copy failures without guessing source support.
+        std::uint64_t seenSignals=0,seenRefusals=0,nextGateSample=1;
+        unsigned gateTransitions=0,gateSamples=0;
+        auto nextGateReport=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        const auto reportCoverage=[&](bool final){
+            const auto now=std::chrono::steady_clock::now();if(!final&&now<nextGateReport)return;
+            const auto stats=coverage_.gateStats();
+            const std::uint64_t signals[]{stats.deviceOpened,stats.contextsReady,stats.hookDraws,stats.nativeDraws,
+                stats.sourceFrames,stats.constantMaps,stats.constantCaptures,stats.eyeDraws,stats.completePairs,
+                stats.nativeCopies,stats.capturedCopies,stats.matchedInputs,stats.certifiedMasks,stats.nativeMaps,stats.inventoryRefreshes};
+            std::uint64_t signalBits=0,refusalBits=0;
+            for(unsigned i=0;i<sizeof signals/sizeof signals[0];++i)if(signals[i])signalBits|=std::uint64_t(1)<<i;
+            std::array<unsigned,3> top{};
+            for(unsigned i=1;i<stats.refusals.size();++i){
+                if(stats.refusals[i])refusalBits|=std::uint64_t(1)<<i;
+                unsigned candidate=i;for(auto& at:top)if(stats.refusals[candidate]>stats.refusals[at])std::swap(candidate,at);
+            }
+            const bool changed=(signalBits&~seenSignals)||(refusalBits&~seenRefusals);
+            const bool sample=stats.hookDraws>=nextGateSample;
+            if(!signalBits&&!refusalBits)return;
+            if(!final&&(!changed||gateTransitions>=16)&&(!sample||gateSamples>=8))return;
+            if(changed)++gateTransitions;
+            if(sample)++gateSamples;
+            seenSignals|=signalBits;seenRefusals|=refusalBits;
+            nextGateSample=stats.hookDraws>~std::uint64_t(0)/8?~std::uint64_t(0):stats.hookDraws*8;
+            nextGateReport=now+std::chrono::seconds(5);
+            char text[344]{};std::snprintf(text,sizeof text,
+                "coverage gates: device=%llu, context=%llu, draws=%llu/%llu, source=%llu, constants=%llu/%llu, eyes=%llu, pairs=%llu, copies=%llu/%llu, inputs=%llu, masks=%llu; last=%s",
+                static_cast<unsigned long long>(stats.deviceOpened),static_cast<unsigned long long>(stats.contextsReady),
+                static_cast<unsigned long long>(stats.nativeDraws),static_cast<unsigned long long>(stats.hookDraws),
+                static_cast<unsigned long long>(stats.sourceFrames),static_cast<unsigned long long>(stats.constantCaptures),static_cast<unsigned long long>(stats.constantMaps),
+                static_cast<unsigned long long>(stats.eyeDraws),static_cast<unsigned long long>(stats.completePairs),
+                static_cast<unsigned long long>(stats.capturedCopies),static_cast<unsigned long long>(stats.nativeCopies),
+                static_cast<unsigned long long>(stats.matchedInputs),static_cast<unsigned long long>(stats.certifiedMasks),
+                stream_bridge::sender::coverageGateName(stats.lastRefusal));report(text);
+            std::snprintf(text,sizeof text,
+                "coverage gate detail: %s=%llu, %s=%llu, %s=%llu; constant-bytes=%u; source=%ux%u/f%u, output=%ux%u/f%u; maps=%llu, inventory=%llu",
+                stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[0])),static_cast<unsigned long long>(stats.refusals[top[0]]),
+                stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[1])),static_cast<unsigned long long>(stats.refusals[top[1]]),
+                stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[2])),static_cast<unsigned long long>(stats.refusals[top[2]]),
+                stats.lastConstantBytes,stats.lastSourceWidth,stats.lastSourceHeight,stats.lastSourceFormat,stats.lastOutputWidth,stats.lastOutputHeight,stats.lastOutputFormat,
+                static_cast<unsigned long long>(stats.nativeMaps),static_cast<unsigned long long>(stats.inventoryRefreshes));report(text);
+        };
         for(;;){
             {std::lock_guard<std::mutex> guard(mutex_);if(stopped_)break;}
             try{coverage_.tick();runtime_.tick();
@@ -237,13 +282,14 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             }catch(...){sourceIpc_.stop();coverage_.stop();runtime_.stop();report("worker refused; ordinary video");break;}
             const auto* coverageState=coverage_.stateName();if(request_.explicitlyEnabled&&coverageState!=lastCoverage){lastCoverage=coverageState;reportState(coverageState);}
             if(runtime_.state()!=last){last=runtime_.state();reportState(stream_bridge::sender::runtimeStateName(last));}
-            if(request_.explicitlyEnabled)reportReconfigure(false);
+            if(request_.explicitlyEnabled){reportReconfigure(false);reportCoverage(false);}
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(8),[this]{return stopped_;});
         }
         report("sender worker stopping");
         report(stream_bridge::sender::runtimeStateName(runtime_.state()));
         report(coverage_.stateName());
         reportReconfigure(true);
+        reportCoverage(true);
         sourceIpc_.stop();runtime_.stop();
     }
 public:
