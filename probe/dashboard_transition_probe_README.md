@@ -48,6 +48,14 @@ Submit2/unknown queues or different device profiles explicitly refuse measuremen
 and preserve the ordinary call. Do not request a game stream when cold admission
 has already refused; inspect the exact cold predicate evidence first.
 
+`dashboard-transition-queue-profile.json` records these copied cold scalars once
+from the background writer, below1KiB: original queue flags/type/family/priority,
+the single extension node's type/continuation flag, both bounded capability-query
+counts, observed graphics flags and per-predicate failure bits. The same
+`observed_device` ties it to the lifecycle status. An unavailable family is
+`UINT32_MAX`; unknown extension payloads and further chain nodes are not read.
+It is neither a feature-enable request nor an image capture.
+
 The first isolated attachment on2026-10-18 refused `QueueProfile` before any
 recording and was manually removed. The old `native_queue_family:0` field on
 that refusal was an unassigned default, not a measured family. The deployment

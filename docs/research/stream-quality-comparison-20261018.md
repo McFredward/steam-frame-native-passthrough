@@ -117,3 +117,13 @@ Residual private staging is inactive and under1MiB; it is retained while some
 same-user process maps cannot be inspected, rather than unlinking a possibly
 mapped library. It is not a persistent diagnostic activation. The public
 installation remains enabled and its library byte-identical to the baseline.
+
+The subsequent diagnostic-only correction reuses the constrained existing queue
+contract and retains precise cold failure/query evidence.22 actual `prepare()`
+vectors pass293 checks each in normal and ASan/UBSan runs; three causal negative
+controls detect the old blanket extension refusal, a removed graphics guard and
+invented family0. Strict host/AArch64 builds pass. The ordinary shipping
+preprocessor output remains byte-identical to the previous reviewed source, and
+the diagnostic scene shader hashes are unchanged. All116 strong imported
+name/version pairs match the previously verified actual Frame providers. These
+are software/preparation proofs, not a new device admission or menu result.
