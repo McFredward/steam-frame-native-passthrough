@@ -16,6 +16,8 @@ on:
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_setup_session.py'
+      - 'tests/test_setup_log.py'
       - 'tests/test_package_stream_bridge.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
@@ -37,6 +39,8 @@ on:
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_setup_session.py'
+      - 'tests/test_setup_log.py'
       - 'tests/test_package_stream_bridge.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
@@ -66,6 +70,8 @@ jobs:
           bash -n get.sh get-preview.sh setup/patch-steam-link.sh
           python -B tests/test_steam_link_setup.py
           python -B tests/test_stream_bridge_install.py
+          python -B tests/test_setup_session.py
+          python -B tests/test_setup_log.py
           python -B tests/test_package_stream_bridge.py
           python -B tests/test_setup_bootstrap.py
           python -B tests/test_setup_ui.py
@@ -81,6 +87,13 @@ jobs:
       - name: Actual Windows PowerShell archive parser and bootstrap fixtures
         shell: powershell
         run: python -B tests/test_setup_bootstrap.py --pwsh "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+      - name: Session reuse and persistent failure logs on Windows
+        shell: powershell
+        run: |
+          python -B tests/test_setup_session.py
+          if ($LASTEXITCODE -ne 0) { throw 'SSH session checks failed.' }
+          python -B tests/test_setup_log.py
+          if ($LASTEXITCODE -ne 0) { throw 'Setup log checks failed.' }
       - name: Execute the actual packaged portable Python without Frame access
         shell: powershell
         run: |

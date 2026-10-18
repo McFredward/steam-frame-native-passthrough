@@ -43,6 +43,7 @@ def pin(raw):return {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
 def required_sources(root=ROOT):
     bridge=load('sfnp_bridge_package_contract',root/'setup/stream_bridge_install.py')
     return sorted({'setup/steam_link_setup.py','setup/steam_link_setup_ui.py','setup/stream_bridge_install.py',
+                   'setup/steam_link_setup_session.py','setup/steam_link_setup_log.py',
                    'setup/patch-steam-link.cmd','setup/patch-steam-link.sh','LICENSE',
                    'pc/stream-bridge-sender-provider.vrdrivermanifest',
                    'tools/package_stream_bridge.py','tools/package_stream_link_setup.py',
@@ -133,6 +134,8 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
            'setup/steam_link_setup.py':source_bytes['setup/steam_link_setup.py'],
            'setup/steam_link_setup_ui.py':source_bytes['setup/steam_link_setup_ui.py'],
            'setup/stream_bridge_install.py':source_bytes['setup/stream_bridge_install.py'],
+           'setup/steam_link_setup_session.py':source_bytes['setup/steam_link_setup_session.py'],
+           'setup/steam_link_setup_log.py':source_bytes['setup/steam_link_setup_log.py'],
            'patch-steam-link.cmd':source_bytes['setup/patch-steam-link.cmd'],
            'patch-steam-link.sh':source_bytes['setup/patch-steam-link.sh'],
            'LICENSE':source_bytes['LICENSE']}

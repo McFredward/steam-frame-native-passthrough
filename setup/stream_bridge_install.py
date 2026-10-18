@@ -6,6 +6,7 @@ prototype into an installable release.
 """
 from __future__ import annotations
 import base64
+import ast
 import hashlib
 import importlib.util
 import ipaddress
@@ -21,6 +22,36 @@ import socket
 import stat
 import sys
 import tempfile
+
+
+def fixed_checks(*sources):
+    """Expose only our authored checks, never an arbitrary remote exception."""
+    result={}
+    for source in sources:
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node,ast.Call):continue
+            name=node.func.attr if isinstance(node.func,ast.Attribute) else node.func.id if isinstance(node.func,ast.Name) else None
+            index=1 if name=='require' else 0 if name=='SetupError' else None
+            if index is not None and len(node.args)>index and isinstance(node.args[index],ast.Constant) and type(node.args[index].value)is str:
+                message=node.args[index].value
+                result['check_'+hashlib.sha256(message.encode()).hexdigest()[:16]]=message
+    return result
+
+
+def failure_record(engine,error,checks):
+    """Only exact local-source check IDs and OS error numbers leave the Frame."""
+    code='setup_refused'
+    if isinstance(error,engine.SetupError):
+        candidate='check_'+hashlib.sha256(str(error).encode()).hexdigest()[:16]
+        if candidate in checks:code=candidate
+    elif isinstance(error,OSError):code='os_error'
+    elif isinstance(error,(ValueError,KeyError,TypeError)):code='invalid_data'
+    return {'reason':code,'errno':error.errno if isinstance(error,OSError) and type(error.errno)is int else None}
+
+
+def load_helper(engine,name):
+    path=engine.no_links(Path(__file__).with_name(name+'.py'))
+    return load_module(path.read_bytes(),'sfnp_'+name)
 
 SCHEMA = 'sfnp-stream-bridge-bundle-v1'
 RECEIPT = 'sfnp-stream-bridge-install-v1'
@@ -514,6 +545,7 @@ class FrameInstall:
         return {'architecture':self.machine(),'runtime_compatible':compatible,
                 'installed':state is not None,'files_current':current,
                 'legacy_installed':(self.home/'.config/SteamFrameNativePassthrough/install.json').exists(),
+                'recovery_path':str(self.tx.path),
                 'active_pair':state['pair'] if state else None,'automatic_restart':False}
 
     def legacy_operations(self):
@@ -749,16 +781,55 @@ class Remote:
     def __init__(self,engine,address,login='steamos',*,runner=None,interactive=False):
         self.e=engine;self.address=engine.host(address);self.login=engine.user(login)
         self.runner=runner or engine.Runner();self.interactive=interactive
+        self.session=None;self.log=None
+        self.engine_source=Path(engine.__file__).read_bytes()
+        self.bridge_source=Path(__file__).read_bytes()
+        self.checks=fixed_checks(self.engine_source,self.bridge_source)
+
+    def close(self):
+        if self.session is not None:self.session.close()
 
     def call(self,request):
         e=self.e
-        request={**request,'_engine':base64.b64encode(Path(e.__file__).read_bytes()).decode(),
-                 '_bridge':base64.b64encode(Path(__file__).read_bytes()).decode()}
-        args=e.ssh_args(self.address,self.login,interactive=self.interactive)
-        args+=['python3 -B -c '+shlex.quote(REMOTE_BOOTSTRAP)]
-        code,raw=self.runner.run(args,e.encoded(request),interactive=self.interactive,timeout=90)
-        e.require(code==0,'The Frame operation could not be confirmed. Run Check; retained recovery records can undo this installation.')
-        result=e.parse(raw);e.require(not result.get('error'),'The Frame refused this operation. Existing files and recovery records were preserved.')
+        command=request.get('command')
+        stage={'bridge-inventory':'frame_inventory','bridge-prepare':'frame_prepare',
+               'bridge-commit':'frame_commit','bridge-undo':'undo',
+               'bridge-health-baseline':'startup_baseline','bridge-health':'startup_health'}.get(command,'preflight')
+        if self.log:self.log.event(stage,'stage',command=command,status='started')
+        if self.session is None:
+            # One authenticated SSH process for the entire wizard, including
+            # Check/prepare/commit/health/Undo. OpenSSH keeps the connection;
+            # we never read a password or create credentials/authorized_keys.
+            source=('import base64,sys,types\n'
+                    'e=types.ModuleType("sfnp_remote_engine");e.__file__="<verified-setup-engine>"\n'
+                    'sys.modules[e.__name__]=e\n'
+                    f'exec(compile(base64.b64decode({base64.b64encode(self.engine_source).decode()!r}),e.__file__,"exec"),e.__dict__)\n'
+                    'b=types.ModuleType("sfnp_remote_bridge");b.__file__="<verified-bridge-engine>"\n'
+                    'sys.modules[b.__name__]=b\n'
+                    f'bridge_source=base64.b64decode({base64.b64encode(self.bridge_source).decode()!r})\n'
+                    'exec(compile(bridge_source,b.__file__,"exec"),b.__dict__)\n'
+                    f'checks=b.fixed_checks(base64.b64decode({base64.b64encode(self.engine_source).decode()!r}),bridge_source)\n'
+                    'def dispatch(request):\n'
+                    ' try:return b.remote_request(e,request)\n'
+                    ' except Exception as error:return {"error":True,"failure":b.failure_record(e,error,checks)}\n')
+            session=load_helper(e,'steam_link_setup_session')
+            self.session=session.Session(e.ssh_args(self.address,self.login,interactive=self.interactive),source,interactive=self.interactive,timeout=90)
+        try:result=self.session.call(request)
+        except (OSError,ValueError,TimeoutError) as error:
+            if self.log:self.log.record_failure(stage,error,command=command)
+            raise e.SetupError('The SSH session ended or timed out. The operation was not retried; run setup again to check its recovery records.') from None
+        if result.get('error'):
+            failure=result.get('failure',{})
+            if type(failure)is not dict:failure={}
+            reason=failure.get('reason')
+            if reason not in self.checks and reason not in ('setup_refused','os_error','invalid_data'):reason='setup_refused'
+            logged_reason={'setup_refused':'remote_refused','os_error':'io_error','invalid_data':'invalid_input'}.get(reason,reason)
+            if self.log:self.log.event(stage,'failure',command=command,reason=logged_reason,status='refused',errno=failure.get('errno'))
+            message=self.checks.get(reason,'The Frame refused this operation. Check the setup log and recovery paths shown below.')
+            number=failure.get('errno')
+            if reason=='os_error' and type(number)is int and 0<number<4096:message+=' OS error '+str(number)+'.'
+            raise e.SetupError(message)
+        if self.log:self.log.event(stage,'result',command=command,status='ok')
         return result
 
 
@@ -772,29 +843,113 @@ def request(bundle,command,**values):
     return result
 
 
+def support_paths(local,context):
+    """Show durable evidence before Undo prompts and again on terminal failures."""
+    if context.get('paths_printed'):return
+    ui=context.get('ui');log=context.get('log')
+    def show(key,value):
+        if ui:ui.path(value,key=key)
+        else:
+            labels={'setup_log':'Setup log: ','setup_log_unavailable':'Setup log could not be created: ',
+                    'recovery_pc':'PC recovery record (if created): ',
+                    'recovery_frame':'Frame recovery record (if created): '}
+            print(labels[key]+str(value),file=sys.stderr)
+    if log and log.path:show('setup_log' if log.available else 'setup_log_unavailable',log.path)
+    show('recovery_pc',local.root/'bridge-install.json')
+    show('recovery_frame',context.get('frame_recovery') or '$HOME/.local/share/SteamLinkNativePassthrough/stream-bridge/install.json')
+    if log:
+        recovery={'pc':str(local.root/'bridge-install.json')}
+        if context.get('frame_recovery'):recovery['frame']=context['frame_recovery']
+        log.event(context['stage'],'recovery',reason='recovery_retained',recovery=recovery)
+    context['paths_printed']=True
+
+
+def record_failure(log,engine,stage,error):
+    if not log:return
+    try:
+        checks=fixed_checks(Path(engine.__file__).read_bytes(),Path(__file__).read_bytes())
+        reason=failure_record(engine,error,checks)['reason']
+        log.record_failure(stage,error,reason=reason if reason in checks else None)
+    except (OSError,ValueError,TypeError):log.record_failure(stage,error)
+
+
 def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=None):
+    """Own one durable log and one SSH lifetime, including failed installs."""
+    log=None;context={'peers':[],'stage':'bundle'}
+    if not args.check and not args.dry_run:
+        log=load_helper(engine,'steam_link_setup_log').SessionLog.open(local.root,system=local.system)
+    context['log']=log
+    try:
+        if log:log.event('session','start',status='started')
+        result=_run(args,engine,local,input_fn=input_fn,discover_frame=discover_frame,
+                    remote_factory=remote_factory,context=context)
+        if log:log.event('complete','complete',status='ok')
+        return result
+    except BaseException as error:
+        record_failure(log,engine,context['stage'],error)
+        support_paths(local,context)
+        raise
+    finally:
+        for peer in context['peers']:
+            close=getattr(peer,'close',None)
+            if close:
+                try:close()
+                except (OSError,ValueError):
+                    if log:log.event('cleanup','failure',status='failed')
+        if log:
+            if not context.get('paths_printed'):
+                ui=context.get('ui')
+                key='setup_log' if log.available else 'setup_log_unavailable'
+                if ui:ui.path(log.path,key=key)
+                else:print(('Setup log: ' if log.available else 'Setup log could not be created: ')+str(log.path))
+            log.close()
+
+
+def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=None,context):
     """Called only when this exact package contains the new bundle manifest."""
-    e=engine;bundle=Bundle(args.bundle,e);pc=local.inventory();installed=LocalInstall(e,local)
+    e=engine;log=context['log']
+    def phase(stage):
+        context['stage']=stage
+        if log:log.event(stage,'stage',status='started')
+    phase('bundle');bundle=Bundle(args.bundle,e)
+    phase('pc_inventory');pc=local.inventory();installed=LocalInstall(e,local)
+    phase('preflight')
     interactive=not args.check and sys.stdin.isatty()
     ui=e.load_presentation().Presenter(input_fn=input_fn,lang=args.lang,input_enabled=True) if interactive else None
+    context['ui']=ui
     if ui:ui.banner(inspection=False);ui.status('pc_ready' if installed.check(bundle,pc) else 'pc_partial','info')
     remote=frame=None;address=args.frame
-    factory=remote_factory or (lambda value,login,**kw:Remote(e,value,login,**kw))
+    native_factory=remote_factory or (lambda value,login,**kw:Remote(e,value,login,**kw))
+    def factory(*values,**kw):
+        peer=native_factory(*values,**kw);context['peers'].append(peer)
+        if isinstance(peer,Remote):peer.log=log
+        return peer
+    phase('frame_discovery')
     if interactive and not address:
         def validate(candidate,*,interactive=False):
+            peer=None;selected=False
             try:
                 peer=factory(candidate,args.user,interactive=interactive)
                 observed=peer.call(request(bundle,'bridge-inventory'))
                 if observed.get('architecture') in ('aarch64','arm64') and (observed.get('runtime_compatible') or observed.get('installed') or observed.get('legacy_installed')):
+                    selected=True
                     return peer,observed
             except (OSError,ValueError):pass
+            finally:
+                close=getattr(peer,'close',None)
+                if close and not selected:close()
             return None
         presentation=e.load_presentation();finder=discover_frame or presentation.find_frame
         found=finder(validate,cached_hosts=e.remembered_frame_hosts(local),presenter=ui)
         if found:address=found.host;remote,frame=found.value
     if address and frame is None:
+        phase('frame_inventory')
         remote=factory(address,args.user,interactive=interactive)
         with ui.suspend() if ui else e.nullcontext():frame=remote.call(request(bundle,'bridge-inventory'))
+    if frame is not None:
+        path=frame.get('recovery_path')
+        if type(path)is str and path.startswith('/') and path.endswith('/SteamLinkNativePassthrough/stream-bridge/install.json') and len(path)<=2048 and not any(c in path for c in ('\n','\r','\x00')) and '..' not in path.split('/'):
+            context['frame_recovery']=path
     available=bundle.value['readiness']=='release' and bundle.pc['reviewed'] and bundle.frame['reviewed'] and local.system=='Windows'
     state=installed.state()
     report={'schema':SCHEMA,'bridge_available':available,'automatic_restart':False,
@@ -813,6 +968,7 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
     if action in (None,'exit','check'):return 0
     e.require(interactive and action in actions,'That action is not available for this checked package.')
     if action=='uninstall':
+        phase('undo')
         ui.say('bridge_remove_plan')
         if not ui.confirm_uninstall():return 0
         # The native processes must be stopped by the user first. Both sides
@@ -828,20 +984,28 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
     port=47631
     # Baseline belongs to the current service invocation. The later gate must
     # observe a new successful start, rather than reusing these old UI markers.
+    phase('startup_baseline')
     with ui.suspend():baseline=remote.call(request(bundle,'bridge-health-baseline'))
     local.apply_started=True
     try:
+        phase('frame_prepare')
         with ui.suspend():frame_result=remote.call(request(bundle,'bridge-prepare',pairing={**pair,'role':'receiver'},address=address_to_bind,port=port))
+        phase('pc_install')
         pc_result=installed.install(bundle,pc,pair,address_to_bind,port)
+        phase('frame_commit')
         with ui.suspend():remote.call({'command':'bridge-commit'})
-    except BaseException:
+    except BaseException as error:
         # A failed post-install start never triggers an automatic rollback.
         # Incomplete atomic file writes retain/restore their own predecessors.
         # Undo is OFFERED after an uncertain cross-device installation.
 
         # This includes an uncertain SSH response; receipts remain available.
+        record_failure(log,e,context['stage'],error)
         ui.say('bridge_partial')
+        support_paths(local,context)
+        if isinstance(error,e.SetupError):print(str(error),file=sys.stderr)
         if ui.choose_action(['uninstall','exit'],recommended='uninstall')=='uninstall' and ui.confirm_uninstall():
+            phase('undo')
             with ui.suspend():remote.call({'command':'bridge-undo'})
             installed.uninstall(pc)
             ui.say('bridge_removed')
@@ -850,10 +1014,11 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
     if frame_result.get('reason')=='current' and pc_result.get('reason')=='current':
         ui.say('bridge_current');return 0
     e.remember_frame(local,address,args.user)
-    log=e.write_report(local,action,report,{'reason':'installed','coverage_operational':False,'automatic_restart':False})
-    ui.path(log)
+    report_path=e.write_report(local,action,report,{'reason':'installed','coverage_operational':False,'automatic_restart':False})
+    ui.path(report_path)
     ui.say('bridge_installed')
     if ui.ask('bridge_started').strip().lower() in ('y','yes','j','ja'):
+        phase('startup_health')
         with ui.suspend():health=remote.call(request(bundle,'bridge-health',baseline=baseline))
         ui.say('bridge_health_ok' if health['software_ready'] else 'bridge_health_bad')
         picture=ui.ask('bridge_picture').strip().lower() in ('y','yes','j','ja')

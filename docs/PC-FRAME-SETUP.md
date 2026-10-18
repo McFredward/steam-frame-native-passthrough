@@ -1,5 +1,38 @@
 # PC and Steam Frame setup assistant
 
+## Current paired bridge preview
+
+The explicit `dev/get-preview.ps1` entry now selects the installable
+`stream-bridge-preview-v1` candidate. It requires the pinned Windows/NVIDIA
+sender and Frame runtime, and GloomhavenVR Build708 or newer. The stable entry
+points and historical bundle contract below remain separate. A software-validated
+preview is not a verified combined headset result.
+
+The bridge wizard keeps one authenticated OpenSSH connection for its lifetime.
+Check, install, health checks and explicit Undo reuse that connection on Windows
+and Linux. OpenSSH alone owns password/fingerprint prompts; no password is
+stored, no key is added, and a broken connection does not retry a mutation.
+Failed discovery candidates and the final wizard exit close their processes.
+
+Interactive bridge runs create a bounded private diagnostic file before the
+package check, outside the temporary bootstrap directory. Failures print its
+exact path and the recovery-record locations before offering Undo. Windows
+logs are under `%LOCALAPPDATA%/steam-link-native-passthrough/logs/`; Linux uses
+`$XDG_DATA_HOME/steam-link-native-passthrough/logs/` or the usual
+`~/.local/share` fallback. The PC receipt is `bridge-install.json` in that data
+root. The Frame reports its exact `SteamLinkNativePassthrough/stream-bridge/install.json`
+location (normally under `/home/steamos/.local/share`). A path is a recovery
+location, not proof that a failed operation created a receipt there.
+
+Logs contain fixed stages, commands, authored-check identifiers and OS error
+numbers, never console transcripts, SSH prompts, payloads or pairing keys.
+An authored check ID is the first16 lowercase hex digits of SHA256 over the
+exact source check message, prefixed `check_`; the client displays only its own
+matching static message. This preserves the reason for a remote refusal without
+forwarding arbitrary remote exception text. Logging failure reports the attempted
+path and never replaces the operation error. `--check` and `--dry-run` retain
+their no-log-write contract.
+
 **Development status:** the assistant can check and explain a PC/Frame setup.
 The new sender/receiver bridge is still a prototype, so current prototype bundles
 cannot install components or create pairings. An existing public Frame

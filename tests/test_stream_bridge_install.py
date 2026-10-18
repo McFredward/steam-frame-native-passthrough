@@ -280,7 +280,7 @@ class Tests(unittest.TestCase):
             def __init__(self):self.offered=[];self.messages=[]
             def banner(self,**kw):pass
             def status(self,*a):pass
-            def path(self,*a):pass
+            def path(self,*a,**kw):pass
             def say(self,key):self.messages.append(key)
             def suspend(self):return contextlib.nullcontext()
             def ask(self,key):return {'bridge_confirm':'yes','bridge_started':'yes','bridge_picture':'no'}[key]
@@ -305,6 +305,53 @@ class Tests(unittest.TestCase):
         health=mock.Mock();source=mock.Mock();source.baseline.return_value={'unit':'fixture'};source.checkpoint.return_value={'cursor':'fixture'};health.NativeEvidenceSource.return_value=source
         monitor=b.StartupHealth(health,self.fhome);baseline=monitor.baseline();health.wait_ready.return_value={'status':'ready','reason':None,'process_identities':{'compositor':1}}
         result=monitor.check(baseline);source.resume.assert_called_once_with({'cursor':'fixture'});self.assertTrue(result['software_ready']);self.assertFalse(result['headset_picture_verified']);self.assertFalse(result['automatic_rollback'])
+
+    def test_remote_failure_uses_only_exact_authored_check_ids(self):
+        checks=b.fixed_checks((ROOT/'setup/steam_link_setup.py').read_bytes(),(ROOT/'setup/stream_bridge_install.py').read_bytes())
+        known='Stop SteamVR on the Frame before changing its loaded connection files.'
+        item=b.failure_record(s,s.SetupError(known),checks)
+        self.assertEqual(checks[item['reason']],known)
+        for error in (s.SetupError('fixture secret password'),OSError(13,'fixture secret password'),ValueError('fixture secret password')):
+            item=b.failure_record(s,error,checks)
+            self.assertNotIn('fixture secret',json.dumps(item));self.assertNotIn('password',json.dumps(item))
+
+    def test_failure_before_apply_prints_durable_log_and_recovery_paths(self):
+        import contextlib,io,types
+        class Peer:
+            closed=False
+            def call(inner,request):raise OSError(13,'fixture secret password')
+            def close(inner):inner.closed=True
+        peer=Peer();error=io.StringIO()
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        with contextlib.redirect_stderr(error),mock.patch.object(s.sys.stdin,'isatty',return_value=False):
+            with self.assertRaises(OSError):b.run(args,s,self.local,remote_factory=lambda *a,**kw:peer)
+        text=error.getvalue();self.assertIn(str(self.local.root/'logs'),text)
+        self.assertIn(str(self.local.root/'bridge-install.json'),text)
+        self.assertIn('SteamLinkNativePassthrough/stream-bridge/install.json',text)
+        logs=list((self.local.root/'logs').glob('*'));self.assertEqual(len(logs),1)
+        evidence=logs[0].read_text();self.assertIn('frame_inventory',evidence);self.assertNotIn('fixture secret',evidence)
+        self.assertNotIn(self.pair['key_hex'],evidence);self.assertTrue(peer.closed)
+        self.assertFalse(b.LocalInstall(s,self.local).receipt.exists())
+
+    def test_real_remote_dispatch_reuses_one_process_without_frame_writes(self):
+        import sys,subprocess,types
+        wrapper=self.base/'fake-ssh.py';starts=self.base/'ssh-starts'
+        wrapper.write_text('import os,pathlib,shlex,sys\n'
+                           f'p=pathlib.Path({str(starts)!r});p.write_text(p.read_text()+"start\\n" if p.exists() else "start\\n")\n'
+                           'args=shlex.split(sys.argv[-1]);exec(compile(args[-1],"<fake-ssh>","exec"),{"__name__":"__main__"})\n')
+        remote=b.Remote(s,'192.168.1.25')
+        env={'HOME':str(self.fhome),'XDG_DATA_HOME':'','XDG_CONFIG_HOME':''}
+        before={str(p):p.read_bytes() for p in self.fhome.rglob('*') if p.is_file()}
+        with mock.patch.dict(os.environ,env),mock.patch.object(s,'ssh_args',return_value=[sys.executable,str(wrapper)]):
+            try:
+                for _ in range(3):self.assertIn('architecture',remote.call(b.request(self.bundle,'bridge-inventory')))
+                with self.assertRaisesRegex(s.SetupError,'Bounded package inventory required'):
+                    remote.call(b.request(self.bundle,'wrong-operation'))
+                self.assertIn('architecture',remote.call(b.request(self.bundle,'bridge-inventory')))
+                process=remote.session._process
+            finally:remote.close()
+        self.assertIsNotNone(process.poll());self.assertEqual(starts.read_text(),'start\n')
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.fhome.rglob('*') if p.is_file()})
 
     def test_manifest_rejects_missing_role_unknown_payload_and_generation(self):
         for change in ('missing','foreign','generated'):
