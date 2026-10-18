@@ -107,6 +107,9 @@ paths retain the twelve/thirteen/two guard-fetch budget. There is no third guard
 cached verdict, cross-eye decision or extra frame queue. Historical
 `transform_dual()` continues to generate its original v1/v2 bytes for regression
 controls; it is no longer the package generator's selection.
+The [bounded v3 implementation record](research/robust-native-coverage-20261018.md)
+separates actual-producer/lossy-codec/native-GPU checks from the pending headset
+result, and records the required old-v2 stereo failure control.
 
 The retained experimental contract is
 [`scene-contribution-atlas-v2.json`](protocols/scene-contribution-atlas-v2.json),
