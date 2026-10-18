@@ -4,6 +4,7 @@
 #include "bridge/stream_bridge_control.h"
 #include <memory>
 #include <limits>
+struct ID3D11DeviceContext;
 namespace stream_bridge::sender {
 // Diagnostic metadata only, never a permission or a GPU-frame identity. Fixed
 // storage and one non-retrying CAS per sample keep render callbacks bounded.
@@ -81,6 +82,25 @@ private:
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(CoverageSignal::Count)> signals_{};
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(CoverageGate::Count)> refusals_{};
     std::atomic<unsigned> last_{0};std::atomic<std::uint32_t> constant_{0},sourceWidth_{0},sourceHeight_{0},sourceFormat_{0},outputWidth_{0},outputHeight_{0},outputFormat_{0};
+};
+// A writable, object-local facade. Every public method forwards through the
+// original runtime table at call time; no system-code/table entry is changed.
+// Callbacks replace Draw, Map, Unmap and CopyResource only, in that order.
+class CoverageContextFacade {
+public:
+    CoverageContextFacade();
+    ~CoverageContextFacade();
+    CoverageContextFacade(const CoverageContextFacade&)=delete;
+    CoverageContextFacade& operator=(const CoverageContextFacade&)=delete;
+    bool prepare(ID3D11DeviceContext*,const std::array<std::uintptr_t,4>& callbacks)noexcept;
+    bool publish()noexcept;
+    bool restore()noexcept;
+    bool installed()const noexcept;
+    unsigned slotCount()const noexcept;
+    std::uintptr_t originalFunction(unsigned slot)const noexcept;
+    std::uint32_t nativeMutationCount()const noexcept;
+private:
+    struct Impl;std::unique_ptr<Impl> impl_;
 };
 // Process-lifetime native GPU observer. Construct before publishing the NVENC
 // factory; tick runs only on the cold provider worker. All refusals leave native

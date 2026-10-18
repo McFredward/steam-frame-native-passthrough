@@ -17,6 +17,100 @@ using Copy=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,ID3D11R
 constexpr unsigned StageCount=4,MaxOpened=64*3;
 struct MultithreadScope{ID3D11Multithread* value;explicit MultithreadScope(ID3D11Multithread* p):value(p){if(value)value->Enter();}~MultithreadScope(){if(value)value->Leave();}};
 }
+struct CoverageContextFacade::Impl {
+    ID3D11DeviceContext* context=nullptr;ID3D11Multithread* multithread=nullptr;
+    void** original=nullptr;void** facade=nullptr;void* allocation=nullptr;
+    std::array<void*,149> nativeInitial{},expected{};unsigned count=0;
+    bool prepared=false,everPublished=false;
+    static bool read(const void* address,void* value,std::size_t length)noexcept{
+        SIZE_T got=0;return ReadProcessMemory(GetCurrentProcess(),address,value,length,&got)&&got==length;
+    }
+    bool owns()const noexcept{
+        if(!prepared)return false;
+        void** current=nullptr;std::array<void*,149> observed{};
+        return read(context,&current,sizeof current)&&current==facade&&read(facade,observed.data(),count*sizeof(void*))&&
+            std::memcmp(observed.data(),expected.data(),count*sizeof(void*))==0;
+    }
+};
+CoverageContextFacade::CoverageContextFacade():impl_(new Impl){}
+CoverageContextFacade::~CoverageContextFacade(){
+    restore();if(impl_->everPublished){(void)impl_.release();return;}
+    if(impl_->allocation)VirtualFree(impl_->allocation,0,MEM_RELEASE);
+    release(impl_->multithread);release(impl_->context);
+}
+bool CoverageContextFacade::prepare(ID3D11DeviceContext* context,const std::array<std::uintptr_t,4>& callbacks)noexcept{
+    auto& s=*impl_;if(s.prepared||s.context||!context||(reinterpret_cast<std::uintptr_t>(context)&7u))return false;
+    for(auto callback:callbacks)if(!callback)return false;
+    // The exact public ABI size is selected by the highest supported same-
+    // pointer interface. An alternate COM alias never licenses a longer table.
+    const std::array<GUID,4> versions{{__uuidof(ID3D11DeviceContext4),__uuidof(ID3D11DeviceContext3),__uuidof(ID3D11DeviceContext2),__uuidof(ID3D11DeviceContext1)}};
+    const unsigned lengths[4]{149,147,144,134};
+    for(unsigned i=0;i<versions.size();++i){void* queried=nullptr;
+        if(SUCCEEDED(context->QueryInterface(versions[i],&queried))){
+            if(!queried)return false;
+            if(queried!=context){static_cast<IUnknown*>(queried)->Release();return false;}
+            s.context=static_cast<ID3D11DeviceContext*>(queried);s.count=lengths[i];break;
+        }
+    }
+    if(!s.context){context->AddRef();s.context=context;s.count=115;}
+    if(FAILED(context->QueryInterface(__uuidof(ID3D11Multithread),reinterpret_cast<void**>(&s.multithread)))||
+       !s.multithread->GetMultithreadProtected())return false;
+    MultithreadScope protect(s.multithread);
+    if(!Impl::read(context,&s.original,sizeof s.original)||!s.original||
+       !Impl::read(s.original,s.nativeInitial.data(),s.count*sizeof(void*)))return false;
+    for(unsigned i=0;i<s.count;++i)if(!s.nativeInitial[i])return false;
+    SYSTEM_INFO info{};GetSystemInfo(&info);const auto page=std::size_t(info.dwPageSize);
+    if(page<s.count*16||page<s.count*sizeof(void*))return false;
+    s.allocation=VirtualAlloc(nullptr,2*page,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);if(!s.allocation)return false;
+    s.facade=static_cast<void**>(s.allocation);auto* code=static_cast<std::uint8_t*>(s.allocation)+page;
+    for(unsigned i=0;i<s.count;++i){auto* thunk=code+16*i;
+        // ENDBR64 is an IBT landing pad and a no-op where CET is disabled.
+        // movabs RAX=&original[slot]; jmp [RAX] preserves all arguments,
+        // nonvolatile registers, stack/shadow-space and flags, with no frame.
+        const std::uint8_t opcodes[16]{0xf3,0x0f,0x1e,0xfa,0x48,0xb8,0,0,0,0,0,0,0,0,0xff,0x20};
+        std::memcpy(thunk,opcodes,sizeof opcodes);const auto source=reinterpret_cast<std::uintptr_t>(s.original+i);
+        std::memcpy(thunk+6,&source,sizeof source);s.expected[i]=thunk;
+    }
+    const unsigned slots[4]{13,14,15,47};for(unsigned i=0;i<4;++i)s.expected[slots[i]]=reinterpret_cast<void*>(callbacks[i]);
+    std::memcpy(s.facade,s.expected.data(),s.count*sizeof(void*));
+    DWORD old=0;if(!VirtualProtect(code,page,PAGE_EXECUTE_READ,&old)||!FlushInstructionCache(GetCurrentProcess(),code,page))return false;
+    // Only the generated forwarding instructions become RX. The object-local
+    // facade table stays writable; runtime changes are observed, never faulted.
+    s.prepared=true;return true;
+}
+bool CoverageContextFacade::publish()noexcept{
+    auto& s=*impl_;if(!s.prepared||!s.multithread->GetMultithreadProtected())return false;
+    MultithreadScope protect(s.multithread);if(s.owns())return true;
+    MEMORY_BASIC_INFORMATION info{};
+    if(!VirtualQuery(s.context,&info,sizeof info)||info.State!=MEM_COMMIT||info.Protect&(PAGE_GUARD|PAGE_NOACCESS))return false;
+    const auto access=info.Protect&0xffu;
+    if(access!=PAGE_READWRITE&&access!=PAGE_WRITECOPY&&access!=PAGE_EXECUTE_READWRITE&&access!=PAGE_EXECUTE_WRITECOPY)return false;
+    const auto previous=InterlockedCompareExchangePointer(reinterpret_cast<void**>(s.context),s.facade,s.original);
+    if(previous!=s.original)return false;
+    s.everPublished=true;return s.owns();
+}
+bool CoverageContextFacade::restore()noexcept{
+    auto& s=*impl_;if(!s.prepared||!s.everPublished)return true;
+    MultithreadScope protect(s.multithread);void** current=nullptr;
+    if(!Impl::read(s.context,&current,sizeof current))return false;
+    if(current==s.original)return true;
+    // A later vptr or entry replacement has its own owner. Leave that entire
+    // facade and all forwarding code retained rather than erase its hook.
+    if(!s.owns())return false;
+    return InterlockedCompareExchangePointer(reinterpret_cast<void**>(s.context),s.original,s.facade)==s.facade;
+}
+bool CoverageContextFacade::installed()const noexcept{return impl_->owns();}
+unsigned CoverageContextFacade::slotCount()const noexcept{return impl_->count;}
+std::uintptr_t CoverageContextFacade::originalFunction(unsigned slot)const noexcept{
+    const auto& s=*impl_;if(!s.prepared||slot>=s.count)return 0;
+    return reinterpret_cast<const volatile std::uintptr_t*>(s.original)[slot];
+}
+std::uint32_t CoverageContextFacade::nativeMutationCount()const noexcept{
+    const auto& s=*impl_;if(!s.prepared)return 0;std::array<void*,149> observed{};
+    if(!Impl::read(s.original,observed.data(),s.count*sizeof(void*)))return 0;
+    std::uint32_t count=0;for(unsigned i=0;i<s.count;++i)if(observed[i]!=s.nativeInitial[i])++count;return count;
+}
+
 struct SenderCoverage::Impl {
     DirectModeBoundary& direct;NvencBoundary& boundary;ControlRuntime& control;CoverageGateCounters gates;
     mutable std::mutex mutex;std::atomic<bool> enabled{false},prepared{false};std::atomic<unsigned> state{0};std::atomic<std::uint32_t> lastPid{0},preparedPid{0};
