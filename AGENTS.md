@@ -8,6 +8,14 @@
   source, comments and developer documentation are English.
 - The intended input is real per-eye scene coverage, independent of scene RGB.
   Never derive mask coverage from a key colour in the explicit-mask path.
+- The maintainer explicitly authorized a PC Steam Link sender companion on
+  2026-10-18, superseding the earlier application/Frame-only restriction for this
+  work. Require a mutually confirmed compatible sender/receiver session before
+  enabling the new coverage route. Missing, incompatible or disconnected peers
+  must preserve ordinary Steam Link and report a bounded useful status. A
+  handshake alone never proves exact video/coverage association. This does not
+  authorize an unattended Frame installation or restart; device changes still
+  require the maintainer's coordinated permission and readiness.
 - A mask belongs to one source session, video frame, eye and extent. A compositor
   submit counter, approximate timestamp or latest received mask is not proof of
   that association. Missing/invalid associations must retain opaque rendering.
