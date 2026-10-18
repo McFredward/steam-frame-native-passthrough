@@ -37,6 +37,9 @@ on:
       # Bounded lifecycle-only repairs have their own production-code gate.
       - '.github/workflows/stream-lifecycle-tests.yml'
       - '.github/workflows/sender-resource-tests.yml'
+      # These Windows-only fixtures have their own actual WARP gate.
+      - 'tests/test_stream_bridge_sender_context_layout.c'
+      - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
       - 'bridge/stream_bridge_control.*'
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'pc/stream-bridge-sender-provider-runtime.*'
@@ -80,6 +83,9 @@ on:
       - '.github/workflows/mask-tests.yml'
       - '.github/workflows/stream-lifecycle-tests.yml'
       - '.github/workflows/sender-resource-tests.yml'
+      # These Windows-only fixtures have their own actual WARP gate.
+      - 'tests/test_stream_bridge_sender_context_layout.c'
+      - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
       - 'bridge/stream_bridge_control.*'
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'pc/stream-bridge-sender-provider-runtime.*'
