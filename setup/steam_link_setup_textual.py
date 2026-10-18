@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import sys
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from rich.text import Text
 from textual import events, on
@@ -194,7 +194,7 @@ class _PrivateSSHInput(Input):
             super().action_cut()
 
 
-class SSHInputScreen(ModalScreen[str | None]):
+class SSHInputScreen(ModalScreen[Optional[str]]):
     """Private OpenSSH response input; values never enter notices or history."""
     BINDINGS = [Binding("escape", "cancel", show=False), Binding("ctrl+c", "cancel", show=False)]
 

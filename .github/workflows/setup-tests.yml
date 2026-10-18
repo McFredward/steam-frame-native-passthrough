@@ -72,6 +72,12 @@ on:
       - 'tests/test_setup_askpass_client.py'
       - '.github/workflows/setup-tests.yml'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Run only an affected platform after a bounded repair
+        type: choice
+        default: all
+        options: [all, linux, windows, python39]
 
 permissions:
   contents: read
@@ -82,6 +88,7 @@ concurrency:
 
 jobs:
   linux:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'linux'
     runs-on: ubuntu-24.04
     timeout-minutes: 6
     steps:
@@ -116,6 +123,7 @@ jobs:
           python -B tests/test_setup_textual_integration.py
           python -B tests/test_stream_bridge_artifact_pins.py
   linux-python-baseline:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'python39'
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
@@ -128,6 +136,7 @@ jobs:
           python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
           python -B tests/test_textual_dependencies.py --wheels "${{ runner.temp }}/textual-wheels" --pilot tests/test_setup_textual.py
   windows-bootstrap:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'windows'
     runs-on: windows-2025
     timeout-minutes: 6
     steps:
