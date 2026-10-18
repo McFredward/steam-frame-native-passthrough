@@ -7,20 +7,24 @@ on:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'tests/test_stream_bridge_sender_shared_resource.cpp'
       - 'tests/test_stream_bridge_sender_provider_context.cpp'
+      - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
+      - 'tests/test_stream_bridge_sender_context_layout.c'
       - '.github/workflows/sender-resource-tests.yml'
   pull_request:
     paths:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'tests/test_stream_bridge_sender_shared_resource.cpp'
       - 'tests/test_stream_bridge_sender_provider_context.cpp'
+      - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
+      - 'tests/test_stream_bridge_sender_context_layout.c'
       - '.github/workflows/sender-resource-tests.yml'
   workflow_dispatch:
     inputs:
       focus:
         description: Focused Windows production check
         type: choice
-        options: [context, all]
-        default: context
+        options: [shadow, context, all]
+        default: shadow
 
 permissions:
   contents: read
@@ -31,7 +35,7 @@ concurrency:
 
 jobs:
   shared-resource:
-    if: github.event_name != 'workflow_dispatch' || inputs.focus == 'all'
+    if: github.event_name == 'workflow_dispatch' && inputs.focus == 'all'
     runs-on: windows-2025
     timeout-minutes: 3
     steps:
@@ -67,6 +71,9 @@ jobs:
           name: windows-shared-resource-evidence
           path: build/shared-resource-*.log
   context-observer:
+    # Retain the older production observer control as an explicit focused run.
+    # The independent shadow experiment does not certify that rejected route.
+    if: github.event_name == 'workflow_dispatch' && inputs.focus != 'shadow'
     runs-on: windows-2025
     timeout-minutes: 4
     steps:
@@ -130,3 +137,35 @@ jobs:
         with:
           name: windows-native-context-evidence
           path: build/native-context*.log
+
+  writable-context-shadow:
+    if: github.event_name != 'workflow_dispatch' || inputs.focus == 'shadow' || inputs.focus == 'all'
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile independent full-public-ABI writable shadow experiment
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          mkdir build
+          cl /nologo /TC /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /c tests/test_stream_bridge_sender_context_layout.c /Fo:build\context-layout.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN tests/test_stream_bridge_sender_writable_context_shadow.cpp build\context-layout.obj /Fe:build\writable-context-shadow.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
+          if errorlevel 1 exit /b 1
+      - name: Run actual WARP Draw Copy Readback Getter Flush and protection transitions
+        shell: cmd
+        run: |
+          build\writable-context-shadow.exe >build\writable-context-shadow.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\writable-context-shadow.log
+          if "%SFNP_RESULT%"=="77" echo ::error::The hosted WARP or same-pointer public API is unavailable. No shadow GPU proof was obtained.
+          exit /b %SFNP_RESULT%
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-writable-context-shadow-experiment
+          path: build/writable-context-shadow.log
