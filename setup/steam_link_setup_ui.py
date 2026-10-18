@@ -48,6 +48,10 @@ TEXT = {
         'bridge_inventory_refresh_failed': 'The operation finished, but the final status could not be refreshed. Run Check again to confirm the current installation.',
         'action_retry': 'Try again',
         'action_retry_description': 'Check the last result and retry the operation.',
+        'action_manual': 'Enter Frame IP',
+        'action_manual_description': 'Use the address shown in your Frame Wi-Fi settings.',
+        'discovery_pc_only': 'Check this PC only',
+        'discovery_pc_only_description': 'Continue without connecting to a Frame or changing either device.',
         'action_back': 'Back',
         'action_back_description': 'Return to the previous step.',
         'action_rollback': 'Restore previous setup',
@@ -124,9 +128,9 @@ TEXT = {
         'found': 'Steam Frame connected.',
         'login': 'A likely Frame is available. OpenSSH may ask for its fingerprint or password.',
         'missing': 'We could not identify your Frame automatically. Keep it awake, on the same network, with SSH enabled.',
-        'manual': 'Last option - Frame IP from its Wi-Fi settings (Enter to check only this PC): ',
-        'invalid': 'That is not a local private IPv4 address. Checking only this PC.',
-        'unverified': 'That device could not be confirmed as a Steam Frame. Checking only this PC.',
+        'manual': 'Frame IP from its Wi-Fi settings (Enter to go back): ',
+        'invalid': 'That is not a local private IPv4 address. You can try again or search once more.',
+        'unverified': 'That device could not be confirmed as a Steam Frame. You can check the address or retry the search.',
         'pc_only': 'Continuing with this PC only.',
         'done': 'done',
         'failed': 'could not finish',
@@ -144,6 +148,10 @@ TEXT = {
         'bridge_inventory_refresh_failed': 'Die Aktion ist abgeschlossen, aber die abschließende Statusanzeige konnte nicht aktualisiert werden. Prüfe den Installationsstand mit „Nur prüfen“ erneut.',
         'action_retry': 'Erneut versuchen',
         'action_retry_description': 'Das letzte Ergebnis prüfen und die Aktion erneut versuchen.',
+        'action_manual': 'Frame-IP eingeben',
+        'action_manual_description': 'Die Adresse aus den WLAN-Einstellungen deiner Frame verwenden.',
+        'discovery_pc_only': 'Nur diesen PC prüfen',
+        'discovery_pc_only_description': 'Ohne Frame-Verbindung fortfahren und keine Geräte ändern.',
         'action_back': 'Zurück',
         'action_back_description': 'Zum vorherigen Schritt zurückkehren.',
         'action_rollback': 'Vorherigen Zustand wiederherstellen',
@@ -220,9 +228,9 @@ TEXT = {
         'found': 'Steam Frame verbunden.',
         'login': 'Eine mögliche Frame ist erreichbar. OpenSSH fragt gegebenenfalls nach Fingerabdruck oder Passwort.',
         'missing': 'Die Frame wurde nicht automatisch erkannt. Bitte eingeschaltet lassen, im selben Netzwerk verbinden und SSH aktivieren.',
-        'manual': 'Letzte Möglichkeit - Frame-IP aus den WLAN-Einstellungen (Enter für nur diesen PC): ',
-        'invalid': 'Das ist keine lokale private IPv4-Adresse. Es wird nur dieser PC geprüft.',
-        'unverified': 'Das Gerät konnte nicht als Steam Frame bestätigt werden. Es wird nur dieser PC geprüft.',
+        'manual': 'Frame-IP aus den WLAN-Einstellungen (Enter für zurück): ',
+        'invalid': 'Das ist keine lokale private IPv4-Adresse. Du kannst es erneut eingeben oder noch einmal suchen.',
+        'unverified': 'Das Gerät konnte nicht als Steam Frame bestätigt werden. Prüfe die Adresse oder starte die Suche erneut.',
         'pc_only': 'Es wird nur dieser PC geprüft.',
         'done': 'fertig',
         'failed': 'nicht abgeschlossen',
@@ -363,9 +371,12 @@ class _ArrowTerminal:
 class Presenter:
     """Arrow-key menus and animation exist only on a real terminal.
 
-    Wrap any OpenSSH/password operation in suspend(). It clears the progress
-    line before yielding; the background writer cannot race the prompt.
+    Plain OpenSSH/password operations use suspend() so the progress writer
+    cannot race a terminal prompt. The Textual presenter handles authentication
+    inside its own app and must not release the terminal for those prompts.
     """
+    inline_ssh = False
+
     def __new__(cls, *args, **kwargs):
         # Only the actual entry point owns Textual's terminal lifetime. Discovery
         # and workflow retries reuse its one presenter across sibling imports.
@@ -628,7 +639,7 @@ class Presenter:
         This selects an action; the engine still owns its plan and permissions.
         """
         known = ('install', 'update', 'repair', 'uninstall', 'check', 'exit',
-                 'retry', 'back', 'rollback', 'continue')
+                 'retry', 'back', 'rollback', 'continue', 'manual')
         if (type(actions) not in (list, tuple) or len(actions) > len(known) or
                 any(type(action) is not str or action not in known for action in actions) or
                 len(set(actions)) != len(actions)):
@@ -636,23 +647,26 @@ class Presenter:
         if not actions or not self.prompting:
             return None
         default = recommended if recommended in actions else ('check' if 'check' in actions else ('exit' if 'exit' in actions else None))
+        discovery = {'retry', 'manual', 'check', 'exit'} <= set(actions)
+        def action_words(action):
+            key = 'discovery_pc_only' if discovery and action == 'check' else 'action_' + action
+            return self.text(key), self.text(key + '_description')
         with self.suspend():
             if self._arrow_capable():
-                choices = [(action, self.text('action_' + action),
-                            self.text('action_' + action + '_description')) for action in actions]
+                choices = [(action, *action_words(action)) for action in actions]
                 selected = self._arrow_choose(choices, default, recommended)
                 if selected is not False:
                     return selected
             self.section('actions')
             with self._lock:
                 for number, action in enumerate(actions, 1):
-                    label = self.text('action_' + action)
+                    label, description = action_words(action)
                     if action == recommended:
                         label += ' [' + self.text('recommended') + ']'
                     self._paragraph(str(number) + '. ' + label)
-                    self._paragraph(self.text('action_' + action + '_description'), indent=5)
+                    self._paragraph(description, indent=5)
                     self._write('\n')
-                self._paragraph(self.text('choice_help').format(default=self.text('action_' + (default or 'exit'))))
+                self._paragraph(self.text('choice_help').format(default=action_words(default or 'exit')[0]))
                 self._write('\n')
             number = actions.index(default) + 1 if default is not None else 0
             label = self.text('choice') + ' [' + str(number) + ']: '
@@ -952,6 +966,10 @@ class SystemSources:
         self.ip_tool = shutil.which('ip')
         self._resolved = {}
 
+    def reset_discovery(self):
+        """Discard DNS hints between explicitly requested bounded searches."""
+        self._resolved.clear()
+
     def _powershell(self, command):
         if not self.directory:
             return []
@@ -1063,102 +1081,135 @@ def scan(lan, connector=port_open):
 
 def find_frame(validate, *, cached_hosts=(), sources=None, presenter=None,
                allow_manual=True, connector=port_open):
-    """Return only the caller's verified inventory, never an inferred Frame.
+    """Run one bounded, read-only search per explicit user request.
 
     validate(host, interactive=False) MUST use batch authentication/no prompts.
-    It returns a caller-owned Frame value (e.g. remote+inventory), or None.
-    At most eight batch validations and one automatic interactive validation
-    occur. Unknown SSH hosts are never interactively prompted automatically.
-    Cached/named hints may receive one OpenSSH prompt; an explicit manual
-    address may receive one final prompt. The callback owns its own timeout.
+    Each pass has at most eight batch validations and one strong-hint login;
+    a retry gets a fresh budget and fresh DNS hints. Unknown SSH hosts never
+    trigger login prompts automatically. Manual IP entry and another search
+    require explicit choices. Check-only returns None; Exit/cancel propagates
+    KeyboardInterrupt so a caller cannot mistake cancellation for PC-only mode.
     """
     ui = presenter or Presenter()
     sources = sources or SystemSources()
-    seen = set()
-    attempts = 0
-    interactive_hint = None
+    # Cache inputs are hints, not a source that can grow between retry passes.
+    # Bound iterator consumption as well as the number of network validations.
+    import itertools
+    cached_hosts = tuple(itertools.islice(cached_hosts, 4))
+
     def validate_one(address, origin, interactive=False):
         try:
-            with ui.suspend() if interactive else nullcontext():
+            # The native Textual authentication broker owns its password/host-key
+            # widgets. Only the plain terminal fallback borrows OpenSSH's tty.
+            scope = ui.suspend() if interactive and not getattr(ui, 'inline_ssh', False) else nullcontext()
+            with scope:
                 value = validate(address, interactive=interactive)
         except (OSError, ValueError):
+            # Never echo arbitrary SSH diagnostics or secrets. A failed manual
+            # check gets the same explicit Retry/Manual/PC-only/Exit choices.
             return None
         if value is not None and value is not False:
             ui.say('found')
             return FoundFrame(address, value, origin)
         return None
-    def candidates(values, origin, strong=False):
-        nonlocal attempts, interactive_hint
-        for address in values:
-            address = candidate_ip(address, lan)
-            if not address or address in seen:
-                continue
-            seen.add(address)
-            if attempts >= MAX_VALIDATIONS:
-                break
-            try:
-                reachable = connector(address, 22, .15)
-            except OSError:
-                reachable = False
-            if not reachable:
-                continue
-            attempts += 1
-            found = validate_one(address, origin)
-            if found:
-                return found
-            if strong and interactive_hint is None:
-                interactive_hint = (address, origin)
-        return None
-    lan = None
-    with ui.progress('search'):
-        cached = []
-        for hint in list(cached_hosts)[:4]:
-            if candidate_ip(hint):
-                cached.append(hint)
-            else:
-                cached.extend(sources.resolve(hint))
-        found = candidates(cached, 'cached', True)
-        if found:
-            return found
-        # Plain DNS names must work without a physical-interface table, e.g.
-        # when Windows network inventory is slow or not available.
-        found = candidates(sources.named(None), 'named', True)
-        if found:
-            return found
-        lan = sources.lan()
-        if not eligible_lan(lan):
-            lan = None
-        if lan is not None:
-            found = candidates(sources.named(lan), 'named', True)
-            if found:
-                return found
-        if interactive_hint and ui.prompting:
-            ui.say('login')
-            found = validate_one(*interactive_hint, interactive=True)
-            if found:
-                return found
-    if lan is not None:
-        with ui.progress('nearby'):
-            found = candidates(sources.neighbors(lan), 'neighbor')
-            if found:
-                return found
-            if attempts < MAX_VALIDATIONS:
-                found = candidates(scan(lan, connector), 'local-scan')
+
+    def search_once():
+        seen, attempts, interactive_hint, lan = set(), 0, None, None
+
+        def candidates(values, origin, strong=False):
+            nonlocal attempts, interactive_hint
+            limit = {'cached': 32, 'named': 8, 'neighbor': MAX_NEIGHBORS, 'local-scan': MAX_SCAN_HOSTS}[origin]
+            for address in itertools.islice(values, limit):
+                address = candidate_ip(address, lan)
+                if not address or address in seen:
+                    continue
+                seen.add(address)
+                if attempts >= MAX_VALIDATIONS:
+                    break
+                try:
+                    reachable = connector(address, 22, .15)
+                except OSError:
+                    reachable = False
+                if not reachable:
+                    continue
+                attempts += 1
+                found = validate_one(address, origin)
                 if found:
                     return found
-    ui.say('missing')
-    if not allow_manual or not ui.prompting:
-        ui.say('pc_only')
+                if strong and interactive_hint is None:
+                    interactive_hint = (address, origin)
+            return None
+
+        with ui.progress('search'):
+            cached = []
+            for hint in cached_hosts:
+                if candidate_ip(hint):
+                    cached.append(hint)
+                else:
+                    cached.extend(itertools.islice(sources.resolve(hint), 8))
+            found = candidates(cached, 'cached', True)
+            if found:
+                return found
+            # DNS hints remain useful when physical-interface inventory is
+            # unavailable. A hint never substitutes for real Frame identity.
+            found = candidates(sources.named(None), 'named', True)
+            if found:
+                return found
+            lan = sources.lan()
+            if not eligible_lan(lan):
+                lan = None
+            if lan is not None:
+                found = candidates(sources.named(lan), 'named', True)
+                if found:
+                    return found
+            if interactive_hint and ui.prompting:
+                ui.say('login')
+                found = validate_one(*interactive_hint, interactive=True)
+                if found:
+                    return found
+        if lan is not None:
+            with ui.progress('nearby'):
+                found = candidates(sources.neighbors(lan), 'neighbor')
+                if found:
+                    return found
+                if attempts < MAX_VALIDATIONS:
+                    found = candidates(scan(lan, connector), 'local-scan')
+                    if found:
+                        return found
         return None
-    value = ui.ask('manual').strip()
-    if not value:
-        ui.say('pc_only')
-        return None
-    address = candidate_ip(value)
-    if address is None:
-        ui.say('invalid')
-        return None
-    found = validate_one(address, 'manual', interactive=True)
-    if not found:
-        ui.say('unverified')
-    return found
+
+    while True:
+        try:
+            found = search_once()
+        except (OSError, ValueError):
+            found = None
+        if found:
+            return found
+        ui.say('missing')
+        if not ui.prompting:
+            ui.say('pc_only')
+            return None
+        actions = ['retry', 'manual', 'check', 'exit'] if allow_manual else ['retry', 'check', 'exit']
+        while True:
+            action = ui.choose_action(actions, recommended='retry')
+            if action == 'retry':
+                reset = getattr(sources, 'reset_discovery', None)
+                if callable(reset):
+                    reset()
+                break
+            if action == 'check':
+                ui.say('pc_only')
+                return None
+            if action != 'manual':
+                raise KeyboardInterrupt()
+            value = ui.ask('manual').strip()
+            if not value:
+                continue  # Back means another explicit choice, never PC-only.
+            address = candidate_ip(value)
+            if address is None:
+                ui.say('invalid')
+                continue
+            found = validate_one(address, 'manual', interactive=True)
+            if found:
+                return found
+            ui.say('unverified')

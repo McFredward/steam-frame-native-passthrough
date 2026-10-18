@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import ipaddress
+import itertools
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -47,10 +50,18 @@ class Sources:
         return self.near
 
 
-def presenter(prompting=False, response='', tty=False):
+def presenter(prompting=False, response=None, tty=False):
     output = io.StringIO()
     output.isatty = lambda: tty
-    return ui.Presenter(output, lambda prompt: response, lang='en', input_enabled=prompting)
+    # A failed discovery now requires an explicit menu choice. The default
+    # fixture chooses PC-only; manual tests supply their entire input sequence.
+    answers=iter(['3'] if response is None else response if isinstance(response,(list,tuple)) else [response])
+    def read(prompt):
+        try:value=next(answers)
+        except StopIteration:raise EOFError()
+        if isinstance(value,BaseException):raise value
+        return value
+    return ui.Presenter(output, read, lang='en', input_enabled=prompting)
 
 
 class Discovery(unittest.TestCase):
@@ -112,7 +123,7 @@ class Discovery(unittest.TestCase):
             with self.subTest(text=text):
                 calls = []
                 source = Sources(lan=None)
-                result = self.find(lambda host, interactive=False: calls.append((host, interactive)) or 'verified', sources=source, presenter=presenter(True, text))
+                result = self.find(lambda host, interactive=False: calls.append((host, interactive)) or 'verified', sources=source, presenter=presenter(True, ['2',text,'3']))
                 self.assertEqual(result is not None, expected)
                 self.assertEqual(calls, [('192.168.5.90', True)] if expected else [])
                 self.assertIn(('lan',), source.calls)
@@ -127,7 +138,7 @@ class Discovery(unittest.TestCase):
         self.assertIsNone(p._thread)
 
     def test_output_redirection_does_not_suppress_explicit_input(self):
-        p = presenter(True, '192.168.5.90', tty=False)
+        p = presenter(True, ['2','192.168.5.90'], tty=False)
         result = self.find(lambda *_a, **_k: 'verified', sources=Sources(lan=None), presenter=p)
         self.assertIsNotNone(result)
         self.assertNotIn('\r', p.stream.getvalue())
@@ -144,6 +155,204 @@ class Discovery(unittest.TestCase):
         result = self.find(mock.Mock(side_effect=ValueError('do not print this password')), sources=Sources(lan=None, named=['192.168.5.90']), presenter=p)
         self.assertIsNone(result)
         self.assertNotIn('password', p.stream.getvalue())
+
+
+class DiscoveryRetry(unittest.TestCase):
+    def scripted(self, responses, **kwargs):
+        p=presenter(True,responses)
+        choices=[]
+        original=p.choose_action
+        def choose(actions,recommended=None):
+            choices.append((tuple(actions),recommended))
+            return original(actions,recommended)
+        p.choose_action=choose
+        for key,value in kwargs.items():setattr(p,key,value)
+        return p,choices
+
+    def find(self, validate, p, source, **kwargs):
+        return ui.find_frame(validate,presenter=p,sources=source,
+                             connector=lambda *_:True,**kwargs)
+
+    def test_failure_offers_retry_manual_pc_only_and_exit_before_an_ip_prompt(self):
+        p,choices=self.scripted(['3'])
+        source=Sources(lan=None)
+        self.assertIsNone(self.find(lambda *_a,**_k:None,p,source))
+        self.assertEqual(choices,[(('retry','manual','check','exit'),'retry')])
+        self.assertNotIn(ui.TEXT['en']['manual'],p.stream.getvalue())
+        self.assertIn(ui.TEXT['en']['discovery_pc_only'],p.stream.getvalue())
+        self.assertIn(ui.TEXT['en']['pc_only'],p.stream.getvalue())
+        self.assertEqual(source.calls,[('named',None),('lan',)])
+
+    def test_explicit_retry_resets_each_pass_budget_and_seen_hints(self):
+        class ResetSources(Sources):
+            attempt=0
+            def reset_discovery(self):
+                self.attempt+=1
+                self.calls.append(('reset',))
+        source=ResetSources(lan=None,named=['192.168.5.'+str(i) for i in range(30,80)])
+        p,choices=self.scripted(['1','3'])
+        checks=[]
+        self.assertIsNone(self.find(lambda address,interactive=False:checks.append((source.attempt,address,interactive)),p,source))
+        self.assertEqual(choices,[(('retry','manual','check','exit'),'retry')]*2)
+        self.assertEqual(source.attempt,1)
+        for attempt in (0,1):
+            self.assertEqual(len([r for r in checks if r[0]==attempt and not r[2]]),ui.MAX_VALIDATIONS)
+            self.assertEqual(len([r for r in checks if r[0]==attempt and r[2]]),1)
+        self.assertEqual([r[1:] for r in checks if r[0]==0],[r[1:] for r in checks if r[0]==1])
+
+    def test_real_system_dns_cache_is_discarded_for_a_requested_retry(self):
+        address=['192.168.5.90'];dns=[]
+        def run(argv,**kwargs):
+            dns.append(argv[-1]);return json.dumps(address).encode()
+        source=ui.SystemSources(system='Other',run=run)
+        p,choices=self.scripted(['1'])
+        read=p.input_fn
+        def change(prompt):
+            address[0]='192.168.5.91';return read(prompt)
+        p.input_fn=change
+        result=self.find(lambda value,interactive=False:'verified' if value==address[0] and value.endswith('.91') else None,p,source)
+        self.assertEqual(result.host,'192.168.5.91')
+        self.assertEqual(len(dns),len(ui.NAMES)*2)
+        self.assertEqual(source.resolve('frame.local'),['192.168.5.91'])
+        self.assertEqual(len(dns),len(ui.NAMES)*2)
+
+    def test_injected_sources_without_reset_can_still_find_a_new_device(self):
+        source=Sources(lan=None)
+        p,choices=self.scripted(['1'])
+        read=p.input_fn
+        def change(prompt):
+            source.names=['192.168.5.91'];return read(prompt)
+        p.input_fn=change
+        result=self.find(lambda *_a,**_k:'verified',p,source)
+        self.assertEqual(result.host,'192.168.5.91')
+        self.assertEqual(choices,[(('retry','manual','check','exit'),'retry')])
+
+    def test_invalid_and_unverified_manual_addresses_allow_another_explicit_try(self):
+        p,choices=self.scripted(['2','8.8.8.8','2','192.168.5.90','2','192.168.5.91'])
+        calls=[]
+        def validate(address,interactive=False):
+            calls.append((address,interactive))
+            return 'verified' if address.endswith('.91') else None
+        result=self.find(validate,p,Sources(lan=None))
+        self.assertEqual(result.host,'192.168.5.91')
+        self.assertEqual(calls,[('192.168.5.90',True),('192.168.5.91',True)])
+        self.assertEqual(len(choices),3)
+        self.assertIn(ui.TEXT['en']['invalid'],' '.join(p.stream.getvalue().split()))
+        self.assertIn(ui.TEXT['en']['unverified'],' '.join(p.stream.getvalue().split()))
+        self.assertNotIn(ui.TEXT['en']['pc_only'],p.stream.getvalue())
+
+    def test_manual_failure_can_return_to_a_fresh_automatic_search_without_secret_output(self):
+        source=Sources(lan=None)
+        p,choices=self.scripted(['2','192.168.5.90','1'])
+        read=p.input_fn
+        def change(prompt):
+            value=read(prompt)
+            if value=='1':source.names=['192.168.5.91']
+            return value
+        p.input_fn=change
+        def validate(address,interactive=False):
+            if interactive:raise ValueError('password or untrusted SSH output must not leak')
+            return 'verified'
+        result=self.find(validate,p,source)
+        self.assertEqual(result.host,'192.168.5.91')
+        self.assertEqual(result.origin,'named')
+        self.assertNotIn('password or untrusted',p.stream.getvalue())
+        self.assertEqual(len(choices),2)
+
+    def test_empty_manual_entry_goes_back_without_implicitly_continuing(self):
+        p,choices=self.scripted(['2','','3'])
+        source=Sources(lan=None)
+        self.assertIsNone(self.find(mock.Mock(side_effect=AssertionError('no validation')),p,source))
+        self.assertEqual(len(choices),2)
+        self.assertEqual(source.calls,[('named',None),('lan',)])
+
+    def test_exit_escape_and_input_interrupt_cancel_instead_of_pc_only(self):
+        for response in (['4'],['0'],[KeyboardInterrupt()]):
+            with self.subTest(response=response):
+                p,choices=self.scripted(response)
+                with self.assertRaises(KeyboardInterrupt):
+                    self.find(lambda *_a,**_k:None,p,Sources(lan=None))
+                self.assertEqual(len(choices),1)
+                self.assertNotIn(ui.TEXT['en']['pc_only'],p.stream.getvalue())
+
+    def test_inline_authentication_keeps_the_textual_application_on_screen(self):
+        p,choices=self.scripted([],inline_ssh=True)
+        p.suspend=mock.Mock(side_effect=AssertionError('native Textual authentication must remain visible'))
+        def validate(address,interactive=False):
+            return 'verified' if interactive else None
+        result=self.find(validate,p,Sources(lan=None,named=['192.168.5.90']))
+        self.assertEqual(result.host,'192.168.5.90')
+        self.assertEqual(choices,[])
+        p.suspend.assert_not_called()
+
+    def test_plain_authentication_still_protects_its_terminal_prompt(self):
+        p,choices=self.scripted([])
+        self.assertFalse(p.inline_ssh)
+        def validate(address,interactive=False):
+            if interactive:
+                self.assertGreater(p._paused,0)
+                return 'verified'
+            self.assertEqual(p._paused,0)
+        result=self.find(validate,p,Sources(lan=None,named=['192.168.5.90']))
+        self.assertEqual(result.host,'192.168.5.90')
+        self.assertEqual(p._paused,0)
+
+    def test_password_cancellation_is_not_swallowed_or_retried(self):
+        p,choices=self.scripted([],inline_ssh=True)
+        calls=[]
+        def validate(address,interactive=False):
+            calls.append(interactive)
+            if interactive:raise KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.find(validate,p,Sources(lan=None,named=['192.168.5.90']))
+        self.assertEqual(calls,[False,True])
+        self.assertEqual(choices,[])
+
+    def test_noninteractive_error_is_bounded_and_cannot_prompt_or_retry(self):
+        p=presenter(False)
+        p.choose_action=mock.Mock(side_effect=AssertionError('never prompt'))
+        p.ask=mock.Mock(side_effect=AssertionError('never prompt'))
+        source=Sources(lan=None,named=['192.168.5.90'])
+        calls=[]
+        def validate(address,interactive=False):
+            calls.append(interactive);raise OSError('sensitive exception text')
+        self.assertIsNone(self.find(validate,p,source))
+        self.assertEqual(calls,[False])
+        self.assertNotIn('sensitive',p.stream.getvalue())
+        p.choose_action.assert_not_called()
+        p.ask.assert_not_called()
+
+    def test_no_manual_entry_is_offered_when_the_caller_disallows_it(self):
+        p,choices=self.scripted(['2'])
+        self.assertIsNone(self.find(lambda *_a,**_k:None,p,Sources(lan=None),allow_manual=False))
+        self.assertEqual(choices,[(('retry','check','exit'),'retry')])
+
+    def test_unreachable_and_infinite_hint_sources_stay_bounded_without_writes(self):
+        consumed=[]
+        def resolve(_name):
+            for value in itertools.repeat('192.168.5.90'):
+                consumed.append(value);yield value
+        source=types.SimpleNamespace(resolve=resolve,named=lambda _:(),lan=lambda:None)
+        checks=[]
+        with tempfile.TemporaryDirectory(prefix='sfnp-discovery-readonly-') as directory:
+            folder=Path(directory);sentinel=folder/'original.txt';sentinel.write_bytes(b'unchanged')
+            before={p.relative_to(folder).as_posix():p.read_bytes() for p in folder.rglob('*') if p.is_file()}
+            result=ui.find_frame(mock.Mock(side_effect=AssertionError('unreachable')),sources=source,
+                cached_hosts=itertools.repeat('frame.local'),presenter=presenter(False),
+                connector=lambda *args:checks.append(args) or False)
+            after={p.relative_to(folder).as_posix():p.read_bytes() for p in folder.rglob('*') if p.is_file()}
+            self.assertIsNone(result);self.assertEqual(before,after)
+        self.assertEqual(len(consumed),32)
+        self.assertEqual(len(checks),1)
+
+    def test_source_error_offers_one_choice_instead_of_an_automatic_loop(self):
+        p,choices=self.scripted(['3'])
+        source=Sources(lan=None)
+        source.named=mock.Mock(side_effect=OSError('private diagnostic'))
+        self.assertIsNone(self.find(lambda *_a,**_k:None,p,source))
+        self.assertEqual(source.named.call_count,1)
+        self.assertEqual(len(choices),1)
+        self.assertNotIn('private diagnostic',p.stream.getvalue())
 
 
 class BoundsAndSources(unittest.TestCase):
@@ -399,7 +608,7 @@ class Presentation(unittest.TestCase):
                         break
             self.assertIn(needle, data)
         try:
-            read_until(b'Last option -')
+            read_until(b'Frame IP from')
             # Drain the rest of the prompt, then observe its paused interval.
             while select.select([master], [], [], .05)[0]:
                 data.extend(os.read(master, 4096))
@@ -477,7 +686,7 @@ class ActionChooser(unittest.TestCase):
                 self.assertNotIn('Install [recommended]', output.getvalue())
 
     def test_offered_install_update_repair_labels_have_localized_descriptions(self):
-        actions = ['install', 'update', 'repair', 'uninstall', 'check', 'exit']
+        actions = ['install', 'update', 'repair', 'uninstall', 'check', 'exit', 'manual']
         for lang in ('en', 'de'):
             p, output, _ = self.make(['6'], lang=lang, width=42)
             self.assertEqual(p.choose_action(actions), 'exit')
