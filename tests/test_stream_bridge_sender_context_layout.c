@@ -1,6 +1,15 @@
 // Public Windows SDK declarations, not guessed private interface lengths.
 #define CINTERFACE
+#if defined(_MSC_VER)
+// Windows SDK public C declarations use intentional nameless structs/unions.
+// Limit this allowance to the SDK include; our fixture stays under /W4 /WX.
+#pragma warning(push)
+#pragma warning(disable:4201)
+#endif
 #include <d3d11_4.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 #include <stddef.h>
 size_t sfnp_fixture_context_slots(unsigned version) {
     switch(version) {
