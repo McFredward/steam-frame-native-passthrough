@@ -236,6 +236,10 @@ class Tests(unittest.TestCase):
         short=ctypes.create_unicode_buffer(32768);length=short_path(str(target),short,len(short))
         self.assertTrue(0<length<len(short))
         self.assertEqual(native._normalize(short.value),native._normalize(target))
+        # Prove the signature/file-verification paths released their deny-delete
+        # handles before starting any process. No retry or ignored error here.
+        probe=target.with_suffix('.unlocked')
+        target.rename(probe);probe.rename(target)
         child=subprocess.Popen([str(target),'/q','/k'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                                creationflags=subprocess.CREATE_NO_WINDOW)
         try:
@@ -246,7 +250,14 @@ class Tests(unittest.TestCase):
             self.assertIsNone(child.poll());self.assertTrue(native.terminate(observed));child.wait(timeout=5)
         finally:
             if child.poll() is None:child.kill();child.wait(timeout=5)
-            child.stdin.close()
+            try:child.stdin.close()
+            finally:
+                # wait() observes termination but Popen retains its Windows
+                # process HANDLE. Release it while this fixture still owns the
+                # Popen object, before asking Windows to delete its image.
+                child._handle.Close()
+        target.unlink()
+        self.assertFalse(target.exists(),'The copied image must be deletable before TemporaryDirectory cleanup')
 
 
 if __name__=='__main__':
