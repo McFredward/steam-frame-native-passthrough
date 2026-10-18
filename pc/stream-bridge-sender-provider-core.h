@@ -39,6 +39,11 @@ struct OutputAugmenter {
     bool (*augment)(Bytes,const NvencOutputEvidence&,std::vector<std::uint8_t>&,void*)=nullptr;
     void* context=nullptr;
 };
+struct ReconfigureStats {
+    std::uint64_t total=0,preservedSuccessful=0,preservedRejected=0,revoked=0;
+    int lastStatus=0;std::uint32_t lastWidth=0,lastHeight=0;
+    bool lastContractKnown=false,lastSameContract=false,lastResetEncoder=false;
+};
 struct EncoderState{void* encoder=nullptr;std::uint64_t generation=0;bool hevc=false,peerConfirmed=false,probeObserved=false;std::uint32_t width=0,height=0;bool encoded=false;};
 // Public NVENC ABI boundary. No private Steam object layout or function jump.
 // Single process-lifetime instance; factory tables may retain these callbacks.
@@ -58,6 +63,7 @@ public:
     void setInputObserver(InputObserver);
     void setDeviceObserver(DeviceObserver);
     std::array<EncoderState,4> encoderStates()const;
+    ReconfigureStats reconfigureStats()const; // Cold worker snapshot; no hot-path logging.
     // Revokes only that observed encoder generation; borrowed output stays alive.
     void revokeDiscovery(void*,std::uint64_t generation);
     void stop();
@@ -69,6 +75,8 @@ private:
         void* encoder=nullptr;std::uint64_t generation=0;
         bool initialized=false,hevc=false,encoded=false;std::uint32_t width=0,height=0;
         SenderAdapter adapter{};VerifiedChannel channel{};
+        NV_ENC_INITIALIZE_PARAMS contract{};NV_ENC_CONFIG contractConfig{};
+        bool contractKnown=false,contractHasConfig=false,reconfiguring=false;
         struct Resource {NV_ENC_REGISTERED_PTR registered=nullptr;void* native=nullptr;std::uint64_t generation=0;std::uint32_t width=0,height=0,subresource=0;NV_ENC_BUFFER_FORMAT format=NV_ENC_BUFFER_FORMAT_UNDEFINED;};
         struct Map {NV_ENC_INPUT_PTR mapped=nullptr;NV_ENC_REGISTERED_PTR registered=nullptr;std::uint64_t generation=0,resourceGeneration=0;};
         struct Submission {NvencOutputEvidence evidence{};bool accepted=false,locked=false;};
@@ -79,6 +87,10 @@ private:
     Session* find(void*);
     std::uint64_t revoke(Session&,bool retainRegistrations=false);
     VerifiedSource source(const Session&)const;
+    static bool snapshotContract(const NV_ENC_INITIALIZE_PARAMS&,NV_ENC_INITIALIZE_PARAMS&,NV_ENC_CONFIG&,bool&);
+    static bool sameContract(const Session&,const NV_ENC_INITIALIZE_PARAMS&,const NV_ENC_CONFIG&,bool);
+    void retireSubmissions(Session&);
+    static void saveContract(Session&,const NV_ENC_INITIALIZE_PARAMS&,const NV_ENC_CONFIG&,bool,bool);
     static NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void**);
     static NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*);
     static NVENCSTATUS NVENCAPI reconfigure(void*,NV_ENC_RECONFIGURE_PARAMS*);
@@ -95,7 +107,7 @@ private:
     std::array<Session,4> sessions_{};
     std::array<std::uint8_t,32> hash_{};
     NV_ENCODE_API_FUNCTION_LIST original_{};
-    std::uint64_t nextGeneration_=0;
+    std::uint64_t nextGeneration_=0;ReconfigureStats reconfigureStats_{};
     bool installed_=false,enabled_=true,inputHooks_=false;
     OutputAugmenter augmenter_{};InputObserver inputObserver_{};DeviceObserver deviceObserver_{};
 };

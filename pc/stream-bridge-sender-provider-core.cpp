@@ -1,8 +1,27 @@
 #include "stream-bridge-sender-provider-core.h"
 #include <cstring>
 #include <limits>
+#ifdef __linux__
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 
 namespace stream_bridge::sender {
+namespace {
+template<class T,std::size_t N> bool zero(const T (&values)[N]){for(const auto& value:values)if(value!=T{})return false;return true;}
+void count(std::uint64_t& value){if(value!=std::numeric_limits<std::uint64_t>::max())++value;}
+bool copyConfiguration(const NV_ENC_CONFIG* input,NV_ENC_CONFIG& output){
+#ifdef _WIN32
+    SIZE_T read=0;return ReadProcessMemory(GetCurrentProcess(),input,&output,sizeof output,&read)&&read==sizeof output;
+#elif defined(__linux__)
+    iovec local{&output,sizeof output},remote{const_cast<NV_ENC_CONFIG*>(input),sizeof output};
+    return process_vm_readv(getpid(),&local,1,&remote,1,0)==static_cast<ssize_t>(sizeof output);
+#else
+    (void)input;(void)output;return false;
+#endif
+}
+void padding(void* object,std::size_t begin,std::size_t end){if(end>begin)std::memset(static_cast<unsigned char*>(object)+begin,0,end-begin);}
+}
 static_assert(NVENCAPI_MAJOR_VERSION==11&&NVENCAPI_MINOR_VERSION==1,"SDK 11.1 only");
 static_assert(sizeof(void*)==8&&sizeof(NV_ENCODE_API_FUNCTION_LIST)==0x9f8,"64-bit table ABI");
 static_assert(NV_ENCODE_API_FUNCTION_LIST_VER==0x7102000b,"frozen table version");
@@ -12,13 +31,65 @@ static_assert(offsetof(NV_ENCODE_API_FUNCTION_LIST,nvEncLockBitstream)==0x90&&
 std::atomic<NvencBoundary*> NvencBoundary::instance_{nullptr};
 NvencBoundary::NvencBoundary(const std::array<std::uint8_t,32>& hash):hash_(hash){}
 NvencBoundary::Session* NvencBoundary::find(void* e){for(auto& s:sessions_)if(s.encoder==e&&e)return &s;return nullptr;}
+void NvencBoundary::retireSubmissions(Session& s){
+    for(auto& p:s.submissions)if(p.evidence.submission&&inputObserver_.retire)try{inputObserver_.retire(p.evidence,inputObserver_.context);}catch(...){}
+    s.submissions={};
+}
 std::uint64_t NvencBoundary::revoke(Session& s,bool retainRegistrations){
     s.adapter.stop();s.initialized=false;s.hevc=false;s.encoded=false;
-    for(auto& p:s.submissions)if(p.evidence.submission&&inputObserver_.retire)try{inputObserver_.retire(p.evidence,inputObserver_.context);}catch(...){}
+    s.contractKnown=false;s.reconfiguring=false;retireSubmissions(s);
     if(!retainRegistrations){s.maps={};s.resources={};}
-    s.submissions={};s.probeQueued=false;
+    s.probeQueued=false;
     s.generation=nextGeneration_==std::numeric_limits<std::uint64_t>::max()?0:++nextGeneration_;
     return s.generation;
+}
+bool NvencBoundary::snapshotContract(const NV_ENC_INITIALIZE_PARAMS& input,NV_ENC_INITIALIZE_PARAMS& init,NV_ENC_CONFIG& config,bool& hasConfig){
+    if(input.version!=NV_ENC_INITIALIZE_PARAMS_VER||input.reservedBitFields||input.privDataSize||input.privData
+        ||!zero(input.reserved)||!zero(input.reserved2))return false;
+    for(const auto& hints:input.maxMEHintCountsPerBlock)if(hints.reserved||!zero(hints.reserved1))return false;
+    // Copy fields into zeroed storage rather than treating caller padding as
+    // part of a video contract. Reserved data still has to be explicitly zero.
+    init={};init.version=input.version;init.encodeGUID=input.encodeGUID;init.presetGUID=input.presetGUID;
+    init.encodeWidth=input.encodeWidth;init.encodeHeight=input.encodeHeight;init.darWidth=input.darWidth;init.darHeight=input.darHeight;
+    init.frameRateNum=input.frameRateNum;init.frameRateDen=input.frameRateDen;init.enableEncodeAsync=input.enableEncodeAsync;init.enablePTD=input.enablePTD;
+    init.reportSliceOffsets=input.reportSliceOffsets;init.enableSubFrameWrite=input.enableSubFrameWrite;init.enableExternalMEHints=input.enableExternalMEHints;
+    init.enableMEOnlyMode=input.enableMEOnlyMode;init.enableWeightedPrediction=input.enableWeightedPrediction;init.enableOutputInVidmem=input.enableOutputInVidmem;
+    init.maxEncodeWidth=input.maxEncodeWidth;init.maxEncodeHeight=input.maxEncodeHeight;
+    std::memcpy(init.maxMEHintCountsPerBlock,input.maxMEHintCountsPerBlock,sizeof init.maxMEHintCountsPerBlock);
+    init.tuningInfo=input.tuningInfo;init.bufferFormat=input.bufferFormat;
+    hasConfig=input.encodeConfig!=nullptr;config={};
+    if(!hasConfig)return true;
+    // Snapshot the caller's pointed-to configuration BEFORE calling native code.
+    // Its pointer, stack lifetime and later mutations are never stored as proof.
+    if(!copyConfiguration(input.encodeConfig,config))return false;
+    padding(&config,offsetof(NV_ENC_CONFIG,rcParams)+sizeof config.rcParams,offsetof(NV_ENC_CONFIG,encodeCodecConfig));
+    padding(&config,offsetof(NV_ENC_CONFIG,reserved)+sizeof config.reserved,offsetof(NV_ENC_CONFIG,reserved2));
+    auto& hevcConfig=config.encodeCodecConfig.hevcConfig;
+    padding(&hevcConfig,offsetof(NV_ENC_CONFIG_HEVC,reserved1)+sizeof hevcConfig.reserved1,offsetof(NV_ENC_CONFIG_HEVC,reserved2));
+    // The reviewed native caller uses CONFIG_VER in rcParams.version. Its
+    // containing CONFIG_VER pins this layout; compare the inner value unchanged.
+    const auto& rc=config.rcParams;const auto& hevc=config.encodeCodecConfig.hevcConfig;
+    return config.version==NV_ENC_CONFIG_VER
+        &&!rc.reservedBitField1&&!rc.reservedBitFields&&!rc.reserved2&&zero(rc.reserved1)&&zero(rc.reserved)
+        &&zero(config.reserved)&&zero(config.reserved2)&&!hevc.reserved&&zero(hevc.reserved1)&&zero(hevc.reserved2)
+        &&zero(hevc.hevcVUIParameters.reserved);
+}
+void NvencBoundary::saveContract(Session& s,const NV_ENC_INITIALIZE_PARAMS& init,const NV_ENC_CONFIG& config,bool hasConfig,bool known){
+    s.contract=init;s.contractConfig=config;s.contractHasConfig=hasConfig;s.contractKnown=known;
+}
+bool NvencBoundary::sameContract(const Session& s,const NV_ENC_INITIALIZE_PARAMS& init,const NV_ENC_CONFIG& config,bool hasConfig){
+    if(!s.contractKnown||!s.initialized||!s.hevc||s.reconfiguring)return false;
+    auto previous=s.contract,candidate=init;
+    // SDK11.1 Reconfigure explicitly retains the current configuration when
+    // encodeConfig is NULL and the preset is unchanged. No preset is guessed.
+    if(hasConfig&&!s.contractHasConfig)return false;
+    previous.frameRateNum=previous.frameRateDen=candidate.frameRateNum=candidate.frameRateDen=0;
+    if(std::memcmp(&previous,&candidate,sizeof previous))return false;
+    if(!hasConfig)return true;
+    auto oldConfig=s.contractConfig,newConfig=config;
+    auto normalize=[](NV_ENC_RC_PARAMS& rc){rc.averageBitRate=rc.maxBitRate=rc.vbvBufferSize=rc.vbvInitialDelay=0;};
+    normalize(oldConfig.rcParams);normalize(newConfig.rcParams);
+    return std::memcmp(&oldConfig,&newConfig,sizeof oldConfig)==0;
 }
 VerifiedSource NvencBoundary::source(const Session& s)const {
     VerifiedSource v{};v.verified=installed_&&s.initialized&&s.hevc;v.ordinaryStream=s.hevc;
@@ -63,12 +134,15 @@ NVENCSTATUS NVENCAPI NvencBoundary::init(void* encoder,NV_ENC_INITIALIZE_PARAMS*
     const auto width=admissible?params->encodeWidth:0,height=admissible?params->encodeHeight:0;
     const bool hevc=admissible&&std::memcmp(&params->encodeGUID,&NV_ENC_CODEC_HEVC_GUID,sizeof(GUID))==0&&
         !params->enableOutputInVidmem&&!params->enableMEOnlyMode&&!params->reportSliceOffsets&&!params->enableSubFrameWrite;
+    NV_ENC_INITIALIZE_PARAMS contract{};NV_ENC_CONFIG config{};bool hasConfig=false;
+    const bool known=admissible&&hevc&&snapshotContract(*params,contract,config,hasConfig);
     std::uint64_t generation=0;
     {std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder))generation=self.revoke(*s);}
     const auto result=self.original_.nvEncInitializeEncoder(encoder,params);
     std::lock_guard<std::mutex> guard(self.mutex_);
     if(auto s=self.find(encoder);s&&generation&&s->generation==generation){
         s->initialized=result==NV_ENC_SUCCESS&&admissible;s->hevc=s->initialized&&hevc;s->width=width;s->height=height;
+        saveContract(*s,contract,config,hasConfig,s->hevc&&known);
     }
     return result;
 }
@@ -81,15 +155,37 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
         &&!init->enableOutputInVidmem&&!init->enableMEOnlyMode&&!init->reportSliceOffsets&&!init->enableSubFrameWrite
         &&init->encodeWidth&&init->encodeHeight&&init->encodeWidth<=16384&&init->encodeHeight<=16384;
     const auto width=hevc?init->encodeWidth:0,height=hevc?init->encodeHeight:0;
-    std::uint64_t generation=0;
-    // Revoke before calling native code. Native registration/map handles can
-    // remain valid after successful Reconfigure, but no submission, handshake,
-    // mask, or old metadata identity crosses the generation boundary.
-    {std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder))generation=self.revoke(*s,hevc);}
+    NV_ENC_INITIALIZE_PARAMS contract{};NV_ENC_CONFIG config{};bool hasConfig=false;
+    const bool known=hevc&&snapshotContract(*init,contract,config,hasConfig);
+    std::uint64_t generation=0;bool qos=false;
+    {
+        std::lock_guard<std::mutex> guard(self.mutex_);count(self.reconfigureStats_.total);
+        self.reconfigureStats_.lastWidth=width;self.reconfigureStats_.lastHeight=height;
+        self.reconfigureStats_.lastContractKnown=known;self.reconfigureStats_.lastResetEncoder=typed&&params->resetEncoder;self.reconfigureStats_.lastSameContract=false;
+        if(auto s=self.find(encoder)){
+            const bool unchanged=known&&sameContract(*s,contract,config,hasConfig);self.reconfigureStats_.lastSameContract=unchanged;
+            qos=self.enabled_&&unchanged&&!params->resetEncoder&&!params->reserved;
+            if(qos){
+                generation=s->generation;s->reconfiguring=true;self.retireSubmissions(*s);
+            }else{generation=self.revoke(*s,hevc);count(self.reconfigureStats_.revoked);}
+        }
+    }
+    // Ordinary QoS adaptation does not replace the source session. While native
+    // code runs, discard exact frame evidence and refuse new input/mask claims;
+    // keep its paired control channel and any borrowed Lock bytes alive.
     const auto result=self.original_.nvEncReconfigureEncoder(encoder,params);
-    std::lock_guard<std::mutex> guard(self.mutex_);
+    std::lock_guard<std::mutex> guard(self.mutex_);self.reconfigureStats_.lastStatus=static_cast<int>(result);
     if(auto s=self.find(encoder);s&&generation&&s->generation==generation){
-        if(self.enabled_&&result==NV_ENC_SUCCESS&&hevc&&s->nextIdentity<=std::numeric_limits<std::uint64_t>::max()-64){
+        if(qos){
+            s->reconfiguring=false;
+            if(self.enabled_&&(result==NV_ENC_SUCCESS||result==NV_ENC_ERR_INVALID_PARAM)){
+                if(result==NV_ENC_SUCCESS){
+                    // NULL means retain the existing deep-copied configuration.
+                    if(!hasConfig){config=s->contractConfig;hasConfig=s->contractHasConfig;}
+                    saveContract(*s,contract,config,hasConfig,true);count(self.reconfigureStats_.preservedSuccessful);
+                }else count(self.reconfigureStats_.preservedRejected);
+            }else{self.revoke(*s);count(self.reconfigureStats_.revoked);}
+        }else if(self.enabled_&&result==NV_ENC_SUCCESS&&hevc&&s->nextIdentity<=std::numeric_limits<std::uint64_t>::max()-64){
             // Rebase CURRENT records, not a pre-call snapshot: a nested native
             // unregister/unmap must never be resurrected on return.
             for(auto& r:s->resources)if(r.registered)r.generation=++s->nextIdentity;
@@ -97,7 +193,7 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
                 Session::Resource* found=nullptr;for(auto& r:s->resources)if(r.registered==m.registered)found=&r;
                 if(found){m.resourceGeneration=found->generation;m.generation=++s->nextIdentity;}else m={};
             }
-            s->initialized=s->hevc=true;s->width=width;s->height=height;
+            s->initialized=s->hevc=true;s->width=width;s->height=height;saveContract(*s,contract,config,hasConfig,known);
         }else{s->maps={};s->resources={};}
     }
     return result;
@@ -139,7 +235,7 @@ NVENCSTATUS NVENCAPI NvencBoundary::encode(void* encoder,NV_ENC_PIC_PARAMS* para
     auto& self=*instance_.load(std::memory_order_acquire);const bool typed=params&&params->version==NV_ENC_PIC_PARAMS_VER;
     std::uint64_t identity=0,generation=0;
     if(typed&&params->inputBuffer&&params->outputBitstream&&!(params->encodePicFlags&NV_ENC_PIC_FLAG_EOS)){
-        std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder);self.enabled_&&s&&s->initialized&&s->hevc&&s->nextIdentity!=~std::uint64_t(0)){
+        std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder);self.enabled_&&s&&s->initialized&&s->hevc&&!s->reconfiguring&&s->nextIdentity!=~std::uint64_t(0)){
             generation=s->generation;
             for(auto& m:s->maps)if(m.mapped==params->inputBuffer)for(auto& r:s->resources)if(r.registered==m.registered&&r.generation==m.resourceGeneration&&r.width==params->inputWidth&&r.height==params->inputHeight&&r.width==s->width&&r.height==s->height&&r.format==params->bufferFmt){
                 for(auto& p:s->submissions)if(!p.evidence.submission){identity=++s->nextIdentity;p.evidence={encoder,generation,identity,r.native,r.generation,m.generation,m.mapped,params->outputBitstream,params->inputTimeStamp,r.width,r.height,r.subresource,r.format,true};
@@ -157,7 +253,7 @@ NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* pa
     const auto result=self.original_.nvEncLockBitstream(encoder,params);
     if(result!=NV_ENC_SUCCESS||!typed||params->version!=NV_ENC_LOCK_BITSTREAM_VER)return result;
     std::lock_guard<std::mutex> guard(self.mutex_);auto s=self.find(encoder);
-    if(!self.enabled_||!s||s->output||!s->initialized||!s->hevc||
+    if(!self.enabled_||!s||s->output||!s->initialized||!s->hevc||s->reconfiguring||
        !params->outputBitstream||!params->bitstreamBufferPtr||!params->bitstreamSizeInBytes||
        params->bitstreamSizeInBytes>MaximumAccessUnitBytes||params->sliceOffsets||params->alphaLayerSizeInBytes)return result;
     Session::Submission* matched=nullptr;bool ambiguous=false;
@@ -237,6 +333,7 @@ Status NvencBoundary::receiveEcho(void* encoder,Bytes payload,const VerifiedChan
 void NvencBoundary::setDeviceObserver(DeviceObserver value){std::lock_guard<std::mutex> guard(mutex_);deviceObserver_=value;}
 void NvencBoundary::setInputObserver(InputObserver value){std::lock_guard<std::mutex> guard(mutex_);inputObserver_=value;}
 void NvencBoundary::setOutputAugmenter(OutputAugmenter value){std::lock_guard<std::mutex> guard(mutex_);augmenter_=value;}
+ReconfigureStats NvencBoundary::reconfigureStats()const{std::lock_guard<std::mutex> guard(mutex_);return reconfigureStats_;}
 std::array<EncoderState,4> NvencBoundary::encoderStates()const{std::lock_guard<std::mutex> guard(mutex_);std::array<EncoderState,4> result{};for(unsigned i=0;i<sessions_.size();++i)result[i]={sessions_[i].encoder,sessions_[i].generation,sessions_[i].initialized&&sessions_[i].hevc,sessions_[i].adapter.mutualConfirmed(),sessions_[i].adapter.probeObserved(),sessions_[i].width,sessions_[i].height,sessions_[i].encoded};return result;}
 void NvencBoundary::revokeDiscovery(void* encoder,std::uint64_t generation){std::lock_guard<std::mutex> guard(mutex_);if(auto s=find(encoder);s&&s->generation==generation)s->adapter.stop();}
 void NvencBoundary::stop(){std::lock_guard<std::mutex> guard(mutex_);enabled_=false;for(auto& s:sessions_)revoke(s);}
