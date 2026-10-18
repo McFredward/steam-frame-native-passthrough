@@ -24,6 +24,16 @@ def pe(dll=False):
     raw=bytearray(256);raw[:2]=b'MZ';struct.pack_into('<I',raw,60,64);raw[64:68]=b'PE\0\0';struct.pack_into('<H',raw,68,0x8664);struct.pack_into('<H',raw,86,0x2000 if dll else 0);struct.pack_into('<H',raw,88,0x20b);return bytes(raw)
 def elf():
     raw=bytearray(80);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,3,183);return bytes(raw)
+def helper_pe():
+    # Explicitly synthetic x64 GUI image with bounded system-only imports.
+    raw=bytearray(1024);raw[:256]=pe();struct.pack_into('<H',raw,70,1)
+    struct.pack_into('<H',raw,84,240);struct.pack_into('<H',raw,156,2)
+    struct.pack_into('<II',raw,208,0x1000,80)
+    struct.pack_into('<IIII',raw,336,512,0x1000,512,512)
+    for i,name in enumerate((b'kernel32.dll',b'shell32.dll',b'ws2_32.dll')):
+        struct.pack_into('<IIIII',raw,512+i*20,1,0,0,0x1080+i*32,1)
+        at=640+i*32;raw[at:at+len(name)+1]=name+b'\0'
+    return bytes(raw)
 def archive(files):
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
@@ -39,6 +49,7 @@ class Tests(unittest.TestCase):
         self.pc=self.base/'provider.dll';self.pc.write_bytes(pe(True))
         self.layer=self.base/'layer.so';self.layer.write_bytes(elf())
         self.selector=self.base/'selector.so';self.selector.write_bytes(elf()+b'own-selector-fixture')
+        self.askpass=self.base/'askpass.exe';self.askpass.write_bytes(helper_pe())
         self.python=self.base/'python.zip';self.python.write_bytes(archive({'python.exe':pe(),'LICENSE.txt':b'owned fixture license','python314.zip':b'owned fixture zip','python314._pth':b'python314.zip\n.\n'}))
         # No network use: fixture dependency pins are explicitly local and are
         # included in this fixture checkout's source-bound runtime profile.
@@ -60,7 +71,7 @@ class Tests(unittest.TestCase):
                       'frame':{'reviewed':True,'generated':contract.GENERATED,'runtime_files':{'vrlink':rp('tools/vrlink/bin/linuxarm64/vrlink'),'compositor':rp('bin/linuxarm64/vrcompositor'),'fragment':rp('resources/shaders/vulkan/distort_ps_achromatic_se2.spv'),'openvr':rp('bin/linuxarm64/libopenvr_api.so')}}}
         self.path=self.base/'profile.json';self.save_profile()
     def save_profile(self):self.path.write_bytes(encoded(self.profile))
-    def build(self,**kw):return p.build(self.pc,self.layer,self.selector,self.path,self.python,self.ssh,root=self.root,textual_wheels=self.wheels,**kw)
+    def build(self,**kw):return p.build(self.pc,self.layer,self.selector,self.path,self.python,self.ssh,root=self.root,textual_wheels=self.wheels,askpass_exe=self.askpass,**kw)
     def validation(self,checks=None):
         value={'schema':p.VALIDATION,'result':'PASS','runtime_profile_sha256':p.pin(self.path.read_bytes())['sha256'],'source_revision':self.profile['source_revision'],'source_pins':self.profile['source_pins'],'artifacts':self.profile['artifacts'],'checks':{n:True for n in (checks or p.CHECKS)},'hardware_verified':False}
         path=self.base/'validation.json';path.write_bytes(encoded(value));return path
@@ -79,6 +90,10 @@ class Tests(unittest.TestCase):
             self.assertNotIn('setup/runtime/openssh/sshd.exe',names)
             self.assertIn('setup/steam_link_setup_textual.py',names)
             self.assertIn('setup/steam_link_setup_vendor.py',names)
+            self.assertEqual(z.read('setup/steam-link-askpass.exe'),helper_pe())
+            self.assertIn('setup/steam_link_setup_auth.py',names)
+            self.assertIn('setup/steam_link_setup_askpass_client.py',names)
+            self.assertEqual(z.getinfo('setup/steam-link-askpass.sh').external_attr>>16,0o100700)
             marker=json.loads(z.read('setup/runtime/vendor/SFNP-TEXTUAL-PROVENANCE.json'))
             self.assertEqual(marker['schema'],'sfnp-textual-vendor-v1')
             self.assertEqual(marker['packages']['textual']['version'],'8.2.8')

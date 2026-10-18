@@ -23,6 +23,10 @@ class Workflow:
             if self.ui.choose_action(['retry','rollback'],recommended='retry')!='retry':return False
 
     def recover(self):
+        # A cancellation can stop network I/O, but must not cancel the prompts
+        # needed to restore the exact original, running Frame state.
+        resume=getattr(self.ui,'allow_recovery',None)
+        if resume:resume()
         while True:
             try:
                 self.ports.restore_files()
@@ -62,5 +66,6 @@ class Workflow:
                 # interruption. Restore/reconcile it before offering a new
                 # installation attempt; never blindly replay that mutation.
                 if not self.recover():return 2
+                if isinstance(error,KeyboardInterrupt):return 130
                 if self.ui.choose_action(['retry','exit'],recommended='retry')!='retry':return 130 if isinstance(error,KeyboardInterrupt) else 2
 

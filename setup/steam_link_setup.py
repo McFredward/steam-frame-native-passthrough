@@ -542,9 +542,14 @@ class Runner:
         return code, bytes(captured)
 
 
-def ssh_program(*, system=None, system_directory=None, bundle_root=None):
+def ssh_program(*, system=None, system_directory=None, bundle_root=None, prefer_bundled=False):
     if (system or platform.system()) != 'Windows':
         return shutil.which('ssh') or 'ssh'
+    if prefer_bundled:
+        root=Path(bundle_root) if bundle_root is not None else Path(__file__).resolve().parents[1]
+        candidate=no_links(root/'setup/runtime/openssh/ssh.exe')
+        require(candidate.is_file(),'The setup download is missing its included SSH client. Run the setup command again.')
+        return str(candidate)
     if system_directory is None:
         from ctypes import wintypes
         query = ctypes.WinDLL('kernel32', use_last_error=True).GetSystemDirectoryW
@@ -563,8 +568,8 @@ def ssh_program(*, system=None, system_directory=None, bundle_root=None):
     return str(candidate)
 
 
-def ssh_args(address, login, *, interactive=False):
-    return [ssh_program(), '-o', 'ConnectTimeout=4', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5',
+def ssh_args(address, login, *, interactive=False, inline_auth=False):
+    return [ssh_program(prefer_bundled=True) if inline_auth else ssh_program(), '-o', 'ConnectTimeout=4', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5',
             '-o', 'ServerAliveCountMax=2', '-o', 'StrictHostKeyChecking=' + ('ask' if interactive else 'yes'),
             '-o', 'UpdateHostKeys=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
             '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',

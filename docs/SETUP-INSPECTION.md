@@ -33,11 +33,13 @@ The assistant automatically tries its last confirmed Frame, local Frame names,
 nearby device information and one bounded local network search. It never asks
 for a subnet or other network configuration. Manual IP entry is the last fallback.
 The confirmed address stays in the same non-secret inspection report for reuse.
-English/German follow the PC's language. An ASCII header and terminal-only
-progress animation show the steps; animation pauses before input and SSH prompts.
-OpenSSH handles the usual fingerprint
-confirmation and password prompt; no password is saved. Accepting a new SSH
-fingerprint may update your PC's normal OpenSSH known-hosts file.
+English/German follow the PC's language. The paired preview uses Textual with
+keyboard/mouse navigation, visible progress and private password entry inside
+the interface. Failed discovery offers another search before manual IP entry.
+Passwords are reused only during that setup invocation and never written to a
+log or file. OpenSSH still verifies the Frame identity; accepting a fingerprint
+may update your PC's normal known-hosts file. Ctrl+C cancels waiting connections;
+any already-started changes are reconciled and restored before setup exits.
 
 The report identifies matching, different, missing or unreadable reference PC
 files. A Frame runtime match only identifies the checked reference revision; it

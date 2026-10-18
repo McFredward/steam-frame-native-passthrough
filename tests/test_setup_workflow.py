@@ -329,6 +329,16 @@ class Ports:
 
 
 class Workflow(unittest.TestCase):
+    def test_cancellation_restores_running_original_before_exiting_without_retry(self):
+        ports=Ports();ui=UI()
+        ui.allow_recovery=lambda:ports.mark('allow_recovery')
+        def cancel(action):ports.mark('prepare_'+action);raise KeyboardInterrupt()
+        ports.prepare=cancel
+        ui.choose_action=lambda *a,**kw:self.fail('A completed explicit cancellation must exit after recovery')
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+        self.assertEqual(ports.events[-5:],['allow_recovery','restore_files','restart_original','original_health','finished_original'])
+        self.assertIn('bridge_rolled_back',ui.messages)
+
     def test_success_stages_then_restarts_then_checks(self):
         ports=Ports();ui=UI();self.assertEqual(flow.Workflow(ports,ui).run('install'),0)
         self.assertEqual(ports.events,['begin','stop_pc','prepare_install','restart_prepared','prepared_health','finished_prepared'])

@@ -297,7 +297,7 @@ class WizardTests(unittest.TestCase):
 
     def test_interactive_inspection_uses_manual_ssh_fallback_and_saves_only_pc_report(self):
         self.inspection_profile();before={str(p.relative_to(self.framehome)):p.read_bytes()for p in self.framehome.rglob('*')if p.is_file()}
-        attempts=[];prompts=[];answers=iter(('192.168.1.5',''))
+        attempts=[];prompts=[];answers=iter(('2','192.168.1.5',''))
         def factory(address,login,interactive=False):
             attempts.append((address,login,interactive))
             if not interactive:raise s.SetupError('SSH probe unavailable')
@@ -350,6 +350,7 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(s.ssh_program(system='Windows',system_directory=system,bundle_root=bundle),str(bundled))
         builtin.parent.mkdir(parents=True);builtin.write_bytes(b'NOT EXECUTED system fixture')
         self.assertEqual(s.ssh_program(system='Windows',system_directory=system,bundle_root=bundle),str(builtin))
+        self.assertEqual(s.ssh_program(system='Windows',system_directory=system,bundle_root=bundle,prefer_bundled=True),str(bundled))
 
     def test_inspect_check_without_frame_never_opens_ssh_or_saves(self):
         self.inspection_profile();before=self.snapshot();output=io.StringIO()

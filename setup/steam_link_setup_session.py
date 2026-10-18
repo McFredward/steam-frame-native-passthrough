@@ -1,19 +1,22 @@
-"""One explicitly owned OpenSSH process for a setup run; no password handling.
+"""One explicitly owned OpenSSH process with cancellable bounded RPC waits.
 
 The caller supplies reviewed source defining ``dispatch(request) -> dict``.
 It is loaded once, over SSH stdin, under a non-main module name. Requests may
 contain setup credentials, so neither source, payloads nor remote diagnostics
-are included in exceptions, process arguments or logs. OpenSSH alone owns its
-terminal password/host-key prompts. No reconnect or mutation retry is attempted.
+are included in exceptions, process arguments or logs. OpenSSH owns authentication;
+an optional private askpass broker supplies GUI answers without console handoff.
+No reconnect or mutation retry is attempted.
 """
 from __future__ import annotations
 
 import base64
 import json
 import math
+import os
 import shlex
 import subprocess
 import threading
+import time
 
 MAX_SOURCE = 1024 * 1024
 MAX_INITIAL = 2 * 1024 * 1024
@@ -24,6 +27,13 @@ SCHEMA = 'sfnp-setup-session-v1'
 
 class SessionError(ValueError):
     """Fixed, non-secret transport diagnostics; an operation may be uncertain."""
+    def __init__(self, message, *, reason='remote_unavailable'):
+        super().__init__(message)
+        self.reason=reason
+
+
+class SessionCancelled(KeyboardInterrupt):
+    """Explicit user cancellation; mutation callers must reconcile/restore."""
 
 
 # The command is fixed, independently of the agent, requests, host and secrets.
@@ -119,7 +129,7 @@ class Session:
     permanently closes it, including when an operation's result is uncertain.
     """
     def __init__(self, ssh_args, agent_source, *, timeout=120, interactive=False,
-                 max_request=MAX_REQUEST, max_reply=MAX_REPLY):
+                 max_request=MAX_REQUEST, max_reply=MAX_REPLY, auth=None, cancelled=None):
         if (type(ssh_args) not in (list, tuple) or not ssh_args or
                 not all(type(arg) is str and arg and '\x00' not in arg for arg in ssh_args)):
             raise SessionError('A validated SSH argument list is required.')
@@ -149,6 +159,9 @@ class Session:
         self._closed = False
         self._ready = False
         self._next = 1
+        self._auth, self._cancelled = auth, cancelled
+        self._stderr = bytearray()
+        self._stderr_worker = None
 
     @staticmethod
     def _duration(value):
@@ -176,6 +189,8 @@ class Session:
             with self._state:
                 self._closed = True
                 process, worker = self._process, self._worker
+            if self._auth is not None:
+                self._auth.close()
             if process is not None:
                 if process.poll() is None:
                     try:
@@ -190,8 +205,10 @@ class Session:
                     pass
             if worker is not None and worker is not threading.current_thread():
                 worker.join(timeout=2)
+            if self._stderr_worker is not None:
+                self._stderr_worker.join(timeout=2)
             if process is not None and (worker is None or not worker.is_alive()):
-                for stream in (process.stdin, process.stdout):
+                for stream in (process.stdin, process.stdout, process.stderr):
                     if stream is not None:
                         try:
                             stream.close()
@@ -200,6 +217,10 @@ class Session:
 
     def call(self, request, *, timeout=None):
         duration = self._duration(self._timeout if timeout is None else timeout)
+        if ((self._cancelled is not None and self._cancelled()) or
+                self._auth is not None and self._auth.cancelled.is_set()):
+            self.close()
+            raise SessionCancelled()
         if type(request) is not dict:
             raise SessionError('A bounded JSON request object is required.')
         with self._calls:
@@ -216,11 +237,26 @@ class Session:
                     raise SessionError('The SSH session is closed; no automatic reconnect was attempted.')
                 if self._process is None:
                     try:
+                        environment = self._auth.environment() if self._auth is not None else None
                         self._process = subprocess.Popen(self._args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                                         stderr=None if self._interactive else subprocess.DEVNULL)
+                            stderr=subprocess.PIPE if self._auth is not None else None if self._interactive else subprocess.DEVNULL,
+                            **({'env':environment, 'creationflags':subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0,
+                                'start_new_session':os.name!='nt'}
+                               if environment is not None else {}))
                     except OSError:
                         self._closed = True
                         raise SessionError('SSH could not start. No automatic retry was made.') from None
+                    if self._auth is not None:
+                        def drain_errors():
+                            try:
+                                while True:
+                                    raw = self._process.stderr.read(1024)
+                                    if not raw:break
+                                    self._stderr.extend(raw)
+                                    if len(self._stderr)>8192:del self._stderr[:-8192]
+                            except (OSError,ValueError):pass
+                        self._stderr_worker=threading.Thread(target=drain_errors,name='sfnp-ssh-status',daemon=True)
+                        self._stderr_worker.start()
                 process, sequence, ready = self._process, self._next, self._ready
                 self._next += 1
 
@@ -238,6 +274,7 @@ class Session:
                             if (set(hello) != {'schema', 'ready'} or hello['schema'] != SCHEMA or
                                     type(hello['ready']) is not bool or hello['ready'] is not True):
                                 raise ValueError()
+                            outcome['ready'] = True
                         process.stdin.write(raw); process.stdin.flush()
                         reply = receive(self._max_reply)
                         if (type(reply.get('id')) is not int or reply['id'] != sequence or
@@ -263,12 +300,40 @@ class Session:
                     process.wait(timeout=2)
                     process.stdin.close(); process.stdout.close()
                     raise SessionError('The SSH request worker could not start. No automatic retry was made.') from None
-            if not done.wait(duration):
+            # Network deadlines exclude time spent waiting for a visible human
+            # sign-in prompt. Cancellation polls independently of pipe I/O.
+            phase_ready = ready
+            remaining = duration if ready else min(duration, 20)
+            previous = time.monotonic()
+            try:
+                while not done.wait(.05):
+                    if ((self._cancelled is not None and self._cancelled()) or
+                            self._auth is not None and self._auth.cancelled.is_set()):
+                        raise SessionCancelled()
+                    now = time.monotonic()
+                    if not phase_ready and outcome.get('ready'):
+                        phase_ready=True; remaining=duration
+                    elif self._auth is None or not self._auth.prompting.is_set():
+                        remaining-=now-previous
+                    previous=now
+                    if remaining<=0:
+                        self.close()
+                        if not phase_ready:
+                            raise SessionError('Frame sign-in or setup-agent startup timed out. No setup request was confirmed; try connecting again.',reason='timeout')
+                        raise SessionError('Frame operation timed out; its outcome is unknown. Check retained recovery records. No automatic retry was made.',reason='timeout')
+            except BaseException:
                 self.close()
-                raise SessionError('Frame operation timed out; its outcome is unknown. Check retained recovery records. No automatic retry was made.')
+                raise
             self._worker.join()
             if outcome.get('failed'):
                 self.close()
+                if self._auth is not None and self._auth.cancelled.is_set():
+                    raise SessionCancelled()
+                errors=bytes(self._stderr).lower()
+                if b'permission denied' in errors or b'authentication failed' in errors:
+                    raise SessionError('Frame sign-in was refused. Try again and check the SSH password.',reason='permission_denied')
+                if b'host key verification failed' in errors or b'remote host identification has changed' in errors:
+                    raise SessionError('The Frame SSH identity could not be verified. Its saved host key was preserved.')
                 raise SessionError('The SSH session ended or returned an invalid or excessive reply. Check retained recovery records; no automatic retry was made.')
             with self._state:
                 if self._closed:

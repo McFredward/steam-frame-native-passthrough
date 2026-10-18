@@ -968,6 +968,7 @@ class Remote:
         self.e=engine;self.address=engine.host(address);self.login=engine.user(login)
         self.runner=runner or engine.Runner();self.interactive=interactive
         self.session=None;self.log=None
+        self.auth=None;self.cancelled=None
         self.engine_source=Path(engine.__file__).read_bytes()
         self.bridge_source=Path(__file__).read_bytes()
         self.helper_sources={name:Path(__file__).with_name(name+'.py').read_bytes() for name in
@@ -980,7 +981,7 @@ class Remote:
     @property
     def needs_terminal(self):
         """Only the first interactive SSH authentication borrows the console."""
-        return self.interactive and (self.session is None or self.session.closed)
+        return self.interactive and getattr(self,'auth',None) is None and (self.session is None or self.session.closed)
 
     def call(self,request):
         e=self.e
@@ -1012,10 +1013,15 @@ class Remote:
                     ' try:return b.remote_request(e,request)\n'
                     ' except Exception as error:return {"error":True,"failure":b.failure_record(e,error,checks)}\n')
             session=load_helper(e,'steam_link_setup_session')
-            self.session=session.Session(e.ssh_args(self.address,self.login,interactive=self.interactive),source,interactive=self.interactive,timeout=90)
+            self._session_errors=(session.SessionError,)
+            auth=self.auth.open(self.address,self.login) if self.auth is not None and self.interactive else None
+            self.session=session.Session(e.ssh_args(self.address,self.login,interactive=self.interactive,inline_auth=auth is not None),source,
+                interactive=self.interactive,timeout=90,auth=auth,cancelled=self.cancelled)
         try:result=self.session.call(request)
         except (OSError,ValueError,TimeoutError) as error:
-            if self.log:self.log.record_failure(stage,error,command=command)
+            if self.log:self.log.record_failure(stage,error,command=command,
+                reason=error.reason if isinstance(error,getattr(self,'_session_errors',())) else None)
+            if isinstance(error,getattr(self,'_session_errors',())):raise e.SetupError(str(error)) from None
             raise e.SetupError('The SSH session ended or timed out. The operation was not retried; run setup again to check its recovery records.') from None
         if result.get('error'):
             failure=result.get('failure',{})
@@ -1207,6 +1213,7 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
                 record_failure(log,engine,context['stage'],error)
                 support_paths(local,context)
                 if args.check or args.dry_run or not sys.stdin.isatty():raise
+                if isinstance(error,KeyboardInterrupt):return 130
                 ui=context.get('ui') or engine.load_presentation().Presenter(input_fn=input_fn,lang=args.lang,input_enabled=True)
                 if isinstance(error,engine.SetupError):print(str(error),file=sys.stderr)
                 ui.say('bridge_retry_question')
@@ -1221,6 +1228,7 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
                 try:close()
                 except (OSError,ValueError):
                     if log:log.event('cleanup','failure',status='failed')
+        if context.get('ssh_auth') is not None:context['ssh_auth'].close()
         if log:
             if not context.get('paths_printed'):
                 ui=context.get('ui')
@@ -1249,7 +1257,13 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     native_factory=remote_factory or (lambda value,login,**kw:Remote(e,value,login,**kw))
     def factory(*values,**kw):
         peer=native_factory(*values,**kw);context['peers'].append(peer)
-        if isinstance(peer,Remote):peer.log=log
+        if isinstance(peer,Remote):
+            peer.log=log
+            if ui and getattr(ui,'inline_ssh',False):
+                if context.get('ssh_auth') is None:
+                    context['ssh_auth']=load_helper(e,'steam_link_setup_auth').Credentials(ui)
+                peer.auth=context['ssh_auth']
+                peer.cancelled=ui.cancelled
         return peer
     known=context.get('connection')
     if known and not getattr(getattr(known[1],'session',None),'closed',False):

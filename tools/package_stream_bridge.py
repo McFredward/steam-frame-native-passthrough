@@ -44,6 +44,8 @@ def required_sources(root=ROOT):
     bridge=load('sfnp_bridge_package_contract',root/'setup/stream_bridge_install.py')
     return sorted({'setup/steam_link_setup.py','setup/steam_link_setup_ui.py','setup/stream_bridge_install.py',
                    'setup/steam_link_setup_textual.py','setup/steam_link_setup_vendor.py',
+                   'setup/steam_link_setup_auth.py','setup/steam_link_setup_askpass_client.py',
+                   'setup/steam-link-askpass.sh','setup/steam_link_askpass.c','tools/build_setup_askpass.py',
                    'setup/steam_link_setup_session.py','setup/steam_link_setup_log.py',
                    'setup/steam_link_setup_pc.py','setup/steam_link_setup_frame.py',
                    'setup/steam_link_setup_checkpoint.py','setup/steam_link_setup_workflow.py',
@@ -93,7 +95,7 @@ def validation(engine,profile,profile_raw,artifacts,receipts):
 
 
 def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,openssh_zip,
-          *,release=False,validation_receipts=(),textual_wheels=None,root=ROOT):
+          *,release=False,validation_receipts=(),textual_wheels=None,askpass_exe=None,root=ROOT):
     engine=load('sfnp_bridge_package_engine',root/'setup/steam_link_setup.py')
     bridge=load('sfnp_bridge_package_install',root/'setup/stream_bridge_install.py')
     shared=load('sfnp_bridge_package_runtime',root/'tools/package_stream_link_setup.py')
@@ -149,6 +151,12 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
            'patch-steam-link.cmd':source_bytes['setup/patch-steam-link.cmd'],
            'patch-steam-link.sh':source_bytes['setup/patch-steam-link.sh'],
            'LICENSE':source_bytes['LICENSE']}
+    for name in ('steam_link_setup_auth.py','steam_link_setup_askpass_client.py','steam-link-askpass.sh'):
+        files['setup/'+name]=source_bytes['setup/'+name]
+    engine.require(askpass_exe is not None,'The included Windows sign-in helper is required.')
+    helper=engine.read(askpass_exe,1024*1024)
+    load('sfnp_askpass_package_check',root/'tools/build_setup_askpass.py').inspect(helper)
+    files['setup/steam-link-askpass.exe']=helper
     py_pin=engine.parse(source_bytes['packaging/setup-python.json']);py_raw=engine.read(python_zip)
     engine.require(len(py_raw)==py_pin['bytes'],'Portable Python archive size differs from its official pin.')
     files.update(shared.windows_python(py_raw,py_pin['sha256'],py_pin['source_url']))
@@ -177,7 +185,7 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
         for name,raw in sorted(files.items()):
             engine.relative(name);engine.require(0<=len(raw)<=engine.MAX_FILE,'Oversized setup member.')
             engine.require(not name.endswith('.spv'),'Native-derived shader payloads cannot be distributed.')
-            info=zipfile.ZipInfo(name,date_time=(2026,10,18,0,0,0));info.external_attr=0o100600<<16
+            info=zipfile.ZipInfo(name,date_time=(2026,10,18,0,0,0));info.external_attr=(0o100700 if name=='setup/steam-link-askpass.sh' else 0o100600)<<16
             archive.writestr(info,raw,compress_type=zipfile.ZIP_DEFLATED,compresslevel=6)
     raw=output.getvalue();engine.require(len(raw)<=MAX_ARCHIVE,'Setup archive exceeds download limit.')
     receipt={'schema':'sfnp-stream-bridge-packaging-result-v1','result':'PASS','archive':pin(raw),
@@ -200,13 +208,13 @@ def publish(path,raw):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    for name in ('pc-provider','frame-layer','frame-selector','runtime-profile','python-zip','openssh-zip','textual-wheels','output'):
+    for name in ('pc-provider','frame-layer','frame-selector','runtime-profile','python-zip','openssh-zip','textual-wheels','askpass-exe','output'):
         parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--release',action='store_true')
     parser.add_argument('--validation-receipt',action='append',type=Path,default=[])
     args=parser.parse_args(argv)
     raw,receipt=build(args.pc_provider,args.frame_layer,args.frame_selector,args.runtime_profile,args.python_zip,args.openssh_zip,
-                      release=args.release,validation_receipts=args.validation_receipt,textual_wheels=args.textual_wheels)
+                      release=args.release,validation_receipts=args.validation_receipt,textual_wheels=args.textual_wheels,askpass_exe=args.askpass_exe)
     sidecar=args.output.with_suffix(args.output.suffix+'.receipt.json')
     if args.output.exists() or sidecar.exists():raise ValueError('An output or receipt already exists; it was preserved.')
     publish(args.output,raw)

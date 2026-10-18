@@ -683,6 +683,8 @@ class SetupApp(App[int]):
         self.query_one("#action-area").display = False
         if prompt is not None and not prompt.future.done():
             prompt.future.set_result(answer)
+        if prompt is not None and prompt.kind == "ssh" and not self.backend_finished:
+            self.set_working(self.words["frame_inventory"])
 
     def cancel_ssh_prompt(self):
         prompt = self.prompt

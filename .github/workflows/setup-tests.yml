@@ -32,6 +32,9 @@ on:
       - 'tests/test_setup_textual.py'
       - 'tests/test_setup_textual_integration.py'
       - 'tests/test_stream_bridge_artifact_pins.py'
+      - 'tools/build_setup_askpass.py'
+      - 'tests/test_setup_auth.py'
+      - 'tests/test_setup_askpass_client.py'
       - '.github/workflows/setup-tests.yml'
   pull_request:
     paths:
@@ -64,6 +67,9 @@ on:
       - 'tests/test_setup_textual.py'
       - 'tests/test_setup_textual_integration.py'
       - 'tests/test_stream_bridge_artifact_pins.py'
+      - 'tools/build_setup_askpass.py'
+      - 'tests/test_setup_auth.py'
+      - 'tests/test_setup_askpass_client.py'
       - '.github/workflows/setup-tests.yml'
   workflow_dispatch:
 
@@ -87,6 +93,11 @@ jobs:
         run: python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
       - name: Real private Textual imports and asynchronous keyboard/mouse/resizing tests
         run: python -B tests/test_textual_dependencies.py --wheels "${{ runner.temp }}/textual-wheels" --pilot tests/test_setup_textual.py
+      - name: Real OpenSSH sign-in, Textual cancellation and private broker
+        run: |
+          python -m pip install paramiko==4.0.0 textual==8.2.8
+          python -B tests/test_setup_askpass_client.py
+          python -B tests/test_setup_auth.py --require-real-ssh
       - name: Actual wizard, temporary remote agent, and bootstrap fixtures
         run: |
           bash -n get.sh get-preview.sh setup/patch-steam-link.sh
@@ -186,6 +197,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual keyboard/mouse and screen checks failed.' }
           & (Join-Path $target $runtime) -I -B tests/test_setup_textual_integration.py
           if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual entry-point and console ownership checks failed.' }
+
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Real Windows OpenSSH sign-in and UI cancellation
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install paramiko==4.0.0 textual==8.2.8
+          if ($LASTEXITCODE -ne 0) { throw 'Local test-server dependencies failed.' }
+          $signIn = Join-Path $env:RUNNER_TEMP 'sign in helper'
+          New-Item -ItemType Directory -Path $signIn -Force | Out-Null
+          Copy-Item setup/steam_link_setup_askpass_client.py,setup/steam-link-askpass.sh $signIn
+          python -B tools/build_setup_askpass.py --compiler cl.exe --output (Join-Path $signIn 'steam-link-askpass.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows sign-in helper build failed.' }
+          $ssh = Join-Path $env:RUNNER_TEMP 'actual-inspection-package/setup/runtime/openssh/ssh.exe'
+          python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn
+          if ($LASTEXITCODE -ne 0) { throw 'Actual Windows OpenSSH sign-in failed.' }
 
       - name: Actual packaged management mode (no Frame contact or removal)
         shell: powershell

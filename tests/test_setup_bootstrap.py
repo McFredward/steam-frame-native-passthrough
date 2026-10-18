@@ -387,6 +387,8 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(bundle['readiness'], 'release')
         self.assertTrue((target / 'setup/stream_bridge_install.py').is_file())
         self.assertTrue((target / 'setup/runtime/openssh/ssh.exe').is_file())
+        self.assertTrue((target / 'setup/steam-link-askpass.exe').is_file())
+        if os.name != 'nt':self.assertTrue(os.access(target / 'setup/steam-link-askpass.sh', os.X_OK))
         self.assertFalse((target / 'steam-link-bundle.json').exists())
 
     def test_bridge_modes_cannot_be_interchanged(self):
