@@ -86,7 +86,7 @@ class BootstrapTests(unittest.TestCase):
             text = (ROOT / name).read_text()
             digest = hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
             self.assertIn(digest, text)
-            self.assertIn('/b171247a19b39236f764a5ee5525f0ad4cf4f110/' + source, text)
+            self.assertIn('/2c2fdeeef5ce623c55b2c8489872531f8226a238/' + source, text)
             self.assertIn(flag, text)
 
     def test_explicit_inspection_release_is_separate_from_stable(self):
