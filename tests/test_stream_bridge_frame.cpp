@@ -37,6 +37,8 @@ void run(){
     std::vector<std::uint8_t> output{37};check(!sb::decodeCertifiedCoverage(result,output)&&output==std::vector<std::uint8_t>{37},"byte-only proof cannot become a mask");
     auto duplicate=held;check(sb::appendCertifiedFrame(bytes(held),descriptor,sb::CoverageEncoding::None,{},s.sender,duplicate)==sb::FrameStatus::DuplicateOwned&&duplicate==held,"duplicate owned certificate refuses transactionally");
     const auto stable=held;
+    std::vector<std::uint8_t> wide;
+    check(sb::appendCertifiedFrame(bytes(original),{1,1,3264,6400},sb::CoverageEncoding::None,{},s.sender,wide)==sb::FrameStatus::Ok,"retained real coded extent is not rejected by mask budget");
     for(std::size_t cut=0;cut<stable.size();++cut){sb::CertifiedAccessUnit unchanged;unchanged.descriptor.sourceFrame=555;
         check(sb::inspectCertifiedFrame({stable.data(),cut},s.observer,unchanged)!=sb::FrameStatus::Ok&&unchanged.descriptor.sourceFrame==555,"every truncated stream fails without publishing proof");}
     for(std::size_t at=0;at<stable.size();++at){auto corrupt=stable;corrupt[at]^=0x40;sb::CertifiedAccessUnit unchanged;unchanged.descriptor.sourceFrame=556;
@@ -69,7 +71,7 @@ void run(){
     check(sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok&&sb::decodeCertifiedCoverage(result,output)&&output==rawCoverage,"raw coverage exact");
     for(auto malformed:std::vector<std::vector<std::uint8_t>>{{0,5},{255,0,255},{255,1},{1,1,1,2}}){output={17};
         check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::Rle,bytes(malformed),s.sender,output)==sb::FrameStatus::InvalidArgument&&output==std::vector<std::uint8_t>{17},"invalid RLE never publishes a frame");}
-    for(auto d:std::vector<sb::FrameDescriptor>{{0,1,64,32},{1,0,64,32},{1,1,0,32},{1,1,8192,8192}}){output={18};
+    for(auto d:std::vector<sb::FrameDescriptor>{{0,1,64,32},{1,0,64,32},{1,1,0,32},{1,1,8193,8192}}){output={18};
         check(sb::appendCertifiedFrame(bytes(original),d,sb::CoverageEncoding::None,{},s.sender,output)==sb::FrameStatus::InvalidArgument&&output==std::vector<std::uint8_t>{18},"missing or unbounded identity/extent refused");}
     std::vector<std::uint8_t> withHello;check(sb::appendOwned(bytes(original),{envelope.data(),envelope.size()},withHello)==sb::SeiStatus::Ok,"original discovery SEI inserted by actual old codec");
     check(sb::appendCertifiedFrame(bytes(withHello),descriptor,sb::CoverageEncoding::None,{},s.sender,held)==sb::FrameStatus::Ok,"certificate follows control augmentation");

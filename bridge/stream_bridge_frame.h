@@ -6,7 +6,9 @@ namespace stream_bridge {
 // Separate from SFA1 control. The certificate binds the exact entire NVENC AU
 // (including any control SEI), not a guessed first slice or native slot index.
 constexpr std::size_t FrameSignedHeaderBytes=144,FrameCertificateBytes=176;
-constexpr std::size_t MaximumCoverageBytes=16u*1024u*1024u;
+// Decoded full-luma mask can cover 8192 squared. Encoded certificate still
+// obeys the stricter native AU byte budget; incompressible excess is refused.
+constexpr std::size_t MaximumCoverageBytes=64u*1024u*1024u;
 constexpr std::array<std::uint8_t,16> FrameUuid{{
     0x53,0x46,0x4e,0x50,0x2d,0x46,0x52,0x41,0x4d,0x45,0x2d,0x56,0x31,0,0,1}};
 struct FrameDescriptor {
