@@ -146,12 +146,12 @@ class ActualSSH(unittest.TestCase):
         self.connections=[];self.addCleanup(self.close_sessions)
     def close_sessions(self):
         for connection in self.connections:connection.close()
-    def connection(self,*,cancelled=None,timeout=5):
+    def connection(self,*,cancelled=None,timeout=5,source=None):
         args=[self.ssh,'-F','none','-p',str(self.server.port),'-o','StrictHostKeyChecking=ask',
               '-o','UserKnownHostsFile="'+(self.root/'known_hosts').as_posix()+'"','-o','GlobalKnownHostsFile=none',
               '-o','BatchMode=no','-o','PubkeyAuthentication=no','-o','PreferredAuthentications=password',
               '-o','NumberOfPasswordPrompts=2','-o','ConnectTimeout=2','fixture@127.0.0.1']
-        value=session.Session(args,'def dispatch(request):return {"ok":True,"value":request.get("value")}\n',
+        value=session.Session(args,source or 'def dispatch(request):return {"ok":True,"value":request.get("value")}\n',
               interactive=True,auth=self.credentials.open('127.0.0.1','fixture'),cancelled=cancelled,timeout=timeout)
         self.connections.append(value);return value
     def test_real_openssh_password_rpc_and_same_invocation_cache(self):
@@ -165,6 +165,13 @@ class ActualSSH(unittest.TestCase):
         connection=self.connection();self.assertTrue(connection.call({})['ok'])
         self.assertEqual(self.server.passwords,2)
         self.assertEqual(self.screen.prompts,[(False,True),(True,False),(True,False)])
+    def test_agent_larger_than_ssh_pipe_buffer_and_followup_rpc_do_not_stall(self):
+        # The production bootstrap embeds several full modules. A tiny echo
+        # agent alone would miss a blocked initial source write after sign-in.
+        source='padding='+repr('x'*(512*1024))+'\ndef dispatch(request):return {"bytes":len(padding),"step":request["step"]}\n'
+        connection=self.connection(source=source)
+        self.assertEqual(connection.call({'step':1}),{'bytes':512*1024,'step':1})
+        self.assertEqual(connection.call({'step':2}),{'bytes':512*1024,'step':2})
     def test_cancel_during_real_password_wait_reaps_every_worker(self):
         self.screen.block=True;stop=threading.Event();connection=self.connection(cancelled=stop.is_set)
         outcomes=[]
