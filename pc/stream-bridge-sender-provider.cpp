@@ -271,6 +271,21 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 stats.lastConstantBytes,stats.lastSourceWidth,stats.lastSourceHeight,stats.lastSourceFormat,stats.lastOutputWidth,stats.lastOutputHeight,stats.lastOutputFormat,
                 static_cast<unsigned long long>(stats.nativeMaps),static_cast<unsigned long long>(stats.inventoryRefreshes));report(text);
         };
+        std::uint32_t reportedFailures=0;
+        const auto reportFailure=[&]{
+            const auto failure=runtime_.lastFailure();
+            if(failure.reason==stream_bridge::sender::RuntimeFailure::None)return;
+            const auto bit=std::uint32_t(1)<<static_cast<unsigned>(failure.reason);
+            if(reportedFailures&bit)return;
+            reportedFailures|=bit;
+            char text[312]{};std::snprintf(text,sizeof text,
+                "sender refusal: reason=%s; control=%s; protocol-checked=%u, status=%u; encoder-generation=%llu, extent=%ux%u, encoded=%u, confirmed=%u, probe=%u; output-leases=%u",
+                stream_bridge::sender::runtimeFailureName(failure.reason),stream_bridge::controlStatusName(failure.control),
+                unsigned(failure.hasProtocolStatus),static_cast<unsigned>(failure.protocol),
+                static_cast<unsigned long long>(failure.encoder.generation),failure.encoder.width,failure.encoder.height,
+                unsigned(failure.encoder.encoded),unsigned(failure.encoder.peerConfirmed),unsigned(failure.encoder.probeObserved),failure.liveOutputLeases);
+            report(text);
+        };
         for(;;){
             {std::lock_guard<std::mutex> guard(mutex_);if(stopped_)break;}
             try{coverage_.tick();runtime_.tick();
@@ -282,7 +297,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             }catch(...){sourceIpc_.stop();coverage_.stop();runtime_.stop();report("worker refused; ordinary video");break;}
             const auto* coverageState=coverage_.stateName();if(request_.explicitlyEnabled&&coverageState!=lastCoverage){lastCoverage=coverageState;reportState(coverageState);}
             if(runtime_.state()!=last){last=runtime_.state();reportState(stream_bridge::sender::runtimeStateName(last));}
-            if(request_.explicitlyEnabled){reportReconfigure(false);reportCoverage(false);}
+            if(request_.explicitlyEnabled){reportReconfigure(false);reportCoverage(false);reportFailure();}
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(8),[this]{return stopped_;});
         }
         report("sender worker stopping");
@@ -290,6 +305,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         report(coverage_.stateName());
         reportReconfigure(true);
         reportCoverage(true);
+        reportFailure();
         sourceIpc_.stop();runtime_.stop();
     }
 public:
