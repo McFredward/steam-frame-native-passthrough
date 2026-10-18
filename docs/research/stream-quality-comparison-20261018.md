@@ -77,3 +77,43 @@ A separate mask associated only by arrival time, latest image or an application
 frame counter cannot establish those properties. The full-quality repair and
 game-plus-dashboard composition remain open; no new headset test is presented
 as a completed repair.
+
+## First dashboard diagnostic activation: measured refusal, not a menu result
+
+The explicitly authorized isolated diagnostic loaded on the Frame on2026-10-18.
+SteamVR2.18.2 started successfully; the actual compositor mapped the diagnostic
+library and not the public receiver. The diagnostic reported `QueueProfile`
+before resources/recording (`ready:false`, zero submissions and instrumented
+draws). No game stream or menu experiment was requested after that refusal. No
+sparse records or image capture were collected. This does not establish a cause
+for the visible dashboard defect or a working full-quality transport.
+
+The status confirms one queue-create record and one queue, with the required
+fragment atomic feature already enabled by the native application. It does not
+identify the remaining rejected predicate: queue flags, queue `pNext`, or the
+observed graphics capability. Its reported family0 was an unassigned default
+on refusal, not proof that the actual family was0. The earlier successful
+transaction's counts and family did not establish a null queue extension chain.
+In fact that older implementation explicitly supported one typed original
+`VkDeviceQueueGlobalPriorityCreateInfoKHR`; the isolated probe rejected any
+queue extension. Reusing that existing constrained scheduling contract fixes a
+source-proven incompatibility, but cannot retrospectively prove this launch's
+exact rejection. Subsequent diagnostics must report the cold inputs and each
+rejected predicate before another hardware round.
+
+An initial standalone service-stop transaction was replaced by the Frame's
+concurrent graphical-session restart. No activation files had changed then.
+The controlled swap used an exclusively owned volatile user-unit mask during
+stop/swap, removed in `finally` before the explicit normal start. This was a
+transaction interlock, not an automatic timer. No system unit or public package
+binary was modified. The rollback likewise restored the exact original public
+unit drop-in and manifest link, restored only the owned camera-setting delta,
+and restarted the public installation after the maintainer's explicit approval.
+Hashes, active mappings, published public activation and service success were
+verified; the maintainer also confirmed a normal visible/usable surface.
+
+Private deployment receipts retain the exact rollback command and source.
+Residual private staging is inactive and under1MiB; it is retained while some
+same-user process maps cannot be inspected, rather than unlinking a possibly
+mapped library. It is not a persistent diagnostic activation. The public
+installation remains enabled and its library byte-identical to the baseline.

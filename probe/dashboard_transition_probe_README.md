@@ -37,12 +37,22 @@ that update's actual fence. Reused native draw recordings read the current GPU
 phase. Old spent sessions never rearm.
 
 The cold runtime checks the actual enabled `fragmentStoresAndAtomics` request;
-it does **not** enable the feature. It currently requires the single ordinary
-queue profile observed in the successful2026-10-17 native SSBO run: one queue
-create info, one queue, family0 in that run (the new run observes its own family).
+it does **not** enable the feature. It requires one original ordinary graphics
+queue and proves its family from the current native creation/query inputs.
+The earlier successful SSBO transaction permits one typed native global-priority
+scheduling node; a null extension chain was not established by its count/family
+telemetry. Unknown/chained extensions, protected queues and missing capability
+proof remain refusals. Neither features nor queue creation requests are rewritten.
 Ordinary core QueueSubmit and its public timeline-semaphore pNext are supported.
-Submit2/unknown queues/protected or different device profiles explicitly refuse
-measurement and preserve the ordinary call. Runtime status records those facts.
+Submit2/unknown queues or different device profiles explicitly refuse measurement
+and preserve the ordinary call. Do not request a game stream when cold admission
+has already refused; inspect the exact cold predicate evidence first.
+
+The first isolated attachment on2026-10-18 refused `QueueProfile` before any
+recording and was manually removed. The old `native_queue_family:0` field on
+that refusal was an unassigned default, not a measured family. The deployment
+and public-receiver restoration are documented in the
+[comparison record](../docs/research/stream-quality-comparison-20261018.md).
 
 ## Preparation only
 
