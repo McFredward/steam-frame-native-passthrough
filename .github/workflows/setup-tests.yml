@@ -31,6 +31,7 @@ on:
       - 'tests/test_textual_dependencies.py'
       - 'tests/test_setup_textual.py'
       - 'tests/test_setup_textual_integration.py'
+      - 'tests/test_stream_bridge_artifact_pins.py'
       - '.github/workflows/setup-tests.yml'
   pull_request:
     paths:
@@ -62,6 +63,7 @@ on:
       - 'tests/test_textual_dependencies.py'
       - 'tests/test_setup_textual.py'
       - 'tests/test_setup_textual_integration.py'
+      - 'tests/test_stream_bridge_artifact_pins.py'
       - '.github/workflows/setup-tests.yml'
   workflow_dispatch:
 
@@ -101,6 +103,7 @@ jobs:
           python -B tests/test_setup_ui.py
           python -B tests/test_setup_dependencies.py
           python -B tests/test_setup_textual_integration.py
+          python -B tests/test_stream_bridge_artifact_pins.py
   linux-python-baseline:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
