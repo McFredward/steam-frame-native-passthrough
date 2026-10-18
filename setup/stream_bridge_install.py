@@ -992,20 +992,34 @@ class Automation:
         return result
 
     def restore_files(self):
-        self.phase('rollback');self.runtime.snapshot();self.runtime.stop()
+        self.phase('rollback')
+        # A PC-side recovery error must never strand the Frame in a broken
+        # startup. Restore/restart/check its UI independently, then report any
+        # remaining PC recovery failure without claiming complete rollback.
         self.call('bridge-restore')
-        checkpoint=self.installed.checkpoint();result=checkpoint.restore()
-        if result['registered'] is not None:
-            pc=self.local.inventory();desired=result['registered']
-            if bool(pc.get('registered'))!=desired:
-                tool=self.local.verify_tool(pc,self.bundle.pc['runtime_files']['vrpathreg'])
-                self.local.register(tool,'adddriver' if desired else 'removedriver')
-            self.e.require(bool(self.local.inventory().get('registered'))==desired,
-                           'The original PC driver registration could not be restored.')
+        self.pc_recovery_error=None
+        try:
+            self.runtime.snapshot();self.runtime.stop()
+            checkpoint=self.installed.checkpoint();result=checkpoint.restore()
+            if result['registered'] is not None:
+                pc=self.local.inventory();desired=result['registered']
+                if bool(pc.get('registered'))!=desired:
+                    tool=self.local.verify_tool(pc,self.bundle.pc['runtime_files']['vrpathreg'])
+                    self.local.register(tool,'adddriver' if desired else 'removedriver')
+                self.e.require(bool(self.local.inventory().get('registered'))==desired,
+                               'The original PC driver registration could not be restored.')
+        except Exception as error:
+            self.pc_recovery_error=error
+            record_failure(self.context['log'],self.e,'rollback',error)
 
     def restart_original(self):
         self.phase('runtime_start');self.restore_baseline=self.call('bridge-health-baseline')
-        self.call('bridge-runtime-restart');self.runtime.restore()
+        self.call('bridge-runtime-restart')
+        if self.pc_recovery_error is None:
+            try:self.runtime.restore()
+            except Exception as error:
+                self.pc_recovery_error=error
+                record_failure(self.context['log'],self.e,'rollback',error)
 
     def original_health(self):
         self.phase('startup_health');result=self.call('bridge-health',baseline=self.restore_baseline)
@@ -1014,6 +1028,8 @@ class Automation:
     def finish(self,*,restored):
         # Never discard original-state authority before the Frame UI passed
         # health and its two actual service instances are freshly running.
+        if restored:self.e.require(self.pc_recovery_error is None,
+                                  'The original Frame interface is running, but PC recovery is incomplete. Retry can continue recovery.')
         self.call('bridge-runtime-restored',health_ok=True)
         self.call('bridge-checkpoint-finish',restored=restored)
         self.installed.checkpoint().finish(restored=restored);self.runtime.finish()

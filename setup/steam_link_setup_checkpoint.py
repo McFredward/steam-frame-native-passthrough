@@ -9,6 +9,7 @@ No process/service actions or automatic retries occur in this module.
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 import stat
 
@@ -78,6 +79,7 @@ class Checkpoint:
 
     def setting(self,path,section,key,after):
         e=self.e;path=Path(path);present=path.exists()
+        e.require(self.allowed(path),'Setup settings recovery path is outside its fixed scope.')
         value=e.parse(e.read(path,2*1024*1024)) if present else {}
         e.require(type(value)is dict and (section not in value or type(value[section])is dict),'Invalid setup settings preserved.')
         keys=value.get(section,{})
@@ -143,6 +145,9 @@ class Checkpoint:
 
 
 def file_value(raw,mode=0o600):
+    # Windows stat synthesizes 0666 for ordinary files even when our protected
+    # DACL is private. POSIX permission bits are not Windows file identity.
+    if os.name=='nt':mode=0o600
     return {'kind':'file','bytes':base64.b64encode(raw).decode(),'mode':mode}
 
 

@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 import contextlib
 import types
+import sys
 
 ROOT=Path(__file__).resolve().parents[1]
 def load(name,path):
@@ -123,6 +124,28 @@ class Files(fixtures.Tests):
         self.assertEqual(len(attempts),2);self.assertFalse(self.unit.tx.path.exists())
         self.assertFalse(b.LocalInstall(s,self.local).receipt.exists())
 
+    def test_pc_recovery_failure_does_not_block_original_frame_restart(self):
+        screen=UI();screen.path=lambda *a,**kw:None;screen.suspend=lambda:contextlib.nullcontext()
+        class Runtime:
+            def __init__(inner,*a):pass
+            def snapshot(inner):pass
+            def stop(inner):pass
+            def restore(inner):raise AssertionError('Do not start unrecovered PC code')
+        commands=[]
+        class Peer:
+            def call(inner,request):
+                commands.append(request['command'])
+                if request['command']=='bridge-health':return {'software_ready':True}
+                return {'restored':True}
+        real=b.load_helper
+        with mock.patch.object(b,'load_helper',side_effect=lambda e,name:types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else real(e,name)):
+            installed=b.LocalInstall(s,self.local)
+            ports=b.Automation(s,self.bundle,self.local,installed,Peer(),screen,{'log':None,'peers':[],'stage':'rollback'},None,'192.168.1.25','steamos')
+        with mock.patch.object(installed,'checkpoint',return_value=types.SimpleNamespace(restore=mock.Mock(side_effect=OSError(13,'private')))):
+            self.assertFalse(flow.Workflow(ports,screen).recover())
+        self.assertIn('bridge-runtime-restart',commands);self.assertIn('bridge-health',commands)
+        self.assertNotIn('bridge_rolled_back',screen.messages);self.assertIn('bridge_recovery_incomplete',screen.messages)
+
 
 class UI:
     def __init__(self,choices=(),picture=True):self.choices=iter(choices);self.messages=[];self.picture=picture
@@ -192,6 +215,7 @@ class Workflow(unittest.TestCase):
 
 
 if __name__=='__main__':
+    if len(sys.argv)>1:unittest.main()
     # Existing installer cases are independently run by their own suite.
     own=unittest.TestSuite()
     for case in (Files,Workflow):
