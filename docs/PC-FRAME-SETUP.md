@@ -81,6 +81,9 @@ After the check, choose **Install**, **Update**, **Repair**, **Uninstall** or
 **Quit** and review the concrete action. Missing, altered, unsupported or
 prototype payloads refuse installation and pairing. No component is fetched as
 an unreviewed substitute. Repeating an already current installation is a no-op.
+“Current” includes rehashing the actual installed Frame artifacts against the
+checked bundle, including the native library and setup helper. An unchanged
+receipt or component marker alone cannot hide a missing or corrupted file.
 
 All writes finish before the final exit prompt. The assistant never stops or
 restarts Steam, SteamVR, the stream or the Frame. Close SteamVR before updating
@@ -124,6 +127,13 @@ provider and invoke the existing transactional Frame uninstaller. Changed or
 unknown files are preserved. Credentials are retained, so uninstalling code
 does not destroy a user's rollback key. The assistant does not delete another
 driver, overwrite Valve binaries or require administrator access.
+An updated Frame runtime blocks new activation but does not by itself block
+ownership-based removal with a checked setup bundle. Removal uses the verified
+setup helper and valid owned receipt; it does not import installed scripts or
+re-admit the changed runtime as compatible. If the native uninstaller reports
+pending restoration, use the checked Frame setup's **emergency-off**, stop
+SteamVR manually and retry. The assistant never reports full removal while that
+step is pending.
 
 SSH cannot make two machines one atomic transaction. On failure the assistant
 undoes its new pairing selection/key when ownership still matches. A Frame
@@ -168,6 +178,8 @@ All local payload hashes and remote runtime capabilities are checked before
 writes. After explicit Apply, exact checked bytes may be staged privately on the
 Frame (`0700` directories, `0600` files). The existing `verify_package` then
 checks that real staged package before activation, PC registration or pairing.
+Uninstallation is different: a checked helper removes only receipt-owned files;
+it must not require the updated runtime to pass installation admission again.
 The assistant invokes the existing transactional native setup, never rewrites
 service definitions itself, and removes only its unchanged owned staging files.
 

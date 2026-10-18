@@ -88,6 +88,12 @@ def no_links(path):
     return path
 
 
+def file_identity(info):
+    # Reading may update atime; content, ownership and replacement must not change.
+    return tuple(getattr(info, field) for field in ('st_dev', 'st_ino', 'st_mode', 'st_nlink',
+                 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+
+
 def read(path, limit=MAX_FILE, private=False):
     path = no_links(path)
     before = path.stat()
@@ -100,9 +106,9 @@ def read(path, limit=MAX_FILE, private=False):
         verify_private_acl(path)
     descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     with os.fdopen(descriptor, 'rb') as stream:
-        require(os.fstat(stream.fileno()) == before, 'File changed before opening.')
+        require(file_identity(os.fstat(stream.fileno())) == file_identity(before), 'File changed before opening.')
         raw = stream.read(limit + 1)
-    require(len(raw) == before.st_size and path.stat() == before, 'File changed while checking.')
+    require(len(raw) == before.st_size and file_identity(path.stat()) == file_identity(before), 'File changed while checking.')
     return raw
 
 
@@ -219,6 +225,7 @@ class Bundle:
         require(type(self.platforms) is dict and 1 <= len(self.platforms) <= 2 and
                 set(self.platforms) <= {'windows-x86_64', 'linux-x86_64'}, 'Unknown PC platform.')
         self.files = {}
+        file_pins = {}
         for target, item in [('frame', self.frame), *self.platforms.items()]:
             require(type(item) is dict and item.get('role') == ('receiver' if target == 'frame' else 'producer') and
                     item.get('architecture') == ('aarch64' if target == 'frame' else 'x86_64') and
@@ -227,13 +234,15 @@ class Bundle:
                     'Component role, architecture or protocol mismatch.')
             records(item.get('files'))
             for name, pin in item['files'].items():
-                require(name not in self.files, 'Overlapping component file ownership.')
                 payload = read(self.root / relative(name), pin['bytes'])
                 require(len(payload) == pin['bytes'] and sha(payload) == pin['sha256'], 'Bundle file hash mismatch.')
+                require(name not in self.files or target != 'frame' and name not in self.frame['files'] and
+                        file_pins[name] == pin and self.files[name] == payload, 'Overlapping component file ownership.')
                 self.files[name] = payload
+                file_pins[name] = pin
         require(sum(map(len, self.files.values())) <= MAX_TOTAL, 'Bundle exceeds total size bound.')
         self._frame()
-        for item in self.platforms.values():
+        for target, item in self.platforms.items():
             require(item.get('provider_root') == 'pc-provider' and
                     item.get('provider_manifest') == 'pc-provider/driver.vrdrivermanifest' and
                     item.get('provider_registration') == 'user', 'Unknown local provider layout.')
@@ -242,7 +251,8 @@ class Bundle:
             require(manifest.get('name') == DRIVER_NAME, 'Unexpected OpenVR driver name.')
             tool = item.get('vrpathreg')
             require(type(tool) is dict and set(tool) == {'path', 'bytes', 'sha256'} and
-                    tool['path'] == 'bin/win64/vrpathreg.exe', 'Unknown registration tool contract.')
+                    tool['path'] == ('bin/win64/vrpathreg.exe' if target == 'windows-x86_64' else
+                                     'bin/linux64/vrpathreg'), 'Unknown registration tool contract.')
             records({tool['path']: {key: tool[key] for key in ('bytes', 'sha256')}})
 
     def _frame(self):
@@ -284,6 +294,18 @@ class Bundle:
         require(component == {'schema':'sfnp-bridge-component-v1','role':'receiver',
                               'bridge_protocol':self.protocol,'provider':'vrlink-complete-au-v1'},
                 'Negotiated Frame receiver variant differs from the reviewed bundle.')
+
+    def installed_frame_files(self):
+        package = parse(self.files['frame-package/package.json'])
+        return {'package/' + name: pin for name, pin in package['files'].items()} | {
+            'package/package.json': self.frame['files']['frame-package/package.json'],
+            'tools/native_passthrough_setup.py': self.frame['files'][self.frame['setup_entry']]}
+
+
+def inventory_request(bundle, challenge):
+    return {'command':'inventory','challenge':challenge,
+            'runtime_files':bundle.frame['runtime_files'] if bundle else {},
+            'installed_files':bundle.installed_frame_files() if bundle else {}}
 
 
 def host(value):
@@ -394,11 +416,12 @@ P=pathlib.Path
 def need(v,m):
  if not v: raise ValueError(m)
 def digest(b):return hashlib.sha256(b).hexdigest()
+def identity(s):return tuple(getattr(s,k) for k in ('st_dev','st_ino','st_mode','st_nlink','st_uid','st_gid','st_size','st_mtime_ns','st_ctime_ns'))
 def raw(p,limit=33554432):
  p=P(p);s=p.lstat();need(stat.S_ISREG(s.st_mode) and s.st_nlink==1 and 0<=s.st_size<=limit,'ordinary file required')
  fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
- with os.fdopen(fd,'rb') as f:need(os.fstat(f.fileno())==s,'changed open');b=f.read(limit+1)
- need(len(b)==s.st_size and p.stat()==s,'changed file');return b
+ with os.fdopen(fd,'rb') as f:need(identity(os.fstat(f.fileno()))==identity(s),'changed open');b=f.read(limit+1)
+ need(len(b)==s.st_size and identity(p.stat())==identity(s),'changed file');return b
 def load(p):return json.loads(raw(p,131072))
 def safe(p,home,create=False):
  need(p.is_relative_to(home),'owned path required')
@@ -424,6 +447,32 @@ def runtime(pins):
  for spec in pins.values():
   n=rel(spec['path']);base={'steamvr':P('/opt/steamvr'),'home':HOME,'system':P('/')}[spec['base']]
   b=raw(base/n);need(len(b)==spec['bytes'] and digest(b)==spec['sha256'],'runtime mismatch')
+def owned_receipt():
+ p=HOME/'.config/SteamFrameNativePassthrough/install.json'
+ if not p.exists():return None
+ safe(p.parent,HOME);s=p.lstat();need(s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o600,'private receipt required')
+ v=load(p);data_root=HOME/'.local/share/SteamFrameNativePassthrough'
+ target=P('/run/user')/str(os.getuid())/'steam-frame-native-passthrough/receiver.json'
+ need(set(v)=={'schema','home','data','manifest_link','package_sha256','files'} and v['schema']=='sfnp-user-install-v1' and v['home']==str(HOME) and v['data']==str(data_root) and v['manifest_link']==str(target),'unknown owned receipt')
+ need(re.fullmatch('[0-9a-f]{64}',v['package_sha256']) and type(v['files'])is dict and 1<=len(v['files'])<=32,'receipt bound')
+ for name,pin in v['files'].items():
+  q=P(name);need(q.is_absolute() and '..' not in q.parts and (q.is_relative_to(data_root) or q==HOME/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf') and re.fullmatch('[0-9a-f]{64}',pin),'receipt ownership')
+ return v
+def installed_files_current(request,receipt):
+ if receipt is None:return False
+ pins=request.get('installed_files',{});need(type(pins)is dict and len(pins)<=64,'installed artifact bound')
+ if not pins:return False
+ base=HOME/'.local/share/SteamFrameNativePassthrough';total=0
+ try:
+  safe(base,HOME)
+  for name,pin in pins.items():
+   n=rel(name);need(n.startswith('package/') or n=='tools/native_passthrough_setup.py','installed artifact path')
+   need(set(pin)=={'bytes','sha256'} and type(pin['bytes'])is int and 0<pin['bytes']<=33554432 and re.fullmatch('[0-9a-f]{64}',pin['sha256']),'installed artifact pin')
+   total+=pin['bytes'];need(total<=67108864,'installed artifact total bound')
+   path=base/n;safe(path.parent,HOME);b=raw(path,pin['bytes'])
+   need(receipt['files'].get(str(path))==pin['sha256'] and len(b)==pin['bytes'] and digest(b)==pin['sha256'],'installed artifact changed')
+ except (OSError,ValueError,KeyError,TypeError):return False
+ return True
 def inventory(request):
  pairs={};pairdir=HOME/'.config/steam-link-native-passthrough/pairings';active=None
  if pairdir.exists():
@@ -442,29 +491,40 @@ def inventory(request):
  receipt=HOME/'.config/SteamFrameNativePassthrough/install.json'
  control=HOME/'.config/SteamFrameNativePassthrough/control.json'
  component=HOME/'.local/share/SteamFrameNativePassthrough/package/bridge-component.json'
- bridge=load(component) if component.exists() else None
- legacy=receipt.exists() and bridge is None
- package_sha=load(receipt).get('package_sha256') if receipt.exists() else None
- return {'schema':'sfnp-wizard-frame-v1','architecture':platform.machine(),'home':str(HOME),'installed':receipt.exists(),'legacy_installed':legacy,'bridge_component':bridge,'package_sha256':package_sha,'enabled':load(control).get('enabled') if control.exists() else None,'runtime_compatible':ok,'active_pair':active,'pair_proofs':pairs,'automatic_restart':False}
+ try:bridge=load(component) if component.exists() else None
+ except (OSError,ValueError,TypeError):bridge=None
+ legacy=receipt.exists() and not component.exists()
+ try:checked_receipt=owned_receipt()
+ except (OSError,ValueError,KeyError,TypeError):checked_receipt=None
+ package_sha=checked_receipt.get('package_sha256') if checked_receipt else None
+ current=installed_files_current(request,checked_receipt)
+ return {'schema':'sfnp-wizard-frame-v1','architecture':platform.machine(),'home':str(HOME),'installed':receipt.exists(),'owned_receipt_valid':checked_receipt is not None,'legacy_installed':legacy,'bridge_component':bridge,'package_sha256':package_sha,'files_current':current,'enabled':load(control).get('enabled') if control.exists() else None,'runtime_compatible':ok,'active_pair':active,'pair_proofs':pairs,'automatic_restart':False}
 def module(path,name):
  spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
 def apply(request):
- need(request['readiness']=='release','prototype refuses all writes');runtime(request['runtime_files'])
+ need(request['readiness']=='release','prototype refuses all writes')
+ removing=request['action']=='uninstall'
+ if removing:
+  if (HOME/'.config/SteamFrameNativePassthrough/install.json').exists():need(owned_receipt() is not None,'unknown owned receipt')
+ else:runtime(request['runtime_files'])
  files=request['files'];need(type(files)is dict and 1<=len(files)<=64,'file bound')
  contents={};total=0
  for name,item in files.items():
   n=rel(name);need(n.startswith('frame-package/'),'package root');b=base64.b64decode(item['data'],validate=True);total+=len(b)
   need(total<=67108864 and len(b)==item['bytes'] and digest(b)==item['sha256'],'payload pin mismatch');contents[n]=b
  need('frame-package/tools/native_passthrough_setup.py' in contents,'setup missing')
- pair=request.get('pairing');need(type(pair)is dict and set(pair)=={'schema','pair_id','key_hex','role','protocol_major'} and pair['schema']=='sfnp-pairing-v1' and pair['role']=='receiver' and pair['protocol_major']==1 and re.fullmatch('[0-9a-f]{32}',pair['pair_id']) and re.fullmatch('[0-9a-f]{64}',pair['key_hex']),'pairing contract')
+ pair=request.get('pairing')
+ if not removing:need(type(pair)is dict and set(pair)=={'schema','pair_id','key_hex','role','protocol_major'} and pair['schema']=='sfnp-pairing-v1' and pair['role']=='receiver' and pair['protocol_major']==1 and re.fullmatch('[0-9a-f]{32}',pair['pair_id']) and re.fullmatch('[0-9a-f]{64}',pair['key_hex']),'pairing contract')
  base=HOME/'.local/share/steam-link-native-passthrough/staging';safe(base,HOME,True)
  stage=base/secrets.token_hex(16);stage.mkdir(mode=0o700)
  written={}
  try:
   for name,b in contents.items():p=stage/name;put(p,b);written[p]=b
   package=stage/'frame-package'
-  verifier=module(package/'tools/prepare_native_release.py','sfnp_wizard_verifier');verifier.verify_package(package)
-  # No activation or credential publication is possible before the real verifier.
+  if not removing:
+   verifier=module(package/'tools/prepare_native_release.py','sfnp_wizard_verifier');verifier.verify_package(package)
+  # Removal uses the checked helper and owned receipt, not a new runtime grant.
+  # Every activation/credential publication still requires the real verifier.
   setup=module(package/'tools/native_passthrough_setup.py','sfnp_wizard_setup');unit=setup.Setup(HOME)
   with unit.locked():result=unit.uninstall() if request['action']=='uninstall' else unit.install(package)
   if request['action']=='uninstall':return {'reason':result.get('reason'),'automatic_restart':False}
@@ -527,9 +587,11 @@ class Remote:
         args += ['python3 -B -c ' + shlex.quote(REMOTE_AGENT)]
         code, raw = self.runner.run(args, encoded(request), interactive=self.interactive,
                                     timeout=20 if request['command'] == 'inventory' else 120)
-        require(code == 0, 'Frame operation refused or SSH unavailable. No automatic restart was attempted.')
+        removing = request.get('action') == 'uninstall'
+        recovery = 'Frame removal refused. Use the checked Frame setup emergency-off, stop SteamVR manually, then retry Uninstall; no complete removal is claimed.'
+        require(code == 0, recovery if removing else 'Frame operation refused or SSH unavailable. No automatic restart was attempted.')
         result = parse(raw)
-        require(not result.get('error'), 'Frame operation refused; use its retained setup status for repair.')
+        require(not result.get('error'), recovery if removing else 'Frame operation refused; use its retained setup status for repair.')
         return result
 
 
@@ -697,7 +759,7 @@ def public_report(pc, frame, bundle):
     # Never serialize pairing proofs, credentials, arbitrary SSH output or commands.
     return {'pc': {key: pc.get(key) for key in ('platform','steamvr','installed','registered','active_pair')},
             'frame': None if frame is None else {key: frame.get(key) for key in
-                ('architecture','installed','legacy_installed','enabled','runtime_compatible','active_pair')},
+                ('architecture','installed','legacy_installed','enabled','runtime_compatible','files_current','active_pair')},
             'bundle': None if bundle is None else {'readiness': bundle.value['readiness'], 'sha256': bundle.pin},
             'automatic_restart': False}
 
@@ -726,7 +788,8 @@ def write_report(local, action, inventory, result=None, failed=False):
     value = {'schema':'sfnp-wizard-log-v1','action':action,'inventory':inventory,
              'result':result,'failed':failed,'automatic_restart':False}
     if failed:
-        value['recovery'] = 'Pairing rollback was attempted. A component may already be installed; run Check, then Repair. No automatic restart occurred.'
+        value['recovery'] = ('Removal may be partial. Use the checked Frame setup emergency-off, stop SteamVR manually and retry with a matching bundle; no complete removal is claimed.'
+                             if action == 'uninstall' else 'Pairing rollback was attempted. A component may already be installed; run Check, then Repair. No automatic restart occurred.')
     raw = encoded(value)
     if before != raw:
         put(path, raw, before)
@@ -743,11 +806,13 @@ def plan(pc, frame, bundle):
     if frame is None:
         return 'Connect the Frame by SSH before choosing Install, Update or Repair.'
     if not frame.get('runtime_compatible'):
-        return 'The Frame runtime is unsupported by this bundle. No files will be changed.'
+        return 'The Frame runtime is unsupported by this bundle. Installation is blocked; Uninstall can still remove a valid owned installation.'
     if not pc['installed'] or not frame['installed']:
         return 'Install the missing PC/Frame components and pair them securely.'
     if pc['state']['manifest_sha256'] != bundle.pin:
         return 'Update both checked components; preserve previous pairing credentials for rollback.'
+    if not frame.get('files_current'):
+        return 'Repair the installed Frame files: an expected artifact is missing or changed. Unchanged metadata alone is not a current installation.'
     if not pc['registered'] or pc['active_pair'] != frame['active_pair'] or not pc['active_pair']:
         return 'Repair registration or explicitly replace the mismatched active pairing.'
     return 'The checked components are current. No update is needed.'
@@ -756,26 +821,32 @@ def plan(pc, frame, bundle):
 def apply(action, bundle, local, remote, pc, frame, challenge):
     require(bundle is not None, 'A verified release bundle is required for Frame actions.')
     bundle.admit(pc['platform'])
-    require(remote is not None and frame is not None and frame.get('architecture') in ('aarch64','arm64') and
-            frame.get('runtime_compatible'), 'A compatible Frame SSH inventory is required.')
+    require(remote is not None and frame is not None and frame.get('architecture') in ('aarch64','arm64'),
+            'A verified Frame SSH inventory is required.')
+    if action == 'uninstall':
+        require(not frame.get('installed') or frame.get('owned_receipt_valid'),
+                'Frame ownership receipt could not be verified. Use the checked Frame setup emergency-off and manual recovery; no complete removal is claimed.')
+    else:
+        require(frame.get('runtime_compatible'), 'A compatible Frame SSH inventory is required.')
     local.verify_tool(pc, bundle.platforms[pc['platform']]['vrpathreg'])
-    same_pair = pair_matches(local, frame, challenge)
+    same_pair = pair_matches(local, frame, challenge) if action != 'uninstall' else False
     require(same_pair or action in ('install', 'repair') and not (pc['active_pair'] or frame.get('active_pair')) or
             action == 'repair' or action == 'uninstall', 'Pairing mismatch: choose explicit Repair; old credentials are preserved.')
     item = bundle.platforms[pc['platform']]
     if action != 'uninstall' and same_pair and pc['installed'] and pc['registered'] and \
             pc['state']['manifest_sha256'] == bundle.pin and \
+            frame.get('files_current') is True and \
             frame.get('package_sha256') == sha(bundle.files['frame-package/package.json']) and \
             frame.get('bridge_component') == parse(bundle.files['frame-package/bridge-component.json']) and \
             all((local.root / relative(name)).exists() and sha(read(local.root / relative(name))) == pin['sha256']
                 for name, pin in item['files'].items()):
         return {'reason':'current','pair_id':pc['active_pair'],'changed':False,'automatic_restart':False}
-    pair = local.pairing(pc['active_pair']) if same_pair else {
+    pair = None if action == 'uninstall' else local.pairing(pc['active_pair']) if same_pair else {
         'schema': PAIR, 'pair_id': secrets.token_hex(16), 'key_hex': secrets.token_hex(32), 'role': 'producer', 'protocol_major': 1}
     transaction = secrets.token_hex(16)
     request = {'command': 'apply', 'action': action, 'readiness': bundle.value['readiness'],
                'runtime_files': bundle.frame['runtime_files'], 'transaction': transaction,
-               'pairing': {**pair, 'role': 'receiver'}, 'files': {name: {
+               'pairing': {**pair, 'role': 'receiver'} if pair else None, 'files': {name: {
                    **bundle.frame['files'][name], 'data': base64.b64encode(bundle.files[name]).decode()}
                    for name in bundle.frame['files']}}
     local.apply_started = True  # Only after all release/payload/capability checks.
@@ -784,10 +855,12 @@ def apply(action, bundle, local, remote, pc, frame, challenge):
         result = remote.call(request)
     except BaseException:
         # No journal is a safe no-op; a partially written owned pair can be undone.
-        remote.call({'command': 'rollback-pair', 'transaction': transaction})
+        if action != 'uninstall':
+            remote.call({'command': 'rollback-pair', 'transaction': transaction})
         raise
     if action == 'uninstall':
-        require(result.get('reason') in ('uninstalled', 'not_installed'), 'Frame uninstall is pending; stop SteamVR manually and run again.')
+        require(result.get('reason') in ('uninstalled', 'not_installed'),
+                'Frame removal is pending. Use the checked Frame setup emergency-off, stop SteamVR manually and retry Uninstall; no complete removal is claimed.')
         local.uninstall(pc)
         return {'reason': 'uninstalled', 'automatic_restart': False}
     require(result.get('reason') == 'installed' and result.get('pair_id') == pair['pair_id'], 'Frame setup did not commit its checked payload.')
@@ -851,8 +924,7 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
             for candidate in dict.fromkeys(value for value in candidates if value):
                 try:
                     probe = remote_factory(candidate, args.user)
-                    observed = probe.call({'command':'inventory','challenge':challenge,
-                                           'runtime_files':bundle.frame['runtime_files'] if bundle else {}})
+                    observed = probe.call(inventory_request(bundle, challenge))
                     if observed.get('architecture') in ('aarch64','arm64'):
                         address = candidate; break
                 except (OSError, SetupError):
@@ -864,8 +936,7 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
                 address = input_fn('Frame IP or name (Enter to keep only the PC inventory): ').strip() or None
         if address:
             remote = remote_factory(host(address), user(args.user), interactive=interactive)
-            frame = remote.call({'command':'inventory','challenge':challenge,
-                                 'runtime_files':bundle.frame['runtime_files'] if bundle else {}})
+            frame = remote.call(inventory_request(bundle, challenge))
         report = public_report(pc, frame, bundle)
         suggestion = plan(pc, frame, bundle)
         if args.check:

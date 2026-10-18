@@ -30,21 +30,30 @@ def verify_package(root):
  builtins.sfnp_fixture_verified=True
  return value
 '''
-NATIVE_SETUP = b'''import builtins,contextlib,hashlib,json
+NATIVE_SETUP = b'''import builtins,contextlib,hashlib,json,os,pathlib
 class Setup:
  def __init__(self,home):self.home=home
  @contextlib.contextmanager
  def locked(self):yield
  def install(self,root):
   if not getattr(builtins,'sfnp_fixture_verified',False):raise ValueError('verifier must precede activation')
+  data=self.home/'.local/share/SteamFrameNativePassthrough';files={}
+  names=list(json.loads((root/'package.json').read_bytes())['files'])+['package.json']
+  for name in names:
+   b=(root/name).read_bytes();p=data/'package'/name;p.parent.mkdir(parents=True,exist_ok=True,mode=0o700);p.write_bytes(b);p.chmod(0o600);files[str(p)]=hashlib.sha256(b).hexdigest()
+  helper=data/'tools/native_passthrough_setup.py';helper.parent.mkdir(parents=True,exist_ok=True,mode=0o700);helper.write_bytes((root/'tools/native_passthrough_setup.py').read_bytes());helper.chmod(0o600);files[str(helper)]=hashlib.sha256(helper.read_bytes()).hexdigest()
   receipt=self.home/'.config/SteamFrameNativePassthrough/install.json';receipt.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-  receipt.write_text(json.dumps({'package_sha256':hashlib.sha256((root/'package.json').read_bytes()).hexdigest()}));receipt.chmod(0o600)
-  component=self.home/'.local/share/SteamFrameNativePassthrough/package/bridge-component.json';component.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-  component.write_bytes((root/'bridge-component.json').read_bytes());component.chmod(0o600)
+  receipt.write_text(json.dumps({'schema':'sfnp-user-install-v1','home':str(self.home),'data':str(data),'manifest_link':str(pathlib.Path('/run/user')/str(os.getuid())/'steam-frame-native-passthrough/receiver.json'),'files':files,'package_sha256':hashlib.sha256((root/'package.json').read_bytes()).hexdigest()}));receipt.chmod(0o600)
   return {'reason':'installed'}
  def uninstall(self):
   receipt=self.home/'.config/SteamFrameNativePassthrough/install.json'
-  if receipt.exists():receipt.unlink()
+  if receipt.exists():
+   for name,pin in json.loads(receipt.read_bytes())['files'].items():
+    p=pathlib.Path(name)
+    if p.exists():
+     if hashlib.sha256(p.read_bytes()).hexdigest()!=pin:raise ValueError('unknown changed file')
+     p.unlink()
+   receipt.unlink()
   return {'reason':'uninstalled'}
 '''
 
@@ -107,6 +116,7 @@ class WizardTests(unittest.TestCase):
         profile={'profile':'owned-fixture','complete':True,'architecture':'aarch64','runtime_files':{
             'fixture':{'location':'home','path':'runtime.bin','bytes':len(self.runtime),'sha256':s.sha(self.runtime)}}}
         artifacts={'compatibility.json':s.encoded(profile),'scene-presenter.spv':b'fake shader',
+                   'libVkLayer_frame_pixel_snapshot.so':b'owned fake native library',
                    'tools/prepare_native_release.py':verifier,'source-manifest.json':b'{}\n'}
         if component:artifacts['bridge-component.json']=s.encoded({'schema':'sfnp-bridge-component-v1',
             'role':'receiver','bridge_protocol':proto,'provider':'vrlink-complete-au-v1'})
@@ -136,13 +146,84 @@ class WizardTests(unittest.TestCase):
     def inventory(self):
         challenge='12'*32
         with mock.patch.object(self.frame.namespace['platform'],'machine',return_value='aarch64'):
-            info=self.frame.call({'command':'inventory','challenge':challenge,'runtime_files':self.bundle.frame['runtime_files']})
+            info=self.frame.call(s.inventory_request(self.bundle,challenge))
         return self.local.inventory(),info,challenge
     def apply(self, action='install'):
         pc,frame,challenge=self.inventory()
         return s.apply(action,self.bundle,self.local,self.frame,pc,frame,challenge)
     def snapshot(self):
         return {str(p.relative_to(self.base)):p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+
+    def test_cold_bundle_and_remote_payload_first_reads(self):
+        # Model freshly extracted files: no pin-generating read after resetting atime.
+        for path in self.bundle_root.rglob('*'):
+            if path.is_file():
+                info=path.stat();os.utime(path,ns=(1,info.st_mtime_ns))
+        fresh=s.Bundle(self.bundle_root)
+        self.assertEqual(fresh.value,self.bundle.value)
+        path=self.framehome/'first-read.bin';payload=b'cold remote payload'
+        path.write_bytes(payload);info=path.stat();os.utime(path,ns=(1,info.st_mtime_ns))
+        self.assertEqual(self.frame.namespace['raw'](path),payload)
+
+    def test_readers_ignore_only_atime_and_reject_identity_changes(self):
+        path=self.framehome/'identity.bin';payload=b'actual file bytes'
+        path.write_bytes(payload)
+        fields=('st_dev','st_ino','st_mode','st_nlink','st_uid','st_gid','st_size',
+                'st_mtime_ns','st_ctime_ns','st_atime_ns')
+        actual_fstat=os.fstat
+        def observed(descriptor, changed):
+            info=actual_fstat(descriptor)
+            values={field:getattr(info,field) for field in fields}
+            values[changed]+=1
+            return types.SimpleNamespace(**values)
+        for reader in (s.read,self.frame.namespace['raw']):
+            with self.subTest(reader=reader.__name__,field='st_atime_ns'):
+                with mock.patch.object(os,'fstat',side_effect=lambda fd:observed(fd,'st_atime_ns')):
+                    self.assertEqual(reader(path),payload)
+            for field in fields[:-1]:
+                with self.subTest(reader=reader.__name__,field=field):
+                    with mock.patch.object(os,'fstat',side_effect=lambda fd,key=field:observed(fd,key)):
+                        with self.assertRaises(ValueError):reader(path)
+
+    def test_readers_refuse_actual_midread_replacement_or_mutation(self):
+        actual_fstat=os.fstat
+        for reader in (s.read,self.frame.namespace['raw']):
+            for change in ('mtime','replacement'):
+                with self.subTest(reader=reader.__name__,change=change):
+                    path=self.framehome/'changing.bin';path.write_bytes(b'original bytes')
+                    def changed(descriptor):
+                        before=actual_fstat(descriptor)
+                        if change=='mtime':
+                            os.utime(path,ns=(before.st_atime_ns,before.st_mtime_ns+1000000000))
+                        else:
+                            other=path.with_suffix('.new');other.write_bytes(b'replaced bytes');os.replace(other,path)
+                        return before
+                    with mock.patch.object(os,'fstat',side_effect=changed):
+                        with self.assertRaises(ValueError):reader(path)
+
+    def test_combined_platform_inventory_shares_only_identical_producer_files(self):
+        linux=copy.deepcopy(self.manifest['platforms']['windows-x86_64'])
+        linux['reviewed']=False;linux['native_bridge']=False
+        common='pc-provider/driver.vrdrivermanifest'
+        native='pc-provider/bin/linux64/driver_fixture.so';payload=b'Linux prototype fixture'
+        path=self.bundle_root/native;path.parent.mkdir(parents=True);path.write_bytes(payload)
+        linux['files']={common:linux['files'][common],native:{'bytes':len(payload),'sha256':s.sha(payload)}}
+        linux['vrpathreg']['path']='bin/linux64/vrpathreg'
+        self.manifest['platforms']['linux-x86_64']=linux;self.save_manifest()
+        combined=s.Bundle(self.bundle_root)
+        self.assertEqual(combined.files[common],self.bundle.files[common])
+        self.assertEqual(combined.files[native],payload)
+        self.assertEqual(combined.platforms['linux-x86_64']['vrpathreg']['path'],'bin/linux64/vrpathreg')
+        with self.assertRaisesRegex(s.SetupError,'Linux'):combined.admit('linux-x86_64')
+        linux['vrpathreg']['path']='bin/win64/vrpathreg.exe';self.save_manifest()
+        with self.assertRaisesRegex(s.SetupError,'registration tool contract'):s.Bundle(self.bundle_root)
+        linux['vrpathreg']['path']='bin/linux64/vrpathreg'
+        linux['files'][common]['sha256']='b'*64;self.save_manifest()
+        with self.assertRaisesRegex(s.SetupError,'hash mismatch'):s.Bundle(self.bundle_root)
+        linux['files'][common]=copy.deepcopy(self.manifest['platforms']['windows-x86_64']['files'][common])
+        frame_name='frame-package/package.json'
+        linux['files'][frame_name]=self.manifest['frame']['files'][frame_name];self.save_manifest()
+        with self.assertRaisesRegex(s.SetupError,'Overlapping'):s.Bundle(self.bundle_root)
 
     def test_remote_generated_data_is_real_json(self):
         raw=self.frame.namespace['data']({'test':1})
@@ -162,13 +243,33 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(len(bytes.fromhex(key['key_hex'])),32)
         self.assertEqual(stat.S_IMODE((self.local.root/'pairings'/(result['pair_id']+'.json')).stat().st_mode),0o600)
         self.assertFalse((self.framehome/'.config/steam-link-native-passthrough/pairings/transaction.json').exists())
-        self.assertFalse(any((self.framehome/'.local/share/steam-link-native-passthrough/staging').iterdir()))
+        self.assertEqual(list((self.framehome/'.local/share/steam-link-native-passthrough/staging').rglob('*')),[])
         self.assertTrue(self.local.inventory()['registered'])
     def test_repeat_is_true_noop_and_preserves_keys(self):
         first=self.apply();before=self.snapshot();calls=len(self.system.calls)
         second=self.apply('repair')
         self.assertFalse(second['changed']);self.assertEqual(first['pair_id'],second['pair_id'])
         self.assertEqual(before,self.snapshot());self.assertEqual(calls,len(self.system.calls))
+    def test_installed_artifacts_are_rehashed_before_repeat_noop(self):
+        self.apply()
+        library=self.framehome/'.local/share/SteamFrameNativePassthrough/package/libVkLayer_frame_pixel_snapshot.so'
+        for mode in ('corrupt','missing'):
+            with self.subTest(mode=mode):
+                if mode=='corrupt':s.put(library,b'changed actual library',s.read(library))
+                else:library.unlink()
+                before=self.snapshot();pc,frame,_=self.inventory()
+                self.assertTrue(frame['owned_receipt_valid']);self.assertFalse(frame['files_current'])
+                self.assertEqual(before,self.snapshot());self.assertIn('Repair',s.plan(pc,frame,self.bundle))
+                calls=self.frame.commands.count('apply');result=self.apply('repair')
+                self.assertNotEqual(result.get('changed'),False)
+                self.assertEqual(self.frame.commands.count('apply'),calls+1)
+                self.assertTrue(self.inventory()[1]['files_current'])
+    def test_installed_helper_is_also_checked_without_import(self):
+        self.apply()
+        helper=self.framehome/'.local/share/SteamFrameNativePassthrough/tools/native_passthrough_setup.py'
+        s.put(helper,b'raise RuntimeError("must not be imported")\n',s.read(helper))
+        before=self.snapshot();frame=self.inventory()[1]
+        self.assertFalse(frame['files_current']);self.assertEqual(before,self.snapshot())
     def test_prototype_never_stages_or_pairs(self):
         self.make_bundle('prototype');before=self.snapshot()
         with self.assertRaisesRegex(s.SetupError,'Prototype'):self.apply()
@@ -226,6 +327,37 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(self.apply('uninstall')['reason'],'uninstalled')
         self.assertFalse(self.local.inventory()['registered']);self.assertIsNone(self.local.state())
         self.assertEqual(userfile.read_bytes(),b'keep');self.assertIsNotNone(self.local.pairing(pairid))
+    def test_changed_runtime_does_not_block_owned_uninstall(self):
+        self.apply()
+        runtime=self.framehome/'runtime.bin';s.put(runtime,b'new runtime version',s.read(runtime))
+        pc,frame,challenge=self.inventory();self.assertFalse(frame['runtime_compatible'])
+        self.assertTrue(frame['owned_receipt_valid']);self.assertIn('Uninstall',s.plan(pc,frame,self.bundle))
+        original=self.frame.namespace['module']
+        def checked_removal(path,name):
+            if path.name=='prepare_native_release.py':raise AssertionError('removal must not re-admit changed runtime')
+            return original(path,name)
+        self.frame.namespace['module']=checked_removal
+        result=s.apply('uninstall',self.bundle,self.local,self.frame,pc,frame,challenge)
+        self.assertEqual(result['reason'],'uninstalled');self.assertFalse(self.local.inventory()['registered'])
+        self.assertEqual(runtime.read_bytes(),b'new runtime version')
+    def test_invalid_ownership_blocks_uninstall_without_staging(self):
+        self.apply()
+        receipt=self.framehome/'.config/SteamFrameNativePassthrough/install.json'
+        s.put(receipt,b'{"schema":"foreign"}\n',s.read(receipt));before=self.snapshot()
+        calls=self.frame.commands.count('apply')
+        with self.assertRaisesRegex(s.SetupError,'emergency-off'):self.apply('uninstall')
+        self.assertEqual(before,self.snapshot());self.assertEqual(calls,self.frame.commands.count('apply'))
+    def test_native_uninstall_pending_does_not_claim_complete_removal(self):
+        self.apply()
+        original=self.frame.namespace['module']
+        def pending(path,name):
+            module=original(path,name)
+            if path.name=='native_passthrough_setup.py':
+                module.Setup.uninstall=lambda self:{'reason':'uninstall_pending'}
+            return module
+        self.frame.namespace['module']=pending
+        with self.assertRaisesRegex(s.SetupError,'emergency-off.*no complete removal'):self.apply('uninstall')
+        self.assertTrue(self.local.inventory()['registered']);self.assertIsNotNone(self.local.state())
     def test_linux_refuses_windows_provider(self):
         pc,frame,challenge=self.inventory();pc['platform']='linux-x86_64';before=self.snapshot()
         with self.assertRaisesRegex(s.SetupError,'Linux'):s.apply('install',self.bundle,self.local,self.frame,pc,frame,challenge)
