@@ -36,6 +36,7 @@ on:
       - '.github/workflows/mask-tests.yml'
       # Bounded lifecycle-only repairs have their own production-code gate.
       - '.github/workflows/stream-lifecycle-tests.yml'
+      - '.github/workflows/sender-resource-tests.yml'
       - 'bridge/stream_bridge_control.*'
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'pc/stream-bridge-sender-provider-runtime.*'
@@ -78,6 +79,7 @@ on:
       - '.github/workflows/setup-tests.yml'
       - '.github/workflows/mask-tests.yml'
       - '.github/workflows/stream-lifecycle-tests.yml'
+      - '.github/workflows/sender-resource-tests.yml'
       - 'bridge/stream_bridge_control.*'
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'pc/stream-bridge-sender-provider-runtime.*'
