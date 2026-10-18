@@ -495,7 +495,12 @@ class SetupApp(App[int]):
 
     def set_stage(self, key):
         self.stage_name = key
-        self.query_one("#step", Static).update(self.words.get(key, self.words["working"]))
+        label = self.words.get(key, self.words["working"])
+        self.query_one("#step", Static).update(label)
+        if key == "complete":
+            self.set_working(None)
+        elif self.prompt is None:
+            self.set_working(label)
 
     def set_working(self, label):
         self.query_one("#work").display = label is not None
