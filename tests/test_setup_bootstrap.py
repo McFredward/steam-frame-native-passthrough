@@ -120,8 +120,8 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(bootstrap.select_asset(self.release())['size'], 512)
 
     def test_preview_wrappers_pin_reviewed_core_and_select_manager(self):
-        for name, source, flag in [('get-preview.ps1', 'get.ps1', '-Manage'),
-                                   ('get-preview.sh', 'get.sh', '--manage')]:
+        for name, source, flag in [('get-preview.ps1', 'get.ps1', '-BridgePreview'),
+                                   ('get-preview.sh', 'get.sh', '--bridge-preview')]:
             text = (ROOT / name).read_text()
             digest = hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
             self.assertIn(digest, text)
