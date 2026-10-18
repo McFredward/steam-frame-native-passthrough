@@ -175,14 +175,23 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
             pointerBits<LPCWSTR>(&procAddress),&self))return false;
         (void)boundary();
-        if(request_.explicitlyEnabled&&(!attachDirect(candidate)||!coverage_.configure(reinterpret_cast<std::uintptr_t>(candidate))))return false;
-        DWORD old=0;if(!VirtualProtect(slot_,sizeof(void*),PAGE_READWRITE,&old)){restoreDirect();return false;}
+        if(request_.explicitlyEnabled){
+            if(!attachDirect(candidate))return false;
+            if(!coverage_.configure(reinterpret_cast<std::uintptr_t>(candidate))){
+                coverage_.stop();restoreDirect();return false;
+            }
+        }
+        // Retire coverage observation before unpublishing its DirectMode
+        // source wrappers. Cached callbacks retain their process-lifetime
+        // owners even after this failed attachment has been unwound.
+        const auto undoCoverage=[&]{if(request_.explicitlyEnabled)coverage_.stop();restoreDirect();};
+        DWORD old=0;if(!VirtualProtect(slot_,sizeof(void*),PAGE_READWRITE,&old)){undoCoverage();return false;}
         const auto previous=InterlockedCompareExchangePointer(slot_,pointerBits<void*>(&procAddress),pointerBits<void*>(OriginalGetProcAddress));
         DWORD ignored=0;const bool protection=VirtualProtect(slot_,sizeof(void*),old,&ignored)!=0;
-        if(previous!=pointerBits<void*>(OriginalGetProcAddress)){slot_=nullptr;restoreDirect();return false;}
+        if(previous!=pointerBits<void*>(OriginalGetProcAddress)){slot_=nullptr;undoCoverage();return false;}
         if(!protection){ // Undo our entry; never leave a successful partial activation.
             InterlockedCompareExchangePointer(slot_,pointerBits<void*>(OriginalGetProcAddress),pointerBits<void*>(&procAddress));
-            slot_=nullptr;restoreDirect();return false;
+            slot_=nullptr;undoCoverage();return false;
         }
         bootstrapStatus.store(4);return true; // Armed; future factory call not yet observed.
     }
@@ -273,8 +282,8 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             // Public COM table metadata only; never query a new immediate
             // context here, since even a diagnostic getter may change dispatch.
             std::snprintf(text,sizeof text,
-                "coverage context: hook-slots=0x%x, table-readable=%u, table-stable=%u, native-device-pointer=%u",
-                stats.contextHookSlots,unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame));report(text);
+                "coverage context: hook-slots=0x%x, table-readable=%u, table-stable=%u, native-device-pointer=%u, facade-slots=%u, native-dispatch-mutations=%u",
+                stats.contextHookSlots,unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextFacadeSlots,stats.nativeDispatchMutations);report(text);
         };
         std::uint32_t reportedFailures=0;
         const auto reportFailure=[&]{
