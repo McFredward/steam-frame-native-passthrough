@@ -1,214 +1,257 @@
-// Public OpenVR transport diagnostic. Never launched by the product or installer.
+// Explicit static public-overlay alpha witness; never changes Steam/Frame settings.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <tlhelp32.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <conio.h>
+#include <io.h>
+#include <fcntl.h>
 #include <openvr_capi.h>
 #include "projection-overlay-probe-core.h"
 #include <atomic>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <string>
-
 namespace {
 std::atomic<bool> stopRequested{false};
 BOOL WINAPI consoleControl(DWORD event) {
     if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT || event == CTRL_CLOSE_EVENT) {
-        stopRequested = true;
-        return TRUE;
+        stopRequested.store(true); return TRUE;
     }
     return FALSE;
 }
-bool runningServer() {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32W entry{}; entry.dwSize = sizeof(entry);
-    bool found = false;
-    for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry))
-        if (_wcsicmp(entry.szExeFile,L"vrserver.exe") == 0) { found = true; break; }
-    CloseHandle(snapshot);
-    return found;
-}
 template<class T> void release(T*& p) { if (p) { p->Release(); p = nullptr; } }
+class Stdout final : public projection_probe::LogSink {
+public:
+    bool write(const std::string& line) override {
+        return std::fwrite(line.data(),1,line.size(),stdout) == line.size() && std::fflush(stdout) == 0;
+    }
+};
+HANDLE checkedLibrary(const wchar_t* path) {
+    const auto length = std::wcslen(path);
+    if (length < 4 || length >= 1024 || path[1] != L':' || path[2] != L'\\'
+        || !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')))
+        return INVALID_HANDLE_VALUE;
+    wchar_t canonical[1024];
+    const DWORD size = GetFullPathNameW(path,1024,canonical,nullptr);
+    if (!size || size >= 1024 || _wcsicmp(path,canonical)
+        || _wcsicmp(std::wcsrchr(path,L'\\') + 1,L"openvr_api.dll")) return INVALID_HANDLE_VALUE;
+    for (std::size_t i = 3; i < length; ++i) if (canonical[i] == L'\\') {
+        canonical[i] = 0; const DWORD flags = GetFileAttributesW(canonical); canonical[i] = L'\\';
+        if (flags == INVALID_FILE_ATTRIBUTES || (flags & FILE_ATTRIBUTE_REPARSE_POINT)) return INVALID_HANDLE_VALUE;
+    }
+    const DWORD flags = GetFileAttributesW(path);
+    if (flags == INVALID_FILE_ATTRIBUTES || (flags & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)))
+        return INVALID_HANDLE_VALUE;
+    HANDLE file = CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if (file == INVALID_HANDLE_VALUE) return file;
+    LARGE_INTEGER bytes{}; IMAGE_DOS_HEADER dos{}; IMAGE_NT_HEADERS64 pe{}; DWORD read = 0;
+    bool valid = GetFileSizeEx(file,&bytes) && bytes.QuadPart >= 512 && bytes.QuadPart <= 8 * 1024 * 1024
+        && ReadFile(file,&dos,sizeof(dos),&read,nullptr) && read == sizeof(dos)
+        && dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew >= 64
+        && dos.e_lfanew <= bytes.QuadPart - static_cast<LONGLONG>(sizeof(pe));
+    if (valid) valid = SetFilePointer(file,dos.e_lfanew,nullptr,FILE_BEGIN) != INVALID_SET_FILE_POINTER
+        && ReadFile(file,&pe,sizeof(pe),&read,nullptr) && read == sizeof(pe)
+        && pe.Signature == IMAGE_NT_SIGNATURE && pe.FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64
+        && pe.FileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER64)
+        && pe.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && (pe.FileHeader.Characteristics & IMAGE_FILE_DLL);
+    if (!valid) { CloseHandle(file); return INVALID_HANDLE_VALUE; }
+    return file;
+}
 
 class PublicApi final : public projection_probe::Api {
 public:
-    explicit PublicApi(const wchar_t* dll) : path_(dll) {}
+    PublicApi(const wchar_t* dll, projection_probe::Log& log) : path_(dll), log_(log) {}
     ~PublicApi() override { shutdown(); }
     bool initialize() override {
-        if (!runningServer()) return fail("existing vrserver.exe required; refusing runtime autostart");
-        module_ = LoadLibraryExW(path_.c_str(), nullptr,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (!module_) return fail("LoadLibraryExW failed",GetLastError());
-        init_ = reinterpret_cast<Init>(GetProcAddress(module_,"VR_InitInternal"));
-        get_ = reinterpret_cast<Get>(GetProcAddress(module_,"VR_GetGenericInterface"));
-        shutdown_ = reinterpret_cast<Shutdown>(GetProcAddress(module_,"VR_ShutdownInternal"));
-        if (!init_ || !get_ || !shutdown_) return fail("public OpenVR exports missing");
+        file_ = checkedLibrary(path_.c_str());
+        if (file_ == INVALID_HANDLE_VALUE) return fail("library-path-or-pe",GetLastError());
+        module_ = LoadLibraryExW(path_.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!module_) return fail("library-load",GetLastError());
+        if (!exported(init_,"VR_InitInternal2") || !exported(get_,"VR_GetGenericInterface")
+            || !exported(shutdown_,"VR_ShutdownInternal")) return fail("exports");
         EVRInitError error = EVRInitError_VRInitError_None;
-        init_(&error, EVRApplicationType_VRApplication_Overlay);
-        initialized_ = error == EVRInitError_VRInitError_None;
-        if (!initialized_) return fail("VR_InitInternal Overlay failed",error);
-        std::string name = std::string("FnTable:") + IVRSystem_Version;
-        system_ = reinterpret_cast<VR_IVRSystem_FnTable*>(get_(name.c_str(),&error));
-        if (error || !system_) return fail("public IVRSystem table refused",error);
-        name = std::string("FnTable:") + IVROverlay_Version;
-        overlay_ = reinterpret_cast<VR_IVROverlay_FnTable*>(get_(name.c_str(),&error));
-        if (error || !overlay_) return fail("public IVROverlay table refused",error);
+        // Background never starts/keeps alive the runtime. No Overlay/Scene fallback.
+        init_(&error,EVRApplicationType_VRApplication_Background,nullptr);
+        if (error != EVRInitError_VRInitError_None) return fail("background-init",error);
+        initialized_ = true;
+        system_ = static_cast<VR_IVRSystem_FnTable*>(get_("FnTable:IVRSystem_026",&error));
+        if (error || !system_) return fail("system026",error);
+        overlay_ = static_cast<VR_IVROverlay_FnTable*>(get_("FnTable:IVROverlay_028",&error));
+        if (error || !overlay_) return fail("overlay028",error);
+        if (!system_->GetDeviceToAbsoluteTrackingPose || !system_->GetDXGIOutputInfo
+            || !system_->GetEyeToHeadTransform || !system_->GetProjectionRaw || !system_->GetRecommendedRenderTargetSize
+            || !system_->PollNextEvent || !overlay_->CreateOverlay || !overlay_->DestroyOverlay
+            || !overlay_->SetOverlayTransformProjection || !overlay_->SetOverlayInputMethod || !overlay_->SetOverlayFlag
+            || !overlay_->SetOverlayColor || !overlay_->SetOverlayAlpha || !overlay_->SetOverlayTextureColorSpace
+            || !overlay_->SetOverlayTexture || !overlay_->ClearOverlayTexture || !overlay_->ShowOverlay
+            || !overlay_->HideOverlay || !overlay_->IsDashboardVisible) return fail("required-getters-or-overlay-functions");
+        if (overlay_->IsDashboardVisible()) return fail("close-dashboard-hold-head-still");
         TrackedDevicePose_t pose{};
         system_->GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin_TrackingUniverseStanding,0,&pose,1);
-        if (!pose.bDeviceIsConnected || !pose.bPoseIsValid) return fail("current HMD pose invalid");
+        if (!pose.bDeviceIsConnected || !pose.bPoseIsValid) return fail("hmd-pose");
         static_assert(sizeof(head_) == sizeof(pose.mDeviceToAbsoluteTracking),"matrix ABI");
-        for (unsigned r = 0; r < 3; ++r) for (unsigned c = 0; c < 4; ++c)
-            head_.m[r][c] = pose.mDeviceToAbsoluteTracking.m[r][c];
-        if (!projection_probe::finite(head_)) return fail("HMD matrix nonfinite");
-        int32_t adapterIndex = -1;
-        system_->GetDXGIOutputInfo(&adapterIndex);
-        if (adapterIndex < 0) return fail("HMD DXGI adapter unavailable");
-        IDXGIFactory1* factory = nullptr;
-        IDXGIAdapter1* adapter = nullptr;
+        for (unsigned r=0; r<3; ++r) for (unsigned c=0; c<4; ++c) head_.m[r][c]=pose.mDeviceToAbsoluteTracking.m[r][c];
+        if (!projection_probe::finite(head_)) return fail("finite-hmd-pose");
+        std::uint32_t width = 0, height = 0;
+        system_->GetRecommendedRenderTargetSize(&width,&height);
+        if (!width || !height) return fail("recommended-eye-size");
+        int32_t adapterIndex = -1; system_->GetDXGIOutputInfo(&adapterIndex);
+        if (adapterIndex < 0) return fail("dxgi-adapter");
+        IDXGIFactory1* factory = nullptr; IDXGIAdapter1* adapter = nullptr;
         HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1),reinterpret_cast<void**>(&factory));
         if (SUCCEEDED(hr)) hr = factory->EnumAdapters1(static_cast<UINT>(adapterIndex),&adapter);
         release(factory);
-        if (FAILED(hr)) { release(adapter); return fail("DXGI adapter lookup failed",hr); }
+        if (FAILED(hr)) { release(adapter); return fail("dxgi-lookup",hr); }
         hr = D3D11CreateDevice(adapter,D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,nullptr,0,
             D3D11_SDK_VERSION,&device_,nullptr,&context_);
         release(adapter);
-        if (FAILED(hr)) return fail("D3D11 device failed",hr);
-        std::printf("SDK interfaces %s / %s; DXGI adapter %d; static RGBA8 %ux%u per eye\n",
-            IVRSystem_Version,IVROverlay_Version,adapterIndex,
-            projection_probe::PatternSize,projection_probe::PatternSize);
-        return true;
+        if (FAILED(hr)) return fail("d3d11-device",hr);
+        return line("SFNP_PROJECTION_META_V2 system=026 overlay=028 application=Background recommended_eye=%u,%u pattern=%u adapter=%d chart_min=0.40 chart_max=0.60 hold_head_still=1\n",
+            width,height,projection_probe::PatternSize,adapterIndex);
     }
     bool create(unsigned eye, projection_probe::Handle& handle) override {
-        char key[100], title[100];
+        char key[100], title[80];
         std::snprintf(key,sizeof(key),"native-passthrough.projection-probe.%lu.%u",GetCurrentProcessId(),eye);
-        std::snprintf(title,sizeof(title),"RGBA transport probe %s",eye == 0 ? "LEFT" : "RIGHT");
+        std::snprintf(title,sizeof(title),"Independent alpha witness %s",eye == 0 ? "LEFT" : "RIGHT");
         VROverlayHandle_t native = 0;
-        const auto error = overlay_->CreateOverlay(key,title,&native);
-        handle = native;
-        std::printf("eye=%u overlay=%llu create_error=%d\n",eye,static_cast<unsigned long long>(native),error);
-        return check(error,"CreateOverlay");
+        const auto error = overlay_->CreateOverlay(key,title,&native); handle = native;
+        return check(error,"create-overlay");
     }
     bool configure(unsigned eye, projection_probe::Handle handle) override {
+        if (eye > 1) return fail("eye-range");
         const auto nativeEye = eye == 0 ? EVREye_Eye_Left : EVREye_Eye_Right;
         const auto relative = system_->GetEyeToHeadTransform(nativeEye);
         projection_probe::Matrix eyeToHead{};
-        for (unsigned r = 0; r < 3; ++r) for (unsigned c = 0; c < 4; ++c)
-            eyeToHead.m[r][c] = relative.m[r][c];
-        auto absolute = projection_probe::compose(head_,eyeToHead);
-        if (!projection_probe::finite(absolute)) return fail("eye matrix nonfinite");
-        HmdMatrix34_t nativePose{};
-        std::memcpy(&nativePose,&absolute,sizeof(nativePose));
-        VROverlayProjection_t projection{};
-        system_->GetProjectionRaw(nativeEye,&projection.fLeft,&projection.fRight,&projection.fTop,&projection.fBottom);
-        if (!std::isfinite(projection.fLeft) || !std::isfinite(projection.fRight) ||
-            !std::isfinite(projection.fTop) || !std::isfinite(projection.fBottom) ||
-            projection.fLeft >= projection.fRight || projection.fTop >= projection.fBottom)
-            return fail("invalid public projection frustum");
-        std::printf("eye=%u frustum=%g,%g,%g,%g frozen_standing_eye_pose=",eye,
-            projection.fLeft,projection.fRight,projection.fTop,projection.fBottom);
-        for (const auto& row : absolute.m) for (float n : row) std::printf("%g,",n);
-        std::printf("\n");
-        return check(overlay_->SetOverlayTransformProjection(handle,ETrackingUniverseOrigin_TrackingUniverseStanding,
-                &nativePose,&projection,nativeEye),"SetOverlayTransformProjection") &&
-            check(overlay_->SetOverlayInputMethod(handle,VROverlayInputMethod_None),"SetOverlayInputMethod") &&
-            check(overlay_->SetOverlayFlag(handle,VROverlayFlags_IsPremultiplied,true),"IsPremultiplied") &&
-            check(overlay_->SetOverlayFlag(handle,VROverlayFlags_IgnoreTextureAlpha,false),"IgnoreTextureAlpha=false") &&
-            check(overlay_->SetOverlayFlag(handle,VROverlayFlags_VisibleInDashboard,false),"VisibleInDashboard=false") &&
-            check(overlay_->SetOverlayColor(handle,1,1,1),"SetOverlayColor") &&
-            check(overlay_->SetOverlayAlpha(handle,1),"SetOverlayAlpha") &&
-            check(overlay_->SetOverlayTextureColorSpace(handle,EColorSpace_ColorSpace_Gamma),"SetOverlayTextureColorSpace");
+        for (unsigned r=0; r<3; ++r) for (unsigned c=0; c<4; ++c) eyeToHead.m[r][c]=relative.m[r][c];
+        const auto absolute = projection_probe::compose(head_,eyeToHead);
+        if (!projection_probe::finite(absolute)) return fail("finite-eye-pose");
+        projection_probe::Frustum full{}, cropped{};
+        system_->GetProjectionRaw(nativeEye,&full.left,&full.right,&full.top,&full.bottom);
+        if (!projection_probe::central(full,cropped)) return fail("central-frustum");
+        HmdMatrix34_t pose{}; std::memcpy(&pose,&absolute,sizeof(pose));
+        VROverlayProjection_t projection{cropped.left,cropped.right,cropped.top,cropped.bottom};
+        if (!line("SFNP_PROJECTION_GEOMETRY_V2 eye=%u full=%g,%g,%g,%g central=%g,%g,%g,%g pose=%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g\n",
+            eye,full.left,full.right,full.top,full.bottom,cropped.left,cropped.right,cropped.top,cropped.bottom,
+            absolute.m[0][0],absolute.m[0][1],absolute.m[0][2],absolute.m[0][3],
+            absolute.m[1][0],absolute.m[1][1],absolute.m[1][2],absolute.m[1][3],
+            absolute.m[2][0],absolute.m[2][1],absolute.m[2][2],absolute.m[2][3])) return false;
+        return check(overlay_->SetOverlayTransformProjection(handle,ETrackingUniverseOrigin_TrackingUniverseStanding,&pose,&projection,nativeEye),"projection-transform")
+            && check(overlay_->SetOverlayInputMethod(handle,VROverlayInputMethod_None),"input-none")
+            && check(overlay_->SetOverlayFlag(handle,VROverlayFlags_IsPremultiplied,true),"premultiplied")
+            && check(overlay_->SetOverlayFlag(handle,VROverlayFlags_IgnoreTextureAlpha,false),"preserve-alpha")
+            && check(overlay_->SetOverlayFlag(handle,VROverlayFlags_VisibleInDashboard,false),"hide-in-dashboard")
+            && check(overlay_->SetOverlayColor(handle,1,1,1),"overlay-color")
+            && check(overlay_->SetOverlayAlpha(handle,0),"prepare-alpha-zero")
+            && check(overlay_->SetOverlayTextureColorSpace(handle,EColorSpace_ColorSpace_Gamma),"texture-gamma");
     }
     bool texture(unsigned eye, projection_probe::Handle handle) override {
+        if (eye > 1) return fail("eye-range");
         const auto pixels = projection_probe::pattern(eye);
         D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = desc.Height = projection_probe::PatternSize;
-        desc.MipLevels = desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_IMMUTABLE;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA data{};
-        data.pSysMem = pixels.data();
+        desc.Width = desc.Height = projection_probe::PatternSize; desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA data{}; data.pSysMem = pixels.data();
         data.SysMemPitch = projection_probe::PatternSize * sizeof(projection_probe::Pixel);
         const HRESULT hr = device_->CreateTexture2D(&desc,&data,&textures_[eye]);
-        if (FAILED(hr)) return fail("immutable RGBA8 texture creation failed",hr);
+        if (FAILED(hr)) return fail("immutable-rgba8",hr);
         Texture_t texture{textures_[eye],ETextureType_TextureType_DirectX,EColorSpace_ColorSpace_Gamma};
-        return check(overlay_->SetOverlayTexture(handle,&texture),"SetOverlayTexture");
+        return check(overlay_->SetOverlayTexture(handle,&texture),"submit-overlay-texture");
     }
-    bool show(projection_probe::Handle h) override { return check(overlay_->ShowOverlay(h),"ShowOverlay"); }
-    bool hide(projection_probe::Handle h) override { return check(overlay_->HideOverlay(h),"HideOverlay"); }
-    bool clear(projection_probe::Handle h) override { return check(overlay_->ClearOverlayTexture(h),"ClearOverlayTexture"); }
-    bool destroy(projection_probe::Handle h) override { return check(overlay_->DestroyOverlay(h),"DestroyOverlay"); }
+    bool show(projection_probe::Handle h) override { return check(overlay_->ShowOverlay(h),"show-overlay"); }
+    bool reveal(projection_probe::Handle h) override { return check(overlay_->SetOverlayAlpha(h,1),"reveal-alpha-one"); }
+    bool ready() override {
+        if (overlay_->IsDashboardVisible()) return fail("dashboard-open-before-ready");
+        return log_.emit(projection_probe::ReadyLine);
+    }
+    void stopped(bool clean) override {
+        if (clean) log_.emit(projection_probe::StoppedLine);
+        else fail("overlay-cleanup");
+    }
+    bool hide(projection_probe::Handle h) override { return check(overlay_->HideOverlay(h),"hide-overlay"); }
+    bool clear(projection_probe::Handle h) override { return check(overlay_->ClearOverlayTexture(h),"clear-texture"); }
+    bool destroy(projection_probe::Handle h) override { return check(overlay_->DestroyOverlay(h),"destroy-overlay"); }
     bool quitting() {
         VREvent_t event{};
-        // Observe runtime quit without consuming another application's input.
-        while (system_ && system_->PollNextEvent(&event,sizeof(event)))
+        for (unsigned i = 0; i < 16 && system_ && system_->PollNextEvent(&event,sizeof(event)); ++i)
             if (event.eventType == EVREventType_VREvent_Quit) return true;
         return false;
     }
     void shutdown() override {
-        if (initialized_ && shutdown_) { shutdown_(); initialized_ = false; }
+        if (initialized_ && shutdown_) { initialized_ = false; shutdown_(); }
         for (auto& texture : textures_) release(texture);
-        release(context_); release(device_);
-        system_ = nullptr; overlay_ = nullptr;
-        if (module_) { FreeLibrary(module_); module_ = nullptr; }
+        release(context_); release(device_); system_ = nullptr; overlay_ = nullptr;
         init_ = nullptr; get_ = nullptr; shutdown_ = nullptr;
+        if (module_) { FreeLibrary(module_); module_ = nullptr; }
+        if (file_ != INVALID_HANDLE_VALUE) { CloseHandle(file_); file_ = INVALID_HANDLE_VALUE; }
     }
 private:
-    static bool fail(const char* what, long error = 0) {
-        std::fprintf(stderr,"REFUSED %s (code=%ld)\n",what,error); return false;
+    bool line(const char* format, ...) {
+        char buffer[1024]; va_list args; va_start(args,format);
+        const int n = std::vsnprintf(buffer,sizeof(buffer),format,args); va_end(args);
+        return n > 0 && n < static_cast<int>(sizeof(buffer)) && log_.emit(std::string(buffer,static_cast<std::size_t>(n)));
     }
-    static bool check(EVROverlayError error, const char* call) {
-        return error == EVROverlayError_VROverlayError_None || fail(call,error);
+    bool fail(const char* stage, long error = 0) { line("SFNP_PROJECTION_REFUSED_V2 stage=%s code=%ld\n",stage,error); return false; }
+    bool check(EVROverlayError error, const char* call) { return error == EVROverlayError_VROverlayError_None || fail(call,error); }
+    template<class T> bool exported(T& value, const char* name) {
+        FARPROC address = GetProcAddress(module_,name); static_assert(sizeof(address) == sizeof(value),"export ABI");
+        std::memcpy(&value,&address,sizeof(value)); return value != nullptr;
     }
-    using Init = intptr_t (__cdecl*)(EVRInitError*,EVRApplicationType);
-    using Get = intptr_t (__cdecl*)(const char*,EVRInitError*);
+    using Init = std::uint32_t (__cdecl*)(EVRInitError*,EVRApplicationType,const char*);
+    using Get = void* (__cdecl*)(const char*,EVRInitError*);
     using Shutdown = void (__cdecl*)();
-    std::wstring path_;
-    HMODULE module_ = nullptr;
-    Init init_ = nullptr; Get get_ = nullptr; Shutdown shutdown_ = nullptr;
-    bool initialized_ = false;
-    VR_IVRSystem_FnTable* system_ = nullptr;
-    VR_IVROverlay_FnTable* overlay_ = nullptr;
-    projection_probe::Matrix head_{};
-    ID3D11Device* device_ = nullptr;
-    ID3D11DeviceContext* context_ = nullptr;
+    std::wstring path_; projection_probe::Log& log_; HANDLE file_ = INVALID_HANDLE_VALUE;
+    HMODULE module_ = nullptr; Init init_ = nullptr; Get get_ = nullptr; Shutdown shutdown_ = nullptr;
+    bool initialized_ = false; VR_IVRSystem_FnTable* system_ = nullptr; VR_IVROverlay_FnTable* overlay_ = nullptr;
+    projection_probe::Matrix head_{}; ID3D11Device* device_ = nullptr; ID3D11DeviceContext* context_ = nullptr;
     std::array<ID3D11Texture2D*,2> textures_{};
 };
+bool pipeStop(HANDLE input) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(input,nullptr,0,nullptr,&available,nullptr)) return true;
+    if (!available) return false;
+    unsigned char byte = 0; DWORD read = 0; ReadFile(input,&byte,1,&read,nullptr); return true;
+}
+bool consoleStop() {
+    if (!_kbhit()) return false;
+    const auto key = _getwch(); return key == 13 || key == 27;
+}
 } // namespace
-
-int wmain(int argc,wchar_t** argv) {
-    if (argc != 4 || std::wcscmp(argv[1],L"--probe") || std::wcscmp(argv[2],L"--openvr") ||
-        !((std::wcslen(argv[3]) > 3 && argv[3][1] == L':' && (argv[3][2] == L'\\' || argv[3][2] == L'/')) ||
-          (argv[3][0] == L'\\' && argv[3][1] == L'\\'))) {
-        std::fprintf(stderr,"Explicit diagnostic only. Usage: projection-overlay-probe.exe --probe --openvr <absolute openvr_api.dll>\n"
-            "Start SteamVR and the PC-VR stream first. Press Enter/Escape/Ctrl+C to remove both temporary overlays.\n"
-            "No product setting, autostart, timer, receiver install or Steam configuration change.\n");
-        return 2;
+int wmain(int argc, wchar_t** argv) {
+    if (_setmode(_fileno(stdout),_O_BINARY) == -1) return 2;
+    Stdout sink; projection_probe::Log log(sink);
+    if (argc != 4 || std::wcscmp(argv[2],L"--openvr")
+        || (std::wcscmp(argv[1],L"--stdin-pipe") && std::wcscmp(argv[1],L"--probe"))) {
+        log.emit("SFNP_PROJECTION_REFUSED_V2 stage=arguments code=0\n"); return 2;
     }
-    if (GetFileAttributesW(argv[3]) == INVALID_FILE_ATTRIBUTES) {
-        std::fprintf(stderr,"OpenVR DLL path does not exist.\n"); return 2;
+    const bool piped = std::wcscmp(argv[1],L"--stdin-pipe") == 0;
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if ((piped && GetFileType(input) != FILE_TYPE_PIPE) || (!piped && !_isatty(_fileno(stdin)))) {
+        log.emit("SFNP_PROJECTION_REFUSED_V2 stage=stdin code=0\n"); return 2;
     }
-    SYSTEMTIME utc{}; GetSystemTime(&utc);
-    std::printf("projection-overlay-probe-v1 UTC=%04u-%02u-%02uT%02u:%02u:%02uZ pid=%lu\n",
-        utc.wYear,utc.wMonth,utc.wDay,utc.wHour,utc.wMinute,utc.wSecond,GetCurrentProcessId());
-    std::setvbuf(stdout,nullptr,_IONBF,0);
-    SetConsoleCtrlHandler(consoleControl,TRUE);
-    PublicApi api(argv[3]);
-    projection_probe::Session session(api);
-    if (!session.start(true)) return 1;
-    std::printf("VISIBLE both public projection overlays. Enter/Escape/Ctrl+C removes them; no automatic timeout.\n");
-    while (!stopRequested && !api.quitting()) {
-        if (_kbhit()) { const int key = _getch(); if (key == 13 || key == 27) break; }
-        Sleep(25);
+    if (piped && pipeStop(input)) {
+        log.emit("SFNP_PROJECTION_REFUSED_V2 stage=cancelled-before-start code=0\n"); return 2;
     }
-    const bool clean = session.stop();
-    std::printf("STOPPED both overlays cleared/destroyed; cleanup_ok=%s\n",clean ? "true" : "false");
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    SetDllDirectoryW(L""); SetConsoleCtrlHandler(consoleControl,TRUE);
+    bool clean = false, ready = false;
+    try {
+        PublicApi api(argv[3],log); projection_probe::Session session(api);
+        if (!session.start(true)) return 1;
+        ready = true;
+        while (!stopRequested.load() && !api.quitting()) {
+            if (piped ? pipeStop(input) : consoleStop()) break;
+            Sleep(25); // Poll cadence only; no automatic timeout or expiry.
+        }
+        clean = session.stop();
+    } catch (...) {
+        if (!ready) log.emit("SFNP_PROJECTION_REFUSED_V2 stage=exception code=0\n");
+        return 1;
+    }
     SetConsoleCtrlHandler(consoleControl,FALSE);
-    return clean ? 0 : 1;
+    return clean && !log.failed() ? 0 : 1;
 }

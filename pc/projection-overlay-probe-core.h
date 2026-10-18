@@ -4,36 +4,71 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include <string>
 
 namespace projection_probe {
 using Handle = std::uint64_t;
 struct Pixel { std::uint8_t r, g, b, a; };
-constexpr unsigned PatternSize = 512;
+constexpr unsigned PatternSize = 2048;
+constexpr float ChartMin = .40f, ChartMax = .60f;
+constexpr unsigned LogCap = 8192;
+constexpr const char* ReadyLine = "SFNP_PROJECTION_READY_V2\n";
+constexpr const char* StoppedLine = "SFNP_PROJECTION_STOPPED_V2\n";
 
+// The INNER transparent/black-alpha lanes, not the outer edge, are the witness.
+// Opaque black contributes zero RGB yet must hide the camera if alpha survives.
 inline std::vector<Pixel> pattern(unsigned eye) {
     if (eye > 1) return {};
     std::vector<Pixel> result(PatternSize * PatternSize);
-    for (unsigned y = 0; y < PatternSize; ++y) {
-        for (unsigned x = 0; x < PatternSize; ++x) {
-            Pixel p{}; // transparent, premultiplied black
-            if (x >= 64 && x < 448 && y >= 64 && y < 448) {
-                const unsigned band = (x - 64) / 96;
-                p.a = static_cast<std::uint8_t>((band + 1) * 255 / 4);
-                // Left yellow, right cyan; alpha and both eye IDs are independent.
-                p.r = eye == 0 ? p.a : 0;
-                p.g = p.a;
-                p.b = eye == 1 ? p.a : 0;
-                if (y >= 320 && y < 384) p.r = p.g = p.b = 0;
-                // A small full-alpha eye mark and one-pixel detail bars.
-                if (y >= 96 && y < 128 && x < 96 + 32 * (eye + 1))
-                    p = {255,255,255,255};
-                if (y >= 416 && (x & 1u)) p = {255,255,255,255};
-            }
-            result[y * PatternSize + x] = p;
+    for (unsigned y = 0; y < PatternSize; ++y) for (unsigned x = 0; x < PatternSize; ++x) {
+        Pixel p{};
+        if (x >= 256 && x < 1792 && y >= 256 && y < 1536) {
+            const unsigned band = (x - 256) / 192;
+            constexpr std::array<std::uint8_t,8> alpha{{0,64,128,255,64,128,192,255}};
+            p.a = alpha[band];
+            if (band == 4 || band == 5) p.r = p.g = p.b = p.a / 2;
+            if (band >= 6) { p.g = p.a; (eye == 0 ? p.r : p.b) = p.a; }
         }
+        // Left has one white block, right two; IDs occupy the interior chart.
+        if (y >= 128 && y < 192 && x >= 256 && x < 256 + 64 * (eye + 1)) p = {255,255,255,255};
+        if (y >= 1600 && y < 1792 && x >= 256 && x < 1792) {
+            const unsigned period = y < 1664 ? 1 : y < 1728 ? 2 : 4;
+            p = (x / period) % 2 ? Pixel{255,255,255,255} : Pixel{0,0,0,255};
+        }
+        result[y * PatternSize + x] = p;
     }
     return result;
 }
+struct Frustum { float left = 0, right = 0, top = 0, bottom = 0; };
+inline bool finite(const Frustum& f) {
+    return std::isfinite(f.left) && std::isfinite(f.right) && std::isfinite(f.top)
+        && std::isfinite(f.bottom) && f.left < f.right && f.top < f.bottom;
+}
+inline bool central(const Frustum& full, Frustum& out) {
+    if (!finite(full)) return false;
+    const float width = full.right - full.left, height = full.bottom - full.top;
+    out = {full.left + width * ChartMin, full.left + width * ChartMax,
+        full.top + height * ChartMin, full.top + height * ChartMax};
+    return finite(out);
+}
+// Strictly bounded trusted ASCII metadata; never native free-form strings.
+struct LogSink { virtual ~LogSink() = default; virtual bool write(const std::string&) = 0; };
+class Log {
+public:
+    explicit Log(LogSink& sink) : sink_(sink) {}
+    bool emit(const std::string& line) {
+        if (failed_ || line.empty() || line.back() != '\n' || line.size() > 1024 || line.size() > LogCap - bytes_) {
+            failed_ = true; return false;
+        }
+        for (unsigned char c : line) if ((c < 32 && c != '\n') || c > 126) { failed_ = true; return false; }
+        if (!sink_.write(line)) { failed_ = true; return false; }
+        bytes_ += static_cast<unsigned>(line.size()); return true;
+    }
+    unsigned bytes() const { return bytes_; }
+    bool failed() const { return failed_; }
+private:
+    LogSink& sink_; unsigned bytes_ = 0; bool failed_ = false;
+};
 
 struct Matrix { float m[3][4]{}; };
 inline bool finite(const Matrix& v) {
@@ -60,6 +95,9 @@ struct Api {
     virtual bool configure(unsigned eye, Handle handle) = 0;
     virtual bool texture(unsigned eye, Handle handle) = 0;
     virtual bool show(Handle handle) = 0;
+    virtual bool reveal(Handle handle) = 0;
+    virtual bool ready() = 0;
+    virtual void stopped(bool clean) = 0;
     virtual bool hide(Handle handle) = 0;
     virtual bool clear(Handle handle) = 0;
     virtual bool destroy(Handle handle) = 0;
@@ -73,8 +111,8 @@ public:
     Session& operator=(const Session&) = delete;
     ~Session() { stop(); }
     bool start(bool explicitConsoleOptIn) {
-        if (!explicitConsoleOptIn || attempted_) return false;
-        attempted_ = true;
+        if (!explicitConsoleOptIn || used_) return false;
+        used_ = attempted_ = true;
         if (!api_.initialize()) return failed();
         for (unsigned eye = 0; eye < 2; ++eye) {
             if (!api_.create(eye, handles_[eye]) || !handles_[eye]) return failed();
@@ -86,6 +124,8 @@ public:
         for (unsigned eye = 0; eye < 2; ++eye)
             if (!api_.texture(eye, handles_[eye])) return failed();
         for (Handle handle : handles_) if (!api_.show(handle)) return failed();
+        for (Handle handle : handles_) if (!api_.reveal(handle)) return failed();
+        if (!api_.ready()) return failed();
         active_ = true;
         return true;
     }
@@ -98,9 +138,11 @@ public:
         for (Handle handle : handles_) if (handle) cleanupOk_ = api_.clear(handle) && cleanupOk_;
         for (Handle handle : handles_) if (handle) cleanupOk_ = api_.destroy(handle) && cleanupOk_;
         handles_ = {};
+        const bool hadReady = active_;
         active_ = false;
         attempted_ = false;
         api_.shutdown();
+        if (hadReady) api_.stopped(cleanupOk_);
         return cleanupOk_;
     }
     bool active() const { return active_; }
@@ -108,6 +150,6 @@ private:
     bool failed() { stop(); return false; }
     Api& api_;
     std::array<Handle,2> handles_{};
-    bool attempted_ = false, active_ = false, cleanupOk_ = true;
+    bool used_ = false, attempted_ = false, active_ = false, cleanupOk_ = true;
 };
 } // namespace projection_probe

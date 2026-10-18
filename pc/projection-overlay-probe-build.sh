@@ -15,11 +15,11 @@ probe_expected=3d32d8eb5bcbe2e250610123aee8142c68f0e7d4da823f87513b6a2a333078d7
     echo 'Unreviewed OpenVR C header; do not guess function-table slots.' >&2; exit 2;
 }
 mkdir -p -- "$probe_output"
-g++ -std=c++17 -O2 -Wall -Wextra -Werror \
+g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
     "$probe_source/projection-overlay-probe-test.cpp" -o "$probe_output/projection-overlay-probe-test"
 "$probe_output/projection-overlay-probe-test"
-x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Werror -Wno-cast-function-type \
-    -isystem "$probe_sdk" -municode -static-libgcc -static-libstdc++ \
+x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
+    -isystem "$probe_sdk" -municode -static -s -Wl,--no-insert-timestamp \
     "$probe_source/projection-overlay-probe.cpp" -o "$probe_output/projection-overlay-probe.exe" \
     -ld3d11 -ldxgi -lole32 -luuid
 sha256sum -- "$probe_output/projection-overlay-probe.exe"
