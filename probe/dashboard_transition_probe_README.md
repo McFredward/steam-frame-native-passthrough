@@ -120,11 +120,21 @@ phase to have reached the real queue. Its timestamps are manual context receipts
 correlate them with local Frame systemui open/close logs. It does not infer menu
 visibility from desktop focus or instantiate another OpenVR client in compositor.
 
+Minimizing the fullscreen PC game to answer in chat can itself open the Steam
+window. Do not classify a phase from the reply alone: correlate the logged local
+UI show/hide event, keep chat accessible between replies, and close the menu
+before confirming a closed section. An overlay request with `bOpenDashboard
+false` is not proof of a hide. Logged UI context is not final-pixel proof.
+
 ## Evidence and limits
 
 Outputs are bounded below64KiB:1600bytes of sparse records,64cold route entries,
 three unknown-route counters, at most24small lifecycle statuses, a guaranteed
-terminal status, and four small manual context receipts. Artifacts/library are
+terminal status, one cold queue-profile receipt, and four small manual context
+receipts. The route prefix0–7 is reserved for the8 accepted companions; the
+remaining56 generic entries and128 shader summaries explicitly truncate without
+disabling the measurement. Accepted recipe identities survive that truncation.
+Actual companion allocation is still limited to8 and never reuses tags or slots. Artifacts/library are
 inputs, not output captures. Pipeline/shader identities are hashes and scalar
 handles, never redistributed shader bodies. Route counters mean **submitted
 recorded-command uses/attempts**, not a draw census or a GPU completion claim.

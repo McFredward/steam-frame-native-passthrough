@@ -132,8 +132,19 @@ int main(int argc,char** argv){try{
     live.prepare(gpu.device,info,checkedDashboardDispatch,gpu.memory,directory,VK_QUEUE_GRAPHICS_BIT);close(directory);
     require(live.prepared()&&live.refusal()==dashboard_transition_probe::Refusal::None,"actual feature-enabled owned resource preparation");
     live.queueRetrieved(gpu.family,0,gpu.queue);
+    // Replay unrelated startup metadata beyond BOTH finite summary banks.
+    // These handles are fixture-authored observation events, not extra Vulkan
+    // objects. The owned device/buffer/shader executions below remain real GPU
+    // work. Optional metadata loss must not disable their six phase samples.
+    const auto startupCode=shader(argv[1]);
+    VkShaderModuleCreateInfo startupModule{};startupModule.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    startupModule.codeSize=startupCode.size()*sizeof(std::uint32_t);startupModule.pCode=startupCode.data();
+    for(unsigned i=0;i<192;++i){VkShaderModule handle{};const std::uint64_t raw=2000+i;std::memcpy(&handle,&raw,sizeof(handle));live.shaderObserved(handle,startupModule);}
     VkGraphicsPipelineCreateInfo observed{};observed.sType=VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    for(unsigned i=0;i<32;++i){VkPipeline handle{};const std::uint64_t raw=1000+i;std::memcpy(&handle,&raw,sizeof(handle));live.pipelineObserved(handle,observed,99);}
+    for(unsigned i=0;i<96;++i){VkPipeline handle{};const std::uint64_t raw=1000+i;std::memcpy(&handle,&raw,sizeof(handle));live.pipelineObserved(handle,observed,99);}
+    const bool startupReady=live.refusal()==dashboard_transition_probe::Refusal::None;
+    if(!startupReady)live.release(vkDeviceWaitIdle(gpu.device));
+    require(startupReady,"unrelated startup metadata exhaustion retains real GPU phase observation");
     gpu.exportSet=dashboard_transition_probe::TestAccess::descriptor(live);gpu.actualRecordBuffer=dashboard_transition_probe::TestAccess::buffer(live);
     gpu.set=gpu.sourceSets[0];
     gpu.update(0,ownedTexture(true));c.eye=0;c.tint[0]=1;gpu.metadata(c);
@@ -174,8 +185,8 @@ int main(int argc,char** argv){try{
         if(file>=0){close(file);terminal=true;}else std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     close(terminalDirectory);
-    require(terminal,"completed terminal receipt remains available after32 cold route revisions");
+    require(terminal,"completed terminal receipt survives192 shader and96 route metadata events");
     live.release(VK_SUCCESS);
     require(validationErrors.load()==0,"actual GPU validation stays clean");
-    std::cout<<"{\"checks\":"<<checks<<",\"raster_bit_identical\":"<<(lifecycleOnly?"null":"true")<<",\"lifecycle_only\":"<<(lifecycleOnly?"true":"false")<<",\"actual_reused_cb_phase_updates\":true,\"slots\":6,\"validation_errors\":"<<validationErrors.load()<<",\"native_frame_or_eye_proven\":false}\n";return 0;
+    std::cout<<"{\"checks\":"<<checks<<",\"raster_bit_identical\":"<<(lifecycleOnly?"null":"true")<<",\"lifecycle_only\":"<<(lifecycleOnly?"true":"false")<<",\"actual_reused_cb_phase_updates\":true,\"startup_shader_events\":192,\"startup_pipeline_events\":96,\"metadata_events_are_fixture_authored\":true,\"slots\":6,\"validation_errors\":"<<validationErrors.load()<<",\"native_frame_or_eye_proven\":false}\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -127,3 +127,52 @@ preprocessor output remains byte-identical to the previous reviewed source, and
 the diagnostic scene shader hashes are unchanged. All116 strong imported
 name/version pairs match the previously verified actual Frame providers. These
 are software/preparation proofs, not a new device admission or menu result.
+
+## Second attachment: admitted queue, exhausted optional startup census
+
+The corrected probe actually prepared its owned resources on the Frame. Its
+cold receipt identifies one ordinary graphics queue, family0, native capability
+flags15 and one unchained KHR global-priority node with value1024. The native
+application already enabled the required fragment feature. The new queue guard
+accepted these actual inputs without rewriting them; the old blanket extension
+check would reject this particular recorded input.
+
+Later startup reported refusal7 before any manual capture phase. That enum
+conflated the8 companion-pipeline limit,128 shader-hash summaries and64 route
+summaries. The ordinary presenter recorded6 successful replacements; this
+strongly suggests optional summary exhaustion but does not identify which
+summary filled, nor prove how many instrumented companions had been created.
+Those separate counters were missing. The maintainer confirmed a normal
+stream/passthrough picture, then approved manual removal. Original public unit,
+manifest, library hashes and active compositor mapping were restored; the
+maintainer confirmed normal UI. No six-slot sample was collected.
+
+The correction keeps all allocation limits.128 shader summaries and56 generic
+route summaries may truncate with explicit drop counters. The other8 fixed
+route indices belong exclusively to the actual companions and retain validated
+recipe VS/PS identities even when the generic cache is full. Indices and tags
+are never evicted/relabelled/recycled. The actual ninth-companion, feature and
+resource refusals remain strict. Lifecycle status separates occupied slots,
+successful companion creation and both optional truncations, without emitting
+one file per dropped event.
+
+The same local GPU lifecycle replay now fails on the previous code and passes
+on the correction:192 fixture-authored shader observations and96 route events
+precede real owned buffer/queue/shader work, all6 sample slots and fenced final
+collection (45 checks, zero Vulkan validation errors). These synthetic metadata
+events are not a recording of all native startup calls; the GPU portion proves
+the real phase/buffer path survives that explicit workload. A separate actual
+`prepare/resources/pipeline` path with a successful fake driver passes290 checks
+normally and under ASan/UBSan, including late accepted companions after512
+shader/240 route events and strict rejection of a ninth companion. Four causal
+mutants are detected. The unchanged470 raster checks are inherited; no new
+headset-picture, full-draw-census or dashboard-repair claim follows.
+
+The maintainer also explained that minimizing the fullscreen game to answer in
+chat opens the Steam window. Existing logs independently distinguish remote
+show requests from local controller toggle/hide events. A stream-ready reply
+therefore cannot establish a closed menu. Future operator phases must check the
+latest logged UI event and refuse a mismatched phase; `bOpenDashboard false`
+alone is not a hide event. Keep chat accessible during the comparison and close
+the menu before confirming a closed section. Log context still does not prove
+final compositor pixels or stable animation completion.
