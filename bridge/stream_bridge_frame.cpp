@@ -105,27 +105,43 @@ FrameStatus appendCertifiedFrame(Bytes original,const FrameDescriptor& d,Coverag
 FrameStatus inspectCertifiedFrame(Bytes observed,AuthSession& auth,CertifiedAccessUnit& output){
     std::vector<Nal> ns;auto status=nals(observed,ns);if(status!=FrameStatus::Ok)return status;
     std::size_t owned=0;std::vector<std::uint8_t> payload;status=locate(observed,ns,owned,payload);if(status!=FrameStatus::Ok)return status;
-    if(payload.size()<FrameCertificateBytes)return FrameStatus::Malformed;
+    CertifiedAccessUnit result;
+    status=inspectCoverageMetadata({payload.data(),payload.size()},auth,result);
+    if(status!=FrameStatus::Ok)return status;
     const auto* h=payload.data();
-    if(std::memcmp(h,"SFV1",4)||h[4]!=1||h[5]>2||get(h+6,2)!=FrameCertificateBytes)return FrameStatus::Malformed;
-    for(unsigned i=72;i<80;++i)if(h[i])return FrameStatus::Malformed;
-    CertifiedAccessUnit result;result.descriptor={get(h+40,8),get(h+48,8),std::uint16_t(get(h+64,2)),std::uint16_t(get(h+66,2))};
-    const auto& d=result.descriptor;result.coverageEncoding=CoverageEncoding(h[5]);
-    if(!descriptorValid(d)||get(h+60,4)!=payload.size()-FrameCertificateBytes)return FrameStatus::Malformed;
-    const auto rawSize=result.coverageEncoding==CoverageEncoding::None?0:std::size_t(d.codedWidth)*d.codedHeight;
-    if(get(h+68,4)!=rawSize)return FrameStatus::Malformed;
-    const Bytes coverage{h+FrameCertificateBytes,payload.size()-FrameCertificateBytes};
-    if(!coverageValid(d,result.coverageEncoding,coverage))return FrameStatus::Malformed;
-    if(auth.verifyFrameHeader({h,FrameSignedHeaderBytes},{h+FrameSignedHeaderBytes,AuthTagBytes},result.binding)!=AuthStatus::Ok)return FrameStatus::AuthenticationRefused;
     const auto& n=ns[owned];
     const auto first=std::find_if(ns.begin(),ns.end(),[](const Nal& item){return item.type<=31;});
     if(first==ns.end()||n.layer!=first->layer||n.temporal!=first->temporal)return FrameStatus::Malformed;
     result.original.reserve(observed.size-(n.end-n.start));
     result.original.insert(result.original.end(),observed.data,observed.data+n.start);result.original.insert(result.original.end(),observed.data+n.end,observed.data+observed.size);
     const auto videoHash=hash({result.original.data(),result.original.size()});if(get(h+56,4)!=result.original.size()||!equal({videoHash.data(),videoHash.size()},{h+80,32}))return FrameStatus::OriginalMismatch;
-    const auto coverageHash=hash(coverage);if(!equal({coverageHash.data(),coverageHash.size()},{h+112,32}))return FrameStatus::CoverageMismatch;
     // A certificate cannot bless an empty/missing video payload.
     if(std::none_of(ns.begin(),ns.end(),[](const Nal& item){return item.type<=31;}))return FrameStatus::Malformed;
+    result.originalAccessUnitVerified=true;
+    output=std::move(result);return FrameStatus::Ok;
+}
+bool serializeCoverageMetadata(const CertifiedAccessUnit& frame,std::vector<std::uint8_t>& output){
+    if(!frame.originalAccessUnitVerified||std::memcmp(frame.signedHeader.data(),"SFV1",4)||
+        get(frame.signedHeader.data()+60,4)!=frame.coverage.size())return false;
+    std::vector<std::uint8_t> result(frame.signedHeader.begin(),frame.signedHeader.end());
+    result.insert(result.end(),frame.coverage.begin(),frame.coverage.end());output.swap(result);return true;
+}
+FrameStatus inspectCoverageMetadata(Bytes payload,AuthSession& auth,CertifiedAccessUnit& output){
+    if(!payload.data||payload.size>MaximumAccessUnitBytes)return FrameStatus::InvalidArgument;
+    if(payload.size<FrameCertificateBytes)return FrameStatus::Malformed;
+    const auto* h=payload.data;
+    if(std::memcmp(h,"SFV1",4)||h[4]!=1||h[5]>2||get(h+6,2)!=FrameCertificateBytes)return FrameStatus::Malformed;
+    for(unsigned i=72;i<80;++i)if(h[i])return FrameStatus::Malformed;
+    CertifiedAccessUnit result;result.descriptor={get(h+40,8),get(h+48,8),std::uint16_t(get(h+64,2)),std::uint16_t(get(h+66,2))};
+    const auto& d=result.descriptor;result.coverageEncoding=CoverageEncoding(h[5]);
+    if(!descriptorValid(d)||get(h+60,4)!=payload.size-FrameCertificateBytes)return FrameStatus::Malformed;
+    const auto rawSize=result.coverageEncoding==CoverageEncoding::None?0:std::size_t(d.codedWidth)*d.codedHeight;
+    if(get(h+68,4)!=rawSize)return FrameStatus::Malformed;
+    const Bytes coverage{h+FrameCertificateBytes,payload.size-FrameCertificateBytes};
+    if(!coverageValid(d,result.coverageEncoding,coverage))return FrameStatus::Malformed;
+    if(auth.verifyFrameHeader({h,FrameSignedHeaderBytes},{h+FrameSignedHeaderBytes,AuthTagBytes},result.binding)!=AuthStatus::Ok)return FrameStatus::AuthenticationRefused;
+    const auto coverageHash=hash(coverage);if(!equal({coverageHash.data(),coverageHash.size()},{h+112,32}))return FrameStatus::CoverageMismatch;
+    std::copy_n(h,FrameCertificateBytes,result.signedHeader.begin());
     if(coverage.size)result.coverage.assign(coverage.data,coverage.data+coverage.size);
     output=std::move(result);return FrameStatus::Ok;
 }

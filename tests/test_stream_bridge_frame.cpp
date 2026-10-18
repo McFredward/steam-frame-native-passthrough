@@ -67,6 +67,15 @@ void run(){
     check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::Rle,bytes(rle),s.sender,held)==sb::FrameStatus::Ok,"RLE bound to same exact AU");
     check(sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok,"RLE digest and MAC accepted");
     check(sb::decodeCertifiedCoverage(result,output)&&output==rawCoverage,"all 2048 coverage samples reproduced exactly");
+    std::vector<std::uint8_t> detached;
+    check(result.originalAccessUnitVerified&&sb::serializeCoverageMetadata(result,detached),"actual native-AU-verified result exports exact signed mask metadata");
+    sb::CertifiedAccessUnit local;
+    check(sb::inspectCoverageMetadata(bytes(detached),s.observer,local)==sb::FrameStatus::Ok&&local.original.empty()&&!local.originalAccessUnitVerified,"local mask verification never manufactures video completeness");
+    check(sb::decodeCertifiedCoverage(local,output)&&output==rawCoverage,"local detached mask samples exact");
+    check(!sb::serializeCoverageMetadata(local,held),"detached local mask cannot be promoted to full source proof");
+    for(std::size_t at=0;at<detached.size();++at){auto bad=detached;bad[at]^=0x40;sb::CertifiedAccessUnit unchanged;unchanged.descriptor.sourceFrame=557;
+        check(sb::inspectCoverageMetadata(bytes(bad),s.observer,unchanged)!=sb::FrameStatus::Ok&&unchanged.descriptor.sourceFrame==557,"local metadata tampering refused transactionally");}
+
     check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::Raw,bytes(rawCoverage),s.sender,held)==sb::FrameStatus::Ok,"uncompressed coverage accepted");
     check(sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok&&sb::decodeCertifiedCoverage(result,output)&&output==rawCoverage,"raw coverage exact");
     for(auto malformed:std::vector<std::vector<std::uint8_t>>{{0,5},{255,0,255},{255,1},{1,1,1,2}}){output={17};

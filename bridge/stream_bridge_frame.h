@@ -21,6 +21,8 @@ struct CertifiedAccessUnit {
     Nonce binding{};
     CoverageEncoding coverageEncoding=CoverageEncoding::None;
     std::vector<std::uint8_t> original,coverage;
+    std::array<std::uint8_t,FrameCertificateBytes> signedHeader{};
+    bool originalAccessUnitVerified=false;
 };
 enum class FrameStatus { Ok,NotFound,InvalidArgument,Malformed,LimitExceeded,
     DuplicateOwned,OriginalMismatch,CoverageMismatch,AuthenticationRefused };
@@ -29,6 +31,11 @@ enum class FrameStatus { Ok,NotFound,InvalidArgument,Malformed,LimitExceeded,
 FrameStatus appendCertifiedFrame(Bytes original,const FrameDescriptor&,
     CoverageEncoding,Bytes encodedCoverage,AuthSession&,std::vector<std::uint8_t>& output);
 FrameStatus inspectCertifiedFrame(Bytes observed,AuthSession&,CertifiedAccessUnit& output);
+// Detached local IPC: no VCL/video bytes. Validates mask metadata, NOT an AU.
+// Only a source-pinned peer plus a current native shared resource lease can
+// connect this to a selected picture. Never promote this into full-AU proof.
+bool serializeCoverageMetadata(const CertifiedAccessUnit&,std::vector<std::uint8_t>&);
+FrameStatus inspectCoverageMetadata(Bytes,AuthSession&,CertifiedAccessUnit&);
 bool encodeCoverageRle(Bytes raw,std::vector<std::uint8_t>& output);
 bool decodeCertifiedCoverage(const CertifiedAccessUnit&,std::vector<std::uint8_t>& output);
 } // namespace stream_bridge
