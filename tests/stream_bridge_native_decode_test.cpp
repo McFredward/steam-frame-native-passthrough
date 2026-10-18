@@ -180,6 +180,39 @@ void unsafeShapes(){
     check(!nd::preparePinnedProcess(calls()),"actual host executable cannot impersonate pinned vrlink");
     const auto entries=nd::preparedEntries();check(!entries.ioctl&&!entries.mmap&&!entries.close&&!entries.munmap,"unprepared runtime exposes no hook entries");
 }
+void captureOwnership(){
+    auto p=provider();setup(*p);map(*p,0);map(*p,1);fake.memory[0].fill(0x42);fake.memory[1].fill(0x43);
+    auto capture=format();capture.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    check(p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&capture)==0,"actual capture format forwarded");
+    v4l2_requestbuffers request{};request.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;request.memory=V4L2_MEMORY_DMABUF;request.count=4;
+    check(p->invokeIoctl(base+0x324a8,23,VIDIOC_REQBUFS,&request)==0,"capture DMABUF pool configured");
+    Buffer b(0);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;
+    check(p->invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b)==0,"capture slot query observed");
+    nd::CaptureObservation event{};while(p->pollCapture(event)){}
+    b.plane.m.fd=73;b.b.timestamp.tv_sec=0x4321;b.b.timestamp.tv_usec=0;
+    check(p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==0,"DMABUF capture queued unchanged");
+    check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Requeue&&event.dmabufFd==73&&event.index==0
+        &&event.sourcePoolGeneration&&event.capturePoolGeneration&&event.contentGeneration==1,"requeue invalidation precedes decode and names exact DMABUF lease");
+    auto claimed=event;claimed.kind=nd::CaptureKind::Decoded;
+    check(!p->captureLeaseCurrent(claimed),"queued buffer cannot be authorized by a claimed decoded enum");
+    const auto generation=event.capturePoolGeneration;
+    fake.dequeue=0;check(p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0,"actual capture result original once");
+    check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Decoded&&event.dmabufFd==73&&event.nativeTimestampToken==0x4321
+        &&event.capturePoolGeneration==generation&&event.contentGeneration==1,"decoded timestamp distinct from capture index and content lease");
+    const auto validLease=event;check(p->captureLeaseCurrent(validLease),"immediate scalar check admits only successful actual current DQBUF lease");
+    auto wrongLease=validLease;++wrongLease.nativeTimestampToken;
+    check(!p->captureLeaseCurrent(wrongLease),"current scalar lease also binds actual timestamp token");
+    check(p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0&&!p->pollCapture(event),"unqueued duplicate capture gives no evidence");
+    queue(*p,0);poll(*p,0x42); // Capture setup must not destroy unrelated OUTPUT mappings.
+    fake.result=-1;check(p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==-1,"failed capture queue original preserved");
+    check(!p->captureLeaseCurrent(validLease),"attempted QBUF invalidates selected old lease before worker event consumption even on failure");
+    check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Requeue,"attempted reuse conservatively invalidates old image");
+    fake.result=0;p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);
+    check(!p->pollCapture(event),"failed queue cannot establish decoded ownership");
+    p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&capture);
+    check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Reset&&event.capturePoolGeneration!=generation,"capture reconfiguration retires exact old pool");
+    queue(*p,1);poll(*p,0x43);
 }
-int main(){try{identityAndOwnership();boundsAndLoss();unsafeShapes();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+}
+int main(){try{identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
 #endif

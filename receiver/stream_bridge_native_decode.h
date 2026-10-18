@@ -28,7 +28,13 @@ struct Observation{
     // A V4L2 OUTPUT chunk is NOT by itself a proven complete HEVC access unit.
     bool completeAccessUnit=false;
 };
-struct SnapshotStats{std::uint64_t accepted=0,dropped=0,rejected=0;};
+enum class CaptureKind:std::uint8_t{Reset,Requeue,Decoded,SourceReset};
+struct CaptureObservation{
+    CaptureKind kind=CaptureKind::Reset;int fd=-1,dmabufFd=-1;
+    std::uint32_t index=0,nativeTimestampToken=0;
+    std::uint64_t sourcePoolGeneration=0,capturePoolGeneration=0,contentGeneration=0;
+};
+struct SnapshotStats{std::uint64_t accepted=0,dropped=0,rejected=0,captureDropped=0;};
 
 // Public V4L2 lifecycle observer. No private C++ object fields, metadata parser,
 // authentication, renderer, settings or transport. Each original runs once.
@@ -50,8 +56,11 @@ public:
     // Copies into caller-owned storage on its worker; no borrowed native bytes
     // outlive QBUF. Too-small outputs remain unchanged and keep the queued copy.
     bool poll(Observation&,std::uint8_t* output,std::size_t capacity) noexcept;
+    bool pollCapture(CaptureObservation&) noexcept;
+    bool captureLeaseCurrent(const CaptureObservation&) const noexcept;
     SnapshotStats stats() const noexcept;
     OriginalIoctl originalIoctl() const noexcept;
+    std::uintptr_t imageBase() const noexcept;
 private:
     struct Impl;std::unique_ptr<Impl> impl_;
 };
@@ -62,6 +71,10 @@ private:
 bool preparePinnedProcess(const Originals&) noexcept;
 void stopPinnedProcess() noexcept;
 bool pollPinnedProcess(Observation&,std::uint8_t*,std::size_t) noexcept;
+bool pollPinnedCapture(CaptureObservation&) noexcept;
+SnapshotStats pinnedSnapshotStats() noexcept;
+bool pinnedCaptureLeaseCurrent(const CaptureObservation&) noexcept;
 struct Entries{void* ioctl=nullptr;OriginalMmap mmap=nullptr;OriginalMunmap munmap=nullptr;OriginalClose close=nullptr;};
 Entries preparedEntries() noexcept;
+std::uintptr_t preparedImageBase() noexcept;
 } // namespace stream_bridge_native
