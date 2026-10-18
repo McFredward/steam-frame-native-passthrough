@@ -58,10 +58,10 @@ produced these numerical results; no production decoder was changed:
 
 | Source | Chart / selector | Analytic scene sample | Output coverage |
 | --- | --- | --- | --- |
-| v2, passing measured vector | first quarter / 0 | `.700000` | `.5` |
-| v2, failing measured vector | last quarter / 1 | `.809373` | `1` |
-| v1, first measured vector | first quarter / 0 | `.700000` | `.5` |
-| v1, second measured vector | last quarter / 1 | `.700000` | `.5` |
+| v2, passing measured vector | R1 y `.25–.5` / 0 | `.700000` | `.5` |
+| v2, failing measured vector | R1 y `.75–1` / 1 | `.809373` | `1` |
+| v1, first measured vector | R1 y `.25–.5` / 0 | `.700000` | `.5` |
+| v1, second measured vector | R1 y `.75–1` / 1 | `.700000` | `.5` |
 
 The failing v2 output matched the original shader's RGBA words exactly. All
 40 reproduction checks passed, with zero Vulkan validation errors. This is a
