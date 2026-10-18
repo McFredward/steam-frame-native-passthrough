@@ -42,6 +42,14 @@ mandatory; the inner bundle must independently be a complete admitted release.
 Bash uses system Python 3.9+ and gives the wizard `/dev/tty` as stdin so piping
 the bootstrap into Bash does not swallow interactive review/SSH prompts.
 
+Release engineering uses `tools/package_stream_link_setup.py` to assemble the
+already admitted native bundle, these launchers/engine and an explicitly pinned
+official amd64 embeddable Python archive. It performs no download or installation,
+retains Python's license/provenance and invokes the independent real Frame
+package verifier. It refuses to relabel a prototype or an unknown native
+package variant as an installable setup. Upload the resulting ZIP under the
+exact asset name above; GitHub's reported asset digest is required by bootstrap.
+
 ## Run the assistant
 
 Extract the complete dedicated setup archive. On Windows, open

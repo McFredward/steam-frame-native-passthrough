@@ -6,6 +6,7 @@ import hashlib
 import io
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -147,6 +148,48 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaises(ValueError): packaging.windows_python(raw, digest, 'https://example.org/runtime.zip')
         del files['LICENSE.txt']; missing = runtime(files)
         with self.assertRaises(ValueError): packaging.windows_python(missing, hashlib.sha256(missing).hexdigest(), url)
+
+    @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
+    def test_piped_bootstrap_gives_wizard_actual_terminal(self):
+        import pty
+        import signal
+        import sys
+        report = self.path / 'terminal-result.json'
+        files = contents()
+        files['setup/steam_link_setup.py'] = (
+            'import sys,json,pathlib\n'
+            f'pathlib.Path({str(report)!r}).write_text(json.dumps({{"tty":sys.stdin.isatty(),"args":sys.argv[1:]}}))\n'
+            'assert sys.stdin.isatty()\n').encode()
+        raw = archive(files)
+        release = self.release()
+        release['assets'][0].update(size=len(raw), digest='sha256:' + hashlib.sha256(raw).hexdigest())
+        zipped = self.path / 'fixture.zip'; zipped.write_bytes(raw)
+        runner = self.path / 'tty-runner.py'
+        runner.write_text('import sys,types,pathlib\n'
+                          f'm=types.ModuleType("fixture_bootstrap");exec(compile({source!r},"get.sh","exec"),m.__dict__)\n'
+                          f'payload=pathlib.Path({str(zipped)!r}).read_bytes()\n'
+                          f'm.download=lambda url,limit: {json.dumps(release).encode()!r} if url.endswith("/latest") else payload\n'
+                          'sys.exit(m.main())\n')
+        master, slave = pty.openpty()
+        def controlling_terminal():
+            import fcntl
+            import termios
+            os.setsid(); fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+        child = None
+        try:
+            with (self.path / 'terminal.log').open('wb') as output:
+                child = subprocess.Popen([sys.executable, '-I', '-B', str(runner)], stdin=slave,
+                                         stdout=output, stderr=subprocess.STDOUT, preexec_fn=controlling_terminal)
+                try:
+                    code = child.wait(timeout=15)
+                except BaseException:
+                    os.killpg(child.pid, signal.SIGKILL); child.wait(); raise
+            self.assertEqual(code, 0, (self.path / 'terminal.log').read_text())
+            data = json.loads(report.read_text())
+            self.assertTrue(data['tty']); self.assertEqual(data['args'][0], '--bundle')
+            self.assertFalse(Path(data['args'][1]).exists(), 'Own download/runtime removed after child exits')
+        finally:
+            os.close(master); os.close(slave)
 
     def test_actual_powershell_archive_functions(self):
         if not POWERSHELL: self.skipTest('Pass --pwsh to run actual PowerShell parser/extraction functions')

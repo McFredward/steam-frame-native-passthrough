@@ -160,7 +160,8 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
-        print('Could not start the verified setup. Check your connection and whether a complete PC/Frame setup release is available. No restart was performed.', file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
+        reason = str(error) if type(error) is ValueError else 'Check your connection and the complete PC/Frame setup release.'
+        print('Could not start the verified setup: ' + reason + ' No restart was performed.', file=sys.stderr)
         sys.exit(2)
 SFNP_BOOTSTRAP_PY
