@@ -31,7 +31,7 @@ struct Event {nd::Observation fact{};std::vector<std::uint8_t> coded;};
 struct Fixture {
     Files files;std::deque<Event> input;std::deque<nd::CaptureObservation> capture;
     nd::SnapshotStats counts{};unsigned polls=0,capturePolls=0,randomCalls=0,certified=0,decoded=0;
-    bool randomFails=false,routeReady=true;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
+    bool randomFails=false,routeReady=true;std::uint64_t clock=100;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
     nd::DecodedFrame lastDecoded{};nd::CertifiedFrame lastCertified{};sb::CertifiedAccessUnit retained{};
     sb::ControlRuntime producer;nd::ReceiverWorker worker;sb::Handshake sender;
     sb::LocalConfig local{};sb::LocalSendAuthority authority{};std::uint64_t content=0,sourceFrame=1000;
@@ -44,7 +44,8 @@ struct Fixture {
     nd::RuntimeRequest request(){nd::RuntimeRequest r;r.explicitlyEnabled=true;r.buildId=712;r.pairingsDirectory=files.receiver;r.producerPort=producer.localPort();std::strcpy(r.producerAddress.data(),"127.0.0.1");
         r.imageRoutePrepared=[](void* v) noexcept{return static_cast<Fixture*>(v)->routeReady;};r.imageRouteContext=this;
         r.callbacks={onCertified,onDecoded,onCapture,onNotice,this};return r;}
-    nd::SourceProvider provider(){return {poll,pollCapture,stats,random,this};}
+    nd::SourceProvider provider(){return {poll,pollCapture,stats,random,this,monotonic};}
+    static std::uint64_t monotonic(void* v) noexcept{return static_cast<Fixture*>(v)->clock;}
     static bool poll(nd::Observation& out,std::uint8_t* destination,std::size_t capacity,void* v) noexcept {
         auto& f=*static_cast<Fixture*>(v);++f.polls;if(f.input.empty())return false;const auto& front=f.input.front();if(front.coded.size()>capacity)return false;
         out=front.fact;std::copy(front.coded.begin(),front.coded.end(),destination);f.input.pop_front();return true;}
@@ -68,6 +69,9 @@ struct Fixture {
         const std::array<std::uint8_t,2> coverage{{16,255}};
         check(producer.certifyAccessUnit(bytes(discovery),descriptor,sb::CoverageEncoding::Rle,bytes(coverage),certified),"actual paired exact AU certificate");
         return certified;}
+    std::vector<std::uint8_t> certifiedFrame(){std::vector<std::uint8_t> coded;
+        const sb::FrameDescriptor descriptor{++sourceFrame,81,4,4};const std::array<std::uint8_t,2> coverage{{16,255}};
+        check(producer.certifyAccessUnit(bytes(ordinary),descriptor,sb::CoverageEncoding::Rle,bytes(coverage),coded),"actual paired steady frame certificate");return coded;}
     void start(){check(worker.prepare(request(),provider()),"actual hosted worker prepared");enqueue(ordinary,9);pump();
         capture.push_back({nd::CaptureKind::Decoded,23,73,0,9,7,21,9});pump();}
     void negotiate(){start();for(std::uint32_t token=10;token<13;++token){enqueue(certifiedDiscovery(),token);pump();
@@ -151,5 +155,70 @@ void imageRouteAdmission(){
         &&fresh.stream.generation>original.stream.generation&&fresh.stream.connection!=original.stream.connection,
         "same actual native pool recovers only through fresh route admission lifecycle and full real handshake");
 }
+void lateTransportReadiness(){
+    Fixture f;const auto request=f.request();const auto port=f.producer.localPort();f.producer.stop();
+    check(f.worker.prepare(request,f.provider()),"actual receiver prepared before the producer listener exists");
+    f.enqueue(ordinary,9);f.pump();
+    check(f.worker.status().state==nd::RuntimeState::SenderUnavailable&&f.randomCalls==1,
+        "connection refusal revokes the initial source permission");
+    const auto first=f.worker.status().source;
+    f.clock+=249;f.enqueue(ordinary,10);f.pump();
+    check(f.randomCalls==1,"unavailable listener never triggers a hot retry from repeated worker ticks or QBUFs");
+    f.clock+=1;f.enqueue(ordinary,11);f.pump();
+    check(f.randomCalls==2,"fresh successful native input retries once after the transport backoff");
+    // An unavailable sender is not a permanent poison flag. Retrying remains
+    // rate-bounded even when the user takes much longer than initial startup.
+    for(unsigned i=0;i<10;++i){f.clock+=2000;f.enqueue(ordinary,20+i);f.pump();}
+    check(f.randomCalls==12&&f.certified==0&&f.decoded==0,
+        "late sender remains recoverable after many bounded attempts without admitting ordinary pixels");
+    f.relisten(port);f.clock+=2000;f.enqueue(ordinary,60);f.pump();
+    for(std::uint32_t token=61;token<64;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
+    const auto fresh=f.worker.status().source;
+    check(f.sender.confirmed()&&f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.certified==3&&f.decoded==3,
+        "late real listener recovers through actual certified video and reverse authenticated control");
+    check(fresh.outputPoolGeneration==first.outputPoolGeneration&&fresh.stream.generation>first.stream.generation
+        &&fresh.stream.connection!=first.stream.connection,"same physical decoder pool gets a fresh cryptographic admission");
 }
-int main(){try{offAndPreparation();realVideoAndCapture();unprovedInputs();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+void transportRecoveryRejectsOldProof(){
+    Fixture previous;previous.negotiate();const auto oldCertificate=previous.certifiedFrame();
+    Fixture f;const auto request=f.request();const auto port=f.producer.localPort();f.producer.stop();
+    check(f.worker.prepare(request,f.provider()),"source pending before late transport fixture prepared");
+    f.enqueue(ordinary,40);f.pump();const auto old=f.worker.status().source;
+    const auto oldCertified=f.certified,oldDecoded=f.decoded;
+    check(f.worker.status().state==nd::RuntimeState::SenderUnavailable,"transport refusal withdraws all old pending proof before retry");
+    f.relisten(port);f.clock+=250;f.enqueue(ordinary,41);f.pump();
+    f.enqueue(oldCertificate,42);f.pump();
+    check(f.certified==oldCertified,"old signed video cannot authenticate a fresh receiver admission");
+    f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,42,7,21,42});f.pump();
+    for(std::uint32_t token=50;token<53;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.worker.status().source.stream.connection!=old.stream.connection,
+        "transport recovery requires another full native-video handshake");
+    const auto beforeReuse=f.certified;
+    f.enqueue(f.certifiedFrame(),40);f.pump();
+    f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+    check(f.certified==beforeReuse&&f.decoded==oldDecoded+3,
+        "retired pending native token cannot join new proof to a late old capture");
+    f.enqueue(f.certifiedFrame(),54);f.pump();f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,54,7,21,54});f.pump();
+    check(f.decoded==oldDecoded+4,"unrelated fresh exact frame still decodes after old completion is retired");
+    Fixture fatal;auto r=fatal.request();r.pairingsDirectory=fatal.files.root/"missing";
+    check(fatal.worker.prepare(r,fatal.provider()),"hard credential failure fixture prepared");fatal.enqueue(ordinary,71);fatal.pump();
+    for(unsigned i=0;i<4;++i){fatal.clock+=10000;fatal.enqueue(ordinary,72+i);fatal.pump();}
+    check(fatal.randomCalls==1&&fatal.worker.status().state==nd::RuntimeState::PairingRefused,
+        "transport retry never retries a missing credential or weakens hard refusal");
+    check(fatal.worker.status().control==sb::ControlStatus::PairingRefused,"failure notice retains the actual refusal after closing control");
+    Fixture capacity;check(capacity.worker.prepare(capacity.request(),capacity.provider()),"hard capacity fixture prepared");
+    capacity.enqueue(ordinary,80);capacity.input.front().fact.bufferCapacity=128;capacity.pump();
+    for(unsigned i=0;i<4;++i){capacity.clock+=10000;capacity.enqueue(ordinary,81+i);capacity.pump();}
+    check(capacity.randomCalls==1&&capacity.worker.status().control==sb::ControlStatus::CapacityRefused,
+        "transport retry never retries insufficient native AU capacity");
+    Fixture auth;put(auth.files.receiver/(std::string(id)+".json"),std::string("{\"schema\":\"sfnp-pairing-v1\",\"pair_id\":\"")+id
+        +"\",\"key_hex\":\"0202030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\",\"role\":\"receiver\",\"protocol_major\":1}");
+    check(auth.worker.prepare(auth.request(),auth.provider()),"mismatched private key fixture prepared");auth.enqueue(ordinary,90);auth.pump();
+    for(unsigned i=0;i<4;++i){auth.clock+=10000;auth.enqueue(ordinary,91+i);auth.pump();}
+    check(auth.randomCalls==1&&auth.worker.status().control==sb::ControlStatus::AuthenticationRefused&&auth.certified==0,
+        "transport retry never retries authenticated-control rejection or grants pixels");
+}
+}
+int main(){try{offAndPreparation();realVideoAndCapture();unprovedInputs();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

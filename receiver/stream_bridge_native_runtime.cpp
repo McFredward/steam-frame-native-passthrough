@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <thread>
 namespace stream_bridge_native {
@@ -18,24 +19,53 @@ struct ReceiverWorker::Impl {
     struct Sending {bool used=false,echo=false;std::uint64_t ticket=0;stream_bridge::Message message{};stream_bridge::ProbeMessage probe{};};
     RuntimeRequest request{};SourceProvider provider{};SourceIdentity source{};
     RuntimeNotice current{};bool enabled=false,blocked=false;SnapshotStats lastStats{};
+    // Transport readiness is not source proof. A late listener can recover on a
+    // fresh successful QBUF, at a bounded rate, without admitting any old AU.
+    bool reconnect=false;std::uint64_t retryAt=0;std::uint32_t retryDelay=250;
+    struct RetiredToken {bool used=false;std::uint32_t token=0;};
+    std::array<RetiredToken,ReceiverWorker::PendingCapacity> retired{};
     bool routeSeen=false,routeWasReady=false;std::uint64_t admissionGeneration=0;
     stream_bridge::ControlRuntime control;stream_bridge_receiver::Receiver receiver;
     stream_bridge_receiver::Authority authority{};
     std::array<Pending,ReceiverWorker::PendingCapacity> pending{};Sending sending{};
     std::array<std::uint8_t,MaxCodedBytes> bytes{};
-    void notice(RuntimeState state){
-        const auto controlStatus=control.status();
+    std::uint64_t now()const{
+        if(provider.monotonicMilliseconds)return provider.monotonicMilliseconds(provider.context);
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    void notice(RuntimeState state,stream_bridge::ControlStatus controlStatus){
         if(current.state==state&&current.control==controlStatus&&current.source.stream.connection==source.stream.connection
             &&current.source.stream.generation==source.stream.generation&&current.source.decoderFd==source.decoderFd)return;
         current={state,source,controlStatus};
         if(request.callbacks.notice)request.callbacks.notice(current,request.callbacks.context);
     }
+    void notice(RuntimeState state){notice(state,control.status());}
     void clear(RuntimeState state,bool keepSource){
+        const auto observed=state==RuntimeState::Disabled?stream_bridge::ControlStatus::Disabled:control.status();
         receiver.end();control.stop();pending={};sending={};authority={};blocked=keepSource;
-        notice(state);if(!keepSource)source={};
+        reconnect=false;retryAt=0;
+        notice(state,observed);if(!keepSource)source={};
+    }
+    bool retryTransport(){
+        // A late capture may still describe an old pending token. Quarantine
+        // it until that exact native completion arrives; never join it to a
+        // new admission which happens to reuse the same 16-bit decoder token.
+        for(const auto& p:pending)if(p.used){
+            bool recorded=false;for(const auto& t:retired)recorded|=t.used&&t.token==p.submitted.nativeTimestampToken;
+            if(recorded)continue;
+            auto* free=static_cast<RetiredToken*>(nullptr);for(auto& t:retired)if(!t.used){free=&t;break;}
+            if(!free){clear(RuntimeState::SourceLost,true);return false;}
+            *free={true,p.submitted.nativeTimestampToken};
+        }
+        clear(RuntimeState::SenderUnavailable,true);
+        const auto clock=now();retryAt=clock>std::numeric_limits<std::uint64_t>::max()-retryDelay
+            ?std::numeric_limits<std::uint64_t>::max():clock+retryDelay;
+        retryDelay=std::min<std::uint32_t>(2000,retryDelay*2);reconnect=true;return true;
     }
     bool begin(const Observation& fact){
         if(!fact.poolGeneration||fact.fd<0||!fact.bufferCapacity||fact.usedBytes>fact.bufferCapacity)return false;
+        if(!matches(fact.fd,fact.poolGeneration)){retired={};retryDelay=250;}
         clear(RuntimeState::SourceLost,false);
         if(admissionGeneration==~std::uint64_t(0)){blocked=true;notice(RuntimeState::SourceRefused);return false;}
         admissionGeneration=std::max(admissionGeneration+1,fact.poolGeneration);
@@ -50,8 +80,9 @@ struct ReceiverWorker::Impl {
         const auto status=control.prepare(config);
         stream_bridge::LocalConfig local{};
         authority.session=source.stream.connection;authority.streamGeneration=source.stream.generation;
+        if(status==stream_bridge::ControlStatus::IoRefused||status==stream_bridge::ControlStatus::Lost){retryTransport();return false;}
         if(terminal(status)||!control.configuredLocal(local)||!receiver.beginAuthenticated(authority,local,control.receiverVerifier(),control.verifierContext())){
-            blocked=true;notice(status==stream_bridge::ControlStatus::PairingRefused?RuntimeState::PairingRefused:RuntimeState::SenderUnavailable);return false;}
+            clear(status==stream_bridge::ControlStatus::PairingRefused?RuntimeState::PairingRefused:RuntimeState::SenderUnavailable,true);return false;}
         blocked=false;notice(RuntimeState::Negotiating);return true;
     }
     bool matches(int fd,std::uint64_t pool) const {return source.decoderFd==fd&&source.outputPoolGeneration==pool&&pool!=0;}
@@ -60,7 +91,9 @@ struct ReceiverWorker::Impl {
         if(request.callbacks.capture)request.callbacks.capture(source,event,request.callbacks.context);
         if(event.kind==CaptureKind::SourceReset){clear(RuntimeState::SourceLost,true);return;}
         if(event.kind==CaptureKind::Reset){pending={};return;}
-        if(event.kind!=CaptureKind::Decoded||blocked)return;
+        if(event.kind!=CaptureKind::Decoded)return;
+        for(auto& t:retired)if(t.used&&t.token==event.nativeTimestampToken){t={};return;}
+        if(blocked)return;
         Pending* found=nullptr;unsigned matches=0;
         for(auto& p:pending)if(p.used&&p.submitted.nativeTimestampToken==event.nativeTimestampToken){found=&p;++matches;}
         if(matches!=1||!found)return;
@@ -72,7 +105,8 @@ struct ReceiverWorker::Impl {
     }
     void input(const Observation& fact){
         if(!matches(fact.fd,fact.poolGeneration)){if(!begin(fact))return;}
-        if(blocked)return;
+        else if(blocked){if(!reconnect||now()<retryAt||!begin(fact))return;}
+        for(const auto& t:retired)if(t.used&&t.token==fact.nativeTimestampToken)return;
         if(fact.nativeTimestampToken>0xffff||!fact.contentGeneration||fact.usedBytes==0||fact.usedBytes>bytes.size()){
             clear(RuntimeState::SourceLost,true);return;}
         // A pending duplicate is ambiguous even if it carries different crypto
@@ -104,6 +138,7 @@ struct ReceiverWorker::Impl {
     void controlTick(){
         if(blocked||!nonzero(source.stream.connection))return;
         control.tick();
+        if(control.status()==stream_bridge::ControlStatus::IoRefused||control.status()==stream_bridge::ControlStatus::Lost){retryTransport();return;}
         if(terminal(control.status())){clear(RuntimeState::SenderUnavailable,true);return;}
         stream_bridge::SendReceipt sent{};
         while(control.pollSent(sent)){
@@ -118,6 +153,7 @@ struct ReceiverWorker::Impl {
             else if(receiver.nextEcho(next.probe)){next.echo=true;ready=stream_bridge::encodeProbe(next.probe,plain)==stream_bridge::Status::Ok;}
             if(ready&&control.queueControl({plain.data(),plain.size()},next.ticket)){next.used=true;sending=next;}
         }
+        if(receiver.snapshot().peerConfirmed)retryDelay=250;
         notice(receiver.snapshot().peerConfirmed?RuntimeState::PeerConfirmed:RuntimeState::Negotiating);
     }
 };
@@ -161,6 +197,7 @@ void ReceiverWorker::tick() noexcept{
 void ReceiverWorker::stop() noexcept{
     if(!impl_)return;
     impl_->clear(RuntimeState::Disabled,false);impl_->enabled=false;impl_->request={};impl_->provider={};
+    impl_->retired={};impl_->retryDelay=250;
     impl_->routeSeen=impl_->routeWasReady=false;
 }
 RuntimeNotice ReceiverWorker::status()const noexcept{return impl_->current;}

@@ -62,6 +62,9 @@ struct SourceProvider {
     SnapshotStats (*stats)(void*) noexcept=nullptr;
     bool (*random)(void*,std::size_t,void*) noexcept=nullptr;
     void* context=nullptr;
+    // Optional worker-only monotonic clock. Production uses steady_clock;
+    // deterministic lifecycle fixtures need not sleep or run a real headset.
+    std::uint64_t (*monotonicMilliseconds)(void*) noexcept=nullptr;
 };
 // Serialized, explicitly ticked worker core, containing the actual authenticated
 // control runtime. Tests can supply public-call observations without a headset;
