@@ -43,6 +43,37 @@ this repository.
 Consequently the unchanged uniform v3 carrier is not a full-quality solution.
 Increasing only its requested width again would repeat a falsified approach.
 
+## Exact current spatial budget, not a subjective quality percentage
+
+The actual v3 profile's logical canvas is3168-square and its scene contribution
+is2048-square. These logical coordinates scale with the real carrier;2048 is
+not a claim that the actual encoded image has that fixed extent.
+
+| Allocation | Logical samples | Share of carrier area |
+| --- | ---: | ---: |
+| Useful scene RGB | 2048×2048 =4,194,304 | 41.79% |
+| Useful R8 coverage | Four2048×512 strips =4,194,304 | 41.79% |
+| Halo/guard/remaining layout area | 1,647,616 | 16.42% |
+
+The four physical mask rectangles include their filtering halos and occupy
+4×2080×544 samples, or45.10% in total. The16.42% figure above already includes
+these halos: it must not be added a second time. The twelve128-square format
+cells occupy1.96%; the rest includes edge-continuation/layout space.
+
+The scene's linear fraction is2048/3168 =64/99 =64.65% on each axis.
+At the same uniform carrier extent this is35.35% fewer samples per axis and
+58.21% fewer useful RGB pixels than a full-area color image. It is **not** a
+measurement of58.21% worse perceived quality, an additional fixed2048 resolution
+limit, or an exact MR-Off comparison. Native foveated Off and uniform On use
+different spatial density; filtering, codec and reconstruction also matter.
+
+This quantifies the motivation for preserving the ordinary RGB path and moving
+coverage to an app-owned separate channel. Such a route still requires the
+exact selected-image and shared-ray association described in the
+[receiver feasibility review](app-only-receiver-feasibility-20261018.md) and
+[public API review](app-only-public-api-feasibility-20261018.md). No such new
+runtime adapter or quality result is established by this arithmetic.
+
 ## Activation and the local dashboard are separate boundaries
 
 The game previously started atlas preparation while its asynchronous stream
