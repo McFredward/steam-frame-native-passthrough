@@ -20,6 +20,8 @@ bootstrap = types.ModuleType('sfnp_bootstrap_under_test')
 exec(compile(source, str(ROOT / 'get.sh'), 'exec'), bootstrap.__dict__)
 spec = importlib.util.spec_from_file_location('sfnp_packaging_under_test', ROOT / 'tools/package_stream_link_setup.py')
 packaging = importlib.util.module_from_spec(spec); spec.loader.exec_module(packaging)
+spec = importlib.util.spec_from_file_location('sfnp_bridge_package_fixtures', ROOT / 'tests/test_package_stream_bridge.py')
+bridge_fixtures = importlib.util.module_from_spec(spec); spec.loader.exec_module(bridge_fixtures)
 POWERSHELL = None
 OUT = None
 
@@ -62,6 +64,36 @@ def archive(files=None, *, mutate=None, extra=None, inspection=False, maintenanc
     return stream.getvalue()
 
 
+def bridge_archive(*, release=True):
+    # The actual bridge assembler validates its complete owned-source profile,
+    # synthetic PE/ELF/dependency artifacts and explicit software-only receipt.
+    # Reuse those fixtures without running unrelated packaging test methods.
+    fixture = bridge_fixtures.Tests()
+    fixture.setUp()
+    try:
+        kwargs = {'release': True, 'validation_receipts': [fixture.validation()]} if release else {}
+        raw, receipt = fixture.build(**kwargs)
+        assert receipt['hardware_verified'] is False
+        return raw
+    finally:
+        fixture.doCleanups()
+
+
+def repack(raw, updates):
+    """Keep complete file pins while testing independently wrong inner contracts."""
+    with zipfile.ZipFile(io.BytesIO(raw)) as package:
+        files = {name: package.read(name) for name in package.namelist()}
+    manifest = json.loads(files.pop('bootstrap-package.json'))
+    files.update(updates)
+    manifest['files'] = {name: {'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
+                         for name, value in files.items()}
+    result = io.BytesIO()
+    with zipfile.ZipFile(result, 'w', zipfile.ZIP_DEFLATED) as package:
+        for name, value in files.items(): package.writestr(name, value)
+        package.writestr('bootstrap-package.json', json.dumps(manifest))
+    return result.getvalue()
+
+
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=OUT)
@@ -70,18 +102,18 @@ class BootstrapTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def release(self, inspection=False, maintenance=False):
-        tag = bootstrap.MANAGER_TAG if maintenance else bootstrap.INSPECTION_TAG if inspection else 'v1.0.0'
-        asset_name = bootstrap.MANAGER_ASSET if maintenance else bootstrap.INSPECTION_ASSET if inspection else bootstrap.ASSET
-        return {'draft': False, 'prerelease': inspection or maintenance, 'tag_name': tag,
+    def release(self, inspection=False, maintenance=False, bridge_preview=False):
+        tag = bootstrap.BRIDGE_TAG if bridge_preview else bootstrap.MANAGER_TAG if maintenance else bootstrap.INSPECTION_TAG if inspection else 'v1.0.0'
+        asset_name = bootstrap.BRIDGE_ASSET if bridge_preview else bootstrap.MANAGER_ASSET if maintenance else bootstrap.INSPECTION_ASSET if inspection else bootstrap.ASSET
+        return {'draft': False, 'prerelease': inspection or maintenance or bridge_preview, 'tag_name': tag,
                 'assets': [{'name': asset_name, 'state': 'uploaded', 'size': 512,
                             'digest': 'sha256:' + 'a' * 64,
                             'browser_download_url': 'https://github.com/' + bootstrap.REPO + '/releases/download/' + tag + '/' + asset_name}]}
 
-    def extract(self, raw, inspection=False, maintenance=False):
+    def extract(self, raw, inspection=False, maintenance=False, bridge_preview=False):
         target = self.path / 'package'; target.mkdir()
         zipped = self.path / 'download.zip'; zipped.write_bytes(raw)
-        bootstrap.extract(zipped, target, inspection, maintenance)
+        bootstrap.extract(zipped, target, inspection, maintenance, bridge_preview)
         return target
 
     def test_exact_public_asset(self):
@@ -139,7 +171,10 @@ class BootstrapTests(unittest.TestCase):
     def test_only_explicit_inspection_argument(self):
         self.assertFalse(bootstrap.arguments([])); self.assertIs(bootstrap.arguments(['--inspect']), True)
         self.assertEqual(bootstrap.arguments(['--manage']), 'manage')
-        for args in (['--apply'], ['--inspect', '--apply'], ['--inspect', '--inspect'], ['--inspection'], ['--inspect','--manage'], ['--manage','--action','uninstall']):
+        self.assertEqual(bootstrap.arguments(['--bridge-preview']), 'bridge-preview')
+        for args in (['--apply'], ['--inspect', '--apply'], ['--inspect', '--inspect'], ['--inspection'], ['--inspect','--manage'], ['--manage','--action','uninstall'],
+                     ['--bridge-preview','--manage'], ['--inspect','--bridge-preview'],
+                     ['--bridge-preview','--bridge-preview']):
             with self.subTest(args=args), self.assertRaises(ValueError): bootstrap.arguments(args)
 
     def test_incomplete_or_unexpected_release_refused(self):
@@ -221,7 +256,7 @@ class BootstrapTests(unittest.TestCase):
         del files['LICENSE.txt']; missing = runtime(files)
         with self.assertRaises(ValueError): packaging.windows_python(missing, hashlib.sha256(missing).hexdigest(), url)
 
-    def piped_bootstrap(self, inspection, maintenance=False):
+    def piped_bootstrap(self, inspection, maintenance=False, bridge_preview=False):
         import pty
         import signal
         report = self.path / 'terminal-result.json'
@@ -230,10 +265,11 @@ class BootstrapTests(unittest.TestCase):
             'import sys,json,pathlib\n'
             f'pathlib.Path({str(report)!r}).write_text(json.dumps({{"tty":sys.stdin.isatty(),"args":sys.argv[1:]}}))\n'
             'assert sys.stdin.isatty()\n').encode()
-        raw = archive(files, inspection=inspection, maintenance=maintenance)
-        release = self.release(inspection, maintenance)
+        raw = (repack(bridge_archive(), {'setup/steam_link_setup.py': files['setup/steam_link_setup.py']}) if bridge_preview else
+               archive(files, inspection=inspection, maintenance=maintenance))
+        release = self.release(inspection, maintenance, bridge_preview)
         release['assets'][0].update(size=len(raw), digest='sha256:' + hashlib.sha256(raw).hexdigest())
-        endpoint = '/releases/tags/' + bootstrap.MANAGER_TAG if maintenance else '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/latest'
+        endpoint = '/releases/tags/' + bootstrap.BRIDGE_TAG if bridge_preview else '/releases/tags/' + bootstrap.MANAGER_TAG if maintenance else '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/latest'
         api_url = 'https://api.github.com/repos/' + bootstrap.REPO + endpoint
         asset_url = release['assets'][0]['browser_download_url']
         # Only network I/O is replaced. Execute the actual Bash argv/heredoc,
@@ -252,7 +288,7 @@ class BootstrapTests(unittest.TestCase):
         child = None
         try:
             with (self.path / 'terminal.log').open('wb') as output:
-                child = subprocess.Popen(['bash', '-s', '--'] + (['--manage'] if maintenance else ['--inspect'] if inspection else []), stdin=subprocess.PIPE,
+                child = subprocess.Popen(['bash', '-s', '--'] + (['--bridge-preview'] if bridge_preview else ['--manage'] if maintenance else ['--inspect'] if inspection else []), stdin=subprocess.PIPE,
                                          stdout=output, stderr=subprocess.STDOUT, preexec_fn=controlling_terminal)
                 try:
                     child.communicate(script.encode(), timeout=15)
@@ -303,6 +339,85 @@ class BootstrapTests(unittest.TestCase):
     def test_manager_uses_real_terminal_and_never_install_argument(self):
         self.piped_bootstrap(False, maintenance=True)
 
+    def test_bridge_preview_exact_pinned_release(self):
+        release = self.release(bridge_preview=True)
+        self.assertEqual(bootstrap.select_asset(release, bridge_preview=True)['name'], bootstrap.BRIDGE_ASSET)
+        for field, value in [('draft', True), ('prerelease', False), ('tag_name', 'another-bridge')]:
+            candidate = self.release(bridge_preview=True); candidate[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                bootstrap.select_asset(candidate, bridge_preview=True)
+        for flags in ((False, False, False), (True, False, False), (False, True, False),
+                      (True, False, True), (False, True, True)):
+            with self.subTest(flags=flags), self.assertRaises(ValueError): bootstrap.select_asset(release, *flags)
+        for candidate in (self.release(), self.release(True), self.release(maintenance=True)):
+            with self.subTest(candidate=candidate['tag_name']), self.assertRaises(ValueError):
+                bootstrap.select_asset(candidate, bridge_preview=True)
+
+    def test_actual_bridge_assembler_to_validated_extract(self):
+        raw = bridge_archive()
+        target = self.extract(raw, bridge_preview=True)
+        with zipfile.ZipFile(io.BytesIO(raw)) as package:
+            for name in package.namelist():
+                if name != 'bootstrap-package.json': self.assertEqual((target / name).read_bytes(), package.read(name))
+        bundle = json.loads((target / 'stream-bridge-bundle.json').read_bytes())
+        self.assertEqual(bundle['schema'], 'sfnp-stream-bridge-bundle-v1')
+        self.assertEqual(bundle['readiness'], 'release')
+        self.assertTrue((target / 'setup/stream_bridge_install.py').is_file())
+        self.assertTrue((target / 'setup/runtime/openssh/ssh.exe').is_file())
+        self.assertFalse((target / 'steam-link-bundle.json').exists())
+
+    def test_bridge_modes_cannot_be_interchanged(self):
+        raw = bridge_archive()
+        cases = [(raw, flags) for flags in ((False,False,False),(True,False,False),(False,True,False),
+                                           (True,False,True),(False,True,True))]
+        cases += [(archive(inspection=i, maintenance=m), (False,False,True))
+                  for i,m in ((False,False),(True,False),(False,True))]
+        for index, (value, flags) in enumerate(cases):
+            with self.subTest(index=index), tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                base = Path(temporary); zipped = base / 'a.zip'; zipped.write_bytes(value)
+                target = base / 'target'; target.mkdir()
+                with self.assertRaises(ValueError): bootstrap.extract(zipped, target, *flags)
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_actual_bridge_prototype_refused_before_extraction(self):
+        with self.assertRaises(ValueError): self.extract(bridge_archive(release=False), bridge_preview=True)
+        self.assertEqual(list((self.path / 'package').iterdir()), [])
+
+    def test_bridge_inner_readiness_and_schema_refused_before_extraction(self):
+        raw = bridge_archive()
+        for field, value in [('readiness','prototype'), ('schema','sfnp-steam-link-setup-v1')]:
+            with self.subTest(field=field), tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                with zipfile.ZipFile(io.BytesIO(raw)) as package: bundle = json.loads(package.read('stream-bridge-bundle.json'))
+                bundle[field] = value
+                candidate = repack(raw, {'stream-bridge-bundle.json':json.dumps(bundle).encode()})
+                base = Path(temporary); zipped = base / 'a.zip'; zipped.write_bytes(candidate)
+                target = base / 'target'; target.mkdir()
+                with self.assertRaises(ValueError): bootstrap.extract(zipped, target, bridge_preview=True)
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_bridge_preview_keeps_hash_and_mixed_package_refusals(self):
+        raw = bridge_archive()
+        legacy = contents()['steam-link-bundle.json']
+        cases = [(repack(raw, {'steam-link-bundle.json':legacy}), (False,False,True))]
+        files = contents(); files['stream-bridge-bundle.json'] = b'{"schema":"sfnp-stream-bridge-bundle-v1","readiness":"release"}'
+        cases.append((archive(files), (False,False,False)))
+        # Same length but wrong bytes, with the original reviewed file pin.
+        with zipfile.ZipFile(io.BytesIO(raw)) as package:
+            values = {name:package.read(name) for name in package.namelist()}
+        name = 'setup/stream_bridge_install.py'; values[name] = b'X' + values[name][1:]
+        out = io.BytesIO()
+        with zipfile.ZipFile(out,'w') as package:
+            for name,value in values.items(): package.writestr(name,value)
+        cases.append((out.getvalue(), (False,False,True)))
+        for index,(value,flags) in enumerate(cases):
+            with self.subTest(index=index), tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                base=Path(temporary); zipped=base/'a.zip'; zipped.write_bytes(value); target=base/'target'; target.mkdir()
+                with self.assertRaises(ValueError): bootstrap.extract(zipped,target,*flags)
+
+    @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
+    def test_bridge_preview_uses_actual_terminal_and_bundle_selected_engine(self):
+        self.piped_bootstrap(False, bridge_preview=True)
+
     def test_actual_powershell_archive_functions(self):
         if not POWERSHELL: self.skipTest('Pass --pwsh to run actual PowerShell parser/extraction functions')
         valid = self.path / 'valid.zip'; valid.write_bytes(archive())
@@ -313,9 +428,15 @@ class BootstrapTests(unittest.TestCase):
         manager = self.path / 'manager.zip'; manager.write_bytes(archive(maintenance=True))
         files = manager_contents(); files['pc-provider/driver.dll'] = b'UNEXECUTED NATIVE FIXTURE'
         manager_payload = self.path / 'manager-payload.zip'; manager_payload.write_bytes(archive(files, maintenance=True))
+        bridge = self.path / 'bridge.zip'; bridge.write_bytes(bridge_archive())
+        bridge_prototype = self.path / 'bridge-prototype.zip'; bridge_prototype.write_bytes(bridge_archive(release=False))
+        with zipfile.ZipFile(bridge) as package: inner = json.loads(package.read('stream-bridge-bundle.json'))
+        inner['readiness'] = 'prototype'
+        bridge_inner = self.path / 'bridge-inner-prototype.zip'
+        bridge_inner.write_bytes(repack(bridge.read_bytes(), {'stream-bridge-bundle.json':json.dumps(inner).encode()}))
         report = self.path / 'ps-result.json'
         script = self.path / 'check.ps1'
-        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload, $Manager, $ManagerPayload)
+        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload, $Manager, $ManagerPayload, $Bridge, $BridgePrototype, $BridgeInner)
 $ErrorActionPreference='Stop'
 $tokens=$null; $parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$parseErrors)
@@ -345,19 +466,31 @@ foreach ($case in @(@($Manager,$false,$false),@($Manager,$true,$false),@($Valid,
  $blocked=$false;try { Expand-SfnpPackage $case[0] $caseTarget $case[1] $case[2] | Out-Null } catch { $blocked=$true }
  if (-not $blocked -or @(Get-ChildItem $caseTarget -Recurse).Count -ne 0) { throw 'Manager mode/payload gate failed.' }
 }
+$bridgeTarget=Join-Path $Output 'ps-bridge';[void][IO.Directory]::CreateDirectory($bridgeTarget)
+$bridgeRuntime=Expand-SfnpPackage $Bridge $bridgeTarget $false $false $true
+if ($bridgeRuntime -ne 'setup/runtime/python/python.exe' -or -not (Test-Path (Join-Path $bridgeTarget 'setup/stream_bridge_install.py'))) { throw 'Bridge did not verify.' }
+foreach ($case in @(@($Bridge,$false,$false,$false),@($Bridge,$true,$false,$false),@($Bridge,$false,$true,$false),
+                    @($Bridge,$true,$false,$true),@($Bridge,$false,$true,$true),
+                    @($Valid,$false,$false,$true),@($Inspection,$false,$false,$true),@($Manager,$false,$false,$true),
+                    @($BridgePrototype,$false,$false,$true),@($BridgeInner,$false,$false,$true))) {
+ $caseTarget=Join-Path $Output ([Guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($caseTarget)
+ $blocked=$false;try { Expand-SfnpPackage $case[0] $caseTarget $case[1] $case[2] $case[3] | Out-Null } catch { $blocked=$true }
+ if (-not $blocked -or @(Get-ChildItem $caseTarget -Recurse).Count -ne 0) { throw 'Bridge mode/readiness gate failed.' }
+}
 $unsafe=@('../escape' ,'/escape','C:/escape','x\escape','x//escape','x/CON.txt','x/end.','x/end ','x/CONIN$','x/CONOUT$',('x/COM'+[char]0xB9),('x/LPT'+[char]0xB2),'x/a|b','x/a?b')
 foreach ($name in $unsafe) {
  $blocked=$false; try { Get-SfnpName $name | Out-Null } catch { $blocked=$true }
  if (-not $blocked) { throw ('Unsafe path accepted: '+$name) }
 }
-@{parsed=$true;exact_runtime=$runtime;prototype_refused=$true;unsafe_paths=$unsafe.Count;inspection_verified=$true;inspection_native_payload_refused=$true;scope='ActualPowerShellFunctions_NoNetwork_NoWindowsACL_NoDevice'} | ConvertTo-Json | Set-Content $Report
+@{parsed=$true;exact_runtime=$runtime;prototype_refused=$true;unsafe_paths=$unsafe.Count;inspection_verified=$true;inspection_native_payload_refused=$true;bridge_verified=$true;bridge_prototypes_refused=$true;bridge_scope_separated=$true;scope='ActualPowerShellFunctions_NoNetwork_NoWindowsACL_NoDevice'} | ConvertTo-Json | Set-Content $Report
 ''')
         result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script),
-                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload), str(manager), str(manager_payload)],
+                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload), str(manager), str(manager_payload), str(bridge), str(bridge_prototype), str(bridge_inner)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
         self.assertEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
         data = json.loads(report.read_text(encoding='utf-8-sig'))
         self.assertTrue(data['prototype_refused']); self.assertTrue(data['inspection_verified']); self.assertTrue(data['inspection_native_payload_refused'])
+        self.assertTrue(data['bridge_verified']); self.assertTrue(data['bridge_prototypes_refused']); self.assertTrue(data['bridge_scope_separated'])
 
 
 if __name__ == '__main__':
