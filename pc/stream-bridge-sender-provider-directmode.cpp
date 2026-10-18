@@ -25,6 +25,12 @@ bool DirectModeBoundary::prepare(const DirectModeFunctions& f)noexcept{
 DirectModeFunctions DirectModeBoundary::entryPoints()const noexcept{return {create,destroy,destroyAll,next,submit,present,post,timing};}
 void DirectModeBoundary::stop()noexcept{enabled_=false;++registryEpoch_;}
 bool DirectModeBoundary::ownsProcess(std::uint32_t pid)const noexcept{std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);if(!lock||!enabled_||!pid)return false;for(const auto& s:swaps_)if(s.pid==pid&&s.generation)return true;return false;}
+DirectInventory DirectModeBoundary::inventory()const noexcept{
+    DirectInventory result;std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);
+    if(!lock||!enabled_||tainted_)return result;
+    result.epoch=registryEpoch_;result.valid=true;
+    for(unsigned i=0;i<swaps_.size();++i){const auto& s=swaps_[i];result.swaps[i]={s.component,s.pid,s.generation,s.description,s.handles};}return result;
+}
 const DirectFrame* DirectModeBoundary::currentFrame()noexcept{auto* self=instance_.load();return self&&self->enabled_&&current_&&current_->sourceKnown&&current_->registryEpoch==self->registryEpoch_?current_:nullptr;}
 DirectModeBoundary::Component* DirectModeBoundary::component(void* value){for(auto& c:components_)if(c.value==value&&value)return &c;for(auto& c:components_)if(!c.value){c.value=value;return &c;}return nullptr;}
 void DirectModeBoundary::create(void* object,std::uint32_t pid,const DirectMode::SwapTextureSetDesc_t* desc,DirectMode::SwapTextureSet_t* output){

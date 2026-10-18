@@ -10,6 +10,8 @@
 #include "stream-bridge-sender-provider-core.h"
 #include "stream-bridge-sender-provider-directmode.h"
 #include "stream-bridge-sender-provider-runtime.h"
+#include "stream-bridge-sender-provider-coverage.h"
+#include "stream-bridge-sender-provider-sourceipc.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -111,6 +113,8 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
     bool stopped_=false,initialized_=false;void** slot_=nullptr;HMODULE source_=nullptr;HANDLE file_=INVALID_HANDLE_VALUE;
     vr::IVRDriverContext* context_=nullptr;vr::IVRDriverLog* log_=nullptr;
     stream_bridge::sender::SenderRuntime runtime_{boundary()};stream_bridge::ControlRequest request_{};
+    stream_bridge::sender::SenderCoverage coverage_{directMode(),boundary(),runtime_.control()};
+    stream_bridge::sender::SourceIpcServer sourceIpc_{[](std::uint32_t pid,void* context){return static_cast<Provider*>(context)->coverage_.ready(pid);},this};
     void** directSlots_=nullptr;std::array<void*,8> directOriginal_{},directWrapped_{};
     void report(const char* status){if(log_){char text[160]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
     bool configure(){
@@ -120,7 +124,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         if(!settings)return false;
         vr::EVRSettingsError e=vr::VRSettingsError_None;constexpr auto section="driver_steam_link_native_passthrough";
         if(!settings->GetBool(section,"enableStreamBridge",&e)||e!=vr::VRSettingsError_None){report("bridge disabled; ordinary video");return true;}
-        request_.role=stream_bridge::Role::Producer;request_.buildId=712;
+        request_.role=stream_bridge::Role::Producer;request_.buildId=712;request_.offered=request_.required=stream_bridge::KnownCapabilities;
         settings->GetString(section,"controlListenAddress",request_.address.data(),static_cast<std::uint32_t>(request_.address.size()),&e);
         if(e!=vr::VRSettingsError_None){report("explicit listen address missing; ordinary video");return false;}
         const auto port=settings->GetInt32(section,"controlPort",&e);
@@ -171,7 +175,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
             pointerBits<LPCWSTR>(&procAddress),&self))return false;
         (void)boundary();
-        if(request_.explicitlyEnabled&&!attachDirect(candidate))return false;
+        if(request_.explicitlyEnabled&&(!attachDirect(candidate)||!coverage_.configure(reinterpret_cast<std::uintptr_t>(candidate))))return false;
         DWORD old=0;if(!VirtualProtect(slot_,sizeof(void*),PAGE_READWRITE,&old)){restoreDirect();return false;}
         const auto previous=InterlockedCompareExchangePointer(slot_,pointerBits<void*>(&procAddress),pointerBits<void*>(OriginalGetProcAddress));
         DWORD ignored=0;const bool protection=VirtualProtect(slot_,sizeof(void*),old,&ignored)!=0;
@@ -197,14 +201,21 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(250),[this]{return stopped_;});
         }
         if(!attached)return;
-        auto last=stream_bridge::sender::RuntimeState::Off;unsigned reports=0;
+        auto last=stream_bridge::sender::RuntimeState::Off;const char* lastCoverage=nullptr;unsigned reports=0;
         for(;;){
             {std::lock_guard<std::mutex> guard(mutex_);if(stopped_)break;}
-            try{runtime_.tick();}catch(...){runtime_.stop();report("worker refused; ordinary video");break;}
+            try{coverage_.tick();runtime_.tick();
+                if(request_.explicitlyEnabled){stream_bridge::LocalConfig config;stream_bridge::LocalSendAuthority authority;stream_bridge::sender::SourceIpcState state;
+                    const auto encoder=runtime_.encoder();
+                    if(encoder.peerConfirmed&&encoder.probeObserved&&runtime_.control().peerVerified()&&runtime_.control().localConfig(config,authority)){state.binding=authority.channel.binding;state.generation=encoder.generation;state.compatible=true;}
+                    sourceIpc_.tick(state);
+                }
+            }catch(...){sourceIpc_.stop();coverage_.stop();runtime_.stop();report("worker refused; ordinary video");break;}
+            const auto* coverageState=coverage_.stateName();if(request_.explicitlyEnabled&&coverageState!=lastCoverage&&reports<32){lastCoverage=coverageState;++reports;report(coverageState);}
             if(runtime_.state()!=last&&reports<32){last=runtime_.state();++reports;report(stream_bridge::sender::runtimeStateName(last));}
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(8),[this]{return stopped_;});
         }
-        runtime_.stop();
+        sourceIpc_.stop();runtime_.stop();
     }
 public:
     vr::EVRInitError Init(vr::IVRDriverContext* context)override{
@@ -217,7 +228,7 @@ public:
     void Cleanup()override{
         {std::lock_guard<std::mutex> guard(mutex_);stopped_=true;}changed_.notify_all();
         if(worker_.joinable())worker_.join();
-        runtime_.stop();boundary().stop();restoreDirect();
+        sourceIpc_.stop();coverage_.stop();runtime_.stop();boundary().stop();restoreDirect();
         if(slot_){DWORD old=0;if(VirtualProtect(slot_,sizeof(void*),PAGE_READWRITE,&old)){
             // Another hook's later change is not ours to overwrite.
             InterlockedCompareExchangePointer(slot_,pointerBits<void*>(OriginalGetProcAddress),pointerBits<void*>(&procAddress));

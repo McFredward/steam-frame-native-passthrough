@@ -61,7 +61,7 @@ explicitly enable `enableStreamBridge` and provide numeric private/loopback
 retain ordinary video. The selected private pairing comes from the installer's
 `%LOCALAPPDATA%/steam-link-native-passthrough/pairings` directory via the existing
 strict loader. Keys never appear in settings/logs/argv. The worker opens the
-listener only when exactly one actual initialized HEVC encoder exists. It wires
+listener only when exactly one actual initialized HEVC encoder has accepted an exact registered/map/Encode submission. Init alone cannot open the network listener. It wires
 the real sender sealer/receiver TCP replies into that observed encoder, resets
 on source generation loss, and originates a fresh coded-AU probe after mutual
 confirmation. No timer expires a feature or restarts SteamVR.
@@ -70,8 +70,7 @@ The worker executes on the existing provider thread; native frame/encoder
 callbacks do no socket/file work. At most 32 state transitions are logged.
 Unsupported codecs, missing/mismatched peers and actual EOF leave ordinary
 VCL bytes and image dimensions unchanged. A transport/handshake/probe is not
-coverage permission. The new certificate/mask `OutputAugmenter` port still needs
-the actual GPU route to register it before any MR readiness can be granted.
+coverage permission. The new native GPU observer registers the certificate/mask `OutputAugmenter`; its independent source, two-eye and immutable-readback guards must pass before a mask can be attached.
 
 Five additional **public** NVENC callbacks track RegisterResource → Map →
 EncodePicture → LockBitstream. Records are bounded (four encoders; 32 resources,
@@ -95,8 +94,7 @@ per-eye bounds/projection/pose establish ownership, not GPU completion. A
 bounded `DirectFrame` is available **only** inside the real original Present or
 PostPresent call and only while its registry epoch remains valid. Unrecognized
 handles, invalid geometry, overflow and lifetime conflict return no source.
-The native D3D11 draw must still establish actual acquisition, source sample,
-foveation/UV and matching R8 output; metadata alone does not prove any of them.
+The GPU observer described below checks actual acquired source/SRV identities and native luma output; DirectMode metadata alone still does not prove any of them.
 
 The provider must be loaded before a future NVENC factory and before the app's
 swapsets are created. Unknown preexisting swapsets are never reconstructed from
@@ -140,13 +138,84 @@ or AMD/Intel backend is implemented, and a Windows cross-build is not a Windows,
 Proton, NVIDIA or headset execution. The same game running under Proton does not
 make the native SteamVR driver use the Windows NVENC loader.
 
-## Remaining coverage work
+## Genuine native GPU coverage and app source lease
 
-This hook can carry tiny metadata before FEC without resizing/re-encoding RGB.
-A full native-coverage bridge still needs the genuine pre-YUV coverage source,
-precise source/encoder/transmit association, bounded mask encoding, receiving
-backend, and verified current-frame/eye/UV use. The existing
-[driver dataflow report](../PC-DRIVER-20261011.md) explains those separate identity
-domains. Neither a working SEI append nor public API interception supplies them.
+The public successful NVENC Open supplies its actual D3D11 device. A cold worker
+refuses `D3D11_CREATE_DEVICE_SINGLETHREADED`; otherwise it obtains the immediate
+context and explicitly enables its public `ID3D11Multithread` protection before
+admitting companion work. That protection remains enabled for this process
+lifetime; a normal fresh SteamVR process restores the original policy. Its
+serialization can have a CPU cost and must be measured in the integrated run.
 
-Focused host checkpoint: original public-boundary 54, exact input/device/output association 41, DirectMode ownership 18, actual provider/control/SEI/TCP/probe composition 46, and sender capability policy 81 checks pass. All affected fixtures pass ASan/UBSan. Four semantic controls independently reject wrong output timestamps, failed Encode acceptance, stale DirectMode registry epochs and retained transport trust after EOF. The final Windows DLL links against system libraries only. The CompositorPlugin interface, actual Steam load ordering and headset picture still require the integrated runtime test; no hardware outcome is claimed.
+The already hash-verified module pins four **public D3D11 call sites**:
+Map return `9f36f2`, Unmap `9f372c`, luma Draw `9f3865`, and NVENC input
+CopyResource `a217fb`. No private function is invoked and no native shader source
+is distributed or patched. The original typed methods are always forwarded.
+Other contexts/call sites remain ordinary D3D11. Cleanup compare-exchanges only
+our own published vtable entries; callable objects stay alive until process exit.
+
+Cold imports open only the real DirectMode swapset handles with their exact
+owner, lifetime generation, description and canonical COM identities. At the
+actual Draw, the native CB2 Map/Unmap receipt supplies the current eye, while the
+bound SRV0 must match that eye's actual acquired shared resource. Every layer
+and both eyes must be accounted for inside the same current DirectFrame and
+registry epoch. Unknown resources, duplicate/missing eyes, incompatible native
+output extents/formats, contention or retired ownership cannot produce a mask.
+
+The actual original luma PS already outputs source alpha. A preallocated R8
+companion stores transmittance, cleared to1 for each real present serial; its
+blend equation is `T = T * (1 - nativeSourceAlpha)`. It reuses the bound native
+PS/VS/CB/SRV/sampler, geometry, scissor and viewport, preserving the original
+foveation mapping. It never classifies RGB or changes the encoded image size.
+The native target and blend state are restored; an attached depth target is
+refused. The CPU result is `A = 255 - T`.
+
+A separate tiny5x5 grid per submitted layer/eye is copied from strictly interior
+pixel centres of the **actual source** RGBA/BGRA8 texture. The old v3 atlas always
+writes alpha1; at least one interior texel below1 **for every submitted eye/layer** is required to admit ordinary
+RGBA. Encoded-frame padding or samples outside submitted bounds do not establish
+that transition. A genuinely fully opaque source remains correctly opaque until
+such a witness exists. Typeless members of the same8-bit format family may be
+copied; unsupported formats/mips/arrays/MSAA refuse the route.
+
+The exact native CopyResource records an immutable R8+source-witness readback
+in one of four bounded slots for its actual destination resource. Register →
+Map → accepted Encode freezes that slot under the encoder generation and unique
+submission identity. Lock may consume only the uniquely matching output/timestamp
+receipt. `DO_NOT_WAIT` refuses incomplete GPU readback; it never substitutes a
+later image, waits for GPU completion or evicts another frozen slot. Compression
+and authentication occur outside the GPU metadata mutex. Optional-mask failures
+can still attach a byte-only certificate; that certificate never permits MR.
+The actual peer decoder byte-capacity challenge limits the complete final AU
+transactionally. Excessive/incompressible data restores the exact original AU.
+
+A private per-user, local-only named pipe exposes the fixed128-byte `SBN1`
+source-preparation contract. Its kernel client PID must match the request PID;
+that PID must own the actual source swapsets and have a fully observed two-eye
+GPU route. The reply echoes the request nonce and active paired binding/encoder
+generation. Flag1 additionally requires mutual compatibility and an exact
+coded-AU roundtrip. Flag2 is **not emitted**: a local reply cannot prove remote
+selected-image rendering. Opening/closing the live app pipe does not invent
+frame identities. EOF, worker failure and provider Cleanup revoke it without a
+feature-expiry timer. Socket/file work stays on the cold worker.
+
+## Verification and remaining runtime observations
+
+Focused checks: input/device/output43, DirectMode20, provider/control/SEI/TCP
+composition47 pass normal and ASan/UBSan; source IPC has167 hand-checked framing
+and refusal assertions. Earlier unchanged original-boundary54 and sender
+capability81 checks are inherited. Actual host D3D11 execution through Wine's
+software GPU passes21,646 assertions for native-PS-alpha R8 blending, original
+RGB/target/shader preservation, native eye viewports, layered coverage, source
+interior bounds and immutable fractional-alpha witnesses. Two causal GPU
+mutations (RGB substituted for alpha, and ignored submitted ROI) are rejected.
+
+This environment refuses creation of an NV12 render target. Therefore the
+entire live native NV12 frontend is **not** represented as a completed GPU test:
+its exact association/lifetime predicates have public-call fixtures and static
+source pins, while its R8 and source-witness operations have real D3D11 tests.
+Actual Windows driver load order, device/context equality, shared-resource
+imports, current native composition/encoder call chain and the headset picture
+remain integrated runtime observations. The Frame selected-surface renderer is
+a separate parent-owned integration. No hardware success or installability is
+asserted by this host checkpoint.

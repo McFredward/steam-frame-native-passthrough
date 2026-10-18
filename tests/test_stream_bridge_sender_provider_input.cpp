@@ -33,6 +33,7 @@ void run(){
     void* handle=nullptr;NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS op{};op.version=NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;op.device=reinterpret_cast<void*>(0x9090);op.deviceType=NV_ENC_DEVICE_TYPE_DIRECTX;table.nvEncOpenEncodeSessionEx(&op,&handle);
     check(observedDevice==op.device&&observedDeviceType==op.deviceType&&deviceGeneration==bridge.generation(handle),"actual public Open device and epoch observed without guessed object layout");
     NV_ENC_INITIALIZE_PARAMS ip{};ip.version=NV_ENC_INITIALIZE_PARAMS_VER;ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;ip.encodeWidth=1152;ip.encodeHeight=4608;table.nvEncInitializeEncoder(handle,&ip);
+    check(!bridge.encoderStates()[0].encoded&&bridge.encoderStates()[0].width==1152&&bridge.encoderStates()[0].height==4608,"Init exposes actual dimensions but not successful encode authority");
     NV_ENC_REGISTER_RESOURCE rr{};rr.version=NV_ENC_REGISTER_RESOURCE_VER;rr.resourceType=NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;rr.bufferUsage=NV_ENC_INPUT_IMAGE;rr.resourceToRegister=resource;rr.width=1152;rr.height=4608;rr.bufferFormat=NV_ENC_BUFFER_FORMAT_NV12;
     check(table.nvEncRegisterResource(handle,&rr)==NV_ENC_SUCCESS&&rr.registeredResource==reg,"original registration result unchanged");
     NV_ENC_MAP_INPUT_RESOURCE mp{};mp.version=NV_ENC_MAP_INPUT_RESOURCE_VER;mp.registeredResource=reg;
@@ -41,6 +42,7 @@ void run(){
     auto get=[&](){NV_ENC_LOCK_BITSTREAM p{};p.version=NV_ENC_LOCK_BITSTREAM_VER;p.outputBitstream=output;check(table.nvEncLockBitstream(handle,&p)==NV_ENC_SUCCESS,"actual native output lock forwarded");return p;};
     auto release=[&](){check(table.nvEncUnlockBitstream(handle,output)==NV_ENC_SUCCESS,"actual native output unlock forwarded");};
     check(table.nvEncEncodePicture(handle,&pic)==NV_ENC_SUCCESS&&encodes==1&&captures==1&&captureEvent<encodeEvent,"one real Encode receives captured mapping");
+    check(bridge.encoderStates()[0].encoded,"only accepted original Encode admits cold runtime bootstrap");
     auto p=get();check(p.bitstreamBufferPtr==au.data()&&p.bitstreamSizeInBytes==au.size(),"configured augmenter refusal keeps original entire AU");
     check(observed.exactInput&&observed.resource==resource&&observed.encoder==encoder&&observed.mappedInput==mapped&&observed.output==output&&observed.inputTimestamp==pic.inputTimeStamp&&observed.width==1152&&observed.height==4608&&observed.subresource==0,"output exact public registry/map/encode timestamp tuple");
     check(observed.encoderGeneration==bridge.generation(handle)&&observed.resourceGeneration&&observed.mapGeneration>observed.resourceGeneration&&observed.submission>observed.mapGeneration&&observed.submission==captured.submission,"separate monotonically scoped resource/map/submission identities");release();check(retires==1,"input ledger retired at matching successful unlock");

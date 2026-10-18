@@ -5,7 +5,7 @@ void SenderRuntime::stop(){if(encoder_.encoder)boundary_.revokeDiscovery(encoder
 void SenderRuntime::tick(){
     if(!request_.explicitlyEnabled)return;
     EncoderState current{};unsigned candidates=0;
-    for(const auto& e:boundary_.encoderStates())if(e.encoder&&e.hevc){current=e;++candidates;}
+    for(const auto& e:boundary_.encoderStates())if(e.encoder&&e.hevc&&e.encoded){current=e;++candidates;}
     if(candidates!=1){if(encoder_.encoder){boundary_.revokeDiscovery(encoder_.encoder,encoder_.generation);control_.stop();encoder_={};attempted_=probeRequested_=false;}state_=candidates?RuntimeState::AmbiguousEncoder:RuntimeState::WaitingEncoder;return;}
     if(current.encoder!=encoder_.encoder||current.generation!=encoder_.generation){
         if(encoder_.encoder)boundary_.revokeDiscovery(encoder_.encoder,encoder_.generation);

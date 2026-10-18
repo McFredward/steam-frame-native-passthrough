@@ -15,8 +15,13 @@ NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*){return NV_ENC_SUCCESS
 NVENCSTATUS NVENCAPI reconfigure(void*,NV_ENC_RECONFIGURE_PARAMS*){return NV_ENC_ERR_INVALID_PARAM;}
 NVENCSTATUS NVENCAPI lock(void*,NV_ENC_LOCK_BITSTREAM* p){p->bitstreamBufferPtr=au.data();p->bitstreamSizeInBytes=au.size();p->outputTimeStamp=7;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI unlock(void*,NV_ENC_OUTPUT_PTR){return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI reg(void*,NV_ENC_REGISTER_RESOURCE* p){p->registeredResource=reinterpret_cast<NV_ENC_REGISTERED_PTR>(0x70);return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI unreg(void*,NV_ENC_REGISTERED_PTR){return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI mapInput(void*,NV_ENC_MAP_INPUT_RESOURCE* p){p->mappedResource=reinterpret_cast<NV_ENC_INPUT_PTR>(0x80);p->mappedBufferFmt=NV_ENC_BUFFER_FORMAT_NV12;return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI unmapInput(void*,NV_ENC_INPUT_PTR){return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI encode(void*,NV_ENC_PIC_PARAMS*){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI destroy(void*){return NV_ENC_SUCCESS;}
-NVENCSTATUS NVENCAPI factory(NV_ENCODE_API_FUNCTION_LIST* p){p->nvEncOpenEncodeSessionEx=open;p->nvEncInitializeEncoder=init;p->nvEncReconfigureEncoder=reconfigure;p->nvEncLockBitstream=lock;p->nvEncUnlockBitstream=unlock;p->nvEncDestroyEncoder=destroy;return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI factory(NV_ENCODE_API_FUNCTION_LIST* p){p->nvEncOpenEncodeSessionEx=open;p->nvEncInitializeEncoder=init;p->nvEncReconfigureEncoder=reconfigure;p->nvEncLockBitstream=lock;p->nvEncUnlockBitstream=unlock;p->nvEncDestroyEncoder=destroy;p->nvEncRegisterResource=reg;p->nvEncUnregisterResource=unreg;p->nvEncMapInputResource=mapInput;p->nvEncUnmapInputResource=unmapInput;p->nvEncEncodePicture=encode;return NV_ENC_SUCCESS;}
 Nonce nonce(){Nonce n{};n[0]=91;return n;}
 struct Files{
     std::filesystem::path path;
@@ -31,8 +36,10 @@ void run(){
     runtime.configure(request);runtime.tick();check(runtime.state()==RuntimeState::Off&&runtime.control().localPort()==0,"actual runtime defaults off without opening socket");
     request.explicitlyEnabled=true;runtime.configure(request);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder&&runtime.control().localPort()==0,"no real encoder cannot prepare discovery");
     NV_ENCODE_API_FUNCTION_LIST table{};table.version=NV_ENCODE_API_FUNCTION_LIST_VER;boundary.create(factory,&table);void* handle=nullptr;NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS op{};op.version=NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;table.nvEncOpenEncodeSessionEx(&op,&handle);
-    NV_ENC_INITIALIZE_PARAMS ip{};ip.version=NV_ENC_INITIALIZE_PARAMS_VER;ip.encodeGUID=NV_ENC_CODEC_H264_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder,"actual H264 never starts HEVC metadata route");
-    ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingPeer&&runtime.control().localPort()!=0,"actual HEVC Init triggers cold paired runtime/listener");
+    NV_ENC_INITIALIZE_PARAMS ip{};ip.version=NV_ENC_INITIALIZE_PARAMS_VER;ip.encodeWidth=128;ip.encodeHeight=128;ip.encodeGUID=NV_ENC_CODEC_H264_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder,"actual H264 never starts HEVC metadata route");
+    ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder&&runtime.control().localPort()==0,"Init alone cannot open listener before an actual accepted encode");
+    auto submit=[&](){NV_ENC_REGISTER_RESOURCE r{};r.version=NV_ENC_REGISTER_RESOURCE_VER;r.resourceType=NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;r.resourceToRegister=reinterpret_cast<void*>(0x60);r.width=r.height=128;r.bufferFormat=NV_ENC_BUFFER_FORMAT_NV12;r.bufferUsage=NV_ENC_INPUT_IMAGE;table.nvEncRegisterResource(handle,&r);NV_ENC_MAP_INPUT_RESOURCE m{};m.version=NV_ENC_MAP_INPUT_RESOURCE_VER;m.registeredResource=r.registeredResource;table.nvEncMapInputResource(handle,&m);NV_ENC_PIC_PARAMS p{};p.version=NV_ENC_PIC_PARAMS_VER;p.inputBuffer=m.mappedResource;p.outputBitstream=output;p.inputWidth=p.inputHeight=128;p.bufferFmt=NV_ENC_BUFFER_FORMAT_NV12;p.inputTimeStamp=7;table.nvEncEncodePicture(handle,&p);};
+    submit();runtime.tick();check(runtime.state()==RuntimeState::WaitingPeer&&runtime.control().localPort()!=0,"actual HEVC Init triggers cold paired runtime/listener");
     ControlRequest rr=request;rr.role=Role::Receiver;rr.pairingsDirectory=files.path/"receiver";rr.port=runtime.control().localPort();rr.video={nonce(),4};
     check(reverse.prepare(rr)==ControlStatus::Connecting||reverse.status()==ControlStatus::WaitingVideo,"real receiver reverse socket started");
     auto pump=[&](){for(unsigned i=0;i<80;++i){reverse.tick();runtime.tick();}};pump();
@@ -49,7 +56,7 @@ void run(){
     NV_ENC_LOCK_BITSTREAM fallback{};fallback.version=NV_ENC_LOCK_BITSTREAM_VER;fallback.outputBitstream=output;table.nvEncLockBitstream(handle,&fallback);check(fallback.bitstreamBufferPtr==au.data()&&fallback.bitstreamSizeInBytes==au.size(),"lost paired peer leaves ordinary actual native AU pointer and size intact");table.nvEncUnlockBitstream(handle,output);
     const auto previous=runtime.encoder().generation;NV_ENC_RECONFIGURE_PARAMS rc{};rc.version=NV_ENC_RECONFIGURE_PARAMS_VER;table.nvEncReconfigureEncoder(handle,&rc);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder&&!runtime.control().peerVerified()&&runtime.control().localPort()==0,"real source reconfiguration tears down authenticated transport immediately");
     ip.encodeGUID=NV_ENC_CODEC_H264_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder,"non-HEVC source remains ordinary after reconfiguration");
-    ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.encoder().generation>previous&&runtime.state()==RuntimeState::WaitingPeer,"new actual codec epoch gets fresh session and must reconfirm");
+    ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(handle,&ip);submit();runtime.tick();check(runtime.encoder().generation>previous&&runtime.state()==RuntimeState::WaitingPeer,"new actual codec epoch gets fresh session and must reconfirm");
     runtime.stop();runtime.tick();check(runtime.state()==RuntimeState::Off&&runtime.control().localPort()==0,"explicit stop never autonomously restarts control");table.nvEncDestroyEncoder(handle);boundary.stop();
 }
 }

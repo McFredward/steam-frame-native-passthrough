@@ -20,6 +20,7 @@ void run(){
     DirectModeBoundary bridge;check(!bridge.prepare({}),"incomplete original public table refused");check(bridge.prepare({create,destroy,destroyAll,next,submit,present,post,timing}),"typed DirectMode009 original table accepted");table=bridge.entryPoints();
     DirectMode::SwapTextureSetDesc_t desc{4040,4040,28,1};DirectMode::SwapTextureSet_t left{},right{};
     table.create(object,42,&desc,&left);table.create(object,42,&desc,&right);check(creates==2&&bridge.ownsProcess(42)&&!bridge.ownsProcess(43),"actual CreateSwapTextureSet records owner PID without guessing");
+    const auto inventory=bridge.inventory();check(inventory.valid&&inventory.epoch&&inventory.swaps[0].processId==42&&inventory.swaps[0].handles[0]==left.rSharedTextureHandles[0]&&inventory.swaps[1].generation!=inventory.swaps[0].generation,"cold source inventory retains actual owner and distinct generations");
     DirectMode::SubmitLayerPerEye_t eyes[2]{};for(auto& eye:eyes){eye.bounds={0,0,1,1};eye.mProjection.m[0][0]=1;eye.mProjection.m[1][1]=1;eye.mHmdPose.m[0][0]=1;eye.mHmdPose.m[1][1]=1;eye.mHmdPose.m[2][2]=1;}
     eyes[0].hTexture=left.rSharedTextureHandles[1];eyes[1].hTexture=right.rSharedTextureHandles[2];
     check(!DirectModeBoundary::currentFrame(),"no claimed source outside actual Present/Post");table.submit(object,eyes);table.present(object,77);table.post(object,nullptr);
@@ -34,7 +35,7 @@ void run(){
     table.present(object,77);check(seen==count,"overflowing native layer collection not partially certified");
     table.submit(object,eyes);table.present(object,77);check(seen==count+1,"next bounded real frame recovers from incomplete collection");
     destroyInPresent=true;table.submit(object,eyes);table.present(object,77);destroyInPresent=false;check(!bridge.ownsProcess(42),"DestroyAll removes current app ownership");count=seen;table.submit(object,eyes);table.present(object,77);check(seen==count,"destroyed shared handle not reusable as source identity");
-    bridge.stop();table.submit(object,eyes);table.present(object,77);check(seen==count,"stop preserves original calls but removes all source authority");
+    bridge.stop();check(!bridge.inventory().valid,"stopped source registry cannot prepare texture imports");table.submit(object,eyes);table.present(object,77);check(seen==count,"stop preserves original calls but removes all source authority");
 }
 }
 int main(){try{run();std::printf("sender public DirectMode ownership: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"DirectMode failed after %u: %s\n",checks,e.what());return 1;}}

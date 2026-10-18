@@ -36,7 +36,7 @@ struct OutputAugmenter {
     bool (*augment)(Bytes,const NvencOutputEvidence&,std::vector<std::uint8_t>&,void*)=nullptr;
     void* context=nullptr;
 };
-struct EncoderState{void* encoder=nullptr;std::uint64_t generation=0;bool hevc=false,peerConfirmed=false,probeObserved=false;};
+struct EncoderState{void* encoder=nullptr;std::uint64_t generation=0;bool hevc=false,peerConfirmed=false,probeObserved=false;std::uint32_t width=0,height=0;bool encoded=false;};
 // Public NVENC ABI boundary. No private Steam object layout or function jump.
 // Single process-lifetime instance; factory tables may retain these callbacks.
 class NvencBoundary {
@@ -64,7 +64,7 @@ public:
 private:
     struct Session {
         void* encoder=nullptr;std::uint64_t generation=0;
-        bool initialized=false,hevc=false;std::uint32_t width=0,height=0;
+        bool initialized=false,hevc=false,encoded=false;std::uint32_t width=0,height=0;
         SenderAdapter adapter{};VerifiedChannel channel{};
         struct Resource {NV_ENC_REGISTERED_PTR registered=nullptr;void* native=nullptr;std::uint64_t generation=0;std::uint32_t width=0,height=0,subresource=0;NV_ENC_BUFFER_FORMAT format=NV_ENC_BUFFER_FORMAT_UNDEFINED;};
         struct Map {NV_ENC_INPUT_PTR mapped=nullptr;NV_ENC_REGISTERED_PTR registered=nullptr;std::uint64_t generation=0,resourceGeneration=0;};

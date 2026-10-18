@@ -15,6 +15,8 @@ struct DirectFrame {
     std::array<std::array<DirectEye,2>,4> layers{};std::uint32_t layerCount=0;
     bool sourceKnown=false;
 };
+struct DirectSwap {void* component=nullptr;std::uint32_t processId=0;std::uint64_t generation=0;DirectMode::SwapTextureSetDesc_t description{};std::array<vr::SharedTextureHandle_t,3> handles{};};
+struct DirectInventory {std::array<DirectSwap,64> swaps{};std::uint64_t epoch=0;bool valid=false;};
 struct DirectModeFunctions {
     void (*create)(void*,std::uint32_t,const DirectMode::SwapTextureSetDesc_t*,DirectMode::SwapTextureSet_t*)=nullptr;
     void (*destroy)(void*,vr::SharedTextureHandle_t)=nullptr;
@@ -34,6 +36,7 @@ public:
     DirectModeFunctions entryPoints()const noexcept;
     void stop()noexcept;
     bool ownsProcess(std::uint32_t)const noexcept;
+    DirectInventory inventory()const noexcept;
     static const DirectFrame* currentFrame()noexcept;
 private:
     struct Swap{void* component=nullptr;std::uint32_t pid=0;std::uint64_t generation=0;DirectMode::SwapTextureSetDesc_t description{};std::array<vr::SharedTextureHandle_t,3> handles{};};

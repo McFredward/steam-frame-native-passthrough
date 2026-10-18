@@ -13,7 +13,7 @@ std::atomic<NvencBoundary*> NvencBoundary::instance_{nullptr};
 NvencBoundary::NvencBoundary(const std::array<std::uint8_t,32>& hash):hash_(hash){}
 NvencBoundary::Session* NvencBoundary::find(void* e){for(auto& s:sessions_)if(s.encoder==e&&e)return &s;return nullptr;}
 std::uint64_t NvencBoundary::revoke(Session& s){
-    s.adapter.stop();s.initialized=false;s.hevc=false;
+    s.adapter.stop();s.initialized=false;s.hevc=false;s.encoded=false;
     for(auto& p:s.submissions)if(p.evidence.submission&&inputObserver_.retire)try{inputObserver_.retire(p.evidence,inputObserver_.context);}catch(...){}
     s.maps={};s.resources={};s.submissions={};s.probeQueued=false;
     s.generation=nextGeneration_==std::numeric_limits<std::uint64_t>::max()?0:++nextGeneration_;
@@ -125,7 +125,7 @@ NVENCSTATUS NVENCAPI NvencBoundary::encode(void* encoder,NV_ENC_PIC_PARAMS* para
         }
     }
     const auto result=self.original_.nvEncEncodePicture(encoder,params);
-    if(identity){std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder);s&&s->generation==generation)for(auto& p:s->submissions)if(p.evidence.submission==identity){if(result==NV_ENC_SUCCESS||result==NV_ENC_ERR_NEED_MORE_INPUT)p.accepted=true;else{if(self.inputObserver_.retire)try{self.inputObserver_.retire(p.evidence,self.inputObserver_.context);}catch(...){}p={};}}}
+    if(identity){std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder);s&&s->generation==generation)for(auto& p:s->submissions)if(p.evidence.submission==identity){if(result==NV_ENC_SUCCESS||result==NV_ENC_ERR_NEED_MORE_INPUT){p.accepted=true;s->encoded=true;}else{if(self.inputObserver_.retire)try{self.inputObserver_.retire(p.evidence,self.inputObserver_.context);}catch(...){}p={};}}}
     return result;
 }
 NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* params){
@@ -208,7 +208,7 @@ Status NvencBoundary::receiveEcho(void* encoder,Bytes payload,const VerifiedChan
 void NvencBoundary::setDeviceObserver(DeviceObserver value){std::lock_guard<std::mutex> guard(mutex_);deviceObserver_=value;}
 void NvencBoundary::setInputObserver(InputObserver value){std::lock_guard<std::mutex> guard(mutex_);inputObserver_=value;}
 void NvencBoundary::setOutputAugmenter(OutputAugmenter value){std::lock_guard<std::mutex> guard(mutex_);augmenter_=value;}
-std::array<EncoderState,4> NvencBoundary::encoderStates()const{std::lock_guard<std::mutex> guard(mutex_);std::array<EncoderState,4> result{};for(unsigned i=0;i<sessions_.size();++i)result[i]={sessions_[i].encoder,sessions_[i].generation,sessions_[i].initialized&&sessions_[i].hevc,sessions_[i].adapter.mutualConfirmed(),sessions_[i].adapter.probeObserved()};return result;}
+std::array<EncoderState,4> NvencBoundary::encoderStates()const{std::lock_guard<std::mutex> guard(mutex_);std::array<EncoderState,4> result{};for(unsigned i=0;i<sessions_.size();++i)result[i]={sessions_[i].encoder,sessions_[i].generation,sessions_[i].initialized&&sessions_[i].hevc,sessions_[i].adapter.mutualConfirmed(),sessions_[i].adapter.probeObserved(),sessions_[i].width,sessions_[i].height,sessions_[i].encoded};return result;}
 void NvencBoundary::revokeDiscovery(void* encoder,std::uint64_t generation){std::lock_guard<std::mutex> guard(mutex_);if(auto s=find(encoder);s&&s->generation==generation)s->adapter.stop();}
 void NvencBoundary::stop(){std::lock_guard<std::mutex> guard(mutex_);enabled_=false;for(auto& s:sessions_)revoke(s);}
 bool NvencBoundary::wrapped()const{std::lock_guard<std::mutex> guard(mutex_);return installed_;}
