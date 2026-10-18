@@ -36,6 +36,43 @@ if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(NOT CMAKE_CROSSCOMPILING)
         add_test(NAME stream_bridge_control COMMAND test_stream_bridge_control)
     endif()
+
+    add_executable(test_stream_bridge_native_runtime
+        tests/stream_bridge_native_runtime_test.cpp
+        receiver/stream_bridge_native_runtime.cpp receiver/stream_bridge_native_decode.cpp
+        receiver/stream_bridge_native_loader.cpp)
+    target_link_libraries(test_stream_bridge_native_runtime PRIVATE sfnp_stream_bridge_control ${CMAKE_DL_LIBS})
+    target_compile_options(test_stream_bridge_native_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        enable_language(ASM)
+        target_sources(test_stream_bridge_native_runtime PRIVATE receiver/stream_bridge_native_decode_entry.S)
+    endif()
+    if(NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME stream_bridge_native_runtime COMMAND test_stream_bridge_native_runtime)
+    endif()
+
+    # Explicit SDK input: configure/build never downloads a header. CI prepares
+    # the exact reviewed public SDK before enabling actual sender-boundary tests.
+    set(SFNP_NVENC_SDK_DIRECTORY "" CACHE PATH "Explicit reviewed NVENC SDK11.1 include directory")
+    if(SFNP_NVENC_SDK_DIRECTORY)
+        file(SHA256 "${SFNP_NVENC_SDK_DIRECTORY}/nvEncodeAPI.h" SFNP_NVENC_HEADER_HASH)
+        if(NOT SFNP_NVENC_HEADER_HASH STREQUAL "be0c29a41ae3260fd016a9001fd959e747bac93ad21411759736abba4ffdea86")
+            message(FATAL_ERROR "The explicit NVENC SDK header differs from the reviewed11.1 pin")
+        endif()
+        add_library(sfnp_stream_sender_boundary STATIC
+            pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender-provider-runtime.cpp)
+        target_include_directories(sfnp_stream_sender_boundary SYSTEM PUBLIC ${SFNP_NVENC_SDK_DIRECTORY})
+        target_compile_options(sfnp_stream_sender_boundary PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        target_link_libraries(sfnp_stream_sender_boundary PUBLIC sfnp_stream_bridge_control)
+        foreach(suite stream_bridge_sender_provider stream_bridge_sender_provider_input stream_bridge_sender_provider_runtime)
+            add_executable(test_${suite} tests/test_${suite}.cpp)
+            target_compile_options(test_${suite} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+            target_link_libraries(test_${suite} PRIVATE sfnp_stream_sender_boundary)
+            if(NOT CMAKE_CROSSCOMPILING)
+                add_test(NAME ${suite} COMMAND test_${suite})
+            endif()
+        endforeach()
+    endif()
 endif()
 
 add_executable(stream_bridge_au EXCLUDE_FROM_ALL tools/stream_bridge_au.cpp)

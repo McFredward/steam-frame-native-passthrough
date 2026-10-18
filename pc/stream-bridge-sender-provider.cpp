@@ -116,7 +116,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
     stream_bridge::sender::SenderCoverage coverage_{directMode(),boundary(),runtime_.control()};
     stream_bridge::sender::SourceIpcServer sourceIpc_{[](std::uint32_t pid,void* context){return static_cast<Provider*>(context)->coverage_.ready(pid);},this};
     void** directSlots_=nullptr;std::array<void*,8> directOriginal_{},directWrapped_{};
-    void report(const char* status){if(log_){char text[160]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
+    void report(const char* status){if(log_){char text[384]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
     bool configure(){
         vr::EVRInitError error=vr::VRInitError_None;
         auto* settings=static_cast<vr::IVRSettings*>(context_->GetGenericInterface(vr::IVRSettings_Version,&error));
@@ -195,13 +195,37 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             HMODULE candidate=nullptr;
             if(GetModuleHandleExW(0,L"driver_vrlink.dll",&candidate)){
                 source_=candidate;
-                try {attached=attach(candidate);if(!attached)bootstrapStatus.store(3);}catch(...){bootstrapStatus.store(3);}
+                try {attached=attach(candidate);if(!attached){bootstrapStatus.store(3);report("native sender attachment refused; ordinary video");}}
+                catch(...){bootstrapStatus.store(3);report("native sender attachment failed; ordinary video");}
                 break; // One actual module attempt per provider epoch, no automatic retry.
             }
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(250),[this]{return stopped_;});
         }
         if(!attached)return;
-        auto last=stream_bridge::sender::RuntimeState::Off;const char* lastCoverage=nullptr;unsigned reports=0;
+        report("pinned native sender attached");
+        auto last=stream_bridge::sender::RuntimeState::Off;const char* lastCoverage=nullptr;
+        std::array<const char*,32> reported{};
+        // Repeated startup churn must not spend the budget before a later
+        // handshake/refusal becomes visible. Each distinct state is logged once.
+        const auto reportState=[&](const char* value){for(auto& previous:reported){
+            if(previous&&std::strcmp(previous,value)==0)return;
+            if(!previous){previous=value;report(value);return;}
+        }};
+        std::uint64_t nextReconfigureReport=1;unsigned reconfigureReports=0;
+        bool reportedSuccess=false,reportedRejection=false,reportedRevoke=false;
+        const auto reportReconfigure=[&](bool final){
+            const auto stats=boundary().reconfigureStats();if(!stats.total)return;
+            const bool newOutcome=(!reportedSuccess&&stats.preservedSuccessful)||(!reportedRejection&&stats.preservedRejected)||(!reportedRevoke&&stats.revoked);
+            if(!final&&((!newOutcome&&stats.total<nextReconfigureReport)||reconfigureReports>=8))return;
+            char text[288]{};std::snprintf(text,sizeof text,
+                "encoder reconfigure: calls=%llu; same-contract accepted=%llu, rejected=%llu; revoked=%llu; last native status=%d, extent=%ux%u, contract-known=%u, same=%u, reset=%u",
+                static_cast<unsigned long long>(stats.total),static_cast<unsigned long long>(stats.preservedSuccessful),
+                static_cast<unsigned long long>(stats.preservedRejected),static_cast<unsigned long long>(stats.revoked),stats.lastStatus,stats.lastWidth,stats.lastHeight,
+                unsigned(stats.lastContractKnown),unsigned(stats.lastSameContract),unsigned(stats.lastResetEncoder));
+            report(text);++reconfigureReports;
+            reportedSuccess=stats.preservedSuccessful!=0;reportedRejection=stats.preservedRejected!=0;reportedRevoke=stats.revoked!=0;
+            nextReconfigureReport=stats.total>~std::uint64_t(0)/8?~std::uint64_t(0):stats.total*8;
+        };
         for(;;){
             {std::lock_guard<std::mutex> guard(mutex_);if(stopped_)break;}
             try{coverage_.tick();runtime_.tick();
@@ -211,10 +235,15 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                     sourceIpc_.tick(state);
                 }
             }catch(...){sourceIpc_.stop();coverage_.stop();runtime_.stop();report("worker refused; ordinary video");break;}
-            const auto* coverageState=coverage_.stateName();if(request_.explicitlyEnabled&&coverageState!=lastCoverage&&reports<32){lastCoverage=coverageState;++reports;report(coverageState);}
-            if(runtime_.state()!=last&&reports<32){last=runtime_.state();++reports;report(stream_bridge::sender::runtimeStateName(last));}
+            const auto* coverageState=coverage_.stateName();if(request_.explicitlyEnabled&&coverageState!=lastCoverage){lastCoverage=coverageState;reportState(coverageState);}
+            if(runtime_.state()!=last){last=runtime_.state();reportState(stream_bridge::sender::runtimeStateName(last));}
+            if(request_.explicitlyEnabled)reportReconfigure(false);
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(8),[this]{return stopped_;});
         }
+        report("sender worker stopping");
+        report(stream_bridge::sender::runtimeStateName(runtime_.state()));
+        report(coverage_.stateName());
+        reportReconfigure(true);
         sourceIpc_.stop();runtime_.stop();
     }
 public:

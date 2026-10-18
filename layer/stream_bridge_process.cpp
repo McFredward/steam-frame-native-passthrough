@@ -26,6 +26,7 @@ struct Process {
     std::shared_ptr<local::LeaseReader> currentLeases;
     std::shared_ptr<std::atomic<bool>> connection;std::uint64_t lastConnect=0;
     std::thread worker;std::uint32_t notes=0;bool prepared=false;
+    std::array<std::uint32_t,9> sourceNotices{}; // Written only by the receiver worker.
 };
 Process* process() noexcept{
     // The optional pre-main companion must not terminate Steam on allocation
@@ -73,6 +74,15 @@ void decoded(const native::DecodedFrame& frame,void* context) noexcept{
 }
 void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
     auto&p=*static_cast<Process*>(context);if(notice.state==native::RuntimeState::SourceLost||notice.state==native::RuntimeState::SenderUnavailable)p.writer.invalidateCurrentEpoch();
+    // Worker-only, first occurrence of each state/control pair. Repeated
+    // reconnects cannot flood the journal or hide a later admission failure.
+    const auto state=static_cast<unsigned>(notice.state),control=static_cast<unsigned>(notice.control);
+    if(state>=p.sourceNotices.size()||control>=32)return;
+    const auto bit=std::uint32_t(1)<<control;if(p.sourceNotices[state]&bit)return;
+    p.sourceNotices[state]|=bit;
+    constexpr const char* names[]{"disabled","waiting-native-source","waiting-local-image-route","negotiating",
+        "peer-confirmed","source-proof-lost","sender-unavailable","pairing-refused","source-refused"};
+    std::fprintf(stderr,"[Steam Link Native Passthrough] receiver %s; control=%s\n",names[state],sb::controlStatusName(notice.control));
 }
 void consume(Process&p,local::Message& message){
     if(!message.peerConfirmed)return;

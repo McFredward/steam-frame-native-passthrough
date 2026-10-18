@@ -86,9 +86,14 @@ jobs:
         run: python3 -B tests/test_stream_bridge_artifact_pins.py
       - name: Install small native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends glslc spirv-tools libvulkan-dev mesa-vulkan-drivers g++-mingw-w64-x86-64-win32 binutils-aarch64-linux-gnu
+      - name: Prepare the pinned public NVENC header for actual sender lifecycle tests
+        run: |
+          mkdir -p build/nvenc-sdk
+          curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/FFmpeg/nv-codec-headers/43d91706e097565f57b311e567f0219838bcc2f6/include/ffnvcodec/nvEncodeAPI.h -o build/nvenc-sdk/nvEncodeAPI.h
+          echo 'be0c29a41ae3260fd016a9001fd959e747bac93ad21411759736abba4ffdea86  build/nvenc-sdk/nvEncodeAPI.h' | sha256sum --check --strict
       - name: Configure and build
         run: |
-          cmake -S . -B build/mask -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFRAME_MASK_BUILD_RECEIVER_OBSERVER=ON -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON
+          cmake -S . -B build/mask -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFRAME_MASK_BUILD_RECEIVER_OBSERVER=ON -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
           cmake --build build/mask --parallel 4
       - name: Focused checks in parallel
         run: ctest --test-dir build/mask --output-on-failure --parallel 4
