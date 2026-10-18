@@ -91,8 +91,6 @@ def main():
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
-        print('Inspection packaging refused: verified profile and portable Python source are required.', file=sys.stderr)
-        raise SystemExit(2)
+    # Release engineering runs on known non-secret inputs. Preserve the precise
+    # validation failure here; hiding it would make cross-platform failures opaque.
+    main()
