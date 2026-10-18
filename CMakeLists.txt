@@ -487,6 +487,10 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_fragment_scene_presenter.py)
         add_test(NAME native_fragment_scene_full_presenter COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_fragment_scene_full_presenter.py)
+        add_test(NAME native_fragment_scene_robust_presenter COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_fragment_scene_robust_presenter.py)
+        add_test(NAME native_fragment_robust_scene_stream_contract COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native-fragment-robust-scene-stream/test_contract.py)
         add_test(NAME synthetic_presenter_session COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_synthetic_presenter_session.py)
         add_test(NAME scene_presenter_session COMMAND ${Python3_EXECUTABLE} -B
