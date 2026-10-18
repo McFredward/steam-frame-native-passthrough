@@ -93,10 +93,56 @@ source admission and the two actual GPU controls ran; unchanged core/session
 evidence is inherited. The runner now lists only executed controls. This final
 reporting-only change was AST/diff checked without repeating passed GPU work.
 
-The fresh package is prepared locally and hash-verified. It is not installed.
-This follow-up is preparation, not a product menu fix, installation permission,
-independent overlay-transport proof or a remedy for the separate RGB budget
-loss. Full-quality transport and live game + local menu + camera remain open.
+That preparation was subsequently tested with explicit fresh permission. Its
+actual results follow; neither the software proof nor this observation is a
+product menu fix, independent overlay-transport proof or a remedy for the
+separate RGB budget loss.
+
+## Per-companion follow-up: actual result
+
+The separately authorized route-v4 attachment completed all three manually
+guarded menu contexts. It produced12 populated central samples: companions5
+and6, both consumed selectors and each context. All created-but-unused slots
+for companions1–4 remain empty. Both active companions independently show
+the same transition, so the previous shared first-winner race is no longer
+an explanation for these measured paths:
+
+| Context | Companion5, both selectors | Companion6, both selectors |
+| --- | --- | --- |
+| Closed before | v3; first raw-G128/1023 | v3; first raw-G128/1023 |
+| Menu open | Original994; first raw-G52/1023 | Original994; first raw-G52/1023 |
+| Closed after | v3; first raw-G128/1023 | v3; first raw-G128/1023 |
+
+Both original sample values, SSA603.A and SSA629.A, are exactly1 in all12
+observations. Copying either input alpha into fallback therefore cannot restore
+the camera composition observed here. R1, flags and tint remain unchanged.
+The open fallback still exactly matches original994, and the remaining11 guard
+entries are unexecuted sentinels. The0.40625 first-cell ratio remains a property
+of that cell, not a proved global brightness function.
+
+The raw-G value is the original YUV-luma sample, before our atlas decoder and
+the original final tint/output expression. A later ordinary RGBA menu draw
+alone cannot explain its alteration. An upstream host fade or a prior local
+YUV intermediate is still possible; actual descriptor provenance and a public
+control for that change are not yet established. Do not weaken the format
+guard, invert an assumed global fade or alter UV/FOV from this evidence.
+
+Submitted recorded-command uses were913/1075/415 for companion5 and
+913/1076/415 for companion6 across the three contexts. These counters are not
+a complete physical draw census. Optional startup summaries truncated, while
+strict queue/resources remained admitted with refusal0. Phase3 reached the
+owned fence before collection. All32 transferred files,559464bytes including
+bounded log tails, passed checksum verification. The12544byte numeric record
+contains no pixel image. Private records are under
+`native/dashboard-route-v4-20261018-095032-33fcda/`, including `analysis-v1.json`.
+
+The exact public installation was restored and the maintainer confirmed normal
+visible usable UI. No diagnostic remains active. The next observation is a
+bounded, read-only public OpenVR host helper, automatically gated by the game's
+Debug logging and an eligible native-MR session. It changes no fade, settings,
+resolution, video encoder, sender binary or Frame installation. Its purpose is
+to distinguish an observed public fade/grid state from an unproved hypothesis;
+game + menu + camera and the separate spatial-budget loss remain open.
 
 ## Restoration and retention
 
