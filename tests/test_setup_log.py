@@ -162,7 +162,9 @@ class SessionLogs(unittest.TestCase):
         blocker.write_text('preserve')
         session = self.open(blocker / log.ROOT_NAME)
         self.assertFalse(session.available)
-        self.assertEqual(session.failure_code, 'io_error')
+        # Windows reports a missing child below an ordinary file as path-not-
+        # found; POSIX reports ENOTDIR. Both preserve the blocking file.
+        self.assertEqual(session.failure_code, 'missing' if os.name == 'nt' else 'io_error')
         self.assertEqual(session.path.parent, blocker / log.ROOT_NAME / 'logs')
         self.assertEqual(blocker.read_text(), 'preserve')
         self.assertFalse(session.record_failure('frame_prepare', ValueError('SECRET')))
@@ -212,6 +214,14 @@ class SessionLogs(unittest.TestCase):
         session = self.open()
         original = session.path.read_bytes()
         replacement = session.path.with_suffix('.saved')
+        if os.name == 'nt':
+            # Windows denies replacing the live descriptor's path outright.
+            # Check the real OS protection rather than assuming POSIX rename.
+            with self.assertRaises(PermissionError):session.path.rename(replacement)
+            self.assertEqual(session.path.read_bytes(),original)
+            self.assertFalse(replacement.exists())
+            self.assertTrue(session.event('undo','start',status='started'))
+            return
         session.path.rename(replacement)
         session.path.write_bytes(b'foreign')
         self.assertFalse(session.event('undo', 'start', status='started'))
