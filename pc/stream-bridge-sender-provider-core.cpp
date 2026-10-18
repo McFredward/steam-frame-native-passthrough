@@ -12,6 +12,11 @@ static_assert(offsetof(NV_ENCODE_API_FUNCTION_LIST,nvEncLockBitstream)==0x90&&
 std::atomic<NvencBoundary*> NvencBoundary::instance_{nullptr};
 NvencBoundary::NvencBoundary(const std::array<std::uint8_t,32>& hash):hash_(hash){}
 NvencBoundary::Session* NvencBoundary::find(void* e){for(auto& s:sessions_)if(s.encoder==e&&e)return &s;return nullptr;}
+std::uint64_t NvencBoundary::revoke(Session& s){
+    s.adapter.stop();s.initialized=false;s.hevc=false;
+    s.generation=nextGeneration_==std::numeric_limits<std::uint64_t>::max()?0:++nextGeneration_;
+    return s.generation;
+}
 VerifiedSource NvencBoundary::source(const Session& s)const {
     VerifiedSource v{};v.verified=installed_&&s.initialized&&s.hevc;v.ordinaryStream=s.hevc;
     v.completeAccessUnit=true;v.codec=VerifiedSource::Codec::HevcAnnexB;
@@ -49,9 +54,12 @@ NVENCSTATUS NVENCAPI NvencBoundary::init(void* encoder,NV_ENC_INITIALIZE_PARAMS*
     auto& self=*instance_.load(std::memory_order_acquire);const bool admissible=params&&params->version==NV_ENC_INITIALIZE_PARAMS_VER;
     const bool hevc=admissible&&std::memcmp(&params->encodeGUID,&NV_ENC_CODEC_HEVC_GUID,sizeof(GUID))==0&&
         !params->enableOutputInVidmem&&!params->enableMEOnlyMode&&!params->reportSliceOffsets&&!params->enableSubFrameWrite;
+    std::uint64_t generation=0;
+    {std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder))generation=self.revoke(*s);}
     const auto result=self.original_.nvEncInitializeEncoder(encoder,params);
-    std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder)){
-        s->adapter.stop();s->initialized=result==NV_ENC_SUCCESS&&admissible;s->hevc=s->initialized&&hevc;
+    std::lock_guard<std::mutex> guard(self.mutex_);
+    if(auto s=self.find(encoder);s&&generation&&s->generation==generation){
+        s->initialized=result==NV_ENC_SUCCESS&&admissible;s->hevc=s->initialized&&hevc;
     }
     return result;
 }
@@ -59,7 +67,7 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
     auto& self=*instance_.load(std::memory_order_acquire);
     // Never continue a negotiated source identity across any reconfiguration,
     // even a failed attempt. No borrowed AU is freed by revocation.
-    {std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder)){s->adapter.stop();s->initialized=false;s->hevc=false;}}
+    {std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder)){self.revoke(*s);}}
     return self.original_.nvEncReconfigureEncoder(encoder,params);
 }
 NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* params){

@@ -31,6 +31,7 @@ private:
         void* output=nullptr;std::uint64_t ticket=0;
     };
     Session* find(void*);
+    std::uint64_t revoke(Session&);
     VerifiedSource source(const Session&)const;
     static NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void**);
     static NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*);

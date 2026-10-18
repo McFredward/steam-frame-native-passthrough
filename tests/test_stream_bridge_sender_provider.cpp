@@ -10,9 +10,16 @@ NVENCSTATUS factoryStatus=NV_ENC_SUCCESS,lockStatus=NV_ENC_SUCCESS,unlockStatus=
 void* handle=reinterpret_cast<void*>(0x1010);void* output=reinterpret_cast<void*>(0x2020);
 std::vector<std::uint8_t> originalAu{0,0,0,1,0x26,1,0x80,0x12,0x34};
 NV_ENC_LOCK_BITSTREAM expected{};
+NvencBoundary* observedBridge=nullptr;
+bool observeInitRevocation=false,observedInitRevoked=false,changeSourceInsideInit=false;
+PNVENCRECONFIGUREENCODER nestedReconfigure=nullptr;
 void check(bool okay,const char* why){++checks;if(!okay)throw std::runtime_error(why);}
 NVENCSTATUS NVENCAPI fakeOpen(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void** encoder){++opens;if(encoder)*encoder=handle;return NV_ENC_SUCCESS;}
-NVENCSTATUS NVENCAPI fakeInit(void*,NV_ENC_INITIALIZE_PARAMS*){++inits;return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI fakeInit(void* encoder,NV_ENC_INITIALIZE_PARAMS*){++inits;
+ if(observeInitRevocation){LocalConfig c{};c.buildId=1;c.nonce[0]=80;VerifiedChannel channel{};channel.authenticated=true;channel.binding[0]=9;
+  observedInitRevoked=!observedBridge->requestDiscovery(encoder,c,channel);}
+ if(changeSourceInsideInit){NV_ENC_RECONFIGURE_PARAMS p{};p.version=NV_ENC_RECONFIGURE_PARAMS_VER;nestedReconfigure(encoder,&p);}
+ return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI fakeReconfigure(void*,NV_ENC_RECONFIGURE_PARAMS*){++reconfigs;return NV_ENC_ERR_INVALID_PARAM;}
 NVENCSTATUS NVENCAPI fakeLock(void*,NV_ENC_LOCK_BITSTREAM* p){++locks;
  if(p&&lockStatus==NV_ENC_SUCCESS){p->bitstreamBufferPtr=originalAu.data();p->bitstreamSizeInBytes=static_cast<std::uint32_t>(originalAu.size());
@@ -42,9 +49,11 @@ void tests(){
  auto generation=bridge.generation(handle);check(generation!=0,"actual open generates source epoch");
  auto p=lockParams();check(table.nvEncLockBitstream(encoder,&p)==NV_ENC_SUCCESS&&locks==1&&std::memcmp(&p,&expected,sizeof(p))==0,"inactive actual lock entire result byte identical");
  check(!bridge.requestDiscovery(encoder,config(1),auth()),"no actual init no source authority");
+ observedBridge=&bridge;
  NV_ENC_INITIALIZE_PARAMS init{};init.version=NV_ENC_INITIALIZE_PARAMS_VER;init.encodeGUID=NV_ENC_CODEC_H264_GUID;
  check(table.nvEncInitializeEncoder(encoder,&init)==NV_ENC_SUCCESS&&inits==1,"original init once");
  check(!bridge.requestDiscovery(encoder,config(1),auth()),"actual H264 not mislabeled HEVC");
+ check(bridge.generation(encoder)>generation,"codec initialize advances actual source generation");
  init.encodeGUID=NV_ENC_CODEC_HEVC_GUID;init.enableOutputInVidmem=1;table.nvEncInitializeEncoder(encoder,&init);
  check(!bridge.requestDiscovery(encoder,config(1),auth()),"video-memory output refused");
  init.enableOutputInVidmem=0;init.reportSliceOffsets=1;table.nvEncInitializeEncoder(encoder,&init);
@@ -54,6 +63,11 @@ void tests(){
  init.enableSubFrameWrite=0;table.nvEncInitializeEncoder(encoder,&init);
  auto unauth=auth();unauth.authenticated=false;check(!bridge.requestDiscovery(encoder,config(1),unauth),"no fabricated authenticated channel");
  check(bridge.requestDiscovery(encoder,config(1),auth()),"explicit test authority with actual public HEVC source");
+ observeInitRevocation=true;init.encodeGUID=NV_ENC_CODEC_H264_GUID;table.nvEncInitializeEncoder(encoder,&init);observeInitRevocation=false;
+ check(observedInitRevoked,"active source authority revoked inside original codec change before return");
+ check(!bridge.requestDiscovery(encoder,config(11),auth()),"HEVC to H264 cannot reuse old source authority");
+ init.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(encoder,&init);
+ check(bridge.requestDiscovery(encoder,config(11),auth()),"H264 back to HEVC requires fresh explicit negotiation");
  lockStatus=NV_ENC_ERR_LOCK_BUSY;p=lockParams();copy=table;auto originalParams=p;
  check(table.nvEncLockBitstream(encoder,&p)==lockStatus&&std::memcmp(&p,&originalParams,sizeof(p))==0,"lock errors and arguments unmodified");
  lockStatus=NV_ENC_SUCCESS;p=lockParams();++p.version;
@@ -70,15 +84,20 @@ void tests(){
  unlockStatus=NV_ENC_SUCCESS;check(table.nvEncUnlockBitstream(encoder,output)==NV_ENC_SUCCESS&&bridge.liveLeases()==0,"successful original unlock releases lease");
  check(bridge.requestDiscovery(encoder,config(2),auth()),"explicit new request");p=lockParams();table.nvEncLockBitstream(encoder,&p);check(bridge.liveLeases()==1,"second actual lease");
  saved.assign(static_cast<const std::uint8_t*>(p.bitstreamBufferPtr),static_cast<const std::uint8_t*>(p.bitstreamBufferPtr)+p.bitstreamSizeInBytes);
+ const auto beforeReconfigure=bridge.generation(encoder);
  NV_ENC_RECONFIGURE_PARAMS reconfigure{};reconfigure.version=NV_ENC_RECONFIGURE_PARAMS_VER;
  check(table.nvEncReconfigureEncoder(encoder,&reconfigure)==NV_ENC_ERR_INVALID_PARAM&&reconfigs==1,"original reconfigure status");
+ check(bridge.generation(encoder)>beforeReconfigure,"failed reconfigure still advances revoked source generation");
  check(bridge.liveLeases()==1&&!bridge.requestDiscovery(encoder,config(3),auth()),"source change revokes without freeing borrowed output");
  check(std::memcmp(saved.data(),p.bitstreamBufferPtr,saved.size())==0,"revoked bytes preserved");table.nvEncUnlockBitstream(encoder,output);
  table.nvEncInitializeEncoder(encoder,&init);check(bridge.requestDiscovery(encoder,config(3),auth()),"explicit reinit establishes source");
  p=lockParams();table.nvEncLockBitstream(encoder,&p);destroyStatus=NV_ENC_ERR_GENERIC;
  check(table.nvEncDestroyEncoder(encoder)==destroyStatus&&bridge.liveLeases()==1,"failed destroy retains lease");
  destroyStatus=NV_ENC_SUCCESS;check(table.nvEncDestroyEncoder(encoder)==NV_ENC_SUCCESS&&bridge.liveLeases()==0&&bridge.generation(encoder)==0,"successful destroy retires source and lease");
- table.nvEncOpenEncodeSessionEx(&open,&encoder);check(bridge.generation(encoder)>generation,"reused handle gets fresh generation");table.nvEncInitializeEncoder(encoder,&init);
+ table.nvEncOpenEncodeSessionEx(&open,&encoder);check(bridge.generation(encoder)>generation,"reused handle gets fresh generation");nestedReconfigure=table.nvEncReconfigureEncoder;changeSourceInsideInit=true;
+ table.nvEncInitializeEncoder(encoder,&init);changeSourceInsideInit=false;
+ check(!bridge.requestDiscovery(encoder,config(4),auth()),"late successful Initialize cannot restore reconfigured source epoch");
+ table.nvEncInitializeEncoder(encoder,&init);
  check(bridge.requestDiscovery(encoder,config(4),auth()),"request new encoder epoch");p=lockParams();table.nvEncLockBitstream(encoder,&p);
  check(bridge.liveLeases()==1,"lease before Cleanup");bridge.stop();check(bridge.liveLeases()==1,"Cleanup retains borrowed data and callbacks");
  auto off=lockParams();table.nvEncLockBitstream(encoder,&off);check(std::memcmp(&off,&expected,sizeof(off))==0,"callbacks after Cleanup forward byte-identical output");
