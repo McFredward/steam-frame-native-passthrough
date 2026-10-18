@@ -166,7 +166,12 @@ NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* pa
         matched=&submission;
     }
     NvencOutputEvidence evidence{};evidence.encoder=encoder;evidence.encoderGeneration=s->generation;evidence.output=params->outputBitstream;
-    if(matched&&!ambiguous){matched->locked=true;evidence=matched->evidence;}
+    if(matched&&!ambiguous){
+        matched->locked=true;evidence=matched->evidence;
+        evidence.coverageSessionAuthorized=evidence.encoderGeneration==s->generation
+            &&s->adapter.mutualConfirmed()&&s->adapter.probeObserved()
+            &&(s->adapter.handshake().negotiatedCapabilities()&CapExplicitCoverage)!=0;
+    }
     const Bytes original{static_cast<const std::uint8_t*>(params->bitstreamBufferPtr),params->bitstreamSizeInBytes};
     std::uint64_t ticket=0;
     try {

@@ -13,7 +13,7 @@ NvencOutputEvidence captured{},observed{};bool allowAugment=false,wrongTimestamp
 std::uint64_t timestamp=0;NVENCSTATUS encodeResult=NV_ENC_SUCCESS,unlockResult=NV_ENC_SUCCESS,reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
 NvencBoundary* activeBoundary=nullptr;PNVENCUNREGISTERRESOURCE nestedUnregister=nullptr;bool unregisterInside=false,discoveryRevokedInside=false;
 unsigned localNonce=7;
-LocalConfig localConfig(){LocalConfig c{};c.buildId=1;c.nonce[0]=static_cast<std::uint8_t>(localNonce);return c;}
+LocalConfig localConfig(){LocalConfig c{};c.buildId=1;c.nonce[0]=static_cast<std::uint8_t>(localNonce);c.offered=c.required=KnownCapabilities;return c;}
 VerifiedChannel authority(){VerifiedChannel a{};a.authenticated=true;a.binding[0]=8;return a;}
 NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void** e){*e=encoder;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*){return NV_ENC_SUCCESS;}
@@ -51,7 +51,7 @@ void run(){
     auto release=[&](){check(table.nvEncUnlockBitstream(handle,output)==NV_ENC_SUCCESS,"actual native output unlock forwarded");};
     check(table.nvEncEncodePicture(handle,&pic)==NV_ENC_SUCCESS&&encodes==1&&captures==1&&captureEvent<encodeEvent,"one real Encode receives captured mapping");
     check(bridge.encoderStates()[0].encoded,"only accepted original Encode admits cold runtime bootstrap");
-    auto p=get();check(p.bitstreamBufferPtr==au.data()&&p.bitstreamSizeInBytes==au.size(),"configured augmenter refusal keeps original entire AU");
+    auto p=get();check(!observed.coverageSessionAuthorized,"exact source input alone never authorizes a mask before negotiation");check(p.bitstreamBufferPtr==au.data()&&p.bitstreamSizeInBytes==au.size(),"configured augmenter refusal keeps original entire AU");
     check(observed.exactInput&&observed.resource==resource&&observed.encoder==encoder&&observed.mappedInput==mapped&&observed.output==output&&observed.inputTimestamp==pic.inputTimeStamp&&observed.width==1152&&observed.height==4608&&observed.subresource==0,"output exact public registry/map/encode timestamp tuple");
     check(observed.encoderGeneration==bridge.generation(handle)&&observed.resourceGeneration&&observed.mapGeneration>observed.resourceGeneration&&observed.submission>observed.mapGeneration&&observed.submission==captured.submission,"separate monotonically scoped resource/map/submission identities");release();check(retires==1,"input ledger retired at matching successful unlock");
     allowAugment=true;pic.inputTimeStamp++;table.nvEncEncodePicture(handle,&pic);p=get();check(p.bitstreamBufferPtr!=au.data()&&p.bitstreamSizeInBytes==au.size()+1&&bridge.liveLeases()==1,"owned final augmentation borrowed through actual native lease");
@@ -71,16 +71,38 @@ void run(){
     // actual handles, but require fresh metadata, handshake and Encode evidence.
     table.nvEncInitializeEncoder(handle,&ip);table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
     check(bridge.requestDiscovery(handle,localConfig(),authority()),"pre-reconfigure explicit discovery exists");
-    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();const auto before=observed;release();
-    check(before.exactInput,"pre-reconfigure exact input evidence exists");
+    LocalConfig receiverConfig=localConfig();receiverConfig.role=Role::Receiver;receiverConfig.nonce[0]=90;Handshake peer;
+    check(peer.begin(receiverConfig,authority())==Status::Ok,"independent compatible receiver handshake configured");
+    auto sendFrame=[&](){++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);return get();};
+    for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){
+        p=sendFrame();check(!observed.coverageSessionAuthorized,"handshake messages alone do not authorize coverage before probe");
+        std::vector<std::uint8_t> body;check(inspectOwned({static_cast<const std::uint8_t*>(p.bitstreamBufferPtr),p.bitstreamSizeInBytes},body)==SeiStatus::Ok,"actual coded AU carries exact discovery message");
+        Message sent;check(decode({body.data(),body.size()},sent)==Status::Ok&&sent.kind==kind,"actual discovery order");release();
+        check(peer.receive({body.data(),body.size()},authority())==Status::Ok,"independent peer consumes observed native output message");
+        Message reply;check(peer.next(reply)==Status::Ok&&reply.kind==kind,"peer replies with matching next phase");
+        std::array<std::uint8_t,MessageBytes> encoded{};check(encode(reply,encoded)==Status::Ok&&peer.markSent(reply,authority())==Status::Ok,"peer public handoff recorded");
+        check(bridge.receiveControl(handle,{encoded.data(),encoded.size()},authority())==Status::Ok,"actual NVENC adapter consumes peer reply");
+    }
+    check(bridge.encoderStates()[0].peerConfirmed&&!bridge.encoderStates()[0].probeObserved,"mutual compatible session remains insufficient without coded-AU roundtrip");
+    p=sendFrame();check(!observed.coverageSessionAuthorized,"mutual confirmation alone leaves mask authorization false");release();
+    Nonce probeToken{};probeToken[0]=19;check(bridge.requestProbe(handle,bridge.generation(handle),1,probeToken),"fresh probe queued for current generation");
+    p=sendFrame();check(!observed.coverageSessionAuthorized,"probe submission without actual echo leaves mask authorization false");
+    std::vector<std::uint8_t> probeBytes;check(inspectOwned({static_cast<const std::uint8_t*>(p.bitstreamBufferPtr),p.bitstreamSizeInBytes},probeBytes)==SeiStatus::Ok,"probe is observed in actual native coded AU");
+    ProbeMessage probe,echo;check(decodeProbe({probeBytes.data(),probeBytes.size()},probe)==Status::Ok,"actual coded probe decoded");release();
+    check(makeProbeEcho(peer,probe,authority(),echo)==Status::Ok,"peer echoes only actual observed probe");
+    std::array<std::uint8_t,ProbeBytes> encodedEcho{};check(encodeProbe(echo,encodedEcho)==Status::Ok&&bridge.receiveEcho(handle,{encodedEcho.data(),encodedEcho.size()},authority())==Status::Ok,"matching current-generation roundtrip accepted");
+    p=sendFrame();const auto before=observed;release();
+    check(before.exactInput&&before.coverageSessionAuthorized,"actual Lock snapshots current-generation compatible mutual session plus observed probe");
     reconfig.reInitEncodeParams=ip;reconfigureResult=NV_ENC_SUCCESS;
     check(table.nvEncReconfigureEncoder(handle,&reconfig)==NV_ENC_SUCCESS&&discoveryRevokedInside,"native successful Reconfigure sees old authority revoked before return");
     const auto state=bridge.encoderStates()[0];
     check(state.hevc&&state.width==1152&&state.height==4608&&!state.encoded&&!state.peerConfirmed&&!state.probeObserved&&state.generation>before.encoderGeneration,"successful typed HEVC recovers source dimensions without stale peer/probe/encode proof");
-    p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"old submission cannot authorize new generation before fresh Encode");release();
+    p=get();check(!observed.exactInput&&!observed.coverageSessionAuthorized&&p.bitstreamBufferPtr==au.data(),"old submission cannot authorize new generation before fresh Encode");release();
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();
-    check(observed.exactInput&&observed.encoderGeneration==state.generation&&observed.resourceGeneration>before.resourceGeneration&&observed.mapGeneration>before.mapGeneration&&observed.submission>before.submission,"retained native registrations/maps recover without re-registering but every metadata identity is fresh");release();
+    check(observed.exactInput&&!observed.coverageSessionAuthorized&&observed.encoderGeneration==state.generation&&observed.resourceGeneration>before.resourceGeneration&&observed.mapGeneration>before.mapGeneration&&observed.submission>before.submission,"retained native registrations/maps recover without re-registering but every metadata identity is fresh");release();
+    check(bridge.receiveEcho(handle,{encodedEcho.data(),encodedEcho.size()},authority())!=Status::Ok,"old generation echo cannot restore image permission before cold runtime ticks");
     ++localNonce;check(bridge.requestDiscovery(handle,localConfig(),authority()),"fresh nonce negotiation can begin after actual native reconfigure");
+    p=sendFrame();check(!observed.coverageSessionAuthorized,"fresh discovery does not inherit old session mask permission");release();
     reconfig.reInitEncodeParams.encodeWidth=2304;table.nvEncReconfigureEncoder(handle,&reconfig);
     check(bridge.encoderStates()[0].width==2304,"new actual coded dimensions published");
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"old resource dimensions cannot match new coded extent");release();

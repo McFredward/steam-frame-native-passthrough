@@ -14,6 +14,9 @@ struct NvencOutputEvidence {
     std::uint64_t inputTimestamp=0;std::uint32_t width=0,height=0,subresource=0;
     NV_ENC_BUFFER_FORMAT format=NV_ENC_BUFFER_FORMAT_UNDEFINED;
     bool exactInput=false;
+    // Snapshot at actual Lock, scoped to this encoder generation. Session
+    // permission only: exact source/coverage/selected-surface proof is separate.
+    bool coverageSessionAuthorized=false;
 };
 struct DeviceObserver {
     // Successful actual public Open session. Device is borrowed native identity;

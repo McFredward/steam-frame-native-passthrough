@@ -57,9 +57,14 @@ struct SenderCoverage::Impl {
     }
     static bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8_t>& output,void* opaque){
         auto& s=*static_cast<Impl*>(opaque);if(!e.exactInput||!e.submission||e.width>8192||e.height>8192)return false;
+        FrameDescriptor descriptor{e.submission,e.encoderGeneration,static_cast<std::uint16_t>(e.width),static_cast<std::uint16_t>(e.height)};
+        // Reconfigure can Encode/Lock before the cold worker replaces control.
+        // The old paired control binding is not new-generation mask permission.
+        // Certificate-only discovery must remain possible to bootstrap that
+        // fresh handshake, without reading/compressing any coverage staging.
+        if(!e.coverageSessionAuthorized)return s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||!s.enabled)return false;
         std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;
-        FrameDescriptor descriptor{e.submission,e.encoderGeneration,static_cast<std::uint16_t>(e.width),static_cast<std::uint16_t>(e.height)};
         for(auto& slot:s.stages)if(slot.submission==e.submission&&slot.encoderGeneration==e.encoderGeneration&&slot.encoder==e.encoder&&slot.texture&&slot.present){
             D3D11_MAPPED_SUBRESOURCE data{};
             // The legacy atlas writes alpha1 even in its background. Only an

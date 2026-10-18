@@ -214,6 +214,16 @@ their original successful Unlock. An old resource extent cannot match a new
 coded extent merely because its registration survived. Neither this recovery
 nor the stable source-format lease preserves old mask or peer permissions.
 
+At the actual matching NVENC Lock, `NvencOutputEvidence` snapshots
+`coverageSessionAuthorized` only when this exact encoder generation has a
+mutually confirmed explicit-coverage capability and its matching observed probe.
+Coverage augmentation checks that snapshot before any mask staging readback or
+compression. A certificate without coverage remains available for handshake
+bootstrap. Therefore Encode/Lock immediately after Reconfigure cannot use an
+old control binding before the cold worker notices the generation change.
+This session gate is additional to the exact native texture, encoded frame,
+coverage and selected-surface proofs; it does not replace them.
+
 ## Verification and remaining runtime observations
 
 Focused checks: input/device/output43, DirectMode20, provider/control/SEI/TCP
