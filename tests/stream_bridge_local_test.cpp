@@ -156,7 +156,63 @@ void malformedAndForeignLifetime(){Directory dir;const auto path=dir.path/"recei
     FILE* foreign=fopen(path.c_str(),"wb");check(foreign!=nullptr,"replacement file fixture");fputs("retain",foreign);fclose(foreign);server.stop();
     check(std::filesystem::is_regular_file(path)&&std::filesystem::file_size(path)==6,"shutdown never deletes another actor's replacement file");
 }
+void orphanEndpointRecovery(){
+    Directory dir;const auto path=dir.path/"restart.sock";const auto pin=selfPin();
+    const auto child=fork();check(child>=0,"actual abrupt channel owner process");
+    if(child==0){local::Channel abandoned;_exit(abandoned.preparePinned(local::Endpoint::CompositorConsumer,path,pin)?0:2);}
+    int status=0;check(waitpid(child,&status,0)==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0,"abrupt owner exits without calling channel cleanup");
+    struct stat orphan{};check(!lstat(path.c_str(),&orphan)&&S_ISSOCK(orphan.st_mode),"abrupt owner leaves a real bound pathname");
+    local::Channel source,target;
+    check(target.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"new owner reclaims exact private orphan after abrupt process exit");
+    check(source.preparePinned(local::Endpoint::VrlinkProducer,path,pin),"fresh source connects at the unchanged endpoint after orphan recovery");pump(source,target);
+    check(source.state()==local::State::Connected&&target.state()==local::State::Connected,"recovered channel still verifies both actual peer processes");
+    const auto message=certified();check(source.enqueue(message),"fresh recovered channel queues exact new metadata");pump(source,target);local::Message got;
+    check(target.receive(got)&&got.certifiedMetadata==message.certifiedMetadata,"recovered channel carries complete original local message");
+    local::Channel contender;check(!contender.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"second active owner cannot acquire the lifetime endpoint lock");
+    struct stat live{};check(!lstat(path.c_str(),&live),"refused contender preserves the current endpoint");
+    target.stop();source.stop();check(!std::filesystem::exists(path)&&std::filesystem::is_regular_file(path.string()+".lock"),"stop removes only owned socket and retains the lock inode");
+    // The previous release had no lock file. Preserve a live such listener
+    // without sending it a probe which could trigger its strict peer refusal.
+    const auto legacy=dir.path/"legacy.sock";const int raw=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);check(raw>=0,"legacy listener fixture");
+    sockaddr_un address{};address.sun_family=AF_UNIX;std::strcpy(address.sun_path,legacy.c_str());
+    check(bind(raw,reinterpret_cast<const sockaddr*>(&address),sizeof address)==0&&chmod(legacy.c_str(),0600)==0&&listen(raw,1)==0,"live legacy endpoint has no lock metadata");
+    check(!target.preparePinned(local::Endpoint::CompositorConsumer,legacy,pin),"live legacy endpoint is never reclaimed");
+    const int unexpected=accept4(raw,nullptr,nullptr,SOCK_CLOEXEC|SOCK_NONBLOCK);check(unexpected<0&&(errno==EAGAIN||errno==EWOULDBLOCK),"live legacy refusal sends no disruptive connection probe");close(raw);
+    check(target.preparePinned(local::Endpoint::CompositorConsumer,legacy,pin),"legacy orphan is safely upgraded after its kernel owner exits");target.stop();
+}
+void endpointLockRefusals(){
+    Directory dir;const auto pin=selfPin();const auto path=dir.path/"guard.sock";const auto lock=path.string()+".lock";
+    FILE* file=fopen(lock.c_str(),"wb");check(file!=nullptr,"foreign endpoint lock fixture");fputs("foreign",file);fclose(file);chmod(lock.c_str(),0600);
+    local::Channel target;check(!target.preparePinned(local::Endpoint::CompositorConsumer,path,pin)&&std::filesystem::file_size(lock)==7,"foreign lock contents are never replaced");unlink(lock.c_str());
+    const auto foreign=dir.path/"foreign";file=fopen(foreign.c_str(),"wb");check(file!=nullptr,"foreign lock symlink target");fputs("retain",file);fclose(file);
+    check(symlink(foreign.c_str(),lock.c_str())==0,"foreign lock symlink");
+    check(!target.preparePinned(local::Endpoint::CompositorConsumer,path,pin)&&std::filesystem::is_symlink(lock)&&std::filesystem::file_size(foreign)==6,"symlink lock and its target are preserved");unlink(lock.c_str());
+    check(symlink(foreign.c_str(),path.c_str())==0,"foreign endpoint symlink");
+    check(!target.preparePinned(local::Endpoint::CompositorConsumer,path,pin)&&std::filesystem::is_symlink(path),"endpoint symlink cannot be orphan-reclaimed");unlink(path.c_str());
+    check(target.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"endpoint owner before concurrent lock replacement");
+    const auto held=dir.path/"held.lock";check(rename(lock.c_str(),held.c_str())==0,"actor replaces lock pathname without closing original owner");
+    file=fopen(lock.c_str(),"wb");check(file!=nullptr,"replacement lock fixture");fputs("replacement",file);fclose(file);chmod(lock.c_str(),0600);
+    local::Channel raced;check(!raced.preparePinned(local::Endpoint::CompositorConsumer,path,pin)&&std::filesystem::is_socket(path),"changed lock inode cannot authorize another owner or remove its live socket");
+    target.stop();check(std::filesystem::file_size(lock)==11,"original owner never deletes another actor's lock replacement");
+}
+void concurrentEndpointStarters(){
+    Directory dir;const auto pin=selfPin();const auto path=dir.path/"concurrent.sock";
+    int start[2]{},result[2]{},release[2]{};check(pipe(start)==0&&pipe(result)==0&&pipe(release)==0,"concurrent owner barriers");
+    std::array<pid_t,2> children{};
+    for(auto& child:children){child=fork();check(child>=0,"concurrent endpoint process");if(child==0){
+        close(start[1]);close(result[0]);close(release[1]);char ready=0;if(read(start[0],&ready,1)!=1)_exit(2);
+        local::Channel target;ready=target.preparePinned(local::Endpoint::CompositorConsumer,path,pin)?1:0;
+        if(write(result[1],&ready,1)!=1||read(release[0],&ready,1)!=1)_exit(3);
+        _exit(0);}}
+    close(start[0]);close(result[1]);close(release[0]);check(write(start[1],"xx",2)==2,"release simultaneous endpoint preparation");
+    char first=0,second=0;check(read(result[0],&first,1)==1&&read(result[0],&second,1)==1&&first+second==1,"exactly one simultaneous process owns the endpoint");
+    local::Channel contender;check(!contender.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"third starter cannot unlink the concurrently elected live endpoint");
+    check(write(release[1],"xx",2)==2,"release elected owners after serialization check");
+    for(const auto child:children){int status=0;check(waitpid(child,&status,0)==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0,"concurrent endpoint process reaped");}
+    check(contender.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"new owner recovers the abrupt elected owner after both old processes exit");
+    close(start[1]);close(result[0]);close(release[1]);
+}
 }
 int main(int argc,char** argv){try{if(argc==2&&!std::strcmp(argv[1],"--producer-liveness")){idleProducerLiveness();}else{
-    check(argc==1,"unknown local-test subset");sharedLeases();separateProcessLease();localFramingAndRights();reconnectEpochs();epochExhaustion();peerAndPathRefusals();malformedAndForeignLifetime();idleProducerLiveness();
+    check(argc==1,"unknown local-test subset");sharedLeases();separateProcessLease();localFramingAndRights();reconnectEpochs();epochExhaustion();peerAndPathRefusals();malformedAndForeignLifetime();idleProducerLiveness();orphanEndpointRecovery();endpointLockRefusals();concurrentEndpointStarters();
     }std::printf("actual local transport/shared leases: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}

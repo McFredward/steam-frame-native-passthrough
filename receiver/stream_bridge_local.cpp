@@ -12,6 +12,7 @@
 #include <mutex>
 #include <new>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -150,14 +151,60 @@ bool verifyPeer(int socket,const PeerPin& pin){
     okay=okay&&fstat(fd,&after)==0&&before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&before.st_size==after.st_size
         &&before.st_mtim.tv_sec==after.st_mtim.tv_sec&&before.st_mtim.tv_nsec==after.st_mtim.tv_nsec&&hash.finish()==pin.sha256;close(fd);return okay;
 }
-bool privateParent(const std::filesystem::path& path){
-    if(!path.is_absolute()||path.filename().empty())return false;
-    int fd=open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0)return false;
+int privateParent(const std::filesystem::path& path){
+    if(!path.is_absolute()||path.filename().empty())return -1;
+    int fd=open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0)return -1;
     for(const auto& component:path.parent_path().relative_path()){
-        if(component==".."||component=="."){close(fd);return false;}const auto name=component.string();
-        const int next=openat(fd,name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);close(fd);fd=next;if(fd<0)return false;
+        if(component==".."||component=="."){close(fd);return -1;}const auto name=component.string();
+        const int next=openat(fd,name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);close(fd);fd=next;if(fd<0)return -1;
     }
-    struct stat st{};const bool okay=fstat(fd,&st)==0&&st.st_uid==geteuid()&&(st.st_mode&0777)==0700;close(fd);return okay;
+    struct stat st{};if(fstat(fd,&st)==0&&st.st_uid==geteuid()&&(st.st_mode&0777)==0700)return fd;
+    close(fd);return -1;
+}
+bool sameFile(const struct stat& a,const struct stat& b){return a.st_dev==b.st_dev&&a.st_ino==b.st_ino&&a.st_mode==b.st_mode&&a.st_uid==b.st_uid;}
+int endpointLock(int parent,const std::string& name){
+    constexpr char marker[]="SFNP_LOCAL_CHANNEL_LOCK/1\n";
+    bool created=true;int fd=openat(parent,name.c_str(),O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(fd<0&&errno==EEXIST){created=false;fd=openat(parent,name.c_str(),O_RDWR|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);}
+    if(fd<0)return -1;
+    struct stat st{};bool okay=!fstat(fd,&st)&&S_ISREG(st.st_mode)&&st.st_uid==geteuid()&&(st.st_mode&0777)==0600&&st.st_nlink==1
+        &&st.st_size==(created?0:static_cast<off_t>(sizeof marker-1))&&flock(fd,LOCK_EX|LOCK_NB)==0;
+    if(okay&&created)okay=pwrite(fd,marker,sizeof marker-1,0)==static_cast<ssize_t>(sizeof marker-1);
+    if(okay){std::array<char,sizeof marker-1> actual{};okay=pread(fd,actual.data(),actual.size(),0)==static_cast<ssize_t>(actual.size())&&!std::memcmp(actual.data(),marker,actual.size());}
+    if(okay){struct stat current{};okay=!fstatat(parent,name.c_str(),&current,AT_SYMLINK_NOFOLLOW)&&sameFile(st,current);}
+    if(okay)return fd;
+    close(fd);return -1;
+}
+bool currentEndpointLock(const std::filesystem::path& path,int parent,int lock,const std::string& lockName){
+    const int current=privateParent(path);if(current<0)return false;
+    struct stat a{},b{},held{},named{};const bool okay=!fstat(parent,&a)&&!fstat(current,&b)&&sameFile(a,b)
+        &&!fstat(lock,&held)&&!fstatat(parent,lockName.c_str(),&named,AT_SYMLINK_NOFOLLOW)&&sameFile(held,named)&&held.st_nlink==1;
+    close(current);return okay;
+}
+bool absentKernelEndpoint(const std::string& path){
+    // Avoid even connecting to a live old-version listener which has no lock
+    // yet. A connection probe could make its strict peer policy reject it.
+    auto* file=std::fopen("/proc/net/unix","r");if(!file)return false;
+    char line[512];unsigned lines=0;bool absent=true;
+    while(std::fgets(line,sizeof line,file)){
+        if(++lines>16384||!std::strchr(line,'\n')){absent=false;break;}
+        int at=0;std::sscanf(line,"%*s %*s %*s %*s %*s %*s %*s %n",&at);
+        if(at>0){auto* end=std::strchr(line+at,'\n');if(end)*end=0;if(path==line+at){absent=false;break;}}
+    }
+    if(std::ferror(file))absent=false;
+    std::fclose(file);return absent;
+}
+bool reclaimOrphan(const std::filesystem::path& path,int parent,int lock,const std::string& lockName,const sockaddr_un& address){
+    struct stat before{};const auto name=path.filename().string();
+    if(fstatat(parent,name.c_str(),&before,AT_SYMLINK_NOFOLLOW))return errno==ENOENT;
+    if(!S_ISSOCK(before.st_mode)||before.st_uid!=geteuid()||(before.st_mode&0777)!=0600||before.st_nlink!=1
+        ||!absentKernelEndpoint(path.string()))return false;
+    const int probe=::socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);if(probe<0)return false;
+    const int result=connect(probe,reinterpret_cast<const sockaddr*>(&address),sizeof address);const int error=errno;close(probe);
+    if(result==0||error!=ECONNREFUSED)return false;
+    struct stat after{};return currentEndpointLock(path,parent,lock,lockName)
+        &&!fstatat(parent,name.c_str(),&after,AT_SYMLINK_NOFOLLOW)&&sameFile(before,after)
+        &&unlinkat(parent,name.c_str(),0)==0;
 }
 bool validMessage(const Message& m){
     if(!nonzero(m.source.stream.connection)||!m.source.outputPoolGeneration||!m.source.stream.generation
@@ -200,7 +247,7 @@ bool decode(const std::array<std::uint8_t,HeaderBytes>& h,Message& m){
 struct Channel::Impl {
     struct Queued {bool used=false;std::array<std::uint8_t,HeaderBytes> header{};std::vector<std::uint8_t> payload;std::size_t at=0;int dma=-1,lease=-1;};
     Endpoint endpoint=Endpoint::CompositorConsumer;State state=State::Off;PeerPin pin{};
-    int listen=-1,socket=-1;std::filesystem::path path;KernelIdentity socketIdentity{};bool ownsPath=false;
+    int listen=-1,socket=-1,parent=-1,ownerLock=-1;std::filesystem::path path;std::string lockName;KernelIdentity socketIdentity{};bool ownsPath=false;
     std::array<Queued,2> outgoing{};std::size_t head=0,count=0;
     std::array<std::uint8_t,HeaderBytes> header{};std::size_t headerAt=0,payloadAt=0;Message assembling{};bool decoded=false,ready=false;
     void close(State next){closeFd(socket);closeFd(listen);for(auto& q:outgoing){closeFd(q.dma);closeFd(q.lease);q={};}head=count=0;
@@ -210,11 +257,14 @@ Channel::Channel():impl_(new Impl){}Channel::~Channel(){stop();}
 bool Channel::prepare(Endpoint endpoint,const std::filesystem::path& path) noexcept{return preparePinned(endpoint,path,endpoint==Endpoint::VrlinkProducer?compositorPin():vrlinkPin());}
 bool Channel::preparePinned(Endpoint endpoint,const std::filesystem::path& path,const PeerPin& pin) noexcept {
     stop();try{
-        if(!privateParent(path)||path.string().size()>=sizeof(sockaddr_un::sun_path)||!pin.bytes||pin.bytes>8*1024*1024)return false;
+        impl_->parent=privateParent(path);
+        if(impl_->parent<0||path.string().size()>=sizeof(sockaddr_un::sun_path)||!pin.bytes||pin.bytes>8*1024*1024){stop();return false;}
         sockaddr_un address{};address.sun_family=AF_UNIX;std::strcpy(address.sun_path,path.c_str());
         const int fd=::socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);if(fd<0)return false;
         impl_->endpoint=endpoint;impl_->pin=pin;impl_->path=path;
         if(endpoint==Endpoint::CompositorConsumer){
+            impl_->lockName=path.filename().string()+".lock";impl_->ownerLock=endpointLock(impl_->parent,impl_->lockName);
+            if(impl_->ownerLock<0||!reclaimOrphan(path,impl_->parent,impl_->ownerLock,impl_->lockName,address)){close(fd);stop();impl_->state=State::Refused;return false;}
             if(bind(fd,reinterpret_cast<const sockaddr*>(&address),sizeof address)){close(fd);impl_->state=State::Refused;return false;}
             struct stat st{};if(lstat(path.c_str(),&st)||!S_ISSOCK(st.st_mode)||st.st_uid!=geteuid()){close(fd);impl_->state=State::Refused;return false;}
             impl_->listen=fd;impl_->ownsPath=true;impl_->socketIdentity={{static_cast<std::uint64_t>(st.st_dev),static_cast<std::uint64_t>(st.st_ino)}};
@@ -232,6 +282,7 @@ void Channel::stop() noexcept {
     if(impl_->ownsPath){struct stat st{};if(lstat(impl_->path.c_str(),&st)==0&&S_ISSOCK(st.st_mode)&&st.st_uid==geteuid()
         &&static_cast<std::uint64_t>(st.st_dev)==impl_->socketIdentity[0]&&static_cast<std::uint64_t>(st.st_ino)==impl_->socketIdentity[1])unlink(impl_->path.c_str());}
     impl_->ownsPath=false;impl_->path.clear();impl_->socketIdentity={};
+    closeFd(impl_->ownerLock);closeFd(impl_->parent);impl_->lockName.clear();
 }
 State Channel::state()const noexcept{return impl_->state;}
 bool Channel::enqueue(const Message& message) noexcept {

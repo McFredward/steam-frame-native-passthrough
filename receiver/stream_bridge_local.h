@@ -68,6 +68,8 @@ PeerPin vrlinkPin() noexcept;
 PeerPin compositorPin() noexcept;
 // Non-render worker only; no background thread, implicit discovery or services.
 // A private pre-existing directory owns the socket; foreign paths are preserved.
+// The consumer holds its private endpoint lock for its lifetime. A dead prior
+// owner's exact private socket may be reclaimed only after kernel/probe checks.
 // Actual SO_PEERCRED UID/PID plus peer executable hash are required on BOTH ends.
 class Channel {
 public:
