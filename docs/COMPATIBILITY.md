@@ -46,13 +46,18 @@ their respective evidence and limits.
   current eye. A texture with an alpha channel is not enough on its own.
 - Fractional opacity is supported. Arbitrary refractive glass, effects that sample
   a different background and all transparent shader families are not certified.
-- The new v2 format gives opacity and scene colour equal 2048² logical grids,
-  removing the legacy v1 mask's extra downsampling and reconstruction filter.
-  The receiver accepts both formats. At a fixed stream resolution, v2 allocates
-  more video area to opacity and less to colour. Desktop GPU tests show sharper
-  coverage while retaining glass and gradients; the final headset picture and
-  streaming cost have not yet been checked. Source antialiasing, video filtering
-  and compression still apply. See the [focused implementation evidence](research/full-resolution-native-coverage-20261018.md).
+- Use the **legacy v1 format** for production integrations. Its 1024² opacity
+  versus 2048² colour, source antialiasing and video filtering/compression can
+  soften boundaries. Genuine partial transparency must remain intact.
+- The receiver also recognizes experimental v2 with equal 2048² grids, but its
+  first real stereo test failed: apparent scale and passthrough differed between
+  eyes. Controlled lossy-codec inputs reproduce asymmetric guard rejection and
+  that exact output split in the actual native fragment. The failing hardware
+  guard samples were not logged, so the real triggering cell/codec settings are
+  unproven. V2 is quarantined; its desktop sharpness results are insufficient.
+  See the [regression review](research/eye-divergence-20261018.md). Keeping the
+  current receiver installed does not require using v2 or another restart;
+  restored v1 producers remain compatible.
 - Motion latency and the cost of extra image packing/sampling remain relevant.
   Host GPU measurements are not a Frame performance guarantee. There is no extra
   previous-eye/pair queue in the GloomhavenVR source helper, but the ordinary

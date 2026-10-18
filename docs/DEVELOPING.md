@@ -59,14 +59,23 @@ own scene background has not sampled the headset's camera.
 
 ## Frozen scene profiles
 
-The receiver recognizes both frozen formats. New integrations should use
+The receiver recognizes both frozen formats. **V1 is the current production
+recommendation. V2 is quarantined after a failed stereo headset test:** lossy
+transport can independently reject its small corner signature for one eye,
+displaying the packed image at a different scale with opaque output. The exact
+guard values from that hardware run were not recorded; a controlled codec plus
+actual-fragment reproduction establishes the failure mechanism, not the real
+encoder's parameters. See [the regression review](research/eye-divergence-20261018.md).
+Do not use the idealized v2 GPU results as an end-to-end quality claim.
+
+The retained experimental contract is
 [`scene-contribution-atlas-v2.json`](protocols/scene-contribution-atlas-v2.json),
 whose canonical-profile SHA256 is
 `68ad7a14b094729faffb3ff23cc5b42b2605ae9535e28d55071cd76533aecfc5`.
 The pretty-printed file SHA256 is
 `9ea2c9cd304a296d088659e3bc8e9a316365c8b10e3dfddb459bad08ff11ce9f`.
 
-### Equal-resolution v2
+### Experimental equal-resolution v2
 
 | Field | Profile v2 |
 |---|---|
@@ -217,7 +226,7 @@ current actual eye callback:
     if source is disabled or current coverage is not established:
         submit ordinary current-eye output
     else:
-        pack current-eye contribution E and coverage A into the exact v2 atlas
+        pack current-eye contribution E and coverage A into the exact v1 atlas
         submit that image through the ordinary game/SteamVR path
 ```
 
