@@ -7,13 +7,16 @@
 #include <thread>
 
 namespace dashboard_transition_probe {
-constexpr std::size_t BufferBytes = 1600;
-constexpr std::size_t Slots = 6;
 constexpr std::size_t MaximumPipelines = 8;
+constexpr std::size_t ControlWords = 64;
+constexpr std::size_t WordsPerSlot = 64;
+constexpr std::size_t Slots = 3 * MaximumPipelines * 2;
+constexpr std::size_t BufferBytes = (ControlWords + Slots * WordsPerSlot) * 4;
+static_assert(ControlWords > Slots && BufferBytes <= 65536,"bounded independent claim words and sparse records");
 constexpr std::size_t MaximumCommands = 512;
 constexpr std::size_t GenericRouteBegin = MaximumPipelines;
-constexpr const char* ShaderSha = "04846d731cedfc6f1a98254d2239b0b90f75225567aeac2b868747415766222a";
-constexpr std::size_t ShaderBytes = 62908;
+constexpr const char* ShaderSha = "b4a56ca2035199ffce6227d752d2de53ee77ee1fec31d6dd83a99ab9395e583c";
+constexpr std::size_t ShaderBytes = 61608;
 constexpr std::size_t PipelineTagWord = 1403;
 constexpr std::uint32_t TagTemplate = 0x44545000;
 

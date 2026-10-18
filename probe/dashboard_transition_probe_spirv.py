@@ -21,8 +21,9 @@ import native_fragment_scene_presenter as scene
 SOURCE_SHA = '44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49'
 SOURCE_BYTES = 31384
 WORDS_PER_SLOT = 64
-SLOT_COUNT = 6
-CONTROL_WORDS = 16
+MAXIMUM_COMPANIONS = 8
+SLOT_COUNT = 3 * MAXIMUM_COMPANIONS * 2
+CONTROL_WORDS = 64
 BUFFER_BYTES = (CONTROL_WORDS + WORDS_PER_SLOT * SLOT_COUNT) * 4
 MAGIC = 0x44545031
 
@@ -39,6 +40,70 @@ def parse(raw):
         result.append(ssa.Instruction(opcode, tuple(words[cursor + 1:cursor + count])))
         cursor += count
     return words[:5], result
+
+
+def source_sample_dominance(instructions, sample_ids=(603, 629)):
+    """Refuse unless each existing sample dominates EVERY output-store path."""
+    blocks, block, definitions, stores = {}, None, {}, []
+    for item in instructions:
+        if item.opcode == 56:
+            block = None
+            continue
+        if item.opcode == 248:
+            block = item.operands[0]
+            blocks[block] = []
+        if block is None:
+            continue
+        blocks[block].append(item)
+        ident = scene.result_id(item)
+        if ident in sample_ids:
+            ssa.require(item.opcode == 87 and item.operands[0] == 9,
+                        'exact original vec4 sample definition required')
+            definitions[ident] = (block, len(blocks[block])-1)
+        if item.opcode == 62 and item.operands[0] == 504:
+            stores.append((block, len(blocks[block])-1))
+    ssa.require(blocks and stores and set(definitions) == set(sample_ids),
+                'complete source-sample/store CFG required')
+    predecessors = {key: set() for key in blocks}
+    for key, body in blocks.items():
+        terminator = body[-1]
+        if terminator.opcode == 249:
+            targets = terminator.operands
+        elif terminator.opcode == 250:
+            targets = terminator.operands[1:3]
+        elif terminator.opcode in (253, 254, 255):
+            targets = ()
+        else:
+            ssa.require(False, 'known bounded branch/return CFG required')
+        for target in targets:
+            ssa.require(target in blocks, 'branch target must belong to current function')
+            predecessors[target].add(key)
+    entry = next(iter(blocks))
+    reachable, work = {entry}, [entry]
+    while work:
+        parent = work.pop()
+        for child, incoming in predecessors.items():
+            if parent in incoming and child not in reachable:
+                reachable.add(child); work.append(child)
+    dominators = {key: ({entry} if key == entry else set(reachable)) for key in reachable}
+    changed = True
+    while changed:
+        changed = False
+        for key in reachable - {entry}:
+            incoming = predecessors[key] & reachable
+            ssa.require(incoming, 'reachable non-entry block must have a predecessor')
+            value = {key} | set.intersection(*(dominators[parent] for parent in incoming))
+            if value != dominators[key]:
+                dominators[key] = value; changed = True
+    for destination, offset in stores:
+        ssa.require(destination in reachable, 'reachable original output store required')
+        for origin, definition_offset in definitions.values():
+            ssa.require(origin in dominators[destination] and
+                        (origin != destination or definition_offset < offset),
+                        'source sample does not dominate every original output path')
+    return {'existing_sample_ids': list(sample_ids), 'output_store_paths': len(stores),
+            'all_samples_dominate_all_output_stores': True,
+            'unexecuted_source_samples_possible_in_pinned_module': False}
 
 
 def instrument(raw):
@@ -79,6 +144,7 @@ def instrument(raw):
     require(len(guard_values) == 12 and len(set(guard_values)) == 12,
             'twelve existing current-image v3 guard values required')
 
+    sample_proof = source_sample_dominance(original)
     bound = header[3]
     def fresh():
         nonlocal bound
@@ -116,6 +182,8 @@ def instrument(raw):
     declarations += [make(44, local_array, blank_guards, *([unknown] * 12))]
     pipeline_tag = constant(0x44545000)
 
+    companion_slot_index_ssa, record_slot_ssa, phase_value_ssa = [], [], []
+
     def record(rgba, kind):
         body = []
         def emit(op, typ, *args):
@@ -124,8 +192,12 @@ def instrument(raw):
             return value
         phase_pointer = emit(65, word_pointer, ssbo, zero, zero)
         phase = emit(61, 6, phase_pointer)
+        phase_value_ssa.append(phase)
         eligible = emit(176, 96, phase, three)
         eligible = emit(167, 96, eligible, emit(176, 96, 693, two))
+        companion = emit(130, 6, pipeline_tag, constant(0x44545001))
+        eligible = emit(167, 96, eligible, emit(176, 96, companion, constant(MAXIMUM_COMPANIONS)))
+        companion_slot_index_ssa.append(companion)
         coordinate = emit(61, 9, 487)
         for axis in (0, 1):
             value = emit(109, 6, emit(81, 8, coordinate, axis))
@@ -148,7 +220,9 @@ def instrument(raw):
         eligible = emit(167, 96, eligible, emit(166, 96, central, emit(168, 96, valid_r1)))
         selected, claimed, claimed_end, end = [fresh() for _ in range(4)]
         body += [make(247, end, 0), make(250, eligible, selected, end), make(248, selected)]
-        slot = emit(128, 6, emit(132, 6, phase, two), 693)
+        cohort = emit(128, 6, emit(132, 6, phase, constant(MAXIMUM_COMPANIONS)), companion)
+        slot = emit(128, 6, emit(132, 6, cohort, two), 693)
+        record_slot_ssa.append(slot)
         claim = emit(65, word_pointer, ssbo, zero, emit(128, 6, slot, one))
         previous = emit(230, 6, claim, one, zero, zero, one, zero)
         won = emit(170, 96, previous, zero)
@@ -160,11 +234,18 @@ def instrument(raw):
         for index in range(12):
             ptr = emit(65, local_word, guard_local, constant(index))
             words.append(emit(61, 6, ptr))
-        words += [zero] * (WORDS_PER_SLOT - len(words) - 1)
+        # Both original reads dominate every output; no guessed image access or
+        # invented unexecuted value enters the record. Unused padding remains
+        # zero from the single initialization, and no spent slot can be reused.
+        for value in (603, 629):
+            words += [emit(124, 6, emit(81, 8, value, axis)) for axis in range(4)]
+        words += [None] * (WORDS_PER_SLOT - len(words) - 1)
         words += [emit(169, 6, valid_r1, one, zero)]
         require(len(words) == WORDS_PER_SLOT, 'fixed bounded sparse record')
         offset = emit(128, 6, constant(CONTROL_WORDS), emit(132, 6, slot, constant(WORDS_PER_SLOT)))
         for index, value in enumerate(words):
+            if value is None:
+                continue
             ptr = emit(65, word_pointer, ssbo, zero, emit(128, 6, offset, constant(index)))
             body.append(make(62, ptr, value))
         body += [make(249, claimed_end), make(248, claimed_end), make(249, end), make(248, end)]
@@ -210,7 +291,15 @@ def instrument(raw):
     record = {'schema': 'native-dashboard-transition-probe-spv-v1',
               'source_sha256': SOURCE_SHA, 'source_bytes': SOURCE_BYTES,
               'output_sha256': hashlib.sha256(binary).hexdigest(), 'output_bytes': len(binary),
-              'pipeline_tag_word': instructions[0], 'pipeline_tag_template': 0x44545000,
+              'pipeline_tag_word': instructions[0],
+              'maximum_companions': MAXIMUM_COMPANIONS,
+              'slot_order': '((phase*8 + (pipeline_tag-0x44545001))*2 + consumed_selector)',
+              'companion_slot_index_ssa': companion_slot_index_ssa,
+              'record_slot_ssa': record_slot_ssa, 'phase_value_ssa': phase_value_ssa,
+              'pipeline_tag_ssa': pipeline_tag,
+              'uint_zero_ssa': zero,
+              'source_sample_proof': sample_proof,
+              'source_sample_words': {'603': [44, 48], '629': [48, 52]}, 'pipeline_tag_template': 0x44545000,
               'descriptor_set': 1, 'binding': 0, 'slots': SLOT_COUNT,
               'words_per_slot': WORDS_PER_SLOT, 'control_words': CONTROL_WORDS,
               'buffer_bytes': BUFFER_BYTES, 'initial_disabled_phase': 3,

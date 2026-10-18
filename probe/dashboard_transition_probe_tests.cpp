@@ -60,6 +60,7 @@ struct OwnedDriver {
     std::array<std::atomic<bool>,4> fences{};
     std::array<VkFence,4> fenceHandles{};
     unsigned fenceCount=0,createdPipelines=0,destroyedPipelines=0,phaseSubmits=0;
+    std::vector<std::uint32_t> createdTags;
 };
 OwnedDriver* driver=nullptr;
 #define OWN_CREATE(Name,Info,Handle) \
@@ -71,11 +72,15 @@ OWN_CREATE(AllocateMemory,VkMemoryAllocateInfo,VkDeviceMemory) OWN_DESTROY(FreeM
 OWN_CREATE(CreateDescriptorSetLayout,VkDescriptorSetLayoutCreateInfo,VkDescriptorSetLayout) OWN_DESTROY(DestroyDescriptorSetLayout,VkDescriptorSetLayout)
 OWN_CREATE(CreateDescriptorPool,VkDescriptorPoolCreateInfo,VkDescriptorPool) OWN_DESTROY(DestroyDescriptorPool,VkDescriptorPool)
 OWN_CREATE(CreatePipelineLayout,VkPipelineLayoutCreateInfo,VkPipelineLayout) OWN_DESTROY(DestroyPipelineLayout,VkPipelineLayout)
-OWN_CREATE(CreateShaderModule,VkShaderModuleCreateInfo,VkShaderModule) OWN_DESTROY(DestroyShaderModule,VkShaderModule)
+OWN_DESTROY(DestroyShaderModule,VkShaderModule)
 OWN_CREATE(CreateCommandPool,VkCommandPoolCreateInfo,VkCommandPool) OWN_DESTROY(DestroyCommandPool,VkCommandPool)
 OWN_DESTROY(DestroyFence,VkFence)
 #undef OWN_CREATE
 #undef OWN_DESTROY
+VKAPI_ATTR VkResult VKAPI_CALL ownCreateShaderModule(VkDevice,const VkShaderModuleCreateInfo* info,const VkAllocationCallbacks*,VkShaderModule* out){
+    check(info->codeSize==ShaderBytes&&info->pCode,"actual owned shader has the exact pinned bounded artifact");
+    driver->createdTags.push_back(info->pCode[PipelineTagWord]);*out=h<VkShaderModule>(driver->next++);return VK_SUCCESS;
+}
 VKAPI_ATTR void VKAPI_CALL ownGetBufferMemoryRequirements(VkDevice,VkBuffer,VkMemoryRequirements* out){out->size=BufferBytes;out->alignment=16;out->memoryTypeBits=1;}
 VKAPI_ATTR VkResult VKAPI_CALL ownBindBufferMemory(VkDevice,VkBuffer,VkDeviceMemory,VkDeviceSize){return VK_SUCCESS;}
 VKAPI_ATTR VkResult VKAPI_CALL ownMapMemory(VkDevice,VkDeviceMemory,VkDeviceSize,VkDeviceSize,VkMemoryMapFlags,void** out){*out=driver->memory.data();return VK_SUCCESS;}
@@ -263,13 +268,21 @@ int censusVectors(const char* artifactPath){
         check(routes[0].handle==30000&&routes[0].tag==TagTemplate+1&&routes[0].nativeReason==5&&routes[0].reserved==1,"first actual companion owns its stable reserved route");
         check(routes[0].vs==accepted.recipe.vertex.sha256&&routes[0].ps==accepted.recipe.fragment.sha256,"accepted source pins come directly from validated recipe even when native shader handles were never cached");
         for(unsigned i=GenericRouteBegin;i<64;++i)check(!std::memcmp(&routes[i],&genericBefore[i],sizeof(routes[i])),"late companion cannot evict or relabel any used generic route index");
+        const auto second=h<VkPipeline>(30001);
+        probe.pipeline(second,VK_NULL_HANDLE,accepted.info,accepted.recipe);probe.pipelineObserved(second,accepted.info,5);
+        check(probe.refusal()==Refusal::None&&TestAccess::companionCreated(probe)==2&&
+              native.createdTags==std::vector<std::uint32_t>({TagTemplate+1,TagTemplate+2}),
+              "simultaneous actual companions receive distinct immutable shader-record tags");
         VkCommandBuffer command=h<VkCommandBuffer>(60000);VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         allocate.commandPool=h<VkCommandPool>(60001);allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
         probe.commandsAllocated(allocate,&command,VK_SUCCESS);VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         probe.begin(command,begin,VK_SUCCESS);probe.bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,normal);
         operations.clear();check(probe.beforeDraw(command),"late accepted companion instruments through actual recorded-command path");
-        operations.push_back(99);probe.afterDraw(command);probe.end(command,VK_SUCCESS);
+        operations.push_back(99);probe.afterDraw(command);
         check(operations.size()==4&&operations[1]==77&&operations[2]==99&&operations[3]==30000,"same draw and native pipeline restoration survive startup census truncation");
+        probe.bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,second);
+        check(probe.beforeDraw(command),"same recording admits the second simultaneous actual companion");
+        probe.afterDraw(command);probe.end(command,VK_SUCCESS);
         VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};submitInfo.commandBufferCount=1;submitInfo.pCommandBuffers=&command;
         probe.beforeSubmit(h<VkQueue>(5),true,1,&submitInfo);check(native.phaseSubmits==0,"disabled startup never spends final collection fence");
         for(unsigned phase=0;phase<4;++phase){
@@ -281,9 +294,9 @@ int censusVectors(const char* artifactPath){
         check(await([&]{return !readFile(run.directory+"/dashboard-transition-terminal.json").empty();}),"real completed final fence yields guaranteed terminal receipt");
         const auto terminal=readFile(run.directory+"/dashboard-transition-terminal.json");
         check(terminal.size()<1024&&terminal.find("\"collected\":true")!=std::string::npos&&terminal.find("\"refusal\":0")!=std::string::npos,"terminal collection remains usable by existing bounded helper");
-        for(const char* expected:{"\"companion_used\":1","\"companion_created\":1","\"shader_cached\":128","\"generic_routes\":56","\"shader_dropped\":384","\"routes_dropped\":184","\"shader_truncated\":true","\"routes_truncated\":true"})check(terminal.find(expected)!=std::string::npos,"bounded terminal status distinguishes metadata truncation from actual companion occupancy");
+        for(const char* expected:{"\"companion_used\":2","\"companion_created\":2","\"shader_cached\":128","\"generic_routes\":56","\"shader_dropped\":384","\"routes_dropped\":184","\"shader_truncated\":true","\"routes_truncated\":true"})check(terminal.find(expected)!=std::string::npos,"bounded terminal status distinguishes metadata truncation from actual companion occupancy");
         check(readFile(run.directory+"/dashboard-transition-records.bin").size()==BufferBytes&&readFile(run.directory+"/dashboard-transition-routes.bin").size()==64*sizeof(routes[0]),"actual resource collection retains unchanged bounded binary schemas");
-        const auto finalRoutes=TestAccess::routes(probe);check(finalRoutes[0].draws==std::array<std::uint64_t,3>{{2,2,2}},"all three manual phases preserve accepted route usage despite overflow");
+        const auto finalRoutes=TestAccess::routes(probe);check(finalRoutes[0].draws==std::array<std::uint64_t,3>{{2,2,2}}&&finalRoutes[1].draws==finalRoutes[0].draws,"all three manual phases preserve accepted route usage despite overflow");
         unsigned statusCount=0;for(unsigned i=0;i<24;++i){char name[64];std::snprintf(name,sizeof(name),"/dashboard-transition-status-%02u.json",i);const auto status=readFile(run.directory+name);if(!status.empty()){++statusCount;check(status.size()<1024,"every status fits unchanged parser limit");}}
         check(statusCount<24,"hundreds of dropped census events never spend all phase-control statuses");
         actual.value.release(VK_SUCCESS);check(native.destroyedPipelines==native.createdPipelines,"actual companion owned resources are released quiescently");

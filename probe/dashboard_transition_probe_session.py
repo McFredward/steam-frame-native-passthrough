@@ -13,6 +13,13 @@ import time
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
+MAXIMUM_COMPANIONS = 8
+CONTROL_WORDS = 64
+WORDS_PER_SLOT = 64
+SLOT_COUNT = 3 * MAXIMUM_COMPANIONS * 2
+BUFFER_BYTES = (CONTROL_WORDS + SLOT_COUNT * WORDS_PER_SLOT) * 4
+TAG_FIRST = 0x44545001
+UNOBSERVED = 0x7fc00001
 
 
 def no_symlink_ancestors(path):
@@ -154,18 +161,26 @@ def collect(run):
     result=status(run)
     if not result['latest'] or not result['latest']['collected']:
         raise ValueError('not collected: require explicit phase3, actual queue submission and completed owned fence')
-    raw=owned(run/'dashboard-transition-records.bin',1600)
-    if len(raw)!=1600:
-        raise ValueError('exact sparse buffer required')
-    words=struct.unpack('<400I',raw)
+    raw=owned(run/'dashboard-transition-records.bin',BUFFER_BYTES)
+    if len(raw)!=BUFFER_BYTES:
+        raise ValueError('exact per-companion sparse buffer required')
+    words=struct.unpack('<%uI'%(BUFFER_BYTES//4),raw)
     slots=[]
-    for index in range(6):
-        record=words[16+64*index:16+64*(index+1)]
-        valid=record[0]==0x44545031 and record[1]==1 and record[2]==index//2 and record[3]==index%2
-        slots.append({'phase':index//2,'consumed_selector':index%2,'present':valid,
+    for index in range(SLOT_COUNT):
+        record=words[CONTROL_WORDS+WORDS_PER_SLOT*index:CONTROL_WORDS+WORDS_PER_SLOT*(index+1)]
+        phase, companion, selector = index//(MAXIMUM_COMPANIONS*2), (index//2)%MAXIMUM_COMPANIONS, index%2
+        valid=(words[index+1]==1 and record[0]==0x44545031 and record[1]==1 and
+               record[2]==phase and record[3]==selector and record[6]==TAG_FIRST+companion)
+        slots.append({'phase':phase,'companion_index':companion,'expected_pipeline_tag':TAG_FIRST+companion,
+            'consumed_selector':selector,'present':valid,
+            'slot_state':'present' if valid else ('absent' if not words[index+1] else 'malformed'),
             'branch_kind':record[4] if valid else None,'pipeline_tag':record[6] if valid else None,
             'r1_ordered_span_valid':bool(record[63]) if valid else None,
-            'guard_existing_reads_observed':sum(v!=0x7fc00001 for v in record[32:44]) if valid else 0})
+            'guard_existing_reads_observed':sum(v!=UNOBSERVED for v in record[32:44]) if valid else 0,
+            # Preserve exact existing sample bits; NaN/sentinel data never enters
+            # JSON as a guessed scalar or a claim that source coverage is valid.
+            'source603_rgba_words':list(record[44:48]) if valid else None,
+            'source629_rgba_words':list(record[48:52]) if valid else None})
     routes=owned(run/'dashboard-transition-routes.bin',16384)
     unknown=owned(run/'dashboard-transition-unknown-routes.bin',24)
     route_schema=struct.Struct('<Q4I32s32s3Q')
@@ -178,12 +193,27 @@ def collect(run):
             decoded_routes.append({'route_index':index,'native_handle':handle,'companion_tag':tag,
                 'native_admission_reason':reason,'retired':bool(retired),'vertex_sha256':vs.hex(),
                 'fragment_sha256':ps.hex(),'submission_attempts_using_route_by_phase':counts})
-    result.update(slots=slots,records_sha256=hashlib.sha256(raw).hexdigest(),
+    companions=[]
+    for route in decoded_routes:
+        companion=route['companion_tag']-TAG_FIRST
+        if not 0<=companion<MAXIMUM_COMPANIONS:
+            continue
+        contexts=[]
+        for phase in range(3):
+            selected=[slots[(phase*MAXIMUM_COMPANIONS+companion)*2+eye] for eye in range(2)]
+            contexts.append({'phase':phase,'submitted_recorded_uses':route['submission_attempts_using_route_by_phase'][phase],
+                'both_selectors_present':all(s['present'] for s in selected),
+                'sparse_context_complete':all(s['present'] and s['r1_ordered_span_valid'] for s in selected),
+                'slots':selected})
+        active=[context for context in contexts if context['submitted_recorded_uses']]
+        companions.append({'companion_index':companion,'pipeline_tag':route['companion_tag'],
+            'route_index':route['route_index'],'contexts':contexts,
+            'active_contexts_complete':bool(active) and all(c['sparse_context_complete'] for c in active)})
+    result.update(slots=slots,companions=companions,records_sha256=hashlib.sha256(raw).hexdigest(),
         route_bytes=len(routes),routes=decoded_routes,unknown_route_counts=struct.unpack('<3Q',unknown),
-        sparse_context_complete=all(s['present'] and s['r1_ordered_span_valid'] for s in slots),
-        full_pipeline_census=False,physical_eye_proven=False,final_visible_composition_proven=False,
-        independent_overlay_transport_proven=False,
-        interpretation='Missing slots or invalid R1 are incomplete measurements, never proof of a guard rejection. Routes count actual submitted recorded command uses per phase; no claim that one sample represents all scene draws.')
+        per_companion_contexts=True,full_pipeline_census=False,physical_eye_proven=False,
+        final_visible_composition_proven=False,independent_overlay_transport_proven=False,
+        interpretation='Each created companion has independent phase/selector slots. Missing slots or invalid R1 are incomplete measurements, never proof of a guard rejection. Unsubmitted contexts are not completed by a different companion. Each slot remains one sparse sample, not a census of all descriptor bindings or final visible composition.')
     return result
 
 
