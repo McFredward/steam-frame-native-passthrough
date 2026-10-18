@@ -11,6 +11,9 @@ struct ControlRequest{
     bool explicitlyEnabled=false;
     Role role=Role::Producer;std::uint64_t buildId=0;
     std::uint64_t offered=RequiredCapabilities,required=RequiredCapabilities;
+    // Receiver only: proven minimum live native QUERYBUF capacity, additionally
+    // bounded by the exact provider snapshot/parser limit. Never a guess.
+    std::uint32_t nativeAccessUnitCapacity=0;
     std::filesystem::path pairingsDirectory;
     // Numeric IPv4 only; no DNS/discovery or implicit public listener.
     std::array<char,16> address{};std::uint16_t port=0;
@@ -52,6 +55,7 @@ public:
     bool pollSent(SendReceipt&) noexcept;
     bool pollVerified(VerifiedControl&) noexcept;
     bool peerVerified() const noexcept;
+    std::uint32_t peerAccessUnitCapacity() const noexcept;
     // The caller supplies actual successful encode/output evidence. A completed
     // byte certificate is not itself proof of alpha, stereo or selected image.
     bool certifyAccessUnit(Bytes,const FrameDescriptor&,CoverageEncoding,Bytes coverage,

@@ -1,4 +1,5 @@
 #include "stream_bridge_control.h"
+#include "stream_bridge_capacity.h"
 #include <algorithm>
 #include <cstring>
 #include <mutex>
@@ -50,6 +51,8 @@ struct ControlRuntime::Impl{
     static constexpr std::size_t Capacity=4;
     struct Outbound{AuthEnvelope bytes{};std::size_t sent=0;std::uint64_t ticket=0;};
     mutable std::mutex mutex;AuthSession auth;LocalConfig config{};VideoStreamContext video{};
+    CapacityProtection capacityProtection;Nonce budgetBinding{},challenge{};
+    std::uint32_t nativeBudget=0,peerBudget=0;bool requireBudget=false,budgetChallengeSent=false,budgetAnswered=false;
     ControlStatus state=ControlStatus::Disabled;CredentialStatus credential=CredentialStatus::MissingSelection;
     Socket listener=Invalid,peer=Invalid;std::uint16_t port=0;bool prepared=false,connecting=false;
 #ifdef _WIN32
@@ -61,7 +64,8 @@ struct ControlRuntime::Impl{
     AuthEnvelope assembling{};std::size_t assembled=0;std::uint64_t nextTicket=0;
     void close(ControlStatus why){
         closeSocket(peer);closeSocket(listener);peer=listener=Invalid;port=0;connecting=prepared=false;
-        auth.reset();config={};video={};tx={};verified={};sent={};assembling={};
+        auth.reset();capacityProtection.reset();config={};video={};
+        budgetBinding={};challenge={};nativeBudget=peerBudget=0;requireBudget=budgetChallengeSent=budgetAnswered=false;tx={};verified={};sent={};assembling={};
         txHead=txCount=rxHead=rxCount=sentHead=sentCount=assembled=0;state=why;
 #ifdef _WIN32
         if(winsock){WSACleanup();winsock=false;}
@@ -78,6 +82,8 @@ ControlStatus ControlRuntime::prepare(const ControlRequest& request) noexcept{
         ||(request.offered&~KnownCapabilities)||(request.required&~request.offered)
         ||(request.required&RequiredCapabilities)!=RequiredCapabilities
         ||(request.role==Role::Receiver&&(!nonzero(request.video.connection)||!request.video.generation)))return impl_->state=ControlStatus::AddressRefused;
+    const bool full=(request.required&CapExplicitCoverage)!=0;
+    if(full&&request.role==Role::Receiver&&(request.nativeAccessUnitCapacity<512||request.nativeAccessUnitCapacity>MaximumAccessUnitBytes))return impl_->state=ControlStatus::CapacityRefused;
     sockaddr_in endpoint{};if(!address(request,endpoint)||(request.role==Role::Receiver&&(!request.port||endpoint.sin_addr.s_addr==INADDR_ANY)))return impl_->state=ControlStatus::AddressRefused;
     Pairing pair;struct Erase{Pairing& p;~Erase(){secureZero(p.key.data(),p.key.size());}}erase{pair};
     impl_->credential=loadPrivatePairing(request.pairingsDirectory,request.role,pair);
@@ -86,7 +92,8 @@ ControlStatus ControlRuntime::prepare(const ControlRequest& request) noexcept{
     if(!bridgeSystemRandom(local.data(),local.size())||!nonzero(local)
         ||(request.role==Role::Producer&&(!bridgeSystemRandom(binding.data(),binding.size())||!nonzero(binding))))return impl_->state=ControlStatus::RandomRefused;
     const auto auth=request.role==Role::Producer?impl_->auth.prepareProducer(pair,binding):impl_->auth.prepareReceiver(pair,request.video);
-    if(auth!=AuthStatus::Ok)return impl_->state=ControlStatus::AuthenticationRefused;
+    if(auth!=AuthStatus::Ok||!impl_->capacityProtection.prepare(pair))return impl_->state=ControlStatus::AuthenticationRefused;
+    impl_->requireBudget=full;impl_->nativeBudget=request.nativeAccessUnitCapacity;impl_->challenge=local;
     impl_->config={request.role,request.buildId,local,request.offered,request.required};impl_->video=request.video;
 #ifdef _WIN32
     WSADATA data{};if(WSAStartup(MAKEWORD(2,2),&data)!=0){impl_->close(ControlStatus::IoRefused);return impl_->state;}impl_->winsock=true;
@@ -114,12 +121,17 @@ ControlStatus ControlRuntime::status()const noexcept{std::lock_guard<std::mutex>
 CredentialStatus ControlRuntime::credentialStatus()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->credential;}
 std::uint16_t ControlRuntime::localPort()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->port;}
 bool ControlRuntime::peerVerified()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->auth.peerVerified();}
+std::uint32_t ControlRuntime::peerAccessUnitCapacity()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->peerBudget;}
 bool ControlRuntime::certifyAccessUnit(Bytes source,const FrameDescriptor& descriptor,CoverageEncoding encoding,
     Bytes coverage,std::vector<std::uint8_t>& output) noexcept{
     try{
         std::unique_lock<std::mutex> lock(impl_->mutex,std::try_to_lock);
         if(!lock.owns_lock()||!impl_->prepared||impl_->config.role!=Role::Producer)return false;
-        return appendCertifiedFrame(source,descriptor,encoding,coverage,impl_->auth,output)==FrameStatus::Ok;
+        if(impl_->requireBudget&&!impl_->peerBudget)return false;
+        std::vector<std::uint8_t> candidate;
+        if(appendCertifiedFrame(source,descriptor,encoding,coverage,impl_->auth,candidate)!=FrameStatus::Ok||
+            (impl_->requireBudget&&candidate.size()>impl_->peerBudget))return false;
+        output.swap(candidate);return true;
     }catch(...){return false;}
 }
 bool ControlRuntime::verifyAccessUnit(Bytes source,const stream_bridge_receiver::AccessUnitContext& context,
@@ -148,7 +160,8 @@ bool ControlRuntime::localConfig(LocalConfig& config,LocalSendAuthority& authori
 }
 bool ControlRuntime::sealVideo(Bytes payload,std::vector<std::uint8_t>& output,void* context){
     auto& self=*static_cast<ControlRuntime*>(context);std::unique_lock<std::mutex> lock(self.impl_->mutex,std::try_to_lock);
-    if(!lock||!self.impl_->prepared||self.impl_->config.role!=Role::Producer)return false;
+    if(!lock||!self.impl_->prepared||self.impl_->config.role!=Role::Producer||
+        (self.impl_->requireBudget&&!self.impl_->peerBudget))return false;
     AuthEnvelope envelope{};if(self.impl_->auth.seal(payload,envelope)!=AuthStatus::Ok)return false;
     output.assign(envelope.begin(),envelope.end());return true;
 }
@@ -162,6 +175,7 @@ bool ControlRuntime::verifyVideo(Bytes envelope,const stream_bridge_receiver::Ac
         ||!context.completeAnnexBAccessUnit||!context.native.generation
         ||context.authority.session!=self.impl_->video.connection
         ||context.authority.streamGeneration!=self.impl_->video.generation)return false;
+    if(self.impl_->requireBudget&&(!self.impl_->budgetAnswered||!envelope.data||envelope.size!=AuthEnvelopeBytes||!std::equal(self.impl_->budgetBinding.begin(),self.impl_->budgetBinding.end(),envelope.data+32)))return false;
     if(!self.impl_->auth.bound()){
         const VideoSourceEvidence evidence{{context.authority.session,context.authority.streamGeneration},
             context.sourceBoundaryVerified&&context.completeAnnexBAccessUnit&&context.native.generation!=0};
@@ -211,6 +225,12 @@ void ControlRuntime::tick() noexcept{
         if(getpeername(impl_->peer,reinterpret_cast<sockaddr*>(&address),&size)!=0){if(!pending(socketError()))impl_->close(ControlStatus::Lost);return;}
         impl_->connecting=false;impl_->state=impl_->auth.bound()?ControlStatus::TransportConnected:ControlStatus::WaitingVideo;
     }
+    if(impl_->requireBudget&&impl_->config.role==Role::Producer&&!impl_->budgetChallengeSent){
+        if(impl_->txCount==Impl::Capacity)return;
+        CapacityMessage message;message.binding=impl_->auth.binding();message.challenge=impl_->challenge;
+        AuthEnvelope bytes{};if(!impl_->capacityProtection.seal(message,bytes)){impl_->close(ControlStatus::AuthenticationRefused);return;}
+        impl_->tx[(impl_->txHead+impl_->txCount)%Impl::Capacity]={bytes,0,0};++impl_->txCount;impl_->budgetChallengeSent=true;
+    }
     for(unsigned attempt=0;attempt<8&&impl_->txCount&&impl_->sentCount<Impl::Capacity;++attempt){
         auto& entry=impl_->tx[impl_->txHead];const auto needed=AuthEnvelopeBytes-entry.sent;
 #ifdef _WIN32
@@ -221,7 +241,7 @@ void ControlRuntime::tick() noexcept{
         if(n<0){if(pending(socketError()))break;impl_->close(ControlStatus::Lost);return;}
         if(n==0){impl_->close(ControlStatus::Lost);return;}
         entry.sent+=static_cast<std::size_t>(n);
-        if(entry.sent==AuthEnvelopeBytes){impl_->sent[(impl_->sentHead+impl_->sentCount)%Impl::Capacity]={entry.ticket};++impl_->sentCount;impl_->txHead=(impl_->txHead+1)%Impl::Capacity;--impl_->txCount;}
+        if(entry.sent==AuthEnvelopeBytes){if(entry.ticket){impl_->sent[(impl_->sentHead+impl_->sentCount)%Impl::Capacity]={entry.ticket};++impl_->sentCount;}impl_->txHead=(impl_->txHead+1)%Impl::Capacity;--impl_->txCount;}
     }
     // Producer receives only reverse control. Receiver treats any application
     // payload on this direction as a protocol/transport failure, never video.
@@ -235,6 +255,20 @@ void ControlRuntime::tick() noexcept{
         if(n==0){impl_->close(ControlStatus::Lost);return;}
         impl_->assembled+=static_cast<std::size_t>(n);
         if(impl_->assembled!=AuthEnvelopeBytes)continue;
+        if(impl_->requireBudget&&!std::memcmp(impl_->assembling.data(),"SFC1",4)){
+            CapacityMessage message;
+            if(!impl_->capacityProtection.open({impl_->assembling.data(),impl_->assembling.size()},message)){impl_->close(ControlStatus::AuthenticationRefused);return;}
+            if(impl_->config.role==Role::Producer){
+                if(!impl_->budgetChallengeSent||impl_->peerBudget||message.binding!=impl_->auth.binding()||message.challenge!=impl_->challenge){impl_->close(ControlStatus::AuthenticationRefused);return;}
+                impl_->peerBudget=message.maximumAccessUnitBytes;
+            }else{
+                if(impl_->budgetAnswered||impl_->txCount==Impl::Capacity){impl_->close(ControlStatus::AuthenticationRefused);return;}
+                impl_->budgetBinding=message.binding;message.role=Role::Receiver;message.source=impl_->video;message.maximumAccessUnitBytes=impl_->nativeBudget;
+                AuthEnvelope bytes{};if(!impl_->capacityProtection.seal(message,bytes)){impl_->close(ControlStatus::AuthenticationRefused);return;}
+                impl_->tx[(impl_->txHead+impl_->txCount)%Impl::Capacity]={bytes,0,0};++impl_->txCount;impl_->budgetAnswered=true;
+            }
+            impl_->assembled=0;continue;
+        }
         VerifiedControl incoming;
         if(impl_->config.role!=Role::Producer||impl_->auth.openControl({impl_->assembling.data(),impl_->assembling.size()},incoming.payload,incoming.channel)!=AuthStatus::Ok){impl_->close(ControlStatus::AuthenticationRefused);return;}
         impl_->verified[(impl_->rxHead+impl_->rxCount)%Impl::Capacity]=incoming;++impl_->rxCount;impl_->assembled=0;

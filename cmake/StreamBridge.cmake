@@ -4,6 +4,7 @@
 add_library(sfnp_stream_bridge STATIC
     bridge/stream_bridge_protocol.cpp
     bridge/stream_bridge_auth.cpp
+    bridge/stream_bridge_capacity.cpp
     bridge/stream_bridge_frame.cpp
     bridge/hevc_bridge_sei.cpp
     pc/stream-bridge-sender.cpp
@@ -44,7 +45,7 @@ if(NOT MSVC)
 endif()
 
 if(BUILD_TESTING)
-    foreach(suite stream_bridge_protocol stream_bridge_auth stream_bridge_authenticated stream_bridge_frame hevc_bridge_sei stream_bridge_sender stream_bridge_receiver)
+    foreach(suite stream_bridge_protocol stream_bridge_auth stream_bridge_capacity stream_bridge_authenticated stream_bridge_frame hevc_bridge_sei stream_bridge_sender stream_bridge_receiver)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE sfnp_stream_bridge)
         if(NOT MSVC)

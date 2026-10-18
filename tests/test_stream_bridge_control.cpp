@@ -89,11 +89,18 @@ void capabilities(){
     req.offered=sb::RequiredCapabilities;req.required=sb::KnownCapabilities;
     check(runtime.prepare(req)==sb::ControlStatus::AddressRefused,"required capability must be offered");
 }
-void loopbackHandshake(){
+void loopbackHandshake(bool full=false){
     Files files;sb::ControlRuntime p,r;auto rp=request(files.producer,sb::Role::Producer);
+    if(full)rp.offered=rp.required=sb::KnownCapabilities;
     check(p.prepare(rp)==sb::ControlStatus::Listening&&p.localPort()!=0,"actual nonblocking producer listener prepared from private key");
-    auto rr=request(files.receiver,sb::Role::Receiver);rr.port=p.localPort();check(r.prepare(rr)==sb::ControlStatus::Connecting||r.status()==sb::ControlStatus::WaitingVideo,"actual receiver socket connect started");pump(p,r);
+    if(full){std::vector<std::uint8_t> untouched{49};check(!p.certifyAccessUnit(bytes(ordinary),{1,9,64,64},sb::CoverageEncoding::None,{},untouched)&&untouched==std::vector<std::uint8_t>{49},"unknown receiver capacity forbids even first certificate");}
+    auto rr=request(files.receiver,sb::Role::Receiver);rr.port=p.localPort();
+    if(full){rr.offered=rr.required=sb::KnownCapabilities;rr.nativeAccessUnitCapacity=4096;}check(r.prepare(rr)==sb::ControlStatus::Connecting||r.status()==sb::ControlStatus::WaitingVideo,"actual receiver socket connect started");pump(p,r);
     check(!p.peerVerified()&&!r.peerVerified()&&p.status()==sb::ControlStatus::TransportConnected,"real TCP connection alone is never authenticated");
+    if(full){check(p.peerAccessUnitCapacity()==4096,"actual pair-authenticated source capacity precedes video append");
+        std::vector<std::uint8_t> certified;check(p.certifyAccessUnit(bytes(ordinary),{1,9,64,64},sb::CoverageEncoding::None,{},certified),"first discovery certificate fits proven decoder budget");
+        std::vector<std::uint8_t> oversized(5000,0);oversized[2]=1;oversized[3]=0x26;oversized[4]=1;
+        certified={97};check(!p.certifyAccessUnit(bytes(oversized),{1,9,64,64},sb::CoverageEncoding::None,{},certified)&&certified==std::vector<std::uint8_t>{97},"native decoder bound applies transactionally before delivery");}
     sb::LocalConfig pc,rc;sb::LocalSendAuthority pa,ra;
     check(p.localConfig(pc,pa)&&r.configuredLocal(rc)&&!r.localConfig(rc,ra),"producer local protection and receiver configuration distinct from bootstrap");
     tx::SenderAdapter sender;rx::Receiver receiver;rx::Authority authority{rr.video.connection,rr.video.generation,{}};
@@ -135,4 +142,4 @@ void partialAndInvalid(){
     sb::VerifiedControl output;check(runtime.status()==sb::ControlStatus::AuthenticationRefused&&!runtime.peerVerified()&&!runtime.pollVerified(output),"complete unauthenticated packet closes trust without an output");close(raw);
 }
 }
-int main(){try{credentials();defaultsAndAddress();capabilities();loopbackHandshake();partialAndInvalid();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{credentials();defaultsAndAddress();capabilities();loopbackHandshake();loopbackHandshake(true);partialAndInvalid();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
