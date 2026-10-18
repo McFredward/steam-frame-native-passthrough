@@ -39,6 +39,17 @@ bool nonblocking(Socket fd){const int flags=fcntl(fd,F_GETFL,0);return flags>=0&
 bool nonzero(const Nonce& n){return std::any_of(n.begin(),n.end(),[](auto b){return b!=0;});}
 bool configureSocket(Socket fd){const int enabled=1;return nonblocking(fd)
     &&setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&enabled),sizeof enabled)==0;}
+void revokePrivatePeer(Socket fd){
+    if(fd==Invalid)return;
+    // This is our auxiliary authenticated metadata connection, never a Steam
+    // video socket. Revocation deliberately discards the old session's queued
+    // bytes and sends RST. A graceful close would retain a TIME_WAIT binding on
+    // the fixed producer port and can prevent the next source from listening.
+    // Do not use SO_REUSEADDR: an active second listener must remain refused.
+    const linger immediate{1,0};
+    (void)setsockopt(fd,SOL_SOCKET,SO_LINGER,reinterpret_cast<const char*>(&immediate),sizeof immediate);
+    closeSocket(fd);
+}
 bool address(const ControlRequest& request,sockaddr_in& out){
     if(std::find(request.address.begin(),request.address.end(),0)==request.address.end())return false;
     out={};out.sin_family=AF_INET;out.sin_port=htons(request.port);
@@ -63,7 +74,7 @@ struct ControlRuntime::Impl{
     std::array<SendReceipt,Capacity> sent{};std::size_t sentHead=0,sentCount=0;
     AuthEnvelope assembling{};std::size_t assembled=0;std::uint64_t nextTicket=0;
     void close(ControlStatus why){
-        closeSocket(peer);closeSocket(listener);peer=listener=Invalid;port=0;connecting=prepared=false;
+        revokePrivatePeer(peer);closeSocket(listener);peer=listener=Invalid;port=0;connecting=prepared=false;
         auth.reset();capacityProtection.reset();config={};video={};
         budgetBinding={};challenge={};nativeBudget=peerBudget=0;requireBudget=budgetChallengeSent=budgetAnswered=false;tx={};verified={};sent={};assembling={};
         txHead=txCount=rxHead=rxCount=sentHead=sentCount=assembled=0;state=why;

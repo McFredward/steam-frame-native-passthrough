@@ -141,5 +141,51 @@ void partialAndInvalid(){
     check(send(raw,invalid.data()+40,invalid.size()-40,0)==static_cast<ssize_t>(invalid.size()-40),"fixture remaining TCP bytes");for(unsigned i=0;i<30;++i)runtime.tick();
     sb::VerifiedControl output;check(runtime.status()==sb::ControlStatus::AuthenticationRefused&&!runtime.peerVerified()&&!runtime.pollVerified(output),"complete unauthenticated packet closes trust without an output");close(raw);
 }
+void fixedEndpointRevocation(){
+    Files files;sb::ControlRuntime p,r;auto rp=request(files.producer,sb::Role::Producer);
+    rp.offered=rp.required=sb::KnownCapabilities;
+    check(p.prepare(rp)==sb::ControlStatus::Listening,"fixed endpoint initial producer listener");rp.port=p.localPort();
+    sb::Nonce previousBinding{},previousNonce{};
+    for(unsigned cycle=0;cycle<6;++cycle){
+        sb::ControlRuntime duplicate;
+        check(duplicate.prepare(rp)==sb::ControlStatus::IoRefused&&duplicate.localPort()==0,
+            "active duplicate producer endpoint remains refused without address sharing");
+        auto rr=request(files.receiver,sb::Role::Receiver);rr.port=rp.port;
+        rr.offered=rr.required=sb::KnownCapabilities;rr.nativeAccessUnitCapacity=4096;
+        rr.video={nonce(90+cycle),5+cycle};
+        check(r.prepare(rr)==sb::ControlStatus::Connecting||r.status()==sb::ControlStatus::WaitingVideo,"real reconnect to fixed producer endpoint");pump(p,r);
+        sb::LocalConfig pc,rc;sb::LocalSendAuthority pa,ra;
+        check(p.localConfig(pc,pa)&&r.configuredLocal(rc)&&!p.peerVerified()&&!r.peerVerified(),"new transport starts without inherited peer authority");
+        check(pa.channel.binding!=previousBinding&&pc.nonce!=previousNonce,"every producer preparation has a fresh binding and nonce");
+        previousBinding=pa.channel.binding;previousNonce=pc.nonce;
+        tx::SenderAdapter sender;rx::Receiver receiver;rx::Authority authority{rr.video.connection,rr.video.generation,{}};
+        check(sender.request(pc,pa.channel,source(),p.senderSealer())==tx::SenderStatus::WaitingPeer
+            &&receiver.beginAuthenticated(authority,rc,r.receiverVerifier(),r.verifierContext()),"fresh adapters own new private control session");
+        for(unsigned round=0;round<3;++round){
+            const auto prepared=sender.prepareDiscovery(bytes(ordinary),source());check(prepared.appended,"new producer signs actual video discovery");
+            const std::vector<std::uint8_t> coded(prepared.output.data,prepared.output.data+prepared.output.size);
+            check(sender.complete(prepared.ticket,true,pa.channel)==sb::Status::Ok,"new discovery exact handoff receipt");
+            const rx::AccessUnitContext context{authority,{31,6+cycle},true,true};
+            check(receiver.observeAccessUnit(bytes(coded),context).result==rx::Result::Handshake,"new receiver validates paired video discovery");
+            check(r.localConfig(rc,ra),"new video bootstrap supplies reverse binding");authority.channel=ra.channel;
+            sb::Message reply;std::uint64_t ticket=0;
+            check(receiver.nextOutbound(reply)==sb::Status::Ok&&r.queueControl(bytes(wire(reply)),ticket),"new authenticated reverse reply queued");pump(p,r);
+            sb::SendReceipt receipt;sb::VerifiedControl got;
+            check(r.pollSent(receipt)&&receipt.ticket==ticket&&p.pollVerified(got)
+                &&sender.receiveControl(bytes(got.payload),got.channel)==sb::Status::Ok
+                &&receiver.markOutboundSent(reply,authority)==sb::Status::Ok,"new actual socket confirms fresh paired discovery");
+        }
+        check(p.peerVerified()&&r.peerVerified()&&sender.mutualConfirmed()&&receiver.snapshot().peerConfirmed,
+            "each actual fixed-port session completes the full mutual handshake");
+        sb::Message queued;queued.role=sb::Role::Receiver;queued.buildId=rc.buildId;queued.senderNonce=rc.nonce;std::uint64_t queuedTicket=0;
+        check(r.queueControl(bytes(wire(queued)),queuedTicket),"old session contains an unsent private control action before revocation");
+        p.stop();
+        check(p.prepare(rp)==sb::ControlStatus::Listening&&p.localPort()==rp.port,
+            "revoked established producer immediately rebinds its exact endpoint without TIME_WAIT");
+        pump(p,r);sb::VerifiedControl stale;
+        check(r.status()==sb::ControlStatus::Lost&&!r.peerVerified()&&!p.peerVerified()&&!p.pollVerified(stale),
+            "abortive private-peer revocation drops old queued bytes and trust; receiver observes Lost");
+    }
 }
-int main(){try{credentials();defaultsAndAddress();capabilities();loopbackHandshake();loopbackHandshake(true);partialAndInvalid();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int main(){try{credentials();defaultsAndAddress();capabilities();loopbackHandshake();loopbackHandshake(true);partialAndInvalid();fixedEndpointRevocation();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
