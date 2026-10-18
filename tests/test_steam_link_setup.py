@@ -225,6 +225,116 @@ class WizardTests(unittest.TestCase):
         linux['files'][frame_name]=self.manifest['frame']['files'][frame_name];self.save_manifest()
         with self.assertRaisesRegex(s.SetupError,'Overlapping'):s.Bundle(self.bundle_root)
 
+    def inspection_profile(self):
+        driver=self.steamvr/'drivers/vrlink/bin/win64/driver_vrlink.dll'
+        driver.parent.mkdir(parents=True);driver.write_bytes(b'fixture PC sender, never executed')
+        pins={name:{'bytes':(self.steamvr/name).stat().st_size,'sha256':s.sha((self.steamvr/name).read_bytes())}
+              for name in s.Inspection.PC_FILES['windows-x86_64']}
+        profile={'schema':s.INSPECTION,'expected_pc':{'windows-x86_64':pins},
+                 'runtime_files':copy.deepcopy(self.manifest['frame']['runtime_files'])}
+        (self.bundle_root/'setup-inspection.json').write_bytes(s.encoded(profile))
+        return profile
+
+    def test_inspection_profile_is_metadata_only_with_fixed_paths(self):
+        original=self.inspection_profile()
+        profile=s.Inspection(self.bundle_root)
+        self.assertEqual(profile.runtime_files,original['runtime_files'])
+        for mutation in ('command','traversal','platform','runtime'):
+            value=copy.deepcopy(original)
+            if mutation=='command':value['execute']='evil'
+            elif mutation=='traversal':
+                pin=value['expected_pc']['windows-x86_64'].pop('bin/win64/vrpathreg.exe')
+                value['expected_pc']['windows-x86_64']['../outside']=pin
+            elif mutation=='platform':value['expected_pc']['any-platform']={}
+            else:value['runtime_files']['fixture']['base']='command'
+            (self.bundle_root/'setup-inspection.json').write_bytes(s.encoded(value))
+            with self.subTest(mutation=mutation),self.assertRaises(s.SetupError):s.Inspection(self.bundle_root)
+
+    def test_inspect_check_hashes_actual_files_and_never_reads_pairings(self):
+        self.inspection_profile()
+        for home in (self.framehome,self.local.root):
+            directory=home/'.config/steam-link-native-passthrough/pairings' if home==self.framehome else home/'pairings'
+            s.put(directory/'active.json',b'not even valid JSON; must not read')
+        s.put(self.framehome/'.config/SteamFrameNativePassthrough/install.json',b'{}\n')
+        before=self.snapshot();output=io.StringIO()
+        self.frame.namespace['module']=lambda *_:self.fail('inspection must not import a script')
+        with contextlib.redirect_stdout(output),mock.patch.object(self.local,'active_pair',side_effect=AssertionError('no key lookup')):
+            code=s.main(['--inspect','--check','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=lambda *_,**__:self.frame)
+        self.assertEqual(code,0);self.assertEqual(before,self.snapshot());self.assertEqual(self.system.calls,[])
+        value=json.loads(output.getvalue());self.assertEqual(value['schema'],s.INSPECTION)
+        self.assertTrue(value['inspection_only']);self.assertFalse(value['bridge_available'])
+        self.assertTrue(value['frame']['runtime_compatible']);self.assertTrue(value['frame']['legacy_installed'])
+        self.assertEqual({item['status'] for item in value['pc']['files'].values()},{'match'})
+        self.assertEqual(self.frame.commands,['inventory-inspect']);self.assertNotIn('pair',output.getvalue())
+        driver=self.steamvr/'drivers/vrlink/bin/win64/driver_vrlink.dll';driver.write_bytes(b'changed')
+        observed=s.Inspection(self.bundle_root).pc_files(self.local.inventory(inspection=True))
+        self.assertEqual(observed[str(driver.relative_to(self.steamvr))]['status'],'different')
+        driver.unlink()
+        self.assertEqual(s.Inspection(self.bundle_root).pc_files(self.local.inventory(inspection=True))[
+                         str(driver.relative_to(self.steamvr))]['status'],'missing')
+
+    def test_interactive_inspection_uses_manual_ssh_fallback_and_saves_only_pc_report(self):
+        self.inspection_profile();before={str(p.relative_to(self.framehome)):p.read_bytes()for p in self.framehome.rglob('*')if p.is_file()}
+        attempts=[];prompts=[];answers=iter(('n','192.168.1.5',''))
+        def factory(address,login,interactive=False):
+            attempts.append((address,login,interactive))
+            if not interactive:raise s.SetupError('SSH probe unavailable')
+            return self.frame
+        def answer(prompt):prompts.append(prompt);return next(answers)
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output),mock.patch('sys.stdin.isatty',return_value=True), \
+             mock.patch.object(s,'apply',side_effect=AssertionError('never apply')):
+            code=s.main(['--inspect','--bundle',str(self.bundle_root)],local=self.local,
+                        remote_factory=factory,input_fn=answer)
+        self.assertEqual(code,0);self.assertEqual(attempts[-1],('192.168.1.5','steamos',True))
+        self.assertEqual(self.frame.commands,['inventory-inspect']);self.assertEqual(self.system.calls,[])
+        self.assertFalse(any('Choose' in prompt or 'Apply' in prompt for prompt in prompts))
+        self.assertEqual(before,{str(p.relative_to(self.framehome)):p.read_bytes()for p in self.framehome.rglob('*')if p.is_file()})
+        files=[p.relative_to(self.local.root).as_posix()for p in self.local.root.rglob('*')if p.is_file()]
+        self.assertEqual(files,['setup-inspection.json'])
+        report=s.parse(s.read(self.local.root/'setup-inspection.json',private=True))
+        self.assertTrue(report['inspection_only']);self.assertNotIn('pair',json.dumps(report))
+        self.assertIn('new bridge is unavailable',output.getvalue())
+        self.assertIn('Only a PC inspection report',output.getvalue())
+
+    def test_inspect_check_without_frame_never_opens_ssh_or_saves(self):
+        self.inspection_profile();before=self.snapshot();output=io.StringIO()
+        with contextlib.redirect_stdout(output),mock.patch.object(s,'Bundle',side_effect=AssertionError('no payload loading')):
+            code=s.main(['--inspect','--check','--bundle',str(self.bundle_root)],local=self.local,
+                        remote_factory=lambda *_,**__:self.fail('no SSH without address'))
+        self.assertEqual(code,0);self.assertEqual(before,self.snapshot())
+        value=json.loads(output.getvalue());self.assertIsNone(value['frame']);self.assertTrue(value['inspection_only'])
+        self.assertFalse(self.local.root.exists())
+
+    def test_inspect_rejects_action_before_inventory_or_changes(self):
+        before=self.snapshot();output=io.StringIO()
+        with contextlib.redirect_stderr(output),mock.patch.object(self.local,'inventory',side_effect=AssertionError('no inventory')):
+            code=s.main(['--inspect','--action','install','--bundle',str(self.bundle_root)],local=self.local)
+        self.assertEqual(code,2);self.assertIn('cannot be combined',output.getvalue());self.assertEqual(before,self.snapshot())
+
+    def test_inspect_dry_run_and_unknown_report_are_preserved(self):
+        self.inspection_profile();before=self.snapshot();output=io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code=s.main(['--inspect','--dry-run','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=lambda *_,**__:self.frame)
+        self.assertEqual(code,0);self.assertEqual(before,self.snapshot())
+        path=self.local.root/'setup-inspection.json';foreign=b'{"schema":"foreign"}\n';s.put(path,foreign)
+        error=io.StringIO()
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(error):
+            code=s.main(['--inspect','--bundle',str(self.bundle_root)],local=self.local)
+        self.assertEqual(code,2);self.assertEqual(path.read_bytes(),foreign)
+        self.assertIn('Unknown inspection report preserved',error.getvalue())
+
+    def test_inspect_raw_remote_failure_is_not_disclosed_or_applied(self):
+        self.inspection_profile();before=self.snapshot();error=io.StringIO()
+        class Failure:
+            def call(self,_):raise OSError('secret password private raw SSH output')
+        with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(error):
+            code=s.main(['--inspect','--check','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=lambda *_,**__:Failure())
+        self.assertEqual(code,2);self.assertNotIn('secret password',error.getvalue());self.assertEqual(before,self.snapshot())
+
     def test_remote_generated_data_is_real_json(self):
         raw=self.frame.namespace['data']({'test':1})
         self.assertTrue(raw.endswith(b'\n'));self.assertFalse(raw.endswith(b'\\n'))

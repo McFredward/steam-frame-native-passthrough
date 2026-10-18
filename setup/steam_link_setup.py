@@ -28,6 +28,7 @@ SCHEMA = 'sfnp-steam-link-setup-v1'
 STATE = 'sfnp-steam-link-install-v1'
 PAIR = 'sfnp-pairing-v1'
 ACTIVE = 'sfnp-active-pairing-v1'
+INSPECTION = 'sfnp-setup-inspection-v1'
 MAX_FILE = 32 * 1024 * 1024
 MAX_TOTAL = 64 * 1024 * 1024
 MAX_OUTPUT = 128 * 1024
@@ -302,6 +303,77 @@ class Bundle:
             'tools/native_passthrough_setup.py': self.frame['files'][self.frame['setup_entry']]}
 
 
+class Inspection:
+    """Pinned file inventory only: no payloads, executable paths or admission grant."""
+    PC_FILES = {
+        'windows-x86_64': {'drivers/vrlink/bin/win64/driver_vrlink.dll', 'bin/win64/vrpathreg.exe'},
+        'linux-x86_64': {'drivers/vrlink/bin/linux64/driver_vrlink.so', 'bin/linux64/vrpathreg'}}
+
+    def __init__(self, root):
+        value = parse(read(no_links(root) / 'setup-inspection.json', 128 * 1024))
+        require(set(value) == {'schema','expected_pc','runtime_files'} and value['schema'] == INSPECTION,
+                'A valid setup inspection profile is required. No setup action is available.')
+        self.value = value
+        self.expected_pc = value['expected_pc']
+        require(type(self.expected_pc) is dict and 1 <= len(self.expected_pc) <= 2 and
+                set(self.expected_pc) <= set(self.PC_FILES), 'Unknown inspection platform.')
+        for target, pins in self.expected_pc.items():
+            records(pins)
+            require(set(pins) == self.PC_FILES[target], 'Unknown inspection file paths.')
+        self.runtime_files = value['runtime_files']
+        require(type(self.runtime_files) is dict and 1 <= len(self.runtime_files) <= 32,
+                'Bounded Frame inspection pins required.')
+        for role, pin in self.runtime_files.items():
+            require(type(role) is str and re.fullmatch('[a-z_]{1,32}', role) and type(pin) is dict and
+                    set(pin) == {'base','path','bytes','sha256'} and pin['base'] in ('steamvr','home','system'),
+                    'Unknown Frame inspection root.')
+            relative(pin['path'])
+            require(pin['base'] != 'system' or pin['path'].startswith('usr/lib/'), 'Unknown system inspection path.')
+            records({pin['path']: {key:pin[key] for key in ('bytes','sha256')}})
+
+    def request(self):
+        return {'command':'inventory-inspect','runtime_files':self.runtime_files,'installed_files':{}}
+
+    def pc_files(self, info):
+        expected = self.expected_pc.get(info['platform'], {})
+        result = {}
+        for name, pin in expected.items():
+            status, actual = 'missing', None
+            if info.get('steamvr'):
+                try:
+                    payload = read(Path(info['steamvr']) / relative(name))
+                    actual = sha(payload)
+                    status = 'match' if len(payload) == pin['bytes'] and actual == pin['sha256'] else 'different'
+                except FileNotFoundError:
+                    pass
+                except (OSError, SetupError):
+                    status = 'unreadable'
+            result[name] = {'status':status,'sha256':actual}
+        return result
+
+
+def inspection_report(local, pc, frame, profile):
+    return {'schema':INSPECTION,'inspection_only':True,'bridge_available':False,'automatic_restart':False,
+            'pc':{'platform':pc['platform'],'steamvr':pc.get('steamvr'),
+                  'installed':pc.get('installed'),'registered':pc.get('registered'),'files':profile.pc_files(pc)},
+            'frame':None if frame is None else {key:frame.get(key) for key in
+                     ('architecture','installed','legacy_installed','enabled','runtime_compatible')}}
+
+
+def save_inspection(local, report):
+    path = local.root / 'setup-inspection.json'
+    before = read(path, 128 * 1024, private=True) if path.exists() else None
+    if before is not None:
+        previous = parse(before)
+        require(set(previous) == set(report) and previous.get('schema') == INSPECTION and
+                previous.get('inspection_only') is True and previous.get('bridge_available') is False and
+                previous.get('automatic_restart') is False, 'Unknown inspection report preserved.')
+    raw = encoded(report)
+    if before != raw:
+        put(path, raw, before)
+    return path
+
+
 def inventory_request(bundle, challenge):
     return {'command':'inventory','challenge':challenge,
             'runtime_files':bundle.frame['runtime_files'] if bundle else {},
@@ -475,7 +547,7 @@ def installed_files_current(request,receipt):
  return True
 def inventory(request):
  pairs={};pairdir=HOME/'.config/steam-link-native-passthrough/pairings';active=None
- if pairdir.exists():
+ if request['command']!='inventory-inspect' and pairdir.exists():
   safe(pairdir,HOME)
   paths=list(pairdir.iterdir());need(len(paths)<=64,'pairing inventory bound')
   for path in paths:
@@ -566,7 +638,7 @@ def pairing_finish(request):
 def run(request,home=None):
  global HOME
  HOME=home if home is not None else P.home()
- if request['command']=='inventory':return inventory(request)
+ if request['command'] in ('inventory','inventory-inspect'):return inventory(request)
  if request['command']=='apply':return apply(request)
  if request['command'] in ('commit-pair','rollback-pair'):return pairing_finish(request)
  raise ValueError('unknown operation')
@@ -586,7 +658,7 @@ class Remote:
         args = ssh_args(self.address, self.login, interactive=self.interactive)
         args += ['python3 -B -c ' + shlex.quote(REMOTE_AGENT)]
         code, raw = self.runner.run(args, encoded(request), interactive=self.interactive,
-                                    timeout=20 if request['command'] == 'inventory' else 120)
+                                    timeout=20 if request['command'] in ('inventory','inventory-inspect') else 120)
         removing = request.get('action') == 'uninstall'
         recovery = 'Frame removal refused. Use the checked Frame setup emergency-off, stop SteamVR manually, then retry Uninstall; no complete removal is claimed.'
         require(code == 0, recovery if removing else 'Frame operation refused or SSH unavailable. No automatic restart was attempted.')
@@ -633,7 +705,7 @@ class Local:
         require(all(name.startswith('pc-provider/') for name in value['files']), 'Foreign receipt file ownership.')
         return value
 
-    def inventory(self):
+    def inventory(self, inspection=False):
         paths = parse(read(self.registry, 128 * 1024)) if self.registry.exists() else {}
         runtimes = paths.get('runtime', [])
         require(type(runtimes) is list and len(runtimes) <= 8, 'OpenVR runtime inventory exceeded bound.')
@@ -642,7 +714,7 @@ class Local:
         return {'platform': self.system.lower() + '-x86_64' if platform.machine().lower() in ('amd64', 'x86_64') else 'unsupported',
                 'steamvr': str(roots[0]) if roots else None, 'registry': str(self.registry),
                 'registered': str(self.root / 'pc-provider') in paths.get('external_drivers', []),
-                'installed': state is not None, 'state': state, 'active_pair': self.active_pair(),
+                'installed': state is not None, 'state': state, 'active_pair': None if inspection else self.active_pair(),
                 'automatic_restart': False}
 
     def active_pair(self):
@@ -892,6 +964,7 @@ def apply(action, bundle, local, remote, pc, frame, challenge):
 
 def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--inspect', action='store_true', help='Check PC/Frame setup only; no installation, pairing or restart.')
     parser.add_argument('--check', action='store_true', help='Read-only JSON inventory; no credential or log writes.')
     parser.add_argument('--dry-run', action='store_true', help='Display the plan without staging, pairing or installing.')
     parser.add_argument('--action', choices=('install','update','repair','uninstall'))
@@ -903,17 +976,25 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
     local = local or Local(steamvr=args.steamvr)
     local.apply_started = False
     try:
-        pc = local.inventory()
-        try:
-            bundle = Bundle(args.bundle)
-        except (OSError, SetupError, KeyError, TypeError):
-            bundle = None
+        require(not (args.inspect and args.action), '--inspect cannot be combined with an installation action.')
+        pc = local.inventory(inspection=True) if args.inspect else local.inventory()
+        inspection = Inspection(args.bundle) if args.inspect else None
+        bundle = None
+        if not args.inspect:
+            try:
+                bundle = Bundle(args.bundle)
+            except (OSError, SetupError, KeyError, TypeError):
+                pass
         challenge = secrets.token_hex(32)
         frame = remote = None
         address = args.frame
         interactive = not args.check and sys.stdin.isatty()
+        request = inspection.request() if inspection else inventory_request(bundle, challenge)
+        if args.inspect and not args.check:
+            print('Setup inspection only; the new bridge is unavailable. Nothing will be installed, paired or restarted.')
+            print('Only a PC inspection report may be saved. OpenSSH may ask to trust the Frame fingerprint or enter its password.')
         if interactive and not address:
-            print('Steam Link Native Passthrough — PC and Frame setup')
+            print('Steam Link Native Passthrough — PC and Frame ' + ('inspection' if args.inspect else 'setup'))
             print('First we check your PC and Frame. Nothing is installed during this check.')
             cache = local.root / 'frame-address.json'
             cached = parse(read(cache, 4096, private=True)) if cache.exists() else {}
@@ -924,7 +1005,7 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
             for candidate in dict.fromkeys(value for value in candidates if value):
                 try:
                     probe = remote_factory(candidate, args.user)
-                    observed = probe.call(inventory_request(bundle, challenge))
+                    observed = probe.call(request)
                     if observed.get('architecture') in ('aarch64','arm64'):
                         address = candidate; break
                 except (OSError, SetupError):
@@ -936,7 +1017,22 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
                 address = input_fn('Frame IP or name (Enter to keep only the PC inventory): ').strip() or None
         if address:
             remote = remote_factory(host(address), user(args.user), interactive=interactive)
-            frame = remote.call(inventory_request(bundle, challenge))
+            frame = remote.call(request)
+        if args.inspect:
+            report = inspection_report(local, pc, frame, inspection)
+            if args.check:
+                print(json.dumps(report, sort_keys=True))
+                return 0
+            matches = sum(item['status'] == 'match' for item in report['pc']['files'].values())
+            print('PC SteamVR reference files: ' + str(matches) + '/' + str(len(report['pc']['files'])) + ' match.')
+            print('Frame: ' + ('not connected' if frame is None else
+                  'connected; reference runtime ' + ('matches' if frame.get('runtime_compatible') else 'differs')) + '.')
+            print('This check does not install or prove the new sender/receiver bridge. Ordinary Steam Link is unchanged.')
+            if not args.dry_run:
+                print('Inspection report: ' + str(save_inspection(local, report)))
+            if interactive and not args.dry_run:
+                input_fn('Inspection finished. No bridge was installed; press Enter to close. ')
+            return 0
         report = public_report(pc, frame, bundle)
         suggestion = plan(pc, frame, bundle)
         if args.check:
