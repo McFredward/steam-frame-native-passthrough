@@ -253,7 +253,7 @@ class BoundsAndSources(unittest.TestCase):
         self.assertIsNone(ui.private_ip(3232235777))
 
     def test_actual_fixed_child_output_limit_timeout_and_reaping(self):
-        self.assertEqual(ui.command_output([sys.executable, '-I', '-c', 'print("okay")']), b'okay\n')
+        self.assertEqual(ui.command_output([sys.executable, '-I', '-c', 'print("okay")']), b'okay' + os.linesep.encode())
         self.assertEqual(ui.command_output([sys.executable, '-I', '-c', 'print("x"*1000000)'], limit=32), b'')
         start = time.monotonic()
         self.assertEqual(ui.command_output([sys.executable, '-I', '-c', 'import time;time.sleep(5)'], timeout=.1), b'')
@@ -370,9 +370,10 @@ class Presentation(unittest.TestCase):
                 'print("INPUT="+p.ask("manual"))')
         child = subprocess.run([sys.executable, '-I', '-c', code], input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
         self.assertEqual(child.returncode, 0, child.stderr)
-        self.assertIn(b'INPUT=\n', child.stdout)
-        self.assertNotIn(b'\r', child.stdout)
-        self.assertNotIn(b'\x1b', child.stdout)
+        output = child.stdout.replace(b'\r\n', b'\n')
+        self.assertIn(b'INPUT=\n', output)
+        self.assertNotIn(b'\r', output)
+        self.assertNotIn(b'\x1b', output)
 
     @unittest.skipIf(os.name == 'nt', 'POSIX PTY check; Windows uses redirected-stream contract above')
     def test_real_python_pty_spinner_stops_for_input(self):
