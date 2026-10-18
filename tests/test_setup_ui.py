@@ -370,7 +370,7 @@ class Presentation(unittest.TestCase):
                 'from steam_link_setup_ui import Presenter; p=Presenter(lang="en");p.banner();'
                 '\nwith p.progress("search"):time.sleep(.15)\n'
                 'print("INPUT="+p.ask("manual"))')
-        child = subprocess.run([sys.executable, '-I', '-c', code], input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
+        child = subprocess.run([sys.executable, '-I', '-B', '-c', code], input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
         self.assertEqual(child.returncode, 0, child.stderr)
         output = child.stdout.replace(b'\r\n', b'\n')
         self.assertIn(b'INPUT=\n', output)
@@ -385,7 +385,7 @@ class Presentation(unittest.TestCase):
                 'from steam_link_setup_ui import Presenter;p=Presenter(lang="en");'
                 '\nwith p.progress("search"):\n time.sleep(.2)\n p.ask("manual")\n'
                 'print("FINISHED")')
-        child = subprocess.Popen([sys.executable, '-I', '-c', code], stdin=slave, stdout=slave, stderr=slave)
+        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', code], stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         data = bytearray()
         def read_until(needle, timeout=3):
@@ -557,11 +557,12 @@ class ActionChooser(unittest.TestCase):
                 'from steam_link_setup_ui import Presenter;'
                 'p=Presenter(lang="en",input_enabled=True,width=32);'
                 'print("SELECTED="+str(p.choose_action(["check","uninstall","exit"])))')
-        child = subprocess.run([sys.executable, '-I', '-c', code], input=b'2\n', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
+        child = subprocess.run([sys.executable, '-I', '-B', '-c', code], input=b'2\n', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
         self.assertEqual(child.returncode, 0, child.stderr)
         self.assertIn(b'SELECTED=uninstall', child.stdout)
         self.assertNotIn(b'\x1b', child.stdout)
-        self.assertNotIn(b'\r', child.stdout)
+        # Windows text stdout uses CRLF; reject cursor-control CR only.
+        self.assertNotIn(b'\r', child.stdout.replace(b'\r\n', b'\n'))
 
 
 if __name__ == '__main__':
