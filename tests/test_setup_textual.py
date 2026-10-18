@@ -287,6 +287,224 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("New connection installed", str(app.query_one("#complete-title", Static).render()))
         app.backend.join()
 
+    async def test_inline_ssh_password_is_masked_preserves_spaces_and_clears_on_submit(self):
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            self.assertTrue(p.inline_ssh)
+            observed.append(p.ssh_prompt("steamos@192.168.0.25 password:", secret=True))
+            return 0
+
+        app = UI.SetupApp(backend, "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+            await pilot.pause()
+            screen = app.screen
+            field = screen.query_one(Input)
+            self.assertTrue(field.password)
+            self.assertEqual(field.value, "")
+            self.assertEqual(field.max_length, 1024)
+            field.value = " fixture-secret "
+            await pilot.press("q")
+            self.assertIs(app.screen, screen)
+            self.assertNotIn("fixture-secret", app.export_screenshot())
+            await pilot.press("enter")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [" fixture-secret q"])
+            self.assertEqual(field.value, "")
+            self.assertFalse(app.stop_requested)
+            self.assertNotIn("fixture-secret", "\n".join(app.detail_history))
+            self.assertNotIn("fixture-secret", str(app.query_one("#notice", Static).render()))
+        app.backend.join()
+
+    async def test_inline_ssh_wrong_password_opens_fresh_empty_prompt(self):
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            observed.append(p.ssh_prompt("First password:", secret=True))
+            observed.append(p.ssh_prompt("Try the password again:", secret=True))
+            return 0
+
+        app = UI.SetupApp(backend, "de")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+            await pilot.pause()
+            first = app.screen
+            first_field = first.query_one(Input)
+            first_field.value = "fixture-wrong"
+            await pilot.press("enter")
+            await until(pilot, lambda: len(observed) == 1 and isinstance(app.screen, UI.SSHInputScreen) and app.screen is not first)
+            await pilot.pause()
+            self.assertEqual(first_field.value, "")
+            second_field = app.screen.query_one(Input)
+            self.assertEqual(second_field.value, "")
+            second_field.value = "fixture-correct"
+            await pilot.press("enter")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, ["fixture-wrong", "fixture-correct"])
+            self.assertEqual(second_field.value, "")
+            self.assertFalse(any("fixture-" in line for line in app.detail_history))
+        app.backend.join()
+
+    async def test_inline_ssh_fingerprint_requires_explicit_accept(self):
+        observed = []
+        fingerprint = "The authenticity of host '[frame]' cannot be established.\nED25519 key fingerprint is SHA256:AbC123+/test.\nConnect?"
+
+        def backend():
+            p = UI.active_presenter()
+            observed.append(p.ssh_prompt(fingerprint, confirm=True))
+            observed.append(p.ssh_prompt(fingerprint, confirm=True))
+            return 0
+
+        app = UI.SetupApp(backend, "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.ConfirmScreen))
+            await pilot.pause()
+            first = app.screen
+            self.assertEqual(app.focused.id, "cancel")
+            self.assertEqual(first.question, fingerprint)
+            self.assertIn("[frame]", str(first.query_one("#confirm-question", Static).render()))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(observed) == 1 and isinstance(app.screen, UI.ConfirmScreen) and app.screen is not first)
+            await pilot.pause()
+            self.assertEqual(app.focused.id, "cancel")
+            await pilot.press("right", "enter")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [None, "yes"])
+            self.assertFalse(app.stop_requested)
+        app.backend.join()
+
+    async def test_inline_ssh_ctrl_c_clears_secret_without_disabling_recovery_prompts(self):
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            observed.append(p.ssh_prompt("Password:", secret=True))
+            observed.append(p.cancelled())
+            observed.append(p.ssh_prompt("Recovery password:", secret=True))
+            return 0
+
+        app = UI.SetupApp(backend)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+            await pilot.pause()
+            first = app.screen
+            field = first.query_one(Input)
+            field.value = "fixture-cancelled"
+            await pilot.press("ctrl+c")
+            await until(pilot, lambda: len(observed) == 2 and isinstance(app.screen, UI.SSHInputScreen) and app.screen is not first)
+            await pilot.pause()
+            self.assertEqual(field.value, "")
+            self.assertEqual(observed, [None, False])
+            await pilot.click("#ssh-cancel")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [None, False, None])
+            self.assertNotIn("fixture-cancelled", "\n".join(app.detail_history))
+        app.backend.join()
+
+    async def test_busy_cancel_is_observable_and_authorized_recovery_clears_it(self):
+        running = threading.Event()
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            running.set()
+            deadline = time.monotonic() + 5
+            tick = threading.Event()
+            while not p.cancelled() and time.monotonic() < deadline:
+                tick.wait(.01)
+            observed.append(p.cancelled())
+            p.allow_recovery()
+            observed.append(p.cancelled())
+            observed.append(p.ssh_prompt("Recovery password:", secret=True))
+            observed.append("safe cleanup finished")
+            return 130
+
+        app = UI.SetupApp(backend)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, running.is_set)
+            await pilot.press("ctrl+c")
+            await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+            await pilot.pause()
+            self.assertEqual(observed[:2], [True, False])
+            self.assertFalse(app.backend_finished)
+            self.assertIn("restoring", str(app.query_one("#notice", Static).render()))
+            await pilot.press("escape")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [True, False, None, "safe cleanup finished"])
+        app.backend.join()
+
+    async def test_transport_close_cancels_only_its_ssh_prompt(self):
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            observed.append(p.confirm("bridge_confirm"))
+            observed.append(p.ssh_prompt("Password:", secret=True))
+            return 0
+
+        app = UI.SetupApp(backend)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.ConfirmScreen))
+            await pilot.pause()
+            self.assertFalse(await asyncio.to_thread(app.presenter.cancel_ssh_prompt))
+            self.assertEqual(observed, [])
+            await pilot.press("escape")
+            await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+            await pilot.pause()
+            field = app.screen.query_one(Input)
+            field.value = "fixture-closed"
+            self.assertTrue(await asyncio.to_thread(app.presenter.cancel_ssh_prompt))
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [False, None])
+            self.assertEqual(field.value, "")
+            self.assertFalse(app.stop_requested)
+            self.assertNotIn("fixture-closed", "\n".join(app.detail_history))
+        app.backend.join()
+
+    async def test_password_clipboard_shortcuts_cannot_copy_the_secret(self):
+        def backend():
+            UI.active_presenter().ssh_prompt("Password:", secret=True)
+            return 0
+
+        app = UI.SetupApp(backend)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+            await pilot.pause()
+            field = app.screen.query_one(Input)
+            field.value = "fixture-private"
+            field.action_select_all()
+            with mock.patch.object(app, "copy_to_clipboard") as clipboard:
+                field.action_copy()
+                field.action_cut()
+                clipboard.assert_not_called()
+            await pilot.press("escape")
+            await until(pilot, lambda: app.backend_finished)
+        app.backend.join()
+
+    async def test_discovery_retry_menu_can_offer_manual_and_clear_pc_only_choice(self):
+        observed = []
+
+        def backend():
+            observed.append(UI.active_presenter().choose_action(["retry", "manual", "check", "exit"], recommended="retry"))
+            return 0
+
+        app = UI.SetupApp(backend, "en")
+        # The discovery worker owns these shared translations. Keep this
+        # isolated worker fixture independent until its commit is integrated.
+        app.texts = dict(app.texts, action_manual="Enter the Frame address", action_manual_description="Use its Wi-Fi address.",
+                         discovery_pc_only="Check this PC only", discovery_pc_only_description="Skip the Frame for this check.")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: app.prompt is not None)
+            choices = app.query_one("#actions", OptionList)
+            self.assertIn("Check this PC only", str(choices.get_option_at_index(2).prompt))
+            await pilot.press("down", "down", "enter")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, ["check"])
+        app.backend.join()
+
     def test_plain_sanitization_and_absent_active_factory(self):
         self.assertIsNone(UI.active_presenter())
         self.assertEqual(UI._plain("[red]text\x00\x1b[4m"), "[red]text")

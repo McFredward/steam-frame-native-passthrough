@@ -1,8 +1,8 @@
 """Textual front end for the existing synchronous, recoverable setup engine.
 
 This module presents backend facts; it never discovers devices, changes files,
-starts services or grants installation permission. OpenSSH retains exclusive
-ownership of host-key and password input outside the full-screen application.
+starts services or grants installation permission. A bounded authentication
+broker owns OpenSSH; authentication input stays inside a private masked modal.
 """
 from __future__ import annotations
 
@@ -48,8 +48,13 @@ WORDS = {
         "stop_pending": "Stop requested. The current safe step will finish first; any required recovery stays under setup control.",
         "stop_help": "Setup is still working. It will not close while a device operation or recovery is running.",
         "select": "Select", "stop": "Stop / back", "detail_key": "Details", "paths_key": "Log paths",
-        "ssh": "OpenSSH sign-in", "ssh_help": "The terminal is temporarily reserved for OpenSSH. Its password is not read or saved by this interface.",
-        "input_help": "Leave empty to continue without this device. Your password is never entered here.",
+        "ssh": "Connect to your Steam Frame", "ssh_help": "Sign in below to connect securely. Your password is hidden and is never written to the setup log.",
+        "ssh_secret_help": "Your input stays hidden and is never written to the setup log.",
+        "ssh_confirm_help": "Check this device identity before continuing. Cancel leaves this connection unapproved.",
+        "ssh_input_help": "This response is sent only to OpenSSH for the current connection.",
+        "ssh_accept": "Trust and connect", "ssh_submit": "Connect", "ssh_placeholder": "Enter your password",
+        "recovering": "Completing the safe step or restoring the previous setup. You can sign in again if recovery needs a connection.",
+        "input_help": "Leave empty to continue without this device. Setup asks for a password separately when needed.",
         "complete": "Complete", "pc_inventory": "Check this PC", "frame_discovery": "Find your Frame", "frame_inventory": "Check your Frame",
         "frame_prepare": "Prepare the Frame", "pc_install": "Prepare this PC", "frame_commit": "Apply the prepared changes",
         "runtime_stop": "Close PC SteamVR", "runtime_start": "Restart the Frame interface", "startup_health": "Check the Frame startup",
@@ -71,8 +76,13 @@ WORDS = {
         "stop_pending": "Abbruch angefordert. Der aktuelle sichere Schritt wird zuerst beendet; eine nötige Wiederherstellung wird weiter überwacht.",
         "stop_help": "Die Einrichtung arbeitet noch. Während einer Geräteaktion oder Wiederherstellung wird sie nicht geschlossen.",
         "select": "Auswählen", "stop": "Stopp / zurück", "detail_key": "Details", "paths_key": "Log-Pfade",
-        "ssh": "OpenSSH-Anmeldung", "ssh_help": "Das Terminal ist kurz für OpenSSH reserviert. Diese Oberfläche liest und speichert dein Passwort nicht.",
-        "input_help": "Leer lassen, um ohne dieses Gerät fortzufahren. Dein Passwort wird niemals hier eingegeben.",
+        "ssh": "Mit deiner Steam Frame verbinden", "ssh_help": "Melde dich unten sicher an. Dein Passwort bleibt verborgen und wird niemals in das Setup-Log geschrieben.",
+        "ssh_secret_help": "Deine Eingabe bleibt verborgen und wird niemals in das Setup-Log geschrieben.",
+        "ssh_confirm_help": "Prüfe diese Gerätekennung, bevor du fortfährst. Abbrechen lässt diese Verbindung unbestätigt.",
+        "ssh_input_help": "Diese Antwort wird nur für die aktuelle Verbindung an OpenSSH übergeben.",
+        "ssh_accept": "Vertrauen und verbinden", "ssh_submit": "Verbinden", "ssh_placeholder": "Passwort eingeben",
+        "recovering": "Der sichere Schritt wird abgeschlossen oder der vorherige Zustand wiederhergestellt. Du kannst dich erneut anmelden, wenn dafür eine Verbindung nötig ist.",
+        "input_help": "Leer lassen, um ohne dieses Gerät fortzufahren. Ein Passwort wird bei Bedarf separat abgefragt.",
         "complete": "Fertig", "pc_inventory": "Diesen PC prüfen", "frame_discovery": "Deine Frame finden", "frame_inventory": "Deine Frame prüfen",
         "frame_prepare": "Frame vorbereiten", "pc_install": "Diesen PC vorbereiten", "frame_commit": "Vorbereitete Änderungen anwenden",
         "runtime_stop": "PC-SteamVR schließen", "runtime_start": "Frame-Oberfläche neu starten", "startup_health": "Frame-Start prüfen",
@@ -105,6 +115,7 @@ def _existing_words():
 class Prompt:
     future: concurrent.futures.Future
     cancel: Any = None
+    kind: str = "general"
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -170,6 +181,70 @@ class InputScreen(ModalScreen[str]):
         self.dismiss("")
 
 
+class _PrivateSSHInput(Input):
+    """A password cannot become clipboard content through copy/cut shortcuts."""
+    def action_copy(self):
+        if not self.password:
+            super().action_copy()
+
+    def action_cut(self):
+        if self.password:
+            self.delete_selection()
+        else:
+            super().action_cut()
+
+
+class SSHInputScreen(ModalScreen[str | None]):
+    """Private OpenSSH response input; values never enter notices or history."""
+    BINDINGS = [Binding("escape", "cancel", show=False), Binding("ctrl+c", "cancel", show=False)]
+
+    def __init__(self, question: str, words: dict, *, secret: bool):
+        super().__init__()
+        self.question, self.words, self.secret = question, words, secret
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="ssh-dialog"):
+            yield Static(self.words["ssh"], id="ssh-title", markup=False)
+            yield Static(self.question, id="ssh-question", markup=False)
+            yield _PrivateSSHInput(password=self.secret, placeholder=self.words["ssh_placeholder"] if self.secret else "",
+                                  max_length=1024, validate_on=[], id="ssh-response")
+            yield Static(self.words["ssh_secret_help" if self.secret else "ssh_input_help"], classes="muted", markup=False)
+            with Horizontal(id="ssh-buttons"):
+                yield Button(self.words["cancel"], id="ssh-cancel")
+                yield Button(self.words["ssh_submit"], id="ssh-submit", variant="primary")
+
+    def on_mount(self):
+        self.query_one(Input).focus()
+
+    def clear_response(self):
+        for field in self.query(Input):
+            field.value = ""
+
+    def dismiss(self, result=None):
+        self.clear_response()
+        return super().dismiss(result)
+
+    @on(Input.Changed)
+    def changed(self, event: Input.Changed):
+        event.stop()
+
+    @on(Input.Submitted)
+    def submitted(self, event: Input.Submitted):
+        event.stop()
+        # Preserve spaces in passwords; the broker validates the bounded value.
+        self.dismiss(self.query_one(Input).value)
+
+    @on(Button.Pressed)
+    def answer(self, event: Button.Pressed):
+        self.dismiss(self.query_one(Input).value if event.button.id == "ssh-submit" else None)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+    def on_unmount(self):
+        self.clear_response()
+
+
 class _Capture:
     """Bounded presentation-only console capture; suspended SSH bypasses it."""
     encoding = "utf-8"
@@ -211,6 +286,7 @@ class _Capture:
 class TextualPresenter:
     prompting = True
     interactive = True
+    inline_ssh = True
 
     def __init__(self, app: SetupApp):
         self.app, self.lang = app, app.lang
@@ -285,23 +361,49 @@ class TextualPresenter:
                 suspension, self._suspension = self._suspension, None
                 self._call(suspension.__exit__, None, None, None)
 
-    def _wait(self, render, cancel):
+    def _wait(self, render, cancel, *, kind="general"):
         if self.app.stop_requested or not self.app.ui_available:
             return cancel
-        prompt = Prompt(concurrent.futures.Future(), cancel)
+        prompt = Prompt(concurrent.futures.Future(), cancel, kind)
         self._call(self.app.start_prompt, prompt, render)
         if not self.app.ui_available and not prompt.future.done():
             return cancel
         return prompt.future.result()
 
+    def ssh_prompt(self, prompt, *, secret=False, confirm=False):
+        """Present a broker-validated SSH prompt without logging its response."""
+        if (type(prompt) is not str or not 0 < len(prompt) <= 4096
+                or type(secret) is not bool or type(confirm) is not bool or (secret and confirm)):
+            raise ValueError("SSH prompt options are invalid")
+        question = _plain(prompt, 4096)
+        if confirm:
+            return self._wait(lambda request: self.app.push_screen(ConfirmScreen(
+                self.app.words["ssh"], question, self.app.words["ssh_confirm_help"],
+                self.app.words["cancel"], self.app.words["ssh_accept"]),
+                lambda value: self.app.resolve_prompt("yes" if value else None, expected=request)), None, kind="ssh")
+        return self._wait(lambda request: self.app.push_screen(SSHInputScreen(
+            question, self.app.words, secret=secret),
+            lambda value: self.app.resolve_prompt(value, expected=request)), None, kind="ssh")
+
+    def cancel_ssh_prompt(self):
+        """Unblock only an SSH prompt after its transport has closed."""
+        return bool(self._call(self.app.cancel_ssh_prompt))
+
+    def cancelled(self):
+        return self.app.stop_requested or not self.app.ui_available
+
+    def allow_recovery(self):
+        """The backend calls this only when authorized recovery begins."""
+        self._call(self.app.allow_recovery)
+
     def ask(self, key):
         if key == "done_prompt":
             return ""
         return self._wait(lambda prompt: self.app.push_screen(InputScreen(self.text(key), self.app.words),
-                           lambda value: self.app.resolve_prompt(value)), "")
+                           lambda value: self.app.resolve_prompt(value, expected=prompt)), "")
 
     def choose_action(self, actions, recommended=None):
-        known = ("install", "update", "repair", "uninstall", "check", "exit", "retry", "back", "rollback", "continue")
+        known = ("install", "update", "repair", "uninstall", "check", "exit", "retry", "back", "rollback", "continue", "manual")
         if (type(actions) not in (list, tuple) or len(actions) > len(known)
                 or any(type(a) is not str or a not in known for a in actions)
                 or len(set(actions)) != len(actions)):
@@ -319,13 +421,13 @@ class TextualPresenter:
         return self._wait(lambda prompt: self.app.push_screen(ConfirmScreen(
             self.app.words["confirm"], self.text(key), plan,
             self.app.words["cancel"], self.app.words["continue"]),
-            lambda value: self.app.resolve_prompt(value)), False)
+            lambda value: self.app.resolve_prompt(value, expected=prompt)), False)
 
     def confirm_uninstall(self):
         return self._wait(lambda prompt: self.app.push_screen(ConfirmScreen(
             self.app.words["confirm"], self.text("confirm_uninstall"), self.app.plan,
             self.app.words["cancel"], self.text("confirm_remove"), True),
-            lambda value: self.app.resolve_prompt(value)), False)
+            lambda value: self.app.resolve_prompt(value, expected=prompt)), False)
 
     def close(self):
         # The engine closes its presenter before its worker has returned.
@@ -337,7 +439,8 @@ class SetupApp(App[int]):
     """One main UI thread and one joined backend thread, with safe prompt handoff."""
     TITLE = "Steam Link Native Passthrough"
     ENABLE_COMMAND_PALETTE = False
-    BINDINGS = [Binding("ctrl+c,ctrl+q,q,escape", "request_stop", "Stop / back", priority=True),
+    BINDINGS = [Binding("ctrl+c,ctrl+q", "request_stop", "Stop / back", priority=True),
+                Binding("q,escape", "request_stop", show=False),
                 Binding("f2", "details", "Details"), Binding("f3", "paths", "Log paths")]
     CSS = """
     Screen { background: #0b111b; color: #dbe7f3; }
@@ -380,16 +483,17 @@ class SetupApp(App[int]):
     SetupApp.compact #devices { min-height: 4; }
     SetupApp.narrow #devices { layout: vertical; }
     SetupApp.narrow .device { width: 1fr; margin: 0; }
-    ConfirmScreen, InputScreen { align: center middle; background: #030811cc; }
-    #confirm-dialog, #input-dialog { width: 70; max-width: 94%; height: auto; max-height: 90%; padding: 1 2; border: round #61bfd4; background: #122336; }
-    #confirm-title, #input-title { color: #8de2ec; text-style: bold; height: auto; margin-bottom: 1; }
+    ConfirmScreen, InputScreen, SSHInputScreen { align: center middle; background: #030811cc; }
+    #confirm-dialog, #input-dialog, #ssh-dialog { width: 70; max-width: 94%; height: auto; max-height: 90%; padding: 1 2; border: round #61bfd4; background: #122336; }
+    #confirm-title, #input-title, #ssh-title { color: #8de2ec; text-style: bold; height: auto; margin-bottom: 1; }
+    #ssh-question { height: auto; margin-bottom: 1; }
     #confirm-copy { height: auto; max-height: 16; }
     #confirm-question { height: auto; text-style: bold; margin: 1 0; }
     .plan-copy { height: auto; color: #bdd0e1; }
-    #confirm-buttons, #input-buttons { height: auto; align-horizontal: right; margin-top: 1; }
+    #confirm-buttons, #input-buttons, #ssh-buttons { height: auto; align-horizontal: right; margin-top: 1; }
     Button { margin-left: 1; }
     Button:focus { text-style: bold; }
-    #setup-input { margin-bottom: 1; }
+    #setup-input, #ssh-response { margin-bottom: 1; }
     """
 
     def __init__(self, callback: Callable[[], int], lang=None):
@@ -415,7 +519,10 @@ class SetupApp(App[int]):
         self.set_bindings()
 
     def set_bindings(self):
-        self.bind("q,escape,ctrl+c,ctrl+q", "request_stop", description=self.words["stop"], show=True)
+        # App.bind() recreates bindings with priority=False. Preserve priority
+        # for stop keys even when a focused widget consumes ordinary keys.
+        self._bindings.bind("ctrl+c,ctrl+q", "request_stop", description=self.words["stop"], show=True, priority=True)
+        self.bind("q,escape", "request_stop", show=False)
         self.bind("f2", "details", description=self.words["detail_key"], show=True)
         self.bind("f3", "paths", description=self.words["paths_key"], show=True)
 
@@ -567,11 +674,29 @@ class SetupApp(App[int]):
         self.set_working(None)
         render(prompt)
 
-    def resolve_prompt(self, answer):
+    def resolve_prompt(self, answer, *, expected=None):
+        # A dismissed authentication screen may finish after a retry has
+        # opened a new prompt. Its callback must not answer the new request.
+        if expected is not None and self.prompt is not expected:
+            return
         prompt, self.prompt = self.prompt, None
         self.query_one("#action-area").display = False
         if prompt is not None and not prompt.future.done():
             prompt.future.set_result(answer)
+
+    def cancel_ssh_prompt(self):
+        prompt = self.prompt
+        if prompt is None or prompt.kind != "ssh":
+            return False
+        if isinstance(self.screen, (SSHInputScreen, ConfirmScreen)):
+            self.screen.action_cancel()
+        self.resolve_prompt(None, expected=prompt)
+        return True
+
+    def allow_recovery(self):
+        self.stop_requested = False
+        self.show_notice(self.words["recovering"], state="warning")
+        self.set_working(self.words["rollback"])
 
     def show_actions(self, actions, recommended):
         self.action_names = list(actions)
@@ -580,10 +705,13 @@ class SetupApp(App[int]):
         choices = self.query_one("#actions", OptionList)
         choices.clear_options()
         for action in actions:
-            label = self.texts["action_" + action]
+            discovery_pc_only = action == "check" and all(a in actions for a in ("retry", "manual", "exit"))
+            label = self.texts.get("discovery_pc_only", self.texts["action_check"]) if discovery_pc_only else self.texts["action_" + action]
+            description = (self.texts.get("discovery_pc_only_description", self.texts["action_check_description"])
+                           if discovery_pc_only else self.texts["action_" + action + "_description"])
             suffix = "  · " + self.texts["recommended"] if action == recommended else ""
             text = Text(label + suffix + "\n", style="bold #dcecf5")
-            text.append(self.texts["action_" + action + "_description"], style="not bold #93adbf")
+            text.append(description, style="not bold #93adbf")
             choices.add_option(Option(text, id=action))
         choices.highlighted = actions.index(recommended) if recommended in actions else 0
         choices.focus()
@@ -618,7 +746,7 @@ class SetupApp(App[int]):
         if self.backend_finished:
             self.exit(self.backend_result)
             return
-        if isinstance(self.screen, (ConfirmScreen, InputScreen)):
+        if isinstance(self.screen, (ConfirmScreen, InputScreen, SSHInputScreen)):
             self.screen.action_cancel()
             return
         if self.prompt is not None:
