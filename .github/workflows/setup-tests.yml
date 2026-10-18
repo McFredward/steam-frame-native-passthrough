@@ -69,6 +69,17 @@ jobs:
           $archive = Join-Path $env:RUNNER_TEMP 'python-embed.zip'
           & curl.exe --fail --silent --show-error --proto '=https' --max-time 60 --max-filesize 16777216 --output $archive $pin.source_url
           if ($LASTEXITCODE -ne 0 -or (Get-Item $archive).Length -ne $pin.bytes -or (Get-FileHash $archive).Hash.ToLowerInvariant() -cne $pin.sha256) { throw 'Official Python pin differs.' }
+          # Only the public Python archive: compare actual Win32 stat/fstat fields
+          # when diagnosing runtime-specific file identity representations.
+          @'
+          import json, os, sys
+          from pathlib import Path
+          path = Path(sys.argv[1]); before = path.stat()
+          with path.open('rb') as stream:
+              opened = os.fstat(stream.fileno())
+          fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+          print(json.dumps({'python':sys.version, 'public_archive_stat_differences':{name:[getattr(before,name),getattr(opened,name)] for name in fields if getattr(before,name)!=getattr(opened,name)}}))
+          '@ | python -B - $archive
           $package = Join-Path $env:RUNNER_TEMP 'setup-inspection.zip'
           python -B tools/package_setup_inspection.py --python-zip $archive --output $package
           if ($LASTEXITCODE -ne 0) { throw 'Inspection packaging failed.' }
