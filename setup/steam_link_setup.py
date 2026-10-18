@@ -1,0 +1,868 @@
+#!/usr/bin/env python3
+"""Guided PC/Frame inventory and exact-package setup; no implicit runtime restart."""
+from __future__ import annotations
+
+import argparse
+import base64
+import concurrent.futures
+import ctypes
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+from pathlib import Path, PurePosixPath
+import platform
+import re
+import secrets
+import shlex
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import threading
+
+sys.dont_write_bytecode = True
+SCHEMA = 'sfnp-steam-link-setup-v1'
+STATE = 'sfnp-steam-link-install-v1'
+PAIR = 'sfnp-pairing-v1'
+ACTIVE = 'sfnp-active-pairing-v1'
+MAX_FILE = 32 * 1024 * 1024
+MAX_TOTAL = 64 * 1024 * 1024
+MAX_OUTPUT = 128 * 1024
+DRIVER_NAME = 'steam_link_native_passthrough'
+ROOT_NAME = 'steam-link-native-passthrough'
+
+
+class SetupError(ValueError):
+    """Fixed, non-secret diagnostic messages only."""
+
+
+def require(value, message):
+    if not value:
+        raise SetupError(message)
+
+
+def encoded(value):
+    return (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + '\n').encode()
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def parse(raw):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'Duplicate JSON key refused.')
+            result[key] = value
+        return result
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(SetupError('Invalid JSON number.')))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise SetupError('Invalid bounded JSON file.') from error
+    require(type(value) is dict, 'JSON object required.')
+    return value
+
+
+def relative(value):
+    require(type(value) is str and 0 < len(value) < 256 and '\\' not in value and ':' not in value,
+            'Relative package path required.')
+    path = PurePosixPath(value)
+    require(not path.is_absolute() and all(part not in ('', '.', '..') for part in value.split('/')) and
+            not any(ord(c) < 32 for c in value), 'Unsafe package path refused.')
+    return path
+
+
+def no_links(path):
+    path = Path(path).absolute()
+    for item in [path, *path.parents]:
+        if not os.path.lexists(item):
+            continue
+        info = item.lstat()
+        require(not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 0x400,
+                'Linked or redirected setup path preserved.')
+    return path
+
+
+def read(path, limit=MAX_FILE, private=False):
+    path = no_links(path)
+    before = path.stat()
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit,
+            'Bounded ordinary file required.')
+    if private and os.name != 'nt':
+        require(before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o600,
+                'Private owned file required.')
+    if private and os.name == 'nt':
+        verify_private_acl(path)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    with os.fdopen(descriptor, 'rb') as stream:
+        require(os.fstat(stream.fileno()) == before, 'File changed before opening.')
+        raw = stream.read(limit + 1)
+    require(len(raw) == before.st_size and path.stat() == before, 'File changed while checking.')
+    return raw
+
+
+def private_acl(path):
+    """Apply Windows owner/system-only DACL before secret bytes are written."""
+    if os.name != 'nt':
+        os.chmod(path, 0o600)
+        return
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL('advapi32', use_last_error=True)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    convert.restype = wintypes.BOOL
+    apply = advapi.SetFileSecurityW
+    apply.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    apply.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    descriptor = ctypes.c_void_p()
+    require(convert('D:P(A;;FA;;;SY)(A;;FA;;;OW)', 1, ctypes.byref(descriptor), None), 'Private Windows ACL unavailable.')
+    try:
+        require(apply(str(path), 0x80000004, descriptor), 'Private Windows ACL could not be applied.')
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def verify_private_acl(path):
+    """Refuse a broadened Windows credential/receipt ACL; never repair silently."""
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL('advapi32', use_last_error=True)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    query = advapi.GetFileSecurityW
+    query.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
+                      wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    query.restype = wintypes.BOOL
+    needed = wintypes.DWORD()
+    query(str(path), 4, None, 0, ctypes.byref(needed))
+    require(0 < needed.value <= 65536, 'Private Windows ACL could not be checked.')
+    descriptor = ctypes.create_string_buffer(needed.value)
+    require(query(str(path), 4, descriptor, len(descriptor), ctypes.byref(needed)), 'Private Windows ACL unavailable.')
+    convert = advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    convert.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                        ctypes.POINTER(wintypes.LPWSTR), ctypes.c_void_p]
+    convert.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    value = wintypes.LPWSTR()
+    require(convert(descriptor, 1, 4, ctypes.byref(value), None), 'Private Windows ACL could not be read.')
+    try:
+        require(value.value == 'D:P(A;;FA;;;SY)(A;;FA;;;OW)', 'Changed Windows file permissions preserved; explicit repair required.')
+    finally:
+        kernel.LocalFree(value)
+
+
+def put(path, raw, expected=None):
+    path = no_links(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    no_links(path.parent)
+    if os.path.lexists(path):
+        require(expected is not None and read(path) == expected, 'Changed or foreign setup file preserved.')
+    else:
+        require(expected is None, 'Expected setup file is missing.')
+    temporary = path.with_name('.' + path.name + '.' + secrets.token_hex(8))
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        private_acl(temporary)
+        with os.fdopen(descriptor, 'wb', closefd=False) as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(descriptor)
+        require((read(path) if os.path.lexists(path) else None) == expected, 'Setup file changed before publication.')
+        os.replace(temporary, path)
+    finally:
+        os.close(descriptor)
+        if temporary.exists():
+            temporary.unlink()
+
+
+def remove_owned(path, raw):
+    if os.path.lexists(path):
+        require(read(path) == raw, 'Changed file preserved during rollback.')
+        path.unlink()
+
+
+def protocol(value):
+    require(type(value) is dict and set(value) == {'major', 'minor', 'wire_sha256'} and
+            type(value['major']) is int and value['major'] == 1 and
+            type(value['minor']) is int and value['minor'] == 0 and
+            type(value['wire_sha256']) is str and re.fullmatch('[0-9a-f]{64}', value['wire_sha256']),
+            'Unknown bridge protocol pin.')
+    return value
+
+
+def records(value):
+    require(type(value) is dict and 1 <= len(value) <= 64, 'Bounded exact package inventory required.')
+    for name, item in value.items():
+        relative(name)
+        require(type(item) is dict and set(item) == {'bytes', 'sha256'} and type(item['bytes']) is int and
+                0 < item['bytes'] <= MAX_FILE and type(item['sha256']) is str and
+                re.fullmatch('[0-9a-f]{64}', item['sha256']), 'Invalid package file pin.')
+
+
+class Bundle:
+    def __init__(self, root):
+        self.root = no_links(root)
+        raw = read(self.root / 'steam-link-bundle.json', 128 * 1024)
+        self.pin = sha(raw)
+        self.value = parse(raw)
+        require(set(self.value) == {'schema', 'readiness', 'bridge_protocol', 'platforms', 'frame'} and
+                self.value['schema'] == SCHEMA and self.value['readiness'] in ('prototype', 'release'),
+                'Unsupported setup bundle schema.')
+        self.protocol = protocol(self.value['bridge_protocol'])
+        self.frame = self.value['frame']
+        self.platforms = self.value['platforms']
+        require(type(self.platforms) is dict and 1 <= len(self.platforms) <= 2 and
+                set(self.platforms) <= {'windows-x86_64', 'linux-x86_64'}, 'Unknown PC platform.')
+        self.files = {}
+        for target, item in [('frame', self.frame), *self.platforms.items()]:
+            require(type(item) is dict and item.get('role') == ('receiver' if target == 'frame' else 'producer') and
+                    item.get('architecture') == ('aarch64' if target == 'frame' else 'x86_64') and
+                    protocol(item.get('bridge_protocol')) == self.protocol and
+                    type(item.get('reviewed')) is bool and type(item.get('native_bridge')) is bool,
+                    'Component role, architecture or protocol mismatch.')
+            records(item.get('files'))
+            for name, pin in item['files'].items():
+                require(name not in self.files, 'Overlapping component file ownership.')
+                payload = read(self.root / relative(name), pin['bytes'])
+                require(len(payload) == pin['bytes'] and sha(payload) == pin['sha256'], 'Bundle file hash mismatch.')
+                self.files[name] = payload
+        require(sum(map(len, self.files.values())) <= MAX_TOTAL, 'Bundle exceeds total size bound.')
+        self._frame()
+        for item in self.platforms.values():
+            require(item.get('provider_root') == 'pc-provider' and
+                    item.get('provider_manifest') == 'pc-provider/driver.vrdrivermanifest' and
+                    item.get('provider_registration') == 'user', 'Unknown local provider layout.')
+            require(all(name.startswith('pc-provider/') for name in item['files']), 'PC payload outside owned provider.')
+            manifest = parse(self.files[item['provider_manifest']])
+            require(manifest.get('name') == DRIVER_NAME, 'Unexpected OpenVR driver name.')
+            tool = item.get('vrpathreg')
+            require(type(tool) is dict and set(tool) == {'path', 'bytes', 'sha256'} and
+                    tool['path'] == 'bin/win64/vrpathreg.exe', 'Unknown registration tool contract.')
+            records({tool['path']: {key: tool[key] for key in ('bytes', 'sha256')}})
+
+    def _frame(self):
+        require(self.frame.get('package_root') == 'frame-package' and
+                self.frame.get('setup_entry') == 'frame-package/tools/native_passthrough_setup.py' and
+                self.frame.get('setup_entry') in self.files and
+                all(name.startswith('frame-package/') for name in self.frame['files']), 'Unknown Frame package layout.')
+        pins = self.frame.get('runtime_files')
+        require(type(pins) is dict and 1 <= len(pins) <= 32, 'Exact Frame runtime pins required.')
+        for item in pins.values():
+            require(type(item) is dict and set(item) == {'base', 'path', 'bytes', 'sha256'} and
+                    item['base'] in ('steamvr', 'home', 'system'), 'Unknown runtime root.')
+            relative(item['path'])
+            require(item['base'] != 'system' or item['path'].startswith('usr/lib/'), 'Unknown system runtime path.')
+            records({item['path']: {key: item[key] for key in ('bytes', 'sha256')}})
+        package = parse(self.files['frame-package/package.json'])
+        require(package.get('schema') == 'sfnp-native-package-v1', 'Unsupported underlying Frame package.')
+        records(package.get('files'))
+        require(set(self.frame['files']) == {'frame-package/' + name for name in package['files']} |
+                {'frame-package/package.json', self.frame['setup_entry']}, 'Frame package inventory differs.')
+        for name, pin in package['files'].items():
+            require(self.frame['files']['frame-package/' + name] == pin, 'Nested Frame package pin mismatch.')
+        profile = parse(self.files['frame-package/compatibility.json'])
+        require(profile.get('complete') is True and profile.get('architecture') == 'aarch64' and
+                profile.get('profile') == package.get('profile'), 'Unsupported Frame profile.')
+        expected = {role: {'base': {'absolute': 'system'}.get(item['location'], item['location']),
+                           'path': item['path'].lstrip('/'), 'bytes': item['bytes'], 'sha256': item['sha256']}
+                    for role, item in profile['runtime_files'].items()}
+        require(expected == pins, 'Frame runtime pins differ from package profile.')
+
+    def admit(self, pc):
+        require(self.value['readiness'] == 'release', 'Prototype bundle: checks and plans only; no installation or pairing.')
+        require(pc == 'windows-x86_64', 'Native Linux sender provider is not reviewed; no Windows DLL will be installed on Linux.')
+        require(pc in self.platforms and all(item['reviewed'] and item['native_bridge']
+                for item in (self.platforms[pc], self.frame)), 'Both reviewed native bridge roles are required.')
+        marker = 'frame-package/bridge-component.json'
+        require(marker in self.frame['files'], 'A legacy Frame scene-atlas package is not a negotiated native receiver.')
+        component = parse(self.files[marker])
+        require(component == {'schema':'sfnp-bridge-component-v1','role':'receiver',
+                              'bridge_protocol':self.protocol,'provider':'vrlink-complete-au-v1'},
+                'Negotiated Frame receiver variant differs from the reviewed bundle.')
+
+
+def host(value):
+    require(type(value) is str and 0 < len(value) <= 253 and
+            re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*', value) and '..' not in value and not value.endswith('.'),
+            'Enter a plain IP address or DNS name; SSH options, ports and commands are not accepted.')
+    return value
+
+
+def user(value):
+    require(type(value) is str and re.fullmatch('[a-z_][a-z0-9_-]{0,31}', value), 'Invalid SSH user name.')
+    return value
+
+
+class Runner:
+    def runtime_running(self):
+        if os.name != 'nt':
+            return False
+        import csv
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        query = kernel.GetSystemDirectoryW
+        query.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        query.restype = wintypes.UINT
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = query(buffer, len(buffer))
+        require(0 < size < len(buffer), 'Windows system directory unavailable.')
+        code, raw = self.run([str(Path(buffer.value) / 'tasklist.exe'), '/FO', 'CSV', '/NH'], timeout=10)
+        require(code == 0, 'Running SteamVR state could not be checked.')
+        return any(row and row[0].lower() in ('vrserver.exe','vrcompositor.exe')
+                   for row in csv.reader(raw.decode('utf-8', errors='replace').splitlines()))
+
+    def run(self, args, data=None, *, interactive=False, timeout=20):
+        """Bound stdout and lifetime; SSH alone owns password/fingerprint prompts."""
+        process = subprocess.Popen(args, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=None if interactive else subprocess.STDOUT)
+        captured = bytearray()
+        overflow = []
+        def drain():
+            while True:
+                chunk = process.stdout.read(4096)
+                if not chunk:
+                    break
+                if len(captured) + len(chunk) > MAX_OUTPUT:
+                    overflow.append(True)
+                    process.kill()
+                    break
+                captured.extend(chunk)
+        def feed():
+            try:
+                if data is not None:
+                    process.stdin.write(data)
+                    process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                if process.stdin is not None and not process.stdin.closed:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+        reader = threading.Thread(target=drain)
+        writer = threading.Thread(target=feed)
+        reader.start(); writer.start()
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait()
+            raise SetupError('System command timed out; no automatic retry or restart.')
+        finally:
+            reader.join(); writer.join()
+            process.stdout.close()
+        require(not overflow, 'System command exceeded output bound.')
+        return code, bytes(captured)
+
+
+def ssh_args(address, login, *, interactive=False):
+    return ['ssh', '-o', 'ConnectTimeout=4', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5',
+            '-o', 'ServerAliveCountMax=2', '-o', 'StrictHostKeyChecking=' + ('ask' if interactive else 'yes'),
+            '-o', 'UpdateHostKeys=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+            '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
+            '-o', 'BatchMode=' + ('no' if interactive else 'yes'), user(login) + '@' + host(address)]
+
+
+def discover(cidr, connector=None):
+    network = ipaddress.ip_network(cidr, strict=True)
+    allowed = [ipaddress.ip_network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+    require(network.version == 4 and network.prefixlen >= 24 and
+            any(network.subnet_of(item) for item in allowed), 'Discovery accepts one private IPv4 /24 or smaller only.')
+    def attempt(address):
+        try:
+            if connector:
+                return str(address) if connector(str(address), 22, .25) else None
+            with socket.create_connection((str(address), 22), timeout=.25):
+                return str(address)
+        except OSError:
+            return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        return [value for value in pool.map(attempt, network.hosts()) if value]
+
+
+# This fixed read/apply agent has no shell commands supplied by a manifest. It
+# never stops/restarts services. Only the separately hash-verified native setup
+# owns Frame activation. stdin carries secrets; stdout never includes them.
+REMOTE_AGENT = r'''
+import base64,hashlib,hmac,importlib.util,json,os,pathlib,platform,re,secrets,stat,sys
+P=pathlib.Path
+def need(v,m):
+ if not v: raise ValueError(m)
+def digest(b):return hashlib.sha256(b).hexdigest()
+def raw(p,limit=33554432):
+ p=P(p);s=p.lstat();need(stat.S_ISREG(s.st_mode) and s.st_nlink==1 and 0<=s.st_size<=limit,'ordinary file required')
+ fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+ with os.fdopen(fd,'rb') as f:need(os.fstat(f.fileno())==s,'changed open');b=f.read(limit+1)
+ need(len(b)==s.st_size and p.stat()==s,'changed file');return b
+def load(p):return json.loads(raw(p,131072))
+def safe(p,home,create=False):
+ need(p.is_relative_to(home),'owned path required')
+ for q in reversed((p,*p.parents)):
+  if q==home or home in q.parents:
+   if os.path.lexists(q):
+    s=q.lstat();need(not stat.S_ISLNK(s.st_mode) and s.st_uid==os.getuid() and not(s.st_mode&0o022),'unsafe owned path')
+   elif create:q.mkdir(mode=0o700)
+def put(p,b,old=None):
+ safe(p.parent,HOME,True)
+ need((raw(p) if os.path.lexists(p) else None)==old,'foreign file preserved')
+ t=p.with_name('.'+p.name+'.'+secrets.token_hex(8));fd=os.open(t,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+ try:
+  with os.fdopen(fd,'wb',closefd=False) as f:f.write(b);f.flush();os.fsync(fd)
+  need((raw(p) if os.path.lexists(p) else None)==old,'changed file');os.replace(t,p)
+ finally:
+  os.close(fd)
+  if t.exists():t.unlink()
+def data(v):return (json.dumps(v,sort_keys=True)+'\n').encode()
+def rel(n):
+ need(type(n)is str and 0<len(n)<256 and '\\' not in n and ':' not in n and not n.startswith('/') and all(x not in ('','.','..')for x in n.split('/')),'bad relative path');return n
+def runtime(pins):
+ for spec in pins.values():
+  n=rel(spec['path']);base={'steamvr':P('/opt/steamvr'),'home':HOME,'system':P('/')}[spec['base']]
+  b=raw(base/n);need(len(b)==spec['bytes'] and digest(b)==spec['sha256'],'runtime mismatch')
+def inventory(request):
+ pairs={};pairdir=HOME/'.config/steam-link-native-passthrough/pairings';active=None
+ if pairdir.exists():
+  safe(pairdir,HOME)
+  paths=list(pairdir.iterdir());need(len(paths)<=64,'pairing inventory bound')
+  for path in paths:
+   if re.fullmatch('[0-9a-f]{32}[.]json',path.name):
+    s=path.lstat();need(stat.S_IMODE(s.st_mode)==0o600,'private key mode')
+    v=load(path);need(v.get('schema')=='sfnp-pairing-v1' and v.get('role')=='receiver' and v.get('pair_id')==path.stem and v.get('protocol_major')==1 and re.fullmatch('[0-9a-f]{64}',v.get('key_hex','')),'invalid pairing')
+    pairs[path.stem]=hmac.new(bytes.fromhex(v['key_hex']),bytes.fromhex(request['challenge']),hashlib.sha256).hexdigest()
+  if (pairdir/'active.json').exists():
+   v=load(pairdir/'active.json');need(set(v)=={'schema','pair_id'} and v['schema']=='sfnp-active-pairing-v1' and v['pair_id'] in pairs,'unknown active pair');active=v['pair_id']
+ ok=False
+ try:runtime(request.get('runtime_files',{}));ok=bool(request.get('runtime_files'))
+ except (OSError,ValueError,KeyError):pass
+ receipt=HOME/'.config/SteamFrameNativePassthrough/install.json'
+ control=HOME/'.config/SteamFrameNativePassthrough/control.json'
+ component=HOME/'.local/share/SteamFrameNativePassthrough/package/bridge-component.json'
+ bridge=load(component) if component.exists() else None
+ legacy=receipt.exists() and bridge is None
+ package_sha=load(receipt).get('package_sha256') if receipt.exists() else None
+ return {'schema':'sfnp-wizard-frame-v1','architecture':platform.machine(),'home':str(HOME),'installed':receipt.exists(),'legacy_installed':legacy,'bridge_component':bridge,'package_sha256':package_sha,'enabled':load(control).get('enabled') if control.exists() else None,'runtime_compatible':ok,'active_pair':active,'pair_proofs':pairs,'automatic_restart':False}
+def module(path,name):
+ spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
+def apply(request):
+ need(request['readiness']=='release','prototype refuses all writes');runtime(request['runtime_files'])
+ files=request['files'];need(type(files)is dict and 1<=len(files)<=64,'file bound')
+ contents={};total=0
+ for name,item in files.items():
+  n=rel(name);need(n.startswith('frame-package/'),'package root');b=base64.b64decode(item['data'],validate=True);total+=len(b)
+  need(total<=67108864 and len(b)==item['bytes'] and digest(b)==item['sha256'],'payload pin mismatch');contents[n]=b
+ need('frame-package/tools/native_passthrough_setup.py' in contents,'setup missing')
+ pair=request.get('pairing');need(type(pair)is dict and set(pair)=={'schema','pair_id','key_hex','role','protocol_major'} and pair['schema']=='sfnp-pairing-v1' and pair['role']=='receiver' and pair['protocol_major']==1 and re.fullmatch('[0-9a-f]{32}',pair['pair_id']) and re.fullmatch('[0-9a-f]{64}',pair['key_hex']),'pairing contract')
+ base=HOME/'.local/share/steam-link-native-passthrough/staging';safe(base,HOME,True)
+ stage=base/secrets.token_hex(16);stage.mkdir(mode=0o700)
+ written={}
+ try:
+  for name,b in contents.items():p=stage/name;put(p,b);written[p]=b
+  package=stage/'frame-package'
+  verifier=module(package/'tools/prepare_native_release.py','sfnp_wizard_verifier');verifier.verify_package(package)
+  # No activation or credential publication is possible before the real verifier.
+  setup=module(package/'tools/native_passthrough_setup.py','sfnp_wizard_setup');unit=setup.Setup(HOME)
+  with unit.locked():result=unit.uninstall() if request['action']=='uninstall' else unit.install(package)
+  if request['action']=='uninstall':return {'reason':result.get('reason'),'automatic_restart':False}
+  pairdir=HOME/'.config/steam-link-native-passthrough/pairings';safe(pairdir,HOME,True)
+  key=pairdir/(pair['pair_id']+'.json');payload=data(pair)
+  old=raw(key) if key.exists() else None;need(old is None or json.loads(old)==pair,'foreign credential preserved')
+  active=pairdir/'active.json';previous=raw(active) if active.exists() else None
+  journal=pairdir/'transaction.json';need(not journal.exists(),'pending pairing repair required')
+  transaction={'token':request['transaction'],'pair_id':pair['pair_id'],'created':old is None,'previous':base64.b64encode(previous).decode() if previous else None,'key_sha256':digest(payload)}
+  put(journal,data(transaction))
+  if old is None:put(key,payload)
+  put(active,data({'schema':'sfnp-active-pairing-v1','pair_id':pair['pair_id']}),previous)
+  return {'reason':result.get('reason'),'pair_id':pair['pair_id'],'automatic_restart':False}
+ finally:
+  for p,b in sorted(written.items(),key=lambda i:len(i[0].parts),reverse=True):
+   if p.exists() and raw(p)==b:p.unlink()
+  for p in sorted(stage.rglob('*'),key=lambda p:len(p.parts),reverse=True):
+   if p.is_dir():
+    try:p.rmdir()
+    except OSError:pass
+  try:stage.rmdir()
+  except OSError:pass
+def pairing_finish(request):
+ d=HOME/'.config/steam-link-native-passthrough/pairings';safe(d,HOME)
+ journal=d/'transaction.json'
+ if not journal.exists():return {'reason':'no-pending-pairing','automatic_restart':False}
+ v=load(journal);need(v['token']==request['transaction'],'unknown pairing transaction')
+ active=d/'active.json';expected=data({'schema':'sfnp-active-pairing-v1','pair_id':v['pair_id']})
+ if request['command']=='rollback-pair':
+  previous=base64.b64decode(v['previous']) if v['previous'] else None
+  current=raw(active) if active.exists() else None
+  need(current in (expected,previous),'changed active pairing preserved')
+  if current!=previous:
+   if previous is None:active.unlink()
+   else:put(active,previous,expected)
+  key=d/(v['pair_id']+'.json')
+  if v['created'] and key.exists():need(digest(raw(key))==v['key_sha256'],'changed key preserved');key.unlink()
+ journal.unlink();return {'reason':'pairing-committed' if request['command']=='commit-pair' else 'pairing-rolled-back','automatic_restart':False}
+def run(request,home=None):
+ global HOME
+ HOME=home if home is not None else P.home()
+ if request['command']=='inventory':return inventory(request)
+ if request['command']=='apply':return apply(request)
+ if request['command'] in ('commit-pair','rollback-pair'):return pairing_finish(request)
+ raise ValueError('unknown operation')
+if __name__=='__main__':
+ try:
+  b=sys.stdin.buffer.read(94371841);need(len(b)<=94371840,'input bound');r=run(json.loads(b));print(json.dumps(r,sort_keys=True))
+ except Exception:print(json.dumps({'error':'Frame setup refused; existing files preserved; inspect the original setup status locally.'}));sys.exit(2)
+'''
+
+
+class Remote:
+    def __init__(self, address, login='steamos', runner=None, interactive=False):
+        self.address, self.login = host(address), user(login)
+        self.runner, self.interactive = runner or Runner(), interactive
+
+    def call(self, request):
+        args = ssh_args(self.address, self.login, interactive=self.interactive)
+        args += ['python3 -B -c ' + shlex.quote(REMOTE_AGENT)]
+        code, raw = self.runner.run(args, encoded(request), interactive=self.interactive,
+                                    timeout=20 if request['command'] == 'inventory' else 120)
+        require(code == 0, 'Frame operation refused or SSH unavailable. No automatic restart was attempted.')
+        result = parse(raw)
+        require(not result.get('error'), 'Frame operation refused; use its retained setup status for repair.')
+        return result
+
+
+def data_root(home=None, system=None):
+    home = Path.home() if home is None else Path(home)
+    system = platform.system() if system is None else system
+    if system == 'Windows':
+        base = Path(os.environ.get('LOCALAPPDATA') or home / 'AppData/Local')
+    else:
+        base = Path(os.environ.get('XDG_DATA_HOME') or home / '.local/share')
+    require(base.is_absolute(), 'Absolute user data directory required.')
+    return no_links(base / ROOT_NAME)
+
+
+def registry_path(home=None, system=None):
+    home = Path.home() if home is None else Path(home)
+    if (system or platform.system()) == 'Windows':
+        return Path(os.environ.get('LOCALAPPDATA') or home / 'AppData/Local') / 'openvr/openvrpaths.vrpath'
+    return Path(os.environ.get('XDG_CONFIG_HOME') or home / '.config') / 'openvr/openvrpaths.vrpath'
+
+
+class Local:
+    def __init__(self, home=None, system=None, runner=None, steamvr=None):
+        self.system = system or platform.system()
+        self.home = Path.home() if home is None else Path(home)
+        self.root = data_root(self.home, self.system)
+        self.registry = registry_path(self.home, self.system)
+        self.runner = runner or Runner()
+        self.explicit_steamvr = Path(steamvr) if steamvr else None
+
+    def state(self):
+        path = self.root / 'install.json'
+        if not os.path.lexists(path):
+            return None
+        value = parse(read(path, 128 * 1024, private=True))
+        require(set(value) == {'schema', 'driver', 'manifest_sha256', 'files', 'vrpathreg', 'bridge_protocol'} and
+                value['schema'] == STATE and value['driver'] == str(self.root / 'pc-provider'), 'Unknown installation receipt preserved.')
+        records(value['files']); protocol(value['bridge_protocol'])
+        require(all(name.startswith('pc-provider/') for name in value['files']), 'Foreign receipt file ownership.')
+        return value
+
+    def inventory(self):
+        paths = parse(read(self.registry, 128 * 1024)) if self.registry.exists() else {}
+        runtimes = paths.get('runtime', [])
+        require(type(runtimes) is list and len(runtimes) <= 8, 'OpenVR runtime inventory exceeded bound.')
+        roots = [self.explicit_steamvr] if self.explicit_steamvr else [Path(p) for p in runtimes if type(p) is str]
+        state = self.state()
+        return {'platform': self.system.lower() + '-x86_64' if platform.machine().lower() in ('amd64', 'x86_64') else 'unsupported',
+                'steamvr': str(roots[0]) if roots else None, 'registry': str(self.registry),
+                'registered': str(self.root / 'pc-provider') in paths.get('external_drivers', []),
+                'installed': state is not None, 'state': state, 'active_pair': self.active_pair(),
+                'automatic_restart': False}
+
+    def active_pair(self):
+        path = self.root / 'pairings/active.json'
+        if not path.exists():
+            return None
+        value = parse(read(path, 4096, private=True))
+        require(set(value) == {'schema', 'pair_id'} and value['schema'] == ACTIVE and
+                re.fullmatch('[0-9a-f]{32}', value['pair_id']), 'Unknown active pairing preserved.')
+        return value['pair_id']
+
+    def pairing(self, pair_id):
+        if pair_id is None:
+            return None
+        require(re.fullmatch('[0-9a-f]{32}', pair_id), 'Invalid pairing ID.')
+        value = parse(read(self.root / 'pairings' / (pair_id + '.json'), 4096, private=True))
+        require(set(value) == {'schema','pair_id','key_hex','role','protocol_major'} and value['schema'] == PAIR and
+                value['pair_id'] == pair_id and value['role'] == 'producer' and value['protocol_major'] == 1 and
+                re.fullmatch('[0-9a-f]{64}', value['key_hex']), 'Unknown local credential preserved.')
+        return value
+
+    def verify_tool(self, info, spec):
+        require(info['steamvr'] is not None, 'SteamVR not found. Install SteamVR or specify --steamvr.')
+        tool = no_links(Path(info['steamvr']) / relative(spec['path']))
+        raw = read(tool, spec['bytes'])
+        require(len(raw) == spec['bytes'] and sha(raw) == spec['sha256'], 'SteamVR registration tool differs from reviewed bundle.')
+        return tool
+
+    def register(self, tool, command):
+        code, _ = self.runner.run([str(tool), command, str(self.root / 'pc-provider')], timeout=10)
+        require(code == 0, 'OpenVR registration failed. Owned payload/receipt retained for repair.')
+
+    def install(self, bundle, info):
+        item = bundle.platforms[info['platform']]
+        tool = self.verify_tool(info, item['vrpathreg'])
+        old = self.state()
+        expected = old['files'] if old else {}
+        planned = {name: bundle.files[name] for name in item['files']}
+        if old and any(not (self.root / relative(name)).exists() or
+                       read(self.root / relative(name)) != raw for name, raw in planned.items()):
+            require(not self.runner.runtime_running(), 'Close SteamVR before replacing installed provider code, then run again.')
+        # Complete collision check before the first local write.
+        driver = self.root / 'pc-provider'
+        if driver.exists():
+            present = {str(p.relative_to(self.root)).replace('\\','/') for p in driver.rglob('*') if p.is_file() or p.is_symlink()}
+            require(present <= set(expected), 'Unknown provider files preserved.')
+        for name, pin in expected.items():
+            path = self.root / relative(name)
+            if path.exists():
+                require(sha(read(path)) == pin['sha256'], 'Changed provider payload preserved.')
+        code, _ = self.runner.run([str(tool), 'finddriver', DRIVER_NAME], timeout=10)
+        require(code in (0, 1), 'Driver collision query failed.')
+        paths = parse(read(self.registry, 128 * 1024)) if self.registry.exists() else {}
+        for entry in paths.get('external_drivers', []):
+            if entry == str(driver):
+                continue
+            manifest = Path(entry) / 'driver.vrdrivermanifest'
+            if manifest.exists():
+                require(parse(read(manifest, 128 * 1024)).get('name') != DRIVER_NAME, 'Another same-name OpenVR driver is registered; it was preserved.')
+        undo = []
+        try:
+            for name, raw in planned.items():
+                path = self.root / relative(name)
+                before = read(path) if path.exists() else None
+                if before != raw:
+                    put(path, raw, before); undo.append((path, raw, before))
+            receipt = encoded({'schema': STATE, 'driver': str(driver), 'manifest_sha256': bundle.pin,
+                               'files': item['files'], 'vrpathreg': item['vrpathreg'], 'bridge_protocol': bundle.protocol})
+            state_path = self.root / 'install.json'
+            previous = read(state_path) if state_path.exists() else None
+            if not info['registered']:
+                self.register(tool, 'adddriver')
+                require(self.inventory()['registered'], 'Registration readback did not contain the owned provider.')
+            if previous != receipt:
+                put(state_path, receipt, previous); undo.append((state_path, receipt, previous))
+        except BaseException:
+            if not info['registered']:
+                try:
+                    self.register(tool, 'removedriver')
+                except SetupError:
+                    pass
+            for path, after, before in reversed(undo):
+                if before is None:
+                    remove_owned(path, after)
+                else:
+                    put(path, before, after)
+            raise
+
+    def uninstall(self, info):
+        state = self.state()
+        if state is None:
+            return
+        tool = self.verify_tool(info, state['vrpathreg'])
+        for name, pin in state['files'].items():
+            raw = read(self.root / relative(name))
+            require(sha(raw) == pin['sha256'], 'Changed installed payload preserved; repair manually before removal.')
+        self.register(tool, 'removedriver')
+        require(not self.inventory()['registered'], 'Owned driver is still registered.')
+        for name, pin in state['files'].items():
+            path = self.root / relative(name); remove_owned(path, read(path))
+        remove_owned(self.root / 'install.json', encoded(state))
+
+
+def pair_matches(local, remote_info, challenge):
+    pair_id = local.active_pair()
+    if pair_id is None or remote_info.get('active_pair') != pair_id:
+        return False
+    value = local.pairing(pair_id)
+    proof = hmac.new(bytes.fromhex(value['key_hex']), bytes.fromhex(challenge), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(proof, remote_info.get('pair_proofs', {}).get(pair_id, ''))
+
+
+def public_report(pc, frame, bundle):
+    # Never serialize pairing proofs, credentials, arbitrary SSH output or commands.
+    return {'pc': {key: pc.get(key) for key in ('platform','steamvr','installed','registered','active_pair')},
+            'frame': None if frame is None else {key: frame.get(key) for key in
+                ('architecture','installed','legacy_installed','enabled','runtime_compatible','active_pair')},
+            'bundle': None if bundle is None else {'readiness': bundle.value['readiness'], 'sha256': bundle.pin},
+            'automatic_restart': False}
+
+
+def plan(pc, frame, bundle):
+    if bundle is None:
+        return 'A complete reviewed release bundle is missing. Inventory is available; installation and pairing are blocked.'
+    if bundle.value['readiness'] != 'release':
+        return 'This is a prototype bundle. Checks and dry-run only; ordinary Steam Link is retained.'
+    if pc['platform'] != 'windows-x86_64':
+        return 'The native Linux sender is not reviewed. Nothing will be installed on this PC.'
+    if frame is None:
+        return 'Connect the Frame by SSH before choosing Install, Update or Repair.'
+    if not frame.get('runtime_compatible'):
+        return 'The Frame runtime is unsupported by this bundle. No files will be changed.'
+    if not pc['installed'] or not frame['installed']:
+        return 'Install the missing PC/Frame components and pair them securely.'
+    if pc['state']['manifest_sha256'] != bundle.pin:
+        return 'Update both checked components; preserve previous pairing credentials for rollback.'
+    if not pc['registered'] or pc['active_pair'] != frame['active_pair'] or not pc['active_pair']:
+        return 'Repair registration or explicitly replace the mismatched active pairing.'
+    return 'The checked components are current. No update is needed.'
+
+
+def apply(action, bundle, local, remote, pc, frame, challenge):
+    require(bundle is not None, 'A verified release bundle is required for Frame actions.')
+    bundle.admit(pc['platform'])
+    require(remote is not None and frame is not None and frame.get('architecture') in ('aarch64','arm64') and
+            frame.get('runtime_compatible'), 'A compatible Frame SSH inventory is required.')
+    local.verify_tool(pc, bundle.platforms[pc['platform']]['vrpathreg'])
+    same_pair = pair_matches(local, frame, challenge)
+    require(same_pair or action in ('install', 'repair') and not (pc['active_pair'] or frame.get('active_pair')) or
+            action == 'repair' or action == 'uninstall', 'Pairing mismatch: choose explicit Repair; old credentials are preserved.')
+    item = bundle.platforms[pc['platform']]
+    if action != 'uninstall' and same_pair and pc['installed'] and pc['registered'] and \
+            pc['state']['manifest_sha256'] == bundle.pin and \
+            frame.get('package_sha256') == sha(bundle.files['frame-package/package.json']) and \
+            frame.get('bridge_component') == parse(bundle.files['frame-package/bridge-component.json']) and \
+            all((local.root / relative(name)).exists() and sha(read(local.root / relative(name))) == pin['sha256']
+                for name, pin in item['files'].items()):
+        return {'reason':'current','pair_id':pc['active_pair'],'changed':False,'automatic_restart':False}
+    pair = local.pairing(pc['active_pair']) if same_pair else {
+        'schema': PAIR, 'pair_id': secrets.token_hex(16), 'key_hex': secrets.token_hex(32), 'role': 'producer', 'protocol_major': 1}
+    transaction = secrets.token_hex(16)
+    request = {'command': 'apply', 'action': action, 'readiness': bundle.value['readiness'],
+               'runtime_files': bundle.frame['runtime_files'], 'transaction': transaction,
+               'pairing': {**pair, 'role': 'receiver'}, 'files': {name: {
+                   **bundle.frame['files'][name], 'data': base64.b64encode(bundle.files[name]).decode()}
+                   for name in bundle.frame['files']}}
+    # Staging+real Frame verifier precede activation, PC registration and pairing.
+    try:
+        result = remote.call(request)
+    except BaseException:
+        # No journal is a safe no-op; a partially written owned pair can be undone.
+        remote.call({'command': 'rollback-pair', 'transaction': transaction})
+        raise
+    if action == 'uninstall':
+        require(result.get('reason') in ('uninstalled', 'not_installed'), 'Frame uninstall is pending; stop SteamVR manually and run again.')
+        local.uninstall(pc)
+        return {'reason': 'uninstalled', 'automatic_restart': False}
+    require(result.get('reason') == 'installed' and result.get('pair_id') == pair['pair_id'], 'Frame setup did not commit its checked payload.')
+    active = local.root / 'pairings/active.json'
+    key = local.root / 'pairings' / (pair['pair_id'] + '.json')
+    old_active = read(active, private=True) if active.exists() else None
+    old_key = read(key, private=True) if key.exists() else None
+    key_bytes = encoded(pair)
+    try:
+        local.install(bundle, pc)
+        if old_key is None:
+            put(key, key_bytes)
+        else:
+            require(parse(old_key) == pair, 'Existing pairing credential differs; it was preserved.')
+        put(active, encoded({'schema': ACTIVE, 'pair_id': pair['pair_id']}), old_active)
+        remote.call({'command': 'commit-pair', 'transaction': transaction})
+    except BaseException:
+        if active.exists() and parse(read(active)).get('pair_id') == pair['pair_id']:
+            if old_active is None:
+                remove_owned(active, read(active))
+            else:
+                put(active, old_active, read(active))
+        if old_key is None and key.exists():
+            remove_owned(key, key_bytes)
+        remote.call({'command': 'rollback-pair', 'transaction': transaction})
+        raise
+    return {'reason': 'current', 'pair_id': pair['pair_id'], 'automatic_restart': False}
+
+
+def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check', action='store_true', help='Read-only JSON inventory; no credential or log writes.')
+    parser.add_argument('--dry-run', action='store_true', help='Display the plan without staging, pairing or installing.')
+    parser.add_argument('--action', choices=('install','update','repair','uninstall'))
+    parser.add_argument('--bundle', type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument('--frame', help='Frame IP or DNS name. Credentials are handled only by OpenSSH.')
+    parser.add_argument('--user', default='steamos')
+    parser.add_argument('--steamvr', type=Path)
+    args = parser.parse_args(argv)
+    local = local or Local(steamvr=args.steamvr)
+    try:
+        pc = local.inventory()
+        try:
+            bundle = Bundle(args.bundle)
+        except (OSError, SetupError, KeyError, TypeError):
+            bundle = None
+        challenge = secrets.token_hex(32)
+        frame = remote = None
+        address = args.frame
+        interactive = not args.check and sys.stdin.isatty()
+        if interactive and not address:
+            print('Steam Link Native Passthrough — PC and Frame setup')
+            print('First we check your PC and Frame. Nothing is installed during this check.')
+            cache = local.root / 'frame-address.json'
+            cached = parse(read(cache, 4096)) if cache.exists() else {}
+            candidates = [cached.get('host'), 'steamframe.local', 'steam-frame.local']
+            for candidate in dict.fromkeys(value for value in candidates if value):
+                try:
+                    probe = remote_factory(candidate, args.user)
+                    observed = probe.call({'command':'inventory','challenge':challenge,
+                                           'runtime_files':bundle.frame['runtime_files'] if bundle else {}})
+                    if observed.get('architecture') in ('aarch64','arm64'):
+                        address = candidate; break
+                except (OSError, SetupError):
+                    pass
+            if not address and input_fn('Search one private local subnet for SSH devices? [y/N] ').strip().lower() == 'y':
+                found = discover(input_fn('Private subnet, for example 192.168.1.0/24: ').strip())
+                print('SSH hosts: ' + (', '.join(found) if found else 'none'))
+            if not address:
+                address = input_fn('Frame IP or name (Enter to keep only the PC inventory): ').strip() or None
+        if address:
+            remote = remote_factory(host(address), user(args.user), interactive=interactive)
+            frame = remote.call({'command':'inventory','challenge':challenge,
+                                 'runtime_files':bundle.frame['runtime_files'] if bundle else {}})
+        report = public_report(pc, frame, bundle)
+        suggestion = plan(pc, frame, bundle)
+        if args.check:
+            print(json.dumps({**report,'suggestion':suggestion}, sort_keys=True))
+            return 0
+        print(suggestion)
+        if args.dry_run:
+            print(json.dumps(report, sort_keys=True)); return 0
+        action = args.action
+        if not action and interactive:
+            answer = input_fn('Choose Install / Update / Repair / Uninstall / Quit [Quit]: ').strip().lower()
+            action = answer if answer in ('install','update','repair','uninstall') else None
+        if not action:
+            print('No changes made.'); return 0
+        require(interactive, 'Applying changes requires an interactive review. Use --check or --dry-run for automation.')
+        print('Selected: ' + action + '. No Steam, SteamVR or Frame restart will be performed.')
+        if input_fn('Apply this exact checked action? [y/N] ').strip().lower() != 'y':
+            print('No changes made.'); return 0
+        result = apply(action, bundle, local, remote, pc, frame, challenge)
+        # This explicit action may now persist its non-secret address and log.
+        put(local.root / 'frame-address.json', encoded({'host':host(address),'user':user(args.user)}),
+            read(local.root / 'frame-address.json') if (local.root / 'frame-address.json').exists() else None)
+        log = local.root / 'setup-last.log'
+        put(log, encoded({'action':action,'result':result,'inventory':report}), read(log) if log.exists() else None)
+        print('Finished. Setup log: ' + str(log))
+        print('Rollback: run this assistant again and choose Uninstall. Existing older pairing keys are retained for explicit repair.')
+        input_fn('All writes are finished. Close and start SteamVR yourself when convenient; press Enter to exit. ')
+        return 0
+    except (OSError, SetupError, KeyError, TypeError, ValueError) as error:
+        detail = str(error)[:500] if isinstance(error, SetupError) else 'Check the bundle, SSH access and retained install receipts.'
+        print('Setup refused the operation: ' + detail + ' No automatic restart was attempted; unknown files are preserved.', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
