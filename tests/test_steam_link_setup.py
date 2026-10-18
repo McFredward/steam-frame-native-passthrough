@@ -529,6 +529,20 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(list((self.framehome/'.local/share/steam-link-native-passthrough/maintenance').rglob('*')),[])
         self.assertEqual(runtime.read_bytes(),b'updated runtime')
 
+    def test_manager_real_presentation_drives_numbered_removal(self):
+        system=self.maintenance_fixture();answers=iter(['2','REMOVE',''])
+        output=io.StringIO();error=io.StringIO()
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(error),mock.patch('sys.stdin.isatty',return_value=True):
+            code=s.main(['--manage','--lang','en','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=lambda *_,**__:self.frame,input_fn=lambda _:next(answers))
+        self.assertEqual(code,0,error.getvalue())
+        shown=output.getvalue();self.assertIn('1. Check only [recommended]',shown)
+        self.assertIn('2. Uninstall',shown);self.assertIn('3. Exit',shown)
+        self.assertIn('The existing Frame patch has been removed.',shown)
+        self.assertNotIn('"schema"',shown);self.assertNotIn('\x1b',shown)
+        self.assertFalse((self.framehome/'.config/SteamFrameNativePassthrough/install.json').exists())
+        self.assertEqual((system.reloads,system.native_calls,system.engine_calls),(1,0,0))
+
     def test_manager_live_camera_restore_is_pending_without_native_or_installed_import(self):
         system=self.maintenance_fixture(live=True,camera=True)
         code,calls,_,error=self.run_manager(['uninstall','REMOVE',''])
