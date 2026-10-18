@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -28,6 +29,40 @@ def require(ok, text):
 
 
 def sha(raw): return hashlib.sha256(raw).hexdigest()
+
+
+def claim_receipt(path):
+    """Atomically own a new receipt before optional imports or input reads."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+
+
+def finish_receipt(fd, path, report):
+    # Never reopen the pathname: replacement or a symlink cannot redirect an
+    # owned descriptor into a foreign receipt. Refuse changed ownership too.
+    opened, named = os.fstat(fd), path.stat(follow_symlinks=False)
+    require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1 and
+            (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino), 'receipt ownership changed')
+    raw = memoryview((json.dumps(report, indent=2)+'\n').encode())
+    while raw:
+        count = os.write(fd, raw)
+        require(count > 0, 'receipt write did not advance')
+        raw = raw[count:]
+    os.fsync(fd)
+
+
+def completion_cleanup(code, record, *, helper=Path('/home/claw/gloomhaven_vr/scripts/town_run_retention.py')):
+    if not helper.is_file():
+        # The subprocess helper always reaps children, and TemporaryDirectory
+        # has already removed this runner's compiler/texture caches on exit.
+        return {'external_completion_api_available': False, 'processes_reaped': True,
+                'owned_temporary_directory_cleanup': True}
+    spec = importlib.util.spec_from_file_location('run_retention', helper)
+    ret = importlib.util.module_from_spec(spec); spec.loader.exec_module(ret)
+    return {'external_completion_api_available': True,
+            'result': ret.cleanup_completed_run('actual-producer-lossy-native-stereo', code, record, ROOT, process_reaped=True)}
+
+
 
 
 def f32(x): return struct.unpack('<f', struct.pack('<f', x))[0]
@@ -152,13 +187,17 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('producer','original','candidate','historical-dual','record'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--driver',choices=('intel','software'),default='intel');args=p.parse_args(argv)
+    try:
+        receipt_fd = claim_receipt(args.record)
+    except OSError as error:
+        print(json.dumps({'status':'REFUSED','error':str(error)}), file=sys.stderr)
+        return 1
     report={'schema':'actual-producer-lossy-native-stereo-v1','status':'FAILED','steps':[],'conditions':[],
             'frame_contact':False,'native_frame_eye_association_proven':False,'steam_link_codec_reproduced':False,'performance_measured':False}
     code=1; cache=None
     try:
         from PIL import Image
         import numpy as np
-        require(not args.record.exists(),'exclusive output receipt');args.record.parent.mkdir(parents=True,exist_ok=True)
         inputs=json.loads((args.producer/'codec-inputs.json').read_text());probes=json.loads((args.producer/inputs['probe_file']).read_text())
         require(inputs['scope']=='ACTUAL_COMPILED_UNITY_PRODUCER_NOT_IDEAL_REPAINT' and probes['passed'] is True and probes['carrier']==4040 and probes['actual_samples']==8,'actual producer evidence required')
         report['producer_manifest_sha256']=sha((args.producer/'codec-inputs.json').read_bytes());report['producer_bank_sha256']=inputs['bank_sha256']
@@ -214,9 +253,12 @@ def main(argv=None):
     except Exception as error:
         report['error']=str(error);print(json.dumps({'status':'FAILED','error':str(error)}),file=sys.stderr)
     finally:
-        s=importlib.util.spec_from_file_location('run_retention','/home/claw/gloomhaven_vr/scripts/town_run_retention.py');ret=importlib.util.module_from_spec(s);s.loader.exec_module(ret)
-        report['cleanup']=ret.cleanup_completed_run('actual-producer-lossy-native-stereo',code,args.record,ROOT,process_reaped=True)
-        report['private_cache_removed']=cache is None or not cache.exists();args.record.write_text(json.dumps(report,indent=2)+'\n')
+        try:
+            report['cleanup']=completion_cleanup(code,args.record)
+            report['private_cache_removed']=cache is None or not cache.exists()
+            finish_receipt(receipt_fd,args.record,report)
+        finally:
+            os.close(receipt_fd)
     return code
 
 

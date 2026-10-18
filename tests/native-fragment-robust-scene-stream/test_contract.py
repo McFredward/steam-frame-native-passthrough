@@ -1,8 +1,14 @@
 """Public finite harness controls; no private pixels, codecs or GPU execution."""
+import builtins
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
+import os
 import sys
+import tempfile
+from unittest import mock
 import unittest
 
 sys.dont_write_bytecode=True
@@ -11,6 +17,42 @@ spec=importlib.util.spec_from_file_location('stream',HERE/'run.py');stream=impor
 
 
 class StreamContract(unittest.TestCase):
+    def test_receipt_claim_preserves_existing_and_symlink_before_inputs(self):
+        with tempfile.TemporaryDirectory(prefix='stream-receipt-') as tmp:
+            directory=Path(tmp);existing=directory/'existing.json'
+            existing.write_bytes(b'FOREIGN ORIGINAL RECEIPT\n')
+            alias=directory/'alias.json';alias.symlink_to(existing)
+            original=existing.read_bytes();identity=existing.stat().st_ino
+            importer=builtins.__import__
+            def no_optional(name,*args,**kwargs):
+                if name.split('.')[0] in ('PIL','numpy'):
+                    raise AssertionError('optional import before exclusive output claim')
+                return importer(name,*args,**kwargs)
+            for path in (existing,alias):
+                inode=path.lstat().st_ino
+                with mock.patch.object(stream.os,'write',side_effect=AssertionError('no transient output write')), \
+                     mock.patch.object(Path,'read_text',side_effect=AssertionError('no input read')), \
+                     mock.patch.object(builtins,'__import__',side_effect=no_optional), \
+                     mock.patch.object(stream,'completion_cleanup',side_effect=AssertionError('no run to clean')), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(FileExistsError):stream.claim_receipt(path)
+                    args=['--producer','never-read','--original','never-read','--candidate','never-read',
+                          '--historical-dual','never-read','--record',str(path)]
+                    self.assertEqual(stream.main(args),1)
+                self.assertEqual(path.lstat().st_ino,inode)
+                self.assertEqual(existing.stat().st_ino,identity)
+                self.assertEqual(existing.read_bytes(),original)
+            owned=directory/'owned.json';fd=stream.claim_receipt(owned)
+            try:
+                with self.assertRaises(FileExistsError):stream.claim_receipt(owned)
+                stream.finish_receipt(fd,owned,{'owned':True})
+                self.assertEqual(owned.stat().st_mode&0o777,0o600)
+                self.assertEqual(json.loads(owned.read_text()),{'owned':True})
+            finally:os.close(fd)
+            absent=stream.completion_cleanup(1,directory/'result',helper=directory/'absent-external-helper')
+            self.assertFalse(absent['external_completion_api_available'])
+            self.assertTrue(absent['processes_reaped'] and absent['owned_temporary_directory_cleanup'])
+
     def test_native_channels_are_not_rgb_and_roundtrip(self):
         for rgb in ((0,0,0),(1,1,1),(.2,.3,.4),(.1,.05,.075),(1,0,.2)):
             encoded=stream.inverse_native(rgb)

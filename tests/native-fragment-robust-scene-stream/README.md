@@ -16,7 +16,7 @@ python3 -B tests/native-fragment-robust-scene-stream/run.py \
 
 An explicitly available Khronos validation layer is required. `--driver intel`
 is the default; `software` selects Lavapipe. The public CTest
-`native_fragment_robust_scene_stream_contract` runs only four finite harness
+`native_fragment_robust_scene_stream_contract` runs only five finite harness
 math/bounds controls, with no private pixels, codec or GPU dependency. The separate
 native worker's seven-method test is registered as
 `native_fragment_scene_robust_presenter`.
@@ -79,6 +79,11 @@ conditions, 11799 C++ checks executed. The initial fixture compilation refusal
 Private receipts, complete compressed bitstreams, decoded images, source pins
 and output rows live under ignored
 `build/private-robust-scene-stream-699-20261018/`. All child processes are reaped
-before the standard completion cleanup and exact owned-cache removal. The
-fixture contacts no device, installs nothing and establishes no new headset,
+before the standard completion cleanup and exact owned-cache removal. The output
+receipt is exclusively claimed before optional imports/input reads; existing or
+symlink receipts retain their bytes and inode. A public checkout without the
+external Gloomhaven cleanup helper reports that absence explicitly and retains
+its already-reaped TemporaryDirectory cleanup. This ownership-only follow-up
+reuses the unchanged codec/GPU computations rather than rerunning that matrix.
+The fixture contacts no device, installs nothing and establishes no new headset,
 physical-eye, authentication, codec equivalence or performance result.
