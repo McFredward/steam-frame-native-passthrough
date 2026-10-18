@@ -37,24 +37,45 @@ MAX_NEIGHBORS = 64
 VIRTUAL = re.compile(r'(?i)(vpn|wireguard|tailscale|zerotier|virtual|vmware|vbox|hyper-v|docker|podman|loopback|^lo$|^wsl|^tun\d*|^tap\d*|^veth|^virbr|^br-)')
 TEXT = {
     'en': {
+        'bridge_stopping': 'Closing SteamVR on this PC; your Frame interface stays running',
+        'bridge_starting': 'Briefly restarting Steam on the Frame and checking its startup',
+        'bridge_rolled_back': 'The previous setup has been restored and its startup checks passed. The log and recovery paths are kept below.',
+        'bridge_retry_question': 'Would you like to try again?',
+        'bridge_reconnect': 'Reconnecting to your Frame after the restart',
+        'bridge_retry_ambiguous': 'The last operation could not be confirmed. Setup will check what changed before offering a safe retry.',
+        'action_retry': 'Try again',
+        'action_retry_description': 'Check the last result and retry the operation.',
+        'action_back': 'Back',
+        'action_back_description': 'Return to the previous step.',
+        'action_rollback': 'Restore previous setup',
+        'action_rollback_description': 'Undo the recorded changes and restore the previous setup.',
+        'action_continue': 'Continue',
+        'action_continue_description': 'Continue with the plan shown above.',
+        'choice_arrow_help': 'Up/Down or Home/End: move. Enter: select. Esc: cancel.',
+        'choice_confirm': 'Confirm your choice',
+        'confirm_no': 'No - go back',
+        'confirm_yes': 'Yes - continue',
+        'confirm_cancel': 'Cancel - keep installed components',
+        'confirm_remove': 'Remove installed components',
+        'confirm_yesno_prompt': 'Continue? [y/N]: ',
         'bridge_current': 'The checked connection is already up to date. Nothing was changed or restarted.',
         'bridge_available': 'The new passthrough connection is available for this package.',
-        'bridge_remove_plan': 'Remove the new PC and Frame connection and restore the previous setup. SteamVR must be closed on the PC, and Steam must be closed on the Frame. No restart is performed.',
-        'bridge_removed': 'The new connection was removed and the previous settings restored. Start SteamVR yourself when ready.',
-        'bridge_install_plan': 'Close SteamVR on this PC and on the Frame before continuing. Setup installs the checked connection and a private pairing. Your game settings are kept. Nothing is restarted automatically.',
-        'bridge_confirm': 'Install this connection now? [y/N]: ',
-        'bridge_partial': 'Setup could not finish. Recovery paths are shown below. You can undo the checked installation now, or rerun setup later.',
+        'bridge_remove_plan': 'Setup prepares removal while your Frame interface stays running. It restores the previous settings, then briefly restarts Steam on the Frame and checks the startup. SteamVR on this PC may close; your game settings are kept.',
+        'bridge_removed': 'The connection was removed and the previous settings restored.',
+        'bridge_install_plan': 'Setup prepares files while your Frame interface stays running. SteamVR on this PC may close. When everything is ready, setup briefly restarts Steam on the Frame and checks its startup. Your game settings are kept. A failed startup automatically restores the previous setup and restarts it.',
+        'bridge_confirm': 'Install this connection now?',
+        'bridge_partial': 'Setup could not finish. You can retry or restore the previous setup. The log and recovery paths below are kept for you.',
         'setup_log': 'Setup log: ',
         'setup_log_unavailable': 'Setup log could not be created: ',
         'recovery_pc': 'PC recovery record (if created): ',
         'recovery_frame': 'Frame recovery record (if created): ',
-        'bridge_installed': 'Installation is complete. Start Steam on the Frame and SteamVR on the PC when ready. The next check will inspect the new startup.',
-        'bridge_started': 'Have you started Steam/SteamVR again and left the Frame switched on? [y/N]: ',
+        'bridge_installed': 'The files are prepared. Setup will now briefly restart Steam on the Frame and check its startup.',
+        'bridge_started': 'Has the Frame interface returned and is it responsive?',
         'bridge_health_ok': 'The new startup passed the software checks. Please also check the picture in the headset.',
-        'bridge_health_bad': 'The new startup could not be confirmed. Undoing this installation is recommended.',
-        'bridge_picture': 'Is the Frame picture normal and its interface usable? [y/N]: ',
-        'bridge_stop_first': 'Close SteamVR on the PC and Steam on the Frame before Undo. Existing recovery records are retained until restoration succeeds.',
-        'bridge_continue': 'Press Enter when both are closed: ',
+        'bridge_health_bad': 'The new startup failed its checks. Setup is restoring the previous setup and checking its restart.',
+        'bridge_picture': 'Is the Frame picture normal and its interface usable?',
+        'bridge_stop_first': 'Setup prepares recovery while your Frame interface stays running, then briefly restarts Steam and checks its startup. Recovery records are kept until restoration succeeds.',
+        'bridge_continue': 'Continue with the supervised restoration? ',
         'bridge_unavailable': 'The new connection is not available yet. You can check or remove the existing Frame patch.',
         'remove_plan': 'This removes only the existing Frame patch. The PC stays unchanged, and Steam is not restarted. If SteamVR still has the patch loaded, stop it manually and run this setup again to finish.',
         'remove_done': 'The existing Frame patch has been removed. Steam was not restarted.',
@@ -103,27 +124,48 @@ TEXT = {
         'pc_only': 'Continuing with this PC only.',
         'done': 'done',
         'failed': 'could not finish',
-        'cancelled': 'Setup stopped. No automatic restart was performed.',
+        'cancelled': 'Setup stopped. Any recovery details are shown below.',
     },
     'de': {
+        'bridge_stopping': 'SteamVR auf diesem PC wird beendet; die Frame-Oberfläche läuft weiter',
+        'bridge_starting': 'Steam auf der Frame wird kurz neu gestartet und der Start geprüft',
+        'bridge_rolled_back': 'Der vorherige Zustand ist wiederhergestellt und hat die Startprüfungen bestanden. Das Log und die Wiederherstellungspfade bleiben unten erhalten.',
+        'bridge_retry_question': 'Möchtest du es erneut versuchen?',
+        'bridge_reconnect': 'Nach dem Neustart wieder mit der Frame verbinden',
+        'bridge_retry_ambiguous': 'Die letzte Aktion konnte nicht bestätigt werden. Die Einrichtung prüft zunächst die Änderungen und bietet dann einen sicheren neuen Versuch an.',
+        'action_retry': 'Erneut versuchen',
+        'action_retry_description': 'Das letzte Ergebnis prüfen und die Aktion erneut versuchen.',
+        'action_back': 'Zurück',
+        'action_back_description': 'Zum vorherigen Schritt zurückkehren.',
+        'action_rollback': 'Vorherigen Zustand wiederherstellen',
+        'action_rollback_description': 'Die protokollierten Änderungen zurücknehmen und den vorherigen Zustand wiederherstellen.',
+        'action_continue': 'Weiter',
+        'action_continue_description': 'Mit dem oben angezeigten Vorhaben fortfahren.',
+        'choice_arrow_help': 'Hoch/Runter oder Pos1/Ende: bewegen. Enter: auswählen. Esc: abbrechen.',
+        'choice_confirm': 'Auswahl bestätigen',
+        'confirm_no': 'Nein - zurück',
+        'confirm_yes': 'Ja - fortfahren',
+        'confirm_cancel': 'Abbrechen - installierte Komponenten behalten',
+        'confirm_remove': 'Installierte Komponenten entfernen',
+        'confirm_yesno_prompt': 'Fortfahren? [j/N]: ',
         'bridge_current': 'Die geprüfte Verbindung ist bereits aktuell. Es wurde nichts geändert oder neu gestartet.',
         'bridge_available': 'Die neue Passthrough-Verbindung ist mit diesem Paket verfügbar.',
-        'bridge_remove_plan': 'Die neue Verbindung auf PC und Frame entfernen und den vorherigen Zustand wiederherstellen. SteamVR muss auf dem PC und Steam auf der Frame geschlossen sein. Es wird nichts neu gestartet.',
-        'bridge_removed': 'Die neue Verbindung wurde entfernt und die vorherigen Einstellungen wiederhergestellt. Starte SteamVR selbst, sobald du bereit bist.',
-        'bridge_install_plan': 'Bitte SteamVR auf diesem PC und auf der Frame schließen. Die Einrichtung installiert die geprüfte Verbindung und eine private Kopplung. Deine Spieleinstellungen bleiben erhalten. Es wird nichts automatisch neu gestartet.',
-        'bridge_confirm': 'Diese Verbindung jetzt installieren? [j/N]: ',
-        'bridge_partial': 'Die Einrichtung konnte nicht abgeschlossen werden. Die Wiederherstellungspfade stehen unten. Du kannst die geprüften Änderungen jetzt zurücknehmen oder die Einrichtung später erneut starten.',
+        'bridge_remove_plan': 'Das Entfernen wird vorbereitet, während die Frame-Oberfläche weiterläuft. Die vorherigen Einstellungen werden wiederhergestellt, danach wird Steam auf der Frame kurz neu gestartet und geprüft. SteamVR auf diesem PC wird gegebenenfalls beendet; deine Spieleinstellungen bleiben erhalten.',
+        'bridge_removed': 'Die Verbindung wurde entfernt und die vorherigen Einstellungen wiederhergestellt.',
+        'bridge_install_plan': 'Die Dateien werden vorbereitet, während die Frame-Oberfläche weiterläuft. SteamVR auf diesem PC wird gegebenenfalls beendet. Sobald alles bereit ist, startet die Einrichtung Steam auf der Frame kurz neu und prüft den Start. Deine Spieleinstellungen bleiben erhalten. Bei einem fehlgeschlagenen Start wird der vorherige Zustand automatisch wiederhergestellt und neu gestartet.',
+        'bridge_confirm': 'Diese Verbindung jetzt installieren?',
+        'bridge_partial': 'Die Einrichtung konnte nicht abgeschlossen werden. Du kannst es erneut versuchen oder den vorherigen Zustand wiederherstellen. Das Log und die Wiederherstellungspfade unten bleiben erhalten.',
         'setup_log': 'Setup-Log: ',
         'setup_log_unavailable': 'Setup-Log konnte nicht erstellt werden: ',
         'recovery_pc': 'PC-Wiederherstellungsdatei (falls erstellt): ',
         'recovery_frame': 'Frame-Wiederherstellungsdatei (falls erstellt): ',
-        'bridge_installed': 'Die Installation ist abgeschlossen. Starte Steam auf der Frame und SteamVR auf dem PC, sobald du bereit bist. Danach wird der neue Start geprüft.',
-        'bridge_started': 'Sind Steam/SteamVR wieder gestartet und ist die Frame eingeschaltet? [j/N]: ',
+        'bridge_installed': 'Die Dateien sind vorbereitet. Die Einrichtung startet Steam auf der Frame jetzt kurz neu und prüft den Start.',
+        'bridge_started': 'Ist die Frame-Oberfläche zurückgekehrt und reagiert sie?',
         'bridge_health_ok': 'Der neue Start hat die Softwareprüfungen bestanden. Bitte zusätzlich das Bild in der Brille prüfen.',
-        'bridge_health_bad': 'Der neue Start konnte nicht bestätigt werden. Das Zurücknehmen dieser Installation wird empfohlen.',
-        'bridge_picture': 'Ist das Bild auf der Frame normal und ihre Oberfläche bedienbar? [j/N]: ',
-        'bridge_stop_first': 'Bitte SteamVR auf dem PC und Steam auf der Frame schließen, bevor du die Installation zurücknimmst. Die Wiederherstellungsdaten bleiben bis zum erfolgreichen Abschluss erhalten.',
-        'bridge_continue': 'Enter drücken, wenn beides geschlossen ist: ',
+        'bridge_health_bad': 'Der neue Start hat die Prüfung nicht bestanden. Die Einrichtung stellt den vorherigen Zustand wieder her und prüft den Neustart.',
+        'bridge_picture': 'Ist das Bild auf der Frame normal und ihre Oberfläche bedienbar?',
+        'bridge_stop_first': 'Die Wiederherstellung wird bei laufender Frame-Oberfläche vorbereitet. Danach wird Steam kurz neu gestartet und geprüft. Die Wiederherstellungsdaten bleiben bis zum erfolgreichen Abschluss erhalten.',
+        'bridge_continue': 'Mit der überwachten Wiederherstellung fortfahren? ',
         'bridge_unavailable': 'Die neue Verbindung ist noch nicht verfügbar. Du kannst den vorhandenen Frame-Patch prüfen oder entfernen.',
         'remove_plan': 'Es wird nur der vorhandene Frame-Patch entfernt. Der PC bleibt unverändert und Steam wird nicht neu gestartet. Falls SteamVR den Patch noch geladen hat, bitte manuell beenden und diese Einrichtung erneut starten, um das Entfernen abzuschließen.',
         'remove_done': 'Der vorhandene Frame-Patch wurde entfernt. Steam wurde nicht neu gestartet.',
@@ -172,7 +214,7 @@ TEXT = {
         'pc_only': 'Es wird nur dieser PC geprüft.',
         'done': 'fertig',
         'failed': 'nicht abgeschlossen',
-        'cancelled': 'Einrichtung beendet. Es wurde kein automatischer Neustart ausgeführt.',
+        'cancelled': 'Einrichtung beendet. Etwaige Wiederherstellungsdetails stehen unten.',
     },
 }
 
@@ -189,8 +231,121 @@ def language(override=None):
     return 'de' if value.lower().startswith(('de', 'german')) else 'en'
 
 
+class _WindowsKeyReader:
+    """CRT console keys; no line input, terminal subprocess or dependency."""
+    def __init__(self, getwch=None):
+        if getwch is None:
+            import msvcrt
+            getwch = msvcrt.getwch
+        self._getwch = getwch
+
+    def read(self):
+        char = self._getwch()
+        if char in ('\x00', '\xe0'):
+            return {'H': 'up', 'P': 'down', 'G': 'home', 'O': 'end'}.get(self._getwch(), 'ignore')
+        if char == '\x03':
+            raise KeyboardInterrupt()
+        if char in ('', '\x1a'):
+            raise EOFError()
+        return {'\r': 'enter', '\n': 'enter', '\x1b': 'escape'}.get(char, 'ignore')
+
+
+class _PosixKeyReader:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+
+    def read(self):
+        char = os.read(self.descriptor, 1)
+        if not char or char == b'\x04':
+            raise EOFError()
+        if char == b'\x03':
+            raise KeyboardInterrupt()
+        if char in (b'\r', b'\n'):
+            return 'enter'
+        if char != b'\x1b':
+            return 'ignore'
+        # This is only Escape/CSI disambiguation, never an operation timer.
+        sequence = bytearray()
+        for _ in range(16):
+            if not select.select([self.descriptor], [], [], .08)[0]:
+                break
+            part = os.read(self.descriptor, 1)
+            if not part:
+                break
+            sequence.extend(part)
+            if len(sequence) == 1 and part not in (b'[', b'O'):
+                break
+            if len(sequence) >= 2 and (part.isalpha() or part == b'~'):
+                break
+        return {b'[A': 'up', b'OA': 'up', b'[B': 'down', b'OB': 'down',
+                b'[H': 'home', b'OH': 'home', b'[1~': 'home', b'[7~': 'home',
+                b'[F': 'end', b'OF': 'end', b'[4~': 'end', b'[8~': 'end'}.get(bytes(sequence), 'escape' if not sequence else 'ignore')
+
+
+class _ArrowTerminal:
+    """Temporary console mode; always restore it before returning an action.
+
+    ANSI cursor movement is restricted to an actual terminal. Windows explicitly
+    enables/restores its own output console mode; pipes use the plain presenter.
+    The menu never clears the screen, hides the cursor or enters another buffer.
+    """
+    def __init__(self, source, stream):
+        self.source, self.stream = source, stream
+        self._restore = None
+        self.restored = False
+        self.rows = 0
+
+    def __enter__(self):
+        if os.name == 'nt':
+            import msvcrt
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            get_mode, set_mode = kernel.GetConsoleMode, kernel.SetConsoleMode
+            get_mode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+            get_mode.restype = wintypes.BOOL
+            set_mode.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            set_mode.restype = wintypes.BOOL
+            handle = msvcrt.get_osfhandle(self.stream.fileno())
+            original = wintypes.DWORD()
+            if not get_mode(handle, ctypes.byref(original)) or not set_mode(handle, original.value | 4):
+                raise OSError('terminal mode unavailable')
+            self._restore = lambda: bool(set_mode(handle, original.value))
+            self.reader = _WindowsKeyReader()
+        else:
+            import termios
+            descriptor = self.source.fileno()
+            original = termios.tcgetattr(descriptor)
+            changed = list(original)
+            changed[6] = list(original[6])
+            changed[3] &= ~(termios.ICANON | termios.ECHO)
+            changed[6][termios.VMIN], changed[6][termios.VTIME] = 1, 0
+            termios.tcsetattr(descriptor, termios.TCSANOW, changed)
+            self._restore = lambda: termios.tcsetattr(descriptor, termios.TCSANOW, original) is None
+            self.reader = _PosixKeyReader(descriptor)
+        return self
+
+    def draw(self, presenter, lines):
+        with presenter._lock:
+            old = self.rows
+            if old:
+                presenter._write('\x1b[' + str(old) + 'A')
+            for index in range(max(old, len(lines))):
+                presenter._write('\r\x1b[2K' + (lines[index] if index < len(lines) else '') + '\n')
+            if old > len(lines):
+                presenter._write('\x1b[' + str(old - len(lines)) + 'A')
+            self.rows = len(lines)
+
+    def __exit__(self, *_):
+        if self._restore is not None:
+            try:
+                self.restored = self._restore()
+            except (OSError, ValueError):
+                self.restored = False
+        return False
+
+
 class Presenter:
-    """No ANSI sequences. Animation exists only on a real terminal.
+    """Arrow-key menus and animation exist only on a real terminal.
 
     Wrap any OpenSSH/password operation in suspend(). It clears the progress
     line before yielding; the background writer cannot race the prompt.
@@ -363,14 +518,91 @@ class Presenter:
             return ''
         return self._input(self.text(key))
 
+    def _arrow_capable(self):
+        # Input permission and output animation are separate; a redirected
+        # output with an interactive input still gets a usable plain prompt.
+        return (self.prompting and self.interactive and
+                bool(getattr(sys.stdin, 'isatty', lambda: False)()) and
+                (os.name == 'nt' or os.environ.get('TERM', '') != 'dumb'))
+
+    def _menu_lines(self, choices, selected, recommended, title):
+        width = self.columns()
+        try:
+            height = os.get_terminal_size(self.stream.fileno()).lines or 24
+        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+            height = 24
+        visible = min(len(choices), max(2, min(height, 60) - 16))
+        first = min(max(0, selected - visible + 1), max(0, len(choices) - visible))
+        def short(value):
+            value = ''.join(c if c.isprintable() else '?' for c in value)
+            return value if len(value) <= width else value[:max(0, width - 3)] + '...'
+        lines = ['  +' + '-' * max(1, width - 4) + '+']
+        lines.extend('  ' + line for line in textwrap.wrap(self.text(title), width=max(1, width - 2))[:3])
+        lines.append('')
+        if first:
+            lines.append('    ...')
+        for index in range(first, first + visible):
+            value = ('  > ' if index == selected else '    ') + choices[index][1]
+            if choices[index][0] == recommended:
+                value += ' [' + self.text('recommended') + ']'
+            lines.append(short(value))
+        if first + visible < len(choices):
+            lines.append('    ...')
+        description = choices[selected][2]
+        if description:
+            lines.append('')
+            wrapped = textwrap.wrap(description, width=max(1, width - 4))
+            lines.extend('    ' + line for line in wrapped[:2])
+            if len(wrapped) > 2:
+                lines[-1] = short(lines[-1][:-3] + '...')
+        lines.append('')
+        wrapped = textwrap.wrap(self.text('choice_arrow_help'), width=max(1, width - 2))
+        lines.extend('  ' + line for line in wrapped[:3])
+        lines.extend(['  +' + '-' * max(1, width - 4) + '+', ''])
+        return lines
+
+    def _arrow_choose(self, choices, default, recommended=None, title='actions'):
+        """None means cancel; False means console mode could not be prepared."""
+        if default is None:
+            choices = [(None, self.text('choice_cancelled'), ''), *choices]
+        terminal = _ArrowTerminal(sys.stdin, self.stream)
+        try:
+            terminal.__enter__()
+        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+            return False
+        selected = next((i for i, value in enumerate(choices) if value[0] == default), 0)
+        answer = None
+        try:
+            while True:
+                terminal.draw(self, self._menu_lines(choices, selected, recommended, title))
+                key = terminal.reader.read()
+                if key == 'escape':
+                    break
+                if key == 'enter':
+                    answer = choices[selected][0]
+                    break
+                if key == 'up':
+                    selected = max(0, selected - 1)
+                elif key == 'down':
+                    selected = min(len(choices) - 1, selected + 1)
+                elif key == 'home':
+                    selected = 0
+                elif key == 'end':
+                    selected = len(choices) - 1
+        except (EOFError, KeyboardInterrupt, OSError):
+            pass
+        finally:
+            terminal.__exit__()
+        return answer if terminal.restored else None
+
     def choose_action(self, actions, recommended=None):
         """Offer only caller-approved actions; cancellation never implies a write.
 
-        Enter uses an offered recommendation, otherwise Check only, otherwise
-        Exit. No prompt capability, EOF, Ctrl-C or three invalid entries cancel.
+        Real consoles use arrow keys and Enter. Pipes retain a numbered menu.
         This selects an action; the engine still owns its plan and permissions.
         """
-        known = ('install', 'update', 'repair', 'uninstall', 'check', 'exit')
+        known = ('install', 'update', 'repair', 'uninstall', 'check', 'exit',
+                 'retry', 'back', 'rollback', 'continue')
         if (type(actions) not in (list, tuple) or len(actions) > len(known) or
                 any(type(action) is not str or action not in known for action in actions) or
                 len(set(actions)) != len(actions)):
@@ -378,8 +610,13 @@ class Presenter:
         if not actions or not self.prompting:
             return None
         default = recommended if recommended in actions else ('check' if 'check' in actions else ('exit' if 'exit' in actions else None))
-        # Keep the complete menu paused if a parent operation owns a spinner.
         with self.suspend():
+            if self._arrow_capable():
+                choices = [(action, self.text('action_' + action),
+                            self.text('action_' + action + '_description')) for action in actions]
+                selected = self._arrow_choose(choices, default, recommended)
+                if selected is not False:
+                    return selected
             self.section('actions')
             with self._lock:
                 for number, action in enumerate(actions, 1):
@@ -403,18 +640,42 @@ class Presenter:
                     return default
                 if answer.lower() in ('0', 'q', 'exit', 'cancel', 'abbrechen'):
                     return None
-                if len(answer) == 1 and answer in '123456' and int(answer) <= len(actions):
+                if answer.isascii() and answer.isdigit() and 1 <= len(answer) <= 2 and 1 <= int(answer) <= len(actions):
                     return actions[int(answer) - 1]
                 self.say('choice_invalid')
             self.say('choice_cancelled')
             return None
 
+    def confirm(self, key):
+        """Explicit permission for a displayed plan; No is always the default."""
+        if not self.prompting:
+            return False
+        with self.suspend():
+            self.say(key)
+            if self._arrow_capable():
+                choices = [('no', self.text('confirm_no'), ''),
+                           ('yes', self.text('confirm_yes'), '')]
+                result = self._arrow_choose(choices, 'no', title='choice_confirm')
+                if result is not False:
+                    return result == 'yes'
+            try:
+                answer = self._input(self.text('confirm_yesno_prompt')).strip().casefold()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return answer in ('y', 'yes', 'j', 'ja')
+
     def confirm_uninstall(self):
-        """Confirm only an already displayed uninstall plan; default is cancel."""
+        """A separate destructive confirmation, default Cancel on every console."""
         if not self.prompting:
             return False
         with self.suspend():
             self.say('confirm_uninstall')
+            if self._arrow_capable():
+                choices = [('cancel', self.text('confirm_cancel'), ''),
+                           ('remove', self.text('confirm_remove'), '')]
+                result = self._arrow_choose(choices, 'cancel', title='choice_confirm')
+                if result is not False:
+                    return result == 'remove'
             try:
                 answer = self._input(self.text('confirm_remove_prompt')).strip()
             except (EOFError, KeyboardInterrupt):
