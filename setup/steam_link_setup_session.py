@@ -208,12 +208,23 @@ class Session:
             if self._stderr_worker is not None:
                 self._stderr_worker.join(timeout=2)
             if process is not None and (worker is None or not worker.is_alive()):
-                for stream in (process.stdin, process.stdout, process.stderr):
+                for stream in (process.stdin, process.stdout):
                     if stream is not None:
                         try:
                             stream.close()
                         except (OSError, ValueError):
                             pass
+            # A child of OpenSSH can retain its inherited stderr handle after
+            # SSH exits. BufferedReader.close() waits for a pending read's lock,
+            # so do not turn the bounded reader join into an unbounded close.
+            # The status reader closes its own pipe when that read eventually
+            # ends; an already stopped reader can be closed here idempotently.
+            if process is not None and (self._stderr_worker is None or not self._stderr_worker.is_alive()):
+                if process.stderr is not None:
+                    try:
+                        process.stderr.close()
+                    except (OSError, ValueError):
+                        pass
 
     def call(self, request, *, timeout=None):
         duration = self._duration(self._timeout if timeout is None else timeout)
@@ -258,6 +269,9 @@ class Session:
                                     self._stderr.extend(raw)
                                     if len(self._stderr)>8192:del self._stderr[:-8192]
                             except (OSError,ValueError):pass
+                            finally:
+                                try:self._process.stderr.close()
+                                except (OSError,ValueError):pass
                         self._stderr_worker=threading.Thread(target=drain_errors,name='sfnp-ssh-status',daemon=True)
                         self._stderr_worker.start()
                 process, sequence, ready = self._process, self._next, self._ready

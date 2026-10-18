@@ -20,11 +20,16 @@ session = importlib.util.module_from_spec(spec); spec.loader.exec_module(session
 OUT = None
 
 FAKE_SSH = r'''
-import json,os,pathlib,shlex,sys,time
+import json,os,pathlib,shlex,subprocess,sys,time
 with pathlib.Path(sys.argv[1]).open('a',encoding='utf-8') as log:
  log.write(json.dumps({'pid':os.getpid(),'argv':sys.argv[2:]})+'\n')
 if sys.argv[2]=='blocked':time.sleep(30);raise SystemExit(7)
 if sys.argv[2]=='bad-ready':print('{"schema":"sfnp-setup-session-v1","ready":1}',flush=True);raise SystemExit(0)
+if sys.argv[2]=='held-stderr':
+ hold=pathlib.Path(sys.argv[1]).with_suffix('.release-stderr')
+ end=pathlib.Path(sys.argv[1]).with_suffix('.stderr-ended')
+ source='import pathlib,sys,time\np=pathlib.Path(sys.argv[1]);end=pathlib.Path(sys.argv[2]);deadline=time.monotonic()+30\nwhile not p.exists() and time.monotonic()<deadline:time.sleep(.02)\nend.write_text("stopped")\n'
+ subprocess.Popen([sys.executable,'-I','-B','-c',source,str(hold),str(end)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL)
 args=shlex.split(sys.argv[-1])
 assert args[:5]==['python3','-I','-B','-u','-c'] and len(args)==6
 exec(compile(args[5],'<actual-fixed-remote-session>','exec'),{'__name__':'__main__'})
@@ -203,6 +208,40 @@ class Tests(unittest.TestCase):
         self.assertLess(time.monotonic()-started,4)
         self.assertFalse(worker.is_alive()); self.assertEqual(len(failures),1)
         self.assert_reaped(connection)
+
+    def test_close_does_not_take_a_blocked_stderr_readers_buffer_lock(self):
+        class Auth:
+            cancelled=threading.Event();prompting=threading.Event()
+            def environment(inner):return dict(os.environ)
+            def close(inner):pass
+        release=self.record.with_suffix('.release-stderr')
+        ended=self.record.with_suffix('.stderr-ended')
+        connection=self.connection(mode='held-stderr',auth=Auth())
+        closed=threading.Event();closer=None;failures=[]
+        try:
+            self.assertEqual(connection.call({})['calls'],1)
+            self.assertFalse(connection._worker.is_alive())
+            self.assertTrue(connection._stderr_worker.is_alive())
+            def close():
+                try:connection.close()
+                except BaseException as error:failures.append(type(error).__name__)
+                finally:closed.set()
+            closer=threading.Thread(target=close,daemon=True);closer.start()
+            self.assertTrue(closed.wait(6),'A held stderr descendant must not make bounded session shutdown hang')
+            self.assertEqual(failures,[])
+            self.assertTrue(connection._stderr_worker.is_alive(),
+                            'The real inherited pipe is still held open, not a fake successful reader join')
+            self.assert_reaped(connection)
+        finally:
+            # Release/reap even the intentionally broken implementation used by
+            # the causal control; no synthetic descendant is abandoned on fail.
+            release.write_text('release',encoding='ascii')
+            if closer:closer.join(4)
+            if connection._stderr_worker:connection._stderr_worker.join(4)
+            connection.close()
+        self.assertFalse(connection._stderr_worker.is_alive())
+        self.assertTrue(connection._process.stderr.closed)
+        self.assertTrue(ended.exists(),'The owned synthetic stderr holder exited before fixture cleanup')
 
     def test_strict_configuration_refusals(self):
         base = [sys.executable, str(self.fake), str(self.record), 'normal']
