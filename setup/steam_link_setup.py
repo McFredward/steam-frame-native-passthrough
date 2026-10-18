@@ -1145,7 +1145,30 @@ def remembered_frame_hosts(local):
     return tuple(dict.fromkeys(candidates))
 
 
-def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discover_frame=None):
+def load_textual():
+    """Load the local-only UI after the bootstrap verified its private runtime."""
+    name = '_sfnp_setup_textual'
+    if name in sys.modules:
+        return sys.modules[name]
+    path = no_links(Path(__file__).with_name('steam_link_setup_vendor.py'))
+    spec = importlib.util.spec_from_file_location('_sfnp_setup_vendor', path)
+    vendor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vendor)
+    vendor.enable_vendor(path.parent)
+    path = no_links(path.with_name('steam_link_setup_textual.py'))
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discover_frame=None,
+         _textual_session=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manage', action='store_true', help='Check setup or explicitly remove an owned existing Frame patch; no new bridge installation.')
     parser.add_argument('--inspect', action='store_true', help='Check PC/Frame setup only; no installation, pairing or restart.')
@@ -1158,6 +1181,17 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discov
     parser.add_argument('--steamvr', type=Path)
     parser.add_argument('--lang', choices=('en','de'), help='Override the automatically selected setup language.')
     args = parser.parse_args(argv)
+    if (not _textual_session and not args.check and not args.dry_run
+            and input_fn is input and sys.stdin.isatty() and sys.stdout.isatty()):
+        try:
+            terminal = load_textual()
+        except (ImportError, OSError, ValueError) as error:
+            print('The terminal interface could not load. Download the complete setup again. '
+                  'No installation was started. (' + type(error).__name__ + ')', file=sys.stderr)
+            return 2
+        return terminal.run_setup(
+            lambda: main(argv, local=local, remote_factory=remote_factory, input_fn=input_fn,
+                         discover_frame=discover_frame, _textual_session=True), lang=args.lang)
     local = local or Local(steamvr=args.steamvr)
     local.apply_started = False
     ui = None

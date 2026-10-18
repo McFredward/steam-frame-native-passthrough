@@ -6,7 +6,7 @@ No credentials, persistence, service changes or installation exist here.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import concurrent.futures
 import ctypes
@@ -362,6 +362,16 @@ class Presenter:
     Wrap any OpenSSH/password operation in suspend(). It clears the progress
     line before yielding; the background writer cannot race the prompt.
     """
+    def __new__(cls, *args, **kwargs):
+        # Only the actual entry point owns Textual's terminal lifetime. Discovery
+        # and workflow retries reuse its one presenter across sibling imports.
+        runtime = sys.modules.get('_sfnp_setup_textual')
+        if runtime is not None:
+            active = runtime.active_presenter(lang=kwargs.get('lang'))
+            if active is not None:
+                return active
+        return super().__new__(cls)
+
     def __init__(self, stream=None, input_fn=input, lang=None, input_enabled=None, width=None):
         self.stream = sys.stdout if stream is None else stream
         self.input_fn = input_fn
@@ -1065,7 +1075,7 @@ def find_frame(validate, *, cached_hosts=(), sources=None, presenter=None,
     interactive_hint = None
     def validate_one(address, origin, interactive=False):
         try:
-            with ui.suspend():
+            with ui.suspend() if interactive else nullcontext():
                 value = validate(address, interactive=interactive)
         except (OSError, ValueError):
             return None

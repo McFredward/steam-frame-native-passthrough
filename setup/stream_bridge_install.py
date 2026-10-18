@@ -977,6 +977,11 @@ class Remote:
     def close(self):
         if self.session is not None:self.session.close()
 
+    @property
+    def needs_terminal(self):
+        """Only the first interactive SSH authentication borrows the console."""
+        return self.interactive and (self.session is None or self.session.closed)
+
     def call(self,request):
         e=self.e
         command=request.get('command')
@@ -1037,6 +1042,12 @@ def request(bundle,command,**values):
     return result
 
 
+def terminal_scope(engine,ui,remote):
+    # An established OpenSSH session needs no terminal. Keeping normal RPCs in
+    # the app preserves its progress/health/recovery display during long work.
+    return ui.suspend() if ui and getattr(remote,'needs_terminal',True) else engine.nullcontext()
+
+
 class Automation:
     """Production ports for the confirmed, recoverable setup workflow."""
     def __init__(self,engine,bundle,local,installed,remote,ui,context,factory,address,login):
@@ -1049,6 +1060,7 @@ class Automation:
 
     def phase(self,stage):
         self.context['stage']=stage
+        if hasattr(self.ui,'stage'):self.ui.stage(stage)
         log=self.context['log']
         if log:log.event(stage,'stage',status='started')
 
@@ -1057,7 +1069,7 @@ class Automation:
         # It never blindly resends an uncertain installation request.
         if getattr(getattr(self.remote,'session',None),'closed',False):
             self.remote=self.factory(self.address,self.login,interactive=True)
-        with self.ui.suspend():return self.remote.call(request(self.bundle,command,**values))
+        with terminal_scope(self.e,self.ui,self.remote):return self.remote.call(request(self.bundle,command,**values))
 
     def begin(self):
         self.pc=self.local.inventory();self.runtime.snapshot()
@@ -1223,14 +1235,16 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     e=engine;log=context['log']
     def phase(stage):
         context['stage']=stage
+        if hasattr(context.get('ui'),'stage'):context['ui'].stage(stage)
         if log:log.event(stage,'stage',status='started')
-    phase('bundle');bundle=Bundle(args.bundle,e)
-    phase('pc_inventory');pc=local.inventory();installed=LocalInstall(e,local)
-    phase('preflight')
     interactive=not args.check and sys.stdin.isatty()
     ui=e.load_presentation().Presenter(input_fn=input_fn,lang=args.lang,input_enabled=True) if interactive else None
     context['ui']=ui
-    if ui:ui.banner(inspection=False);ui.status('pc_ready' if installed.check(bundle,pc) else 'pc_partial','info')
+    if ui:ui.banner(inspection=False)
+    phase('bundle');bundle=Bundle(args.bundle,e)
+    phase('pc_inventory');pc=local.inventory();installed=LocalInstall(e,local)
+    phase('preflight')
+    if ui:ui.status('pc_ready' if installed.check(bundle,pc) else 'pc_partial','info')
     remote=frame=None;address=args.frame
     native_factory=remote_factory or (lambda value,login,**kw:Remote(e,value,login,**kw))
     def factory(*values,**kw):
@@ -1242,7 +1256,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         address,remote=known
         phase('frame_inventory')
         try:
-            with ui.suspend() if ui else e.nullcontext():frame=remote.call(request(bundle,'bridge-inventory'))
+            with terminal_scope(e,ui,remote):frame=remote.call(request(bundle,'bridge-inventory'))
         except (OSError,ValueError):
             context.pop('connection',None)
             close=getattr(remote,'close',None)
@@ -1269,7 +1283,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if address and frame is None:
         phase('frame_inventory')
         remote=factory(address,args.user,interactive=interactive)
-        with ui.suspend() if ui else e.nullcontext():frame=remote.call(request(bundle,'bridge-inventory'))
+        with terminal_scope(e,ui,remote):frame=remote.call(request(bundle,'bridge-inventory'))
     if frame is not None:
         if remote not in context['peers']:context['peers'].append(remote)
         context['connection']=(address,remote)
@@ -1285,6 +1299,12 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if ui:
         if frame is not None:ui.status('receiver_ready' if frame.get('runtime_compatible') else 'receiver_changed','info')
         ui.status('bridge_available' if available else 'bridge_unavailable','info')
+        if hasattr(ui,'inventory'):
+            ui.inventory(pc={'steamvr':str(pc.get('steamvr') or ''),'platform':pc.get('platform'),
+                             **report['pc']},
+                         frame=None if frame is None else {key:frame.get(key) for key in
+                             ('installed','runtime_compatible','enabled','recovery_pending')}|{'host':str(address)},
+                         report={'bridge_available':available,'automatic_restart':False})
     actions=['retry','check','exit']
     pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
     if pending and frame is not None:actions.insert(0,'rollback')
