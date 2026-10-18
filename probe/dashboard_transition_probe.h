@@ -11,6 +11,7 @@ constexpr std::size_t BufferBytes = 1600;
 constexpr std::size_t Slots = 6;
 constexpr std::size_t MaximumPipelines = 8;
 constexpr std::size_t MaximumCommands = 512;
+constexpr std::size_t GenericRouteBegin = MaximumPipelines;
 constexpr const char* ShaderSha = "04846d731cedfc6f1a98254d2239b0b90f75225567aeac2b868747415766222a";
 constexpr std::size_t ShaderBytes = 62908;
 constexpr std::size_t PipelineTagWord = 1403;
@@ -144,6 +145,8 @@ private:
     PhaseSequence sequence_;
     std::atomic<Refusal> refusal_{Refusal::Disabled};
     std::atomic<std::uint64_t> draws_{0}, missed_{0}, submits_{0}, revision_{0};
+    std::atomic<std::uint64_t> shaderDropped_{0}, routesDropped_{0};
+    std::atomic<unsigned> companionUsed_{0}, companionCreated_{0}, shaderCached_{0}, genericRoutes_{0};
     std::atomic<unsigned> queuedPhase_{3};
     std::atomic<bool> stop_{false}, collected_{false};
     std::atomic<bool> disabledFenceSubmitted_{false};

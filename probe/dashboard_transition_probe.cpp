@@ -211,11 +211,20 @@ void Probe::pipeline(VkPipeline normal, VkPipelineCache cache, const VkGraphicsP
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ready_ || refusal() != Refusal::None) return;
     if (!recipe.feature.complete || !recipe.feature.enabled || !recipe.definitionComplete ||
+        !recipe.vertex.complete || !recipe.fragment.complete ||
         original.stageCount != 2 || !original.pStages || !recipe.provenance[0].value) { refuse(Refusal::Feature); return; }
     Pipeline* target = nullptr;
     for (auto& p : pipelines_) if (!p.normal) { target = &p; break; }
     if (!target) { refuse(Refusal::PipelineCapacity); return; }
     target->normal = normal; target->tag = TagTemplate + static_cast<unsigned>(target - pipelines_.data()) + 1;
+    ++companionUsed_;
+    // These indices can never have belonged to unrelated startup metadata.
+    // The recipe was already admitted by the original completion-scoped gate;
+    // its source pins remain available even after the generic shader cache fills.
+    auto& route=routes_[static_cast<std::size_t>(target-pipelines_.data())];
+    route.handle=frame_pixel_ssbo_clone::handle(normal);route.tag=target->tag;
+    route.nativeReason=UINT32_MAX;route.reserved=1;
+    route.vs=recipe.vertex.sha256;route.ps=recipe.fragment.sha256;
     VkDescriptorSetLayout nativeSet{};
     std::memcpy(&nativeSet, &recipe.provenance[0].value, sizeof(nativeSet));
     const std::array<VkDescriptorSetLayout, 2> sets{{nativeSet, setLayout_}};
@@ -234,6 +243,7 @@ void Probe::pipeline(VkPipeline normal, VkPipelineCache cache, const VkGraphicsP
     DestroyShaderModule_(device_, fragment, nullptr);
     shader_[PipelineTagWord] = TagTemplate;
     if (result != VK_SUCCESS || !target->instrumented) refuse(Refusal::Resource);
+    else ++companionCreated_;
     ++revision_;
 }
 void Probe::pipelineRetiring(VkPipeline value) noexcept {
@@ -249,20 +259,27 @@ void Probe::shaderObserved(VkShaderModule value,const VkShaderModuleCreateInfo& 
     // Scalar module hashes only; no shader body is recorded or redistributed.
     ShaderIdentity* target=nullptr;
     for(auto& s:shaders_)if(s.handle==frame_pixel_ssbo_clone::handle(value)){target=&s;break;}
-    if(!target)for(auto& s:shaders_)if(!s.handle){target=&s;break;}
-    if(!target){refuse(Refusal::PipelineCapacity);return;}
+    if(!target)for(auto& s:shaders_)if(!s.handle){target=&s;++shaderCached_;break;}
+    if(!target){++shaderDropped_;return;}
     target->handle=frame_pixel_ssbo_clone::handle(value);target->bytes=static_cast<std::uint32_t>(info.codeSize);
     frame_receiver::Sha256 hash;hash.update(info.pCode,info.codeSize);target->sha=hash.finish();
 }
 void Probe::pipelineObserved(VkPipeline value,const VkGraphicsPipelineCreateInfo& info,unsigned reason) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if(!ready_)return;
+    // Accepted companions own the fixed prefix. Never replace their validated
+    // recipe pins with an incomplete or reused generic module-cache entry.
+    if(auto* p=lookup(value)){
+        routes_[static_cast<std::size_t>(p-pipelines_.data())].nativeReason=reason;
+        return;
+    }
     Route* target=nullptr;
-    for(auto& r:routes_)if(r.handle==frame_pixel_ssbo_clone::handle(value)&&!r.retired){target=&r;break;}
-    if(!target)for(auto& r:routes_)if(!r.handle){target=&r;break;}
-    if(!target){refuse(Refusal::PipelineCapacity);return;}
+    for(std::size_t i=GenericRouteBegin;i<routes_.size();++i)
+        if(routes_[i].handle==frame_pixel_ssbo_clone::handle(value)&&!routes_[i].retired)return;
+    for(std::size_t i=GenericRouteBegin;i<routes_.size();++i)
+        if(!routes_[i].handle){target=&routes_[i];++genericRoutes_;break;}
+    if(!target){++routesDropped_;return;}
     target->handle=frame_pixel_ssbo_clone::handle(value);target->nativeReason=reason;
-    if(auto* p=lookup(value))target->tag=p->tag;
     if(info.stageCount<=8&&info.pStages)for(unsigned i=0;i<info.stageCount;++i)
         for(const auto& s:shaders_)if(s.handle==frame_pixel_ssbo_clone::handle(info.pStages[i].module)){
             if(info.pStages[i].stage==VK_SHADER_STAGE_VERTEX_BIT)target->vs=s.sha;
@@ -418,18 +435,23 @@ void Probe::writer() noexcept {
             } else if (completed != VK_NOT_READY) refuse(Refusal::DeviceLost);
         }
         // Pipeline creation/route revisions never consume the phase-control
-        // budget. This key has at most12 monotonic lifecycle transitions.
+        // budget. Eight successful companion creations and two first metadata
+        // truncations add at most10 transitions to the bounded phase lifecycle.
         const auto revision = (std::uint64_t(unsigned(refusal()))<<16) |
             (std::uint64_t(sequence_.requested.load())<<8) | (std::uint64_t(queuedPhase_.load())<<4) |
-            std::uint64_t(collected_.load());
+            std::uint64_t(collected_.load()) | (std::uint64_t(companionCreated_.load())<<32) |
+            (std::uint64_t(shaderDropped_.load()!=0)<<40) | (std::uint64_t(routesDropped_.load()!=0)<<41);
         if ((revision != previous && update < 24) || (collected_.load()&&!terminalWritten)) {
             char output[1024]{}, name[64]{};
             const auto length = std::snprintf(output, sizeof(output),
-                "{\"schema\":\"sfnp-dashboard-transition-status-v1\",\"observed_device\":%llu,\"ready\":%s,\"refusal\":%u,\"requested_phase\":%u,\"queued_phase\":%u,\"instrumented_draws\":%llu,\"unobserved_draws\":%llu,\"submits\":%llu,\"collected\":%s,\"fragment_stores_observed\":%s,\"fragment_stores_enabled\":%s,\"feature_source\":%u,\"native_queue_create_infos\":%u,\"native_queue_count\":%u,\"native_queue_family\":%u,\"queue_failure_bits\":%u,\"visibility_claim\":false,\"overlay_transport_claim\":false}\n",
+                "{\"schema\":\"sfnp-dashboard-transition-status-v1\",\"observed_device\":%llu,\"ready\":%s,\"refusal\":%u,\"requested_phase\":%u,\"queued_phase\":%u,\"instrumented_draws\":%llu,\"unobserved_draws\":%llu,\"submits\":%llu,\"collected\":%s,\"fragment_stores_observed\":%s,\"fragment_stores_enabled\":%s,\"feature_source\":%u,\"native_queue_create_infos\":%u,\"native_queue_count\":%u,\"native_queue_family\":%u,\"queue_failure_bits\":%u,\"companion_used\":%u,\"companion_created\":%u,\"shader_cached\":%u,\"generic_routes\":%u,\"shader_dropped\":%llu,\"routes_dropped\":%llu,\"shader_truncated\":%s,\"routes_truncated\":%s,\"visibility_claim\":false,\"overlay_transport_claim\":false}\n",
                 static_cast<unsigned long long>(frame_pixel_ssbo_clone::handle(device_)),ready_ ? "true" : "false", unsigned(refusal()), sequence_.requested.load(), queuedPhase_.load(),
                 static_cast<unsigned long long>(draws_.load()), static_cast<unsigned long long>(missed_.load()),
                 static_cast<unsigned long long>(submits_.load()), collected_.load() ? "true" : "false",
-                featureObserved_?"true":"false",featureEnabled_?"true":"false",featureSource_,nativeQueueCreateInfos_,nativeQueueCount_,family_,q.failures);
+                featureObserved_?"true":"false",featureEnabled_?"true":"false",featureSource_,nativeQueueCreateInfos_,nativeQueueCount_,family_,q.failures,
+                companionUsed_.load(),companionCreated_.load(),shaderCached_.load(),genericRoutes_.load(),
+                static_cast<unsigned long long>(shaderDropped_.load()),static_cast<unsigned long long>(routesDropped_.load()),
+                shaderDropped_.load()?"true":"false",routesDropped_.load()?"true":"false");
             if(update<24){
                 std::snprintf(name, sizeof(name), "dashboard-transition-status-%02u.json", update++);
                 if (length > 0 && std::size_t(length) < sizeof(output)) ownedWrite(directoryFd_, name, output, std::size_t(length));
