@@ -166,13 +166,15 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
             const bool unchanged=known&&sameContract(*s,contract,config,hasConfig);self.reconfigureStats_.lastSameContract=unchanged;
             qos=self.enabled_&&unchanged&&!params->resetEncoder&&!params->reserved;
             if(qos){
-                generation=s->generation;s->reconfiguring=true;self.retireSubmissions(*s);
+                generation=s->generation;s->reconfiguring=true;
             }else{generation=self.revoke(*s,hevc);count(self.reconfigureStats_.revoked);}
         }
     }
     // Ordinary QoS adaptation does not replace the source session. While native
-    // code runs, discard exact frame evidence and refuse new input/mask claims;
-    // keep its paired control channel and any borrowed Lock bytes alive.
+    // code runs, refuse new reentrant input/mask claims. Already accepted
+    // asynchronous submissions retain their exact same-frame receipts through
+    // quality-only changes; their output/timestamp and native ownership remain
+    // unchanged. Keep the paired channel and borrowed Lock bytes alive.
     const auto result=self.original_.nvEncReconfigureEncoder(encoder,params);
     std::lock_guard<std::mutex> guard(self.mutex_);self.reconfigureStats_.lastStatus=static_cast<int>(result);
     if(auto s=self.find(encoder);s&&generation&&s->generation==generation){

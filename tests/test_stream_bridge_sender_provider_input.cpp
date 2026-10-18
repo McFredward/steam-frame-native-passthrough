@@ -108,10 +108,16 @@ void run(){
     inspectDiscovery=false;
     codecConfig.rcParams.averageBitRate=14000000;codecConfig.rcParams.maxBitRate=18000000;
     codecConfig.rcParams.vbvBufferSize=100000;codecConfig.rcParams.vbvInitialDelay=50000;qos.reInitEncodeParams.frameRateNum=120;
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);const auto asynchronousInput=captured;
     reconfigureResult=NV_ENC_SUCCESS;const auto unchanged=qos;const auto unchangedConfig=codecConfig;
     check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_SUCCESS,"actual same-contract bitrate/framerate adjustment forwarded");
     check(!std::memcmp(&qos,&unchanged,sizeof qos)&&!std::memcmp(&codecConfig,&unchangedConfig,sizeof codecConfig),"QoS never rewrites original init/config arguments");
     check(bridge.generation(handle)==qosGeneration&&bridge.encoderStates()[0].peerConfirmed&&bridge.encoderStates()[0].probeObserved,"QoS retains actual confirmed encoder session");
+    for(unsigned i=0;i<2;++i)table.nvEncReconfigureEncoder(handle,&qos);
+    p=get();check(observed.exactInput&&observed.coverageSessionAuthorized&&observed.submission==asynchronousInput.submission
+        &&observed.inputTimestamp==asynchronousInput.inputTimestamp&&observed.resourceGeneration==asynchronousInput.resourceGeneration
+        &&observed.mapGeneration==asynchronousInput.mapGeneration&&observed.encoderGeneration==qosGeneration,
+        "Encode(A), repeated QoS, asynchronous Lock(A) keeps only that exact original accepted receipt");release();
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized&&observed.submission>qosResources.submission,"fresh Encode after QoS owns a new exact authorized submission");
     const auto* qosBorrowed=static_cast<const std::uint8_t*>(p.bitstreamBufferPtr);check(qosBorrowed!=au.data()&&bridge.liveLeases()==1,"actual output bytes borrowed before further QoS");
     codecConfig.rcParams.averageBitRate=17000000;reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
@@ -129,7 +135,7 @@ void run(){
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"QoS never resurrects a resource unregistered by the native callback");release();
     table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"native re-registration gets fresh valid input after QoS");release();
-    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==5&&qosStats.preservedRejected==1,"cold QoS counters distinguish successes from rejected attempts");
+    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==7&&qosStats.preservedRejected==1,"cold QoS counters distinguish successes from rejected attempts");
     const auto paddingStart=offsetof(NV_ENC_INITIALIZE_PARAMS,privDataSize)+sizeof qos.reInitEncodeParams.privDataSize;
     const auto paddingEnd=offsetof(NV_ENC_INITIALIZE_PARAMS,privData);
     if(paddingEnd>paddingStart){
