@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import copy
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -176,6 +177,44 @@ class Tests(unittest.TestCase):
         for value in (float('nan'),0,True,301):
             with self.subTest(value=str(value)),self.assertRaises(e.SetupError):self.life.start(timeout=value)
 
+    def path_adapter(self, expand):
+        # Only the public GetLongPathNameW output port is synthetic. Path-link
+        # rejection and every normalization decision are actual production code.
+        adapter=object.__new__(pc.WindowsAdapter);adapter.e=e
+        def public_long(source,destination,bound):
+            value=expand(source)
+            if type(value) is int:return value
+            destination.value=value;return len(value)
+        adapter.longpath=public_long
+        return adapter
+
+    def test_short_and_long_path_forms_use_the_same_public_canonical_name(self):
+        short=self.base/'RUNNER~1'/'SteamVR'/'vrmonitor.exe'
+        long=self.base/'runner-user'/'SteamVR'/'vrmonitor.exe'
+        called=[]
+        def expand(value):
+            called.append(value);return str(long) if value==str(short) else value
+        adapter=self.path_adapter(expand)
+        self.assertEqual(adapter._normalize(short),adapter._normalize(long))
+        self.assertEqual(called,[str(short),str(long)])
+        foreign=self.base/'another-install'/'vrmonitor.exe'
+        self.assertNotEqual(adapter._normalize(short),adapter._normalize(foreign))
+
+    def test_long_path_failure_or_overflow_never_falls_back_to_alias_comparison(self):
+        for result in (0,32768,40000):
+            adapter=self.path_adapter(lambda value:result)
+            with self.subTest(result=result),self.assertRaises(e.SetupError):adapter._normalize(self.root/'bin/win64/vrmonitor.exe')
+
+    @unittest.skipUnless(os.name=='posix','Portable symlink refusal without Windows symlink privileges')
+    def test_path_alias_expansion_does_not_authorize_a_redirected_path(self):
+        real=self.base/'real';real.mkdir();linked=self.base/'redirected';linked.symlink_to(real,target_is_directory=True)
+        called=[]
+        adapter=self.path_adapter(lambda value:called.append(value) or value)
+        with self.assertRaises(e.SetupError):adapter._normalize(linked/'vrmonitor.exe')
+        self.assertEqual(called,[])
+        adapter=self.path_adapter(lambda value:str(linked/'vrmonitor.exe'))
+        with self.assertRaises(e.SetupError):adapter._normalize(real/'vrmonitor.exe')
+
     @unittest.skipUnless(os.name=='nt','Windows ctypes process and Authenticode APIs only')
     def test_native_windows_owned_handles_sid_creation_time_and_foreign_pid_refusal(self):
         # The default production trust gate MUST refuse a Microsoft-publisher
@@ -190,6 +229,13 @@ class Tests(unittest.TestCase):
                 self.assertEqual(Path(path).parent,self.root/'bin/win64')
         native=FixtureOnly(e,self.root);native.images()
         target=self.root/'bin/win64/vrmonitor.exe'
+        # Reproduce the hosted runner's real short-temp-root/long-handle-path
+        # difference. Filesystems without 8.3 aliases may return the same name.
+        short_path=native.k.GetShortPathNameW
+        short_path.argtypes=[native.w.LPCWSTR,native.w.LPWSTR,native.w.DWORD];short_path.restype=native.w.DWORD
+        short=ctypes.create_unicode_buffer(32768);length=short_path(str(target),short,len(short))
+        self.assertTrue(0<length<len(short))
+        self.assertEqual(native._normalize(short.value),native._normalize(target))
         child=subprocess.Popen([str(target),'/q','/k'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                                creationflags=subprocess.CREATE_NO_WINDOW)
         try:

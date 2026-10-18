@@ -167,6 +167,7 @@ class WindowsAdapter:
         self.snapshot = bind(self.k,'CreateToolhelp32Snapshot',[D,D],H)
         self.createfile = bind(self.k,'CreateFileW',[w.LPCWSTR,D,D,P,D,D,H],H)
         self.finalpath = bind(self.k,'GetFinalPathNameByHandleW',[H,w.LPWSTR,D,D],D)
+        self.longpath = bind(self.k,'GetLongPathNameW',[w.LPCWSTR,w.LPWSTR,D],D)
         self.size = bind(self.k,'GetFileSizeEx',[H,ctypes.POINTER(ctypes.c_longlong)],B)
         self.readfile = bind(self.k,'ReadFile',[H,P,D,ctypes.POINTER(D),P],B)
         self.seek = bind(self.k,'SetFilePointerEx',[H,ctypes.c_longlong,ctypes.POINTER(ctypes.c_longlong),D],B)
@@ -186,12 +187,19 @@ class WindowsAdapter:
     def clock():return time.monotonic()
     @staticmethod
     def sleep(seconds):time.sleep(seconds)
-    @staticmethod
-    def _normalize(path):
+    def _normalize(self,path):
         value=str(path)
         if value.startswith('\\\\?\\UNC\\'):value='\\\\'+value[8:]
         elif value.startswith('\\\\?\\'):value=value[4:]
-        return os.path.normcase(os.path.abspath(value))
+        # Handle/process queries expand 8.3 aliases (e.g. RUNNER~1), while
+        # registry/temp roots may retain them. Expand BOTH representations via
+        # the public OS API; never accept a basename/prefix or failed fallback.
+        checked=self.e.no_links(Path(os.path.abspath(value)))
+        expanded=ctypes.create_unicode_buffer(32768)
+        length=self.longpath(str(checked),expanded,len(expanded))
+        self.e.require(0<length<len(expanded),'A canonical SteamVR executable path could not be checked.')
+        canonical=self.e.no_links(Path(expanded.value))
+        return os.path.normcase(os.path.abspath(canonical))
 
     def _sid(self, process):
         token=self.w.HANDLE();self.e.require(self.token(process,8,ctypes.byref(token)), 'PC process ownership could not be checked.')
