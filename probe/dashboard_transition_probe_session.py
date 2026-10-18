@@ -13,9 +13,6 @@ import time
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('dashboard_sparse_transform', HERE/'dashboard_transition_probe_spirv.py')
-transform = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(transform)
 
 
 def no_symlink_ancestors(path):
@@ -79,6 +76,11 @@ def prepare(run, library, shipping, host_fixture=False):
     if machine != 183 and not (host_fixture and machine == 62):
         raise ValueError('native AArch64 library required; host fixtures are explicitly separate')
     source = owned(shipping)
+    # Runtime status/phase/collect remain standalone; only offline preparation
+    # imports the source transformer and its repository-owned dependencies.
+    spec = importlib.util.spec_from_file_location('dashboard_sparse_transform', HERE/'dashboard_transition_probe_spirv.py')
+    transform = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(transform)
     probe, manifest = transform.instrument(source)
     run.mkdir(mode=0o700)
     capture = os.urandom(16).hex()
