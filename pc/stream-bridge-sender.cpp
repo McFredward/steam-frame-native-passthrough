@@ -30,9 +30,12 @@ SenderStatus SenderAdapter::request(const LocalConfig& c,const VerifiedChannel& 
                                    const VerifiedSource& source,PayloadSealer sealer) {
     if(pendingTicket_){publish(SenderStatus::PendingSubmission);return status_;}
     stop();events_=0;
-    // This first prototype cannot truthfully offer source/coverage capabilities.
-    if(c.role!=Role::Producer||c.offered!=RequiredCapabilities||
-       c.required!=RequiredCapabilities){publish(SenderStatus::InvalidRequest);return status_;}
+    // Advertise only the implemented known contract; per-frame proof is still
+    // separate and mutual confirmation alone cannot activate coverage.
+    if(c.role!=Role::Producer||(c.offered&~KnownCapabilities)||(c.required&~KnownCapabilities)||
+       (c.offered&RequiredCapabilities)!=RequiredCapabilities||
+       (c.required&RequiredCapabilities)!=RequiredCapabilities||
+       (c.required&c.offered)!=c.required){publish(SenderStatus::InvalidRequest);return status_;}
     if(!admissible(source)){publish(SenderStatus::SourceUnverified);return status_;}
     if(handshake_.begin(c,channel)!=Status::Ok){publish(SenderStatus::ControlRejected);return status_;}
     source_=source;sealer_=sealer;requested_=true;++epoch_;publish(SenderStatus::WaitingPeer);return status_;

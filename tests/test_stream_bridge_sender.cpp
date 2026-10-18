@@ -36,8 +36,10 @@ void tests(){
  check(!p.appended&&p.output.data==au.data()&&p.output.size==au.size(),"inactive exact original bytes and pointer");
  auto unverified=source();unverified.verified=false;
  check(sender.request(config(Role::Producer,1),channel(),unverified)==SenderStatus::SourceUnverified,"unverified source refused");
- auto c=config(Role::Producer,1);c.offered|=CapExplicitCoverage;
- check(sender.request(c,channel(),source())==SenderStatus::InvalidRequest,"unimplemented mask caps refused");
+ auto c=config(Role::Producer,1);c.offered|=(1ull<<63);
+ check(sender.request(c,channel(),source())==SenderStatus::InvalidRequest,"unknown capability bits refused");
+ auto known=config(Role::Producer,77);known.offered=known.required=KnownCapabilities;SenderAdapter capable;
+ check(capable.request(known,channel(),source())==SenderStatus::WaitingPeer&&!capable.coveragePermitted(),"known route capabilities negotiate without image permission");
  auto unauth=channel();unauth.authenticated=false;
  check(sender.request(config(Role::Producer,1),unauth,source())==SenderStatus::ControlRejected,"no auth no writes");
  check(sender.request(config(Role::Producer,1),channel(),source())==SenderStatus::WaitingPeer,"explicit known requested");

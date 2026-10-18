@@ -1,11 +1,15 @@
-// Offline-prepared Windows bootstrap, not an installer or an enabled MR bridge.
+// Version-pinned Windows provider. Explicit settings opt in to authenticated
+// discovery/control; image coverage still requires its separate exact GPU route.
 // Only this exact vrlink module's future public NVENC factory is intercepted.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <bcrypt.h>
+#include <shlobj.h>
 #include <openvr_driver.h>
 #include "stream-bridge-sender-provider-core.h"
+#include "stream-bridge-sender-provider-directmode.h"
+#include "stream-bridge-sender-provider-runtime.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -26,6 +30,7 @@ ProcAddress const OriginalGetProcAddress=&::GetProcAddress;
 std::atomic<NvencFactory> originalFactory{nullptr};
 std::atomic<unsigned> bootstrapStatus{0};
 NvencBoundary& boundary(){static auto* value=new NvencBoundary(ExpectedHash);return *value;}
+stream_bridge::sender::DirectModeBoundary& directMode(){static auto* value=new stream_bridge::sender::DirectModeBoundary;return *value;}
 HMODULE nvencLifetime=nullptr; // Never released while public callbacks can exist.
 std::mutex factoryMutex;
 template<class To,class From> To pointerBits(From from){static_assert(sizeof(To)==sizeof(From),"Win64 pointers");To to{};std::memcpy(&to,&from,sizeof(to));return to;}
@@ -104,6 +109,55 @@ bool imageProof(HMODULE module,void*** slot){
 class Provider final:public vr::IServerTrackedDeviceProvider {
     std::mutex mutex_;std::condition_variable changed_;std::thread worker_;
     bool stopped_=false,initialized_=false;void** slot_=nullptr;HMODULE source_=nullptr;HANDLE file_=INVALID_HANDLE_VALUE;
+    vr::IVRDriverContext* context_=nullptr;vr::IVRDriverLog* log_=nullptr;
+    stream_bridge::sender::SenderRuntime runtime_{boundary()};stream_bridge::ControlRequest request_{};
+    void** directSlots_=nullptr;std::array<void*,8> directOriginal_{},directWrapped_{};
+    void report(const char* status){if(log_){char text[160]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
+    bool configure(){
+        vr::EVRInitError error=vr::VRInitError_None;
+        auto* settings=static_cast<vr::IVRSettings*>(context_->GetGenericInterface(vr::IVRSettings_Version,&error));
+        log_=static_cast<vr::IVRDriverLog*>(context_->GetGenericInterface(vr::IVRDriverLog_Version,&error));
+        if(!settings)return false;
+        vr::EVRSettingsError e=vr::VRSettingsError_None;constexpr auto section="driver_steam_link_native_passthrough";
+        if(!settings->GetBool(section,"enableStreamBridge",&e)||e!=vr::VRSettingsError_None){report("bridge disabled; ordinary video");return true;}
+        request_.role=stream_bridge::Role::Producer;request_.buildId=712;
+        settings->GetString(section,"controlListenAddress",request_.address.data(),static_cast<std::uint32_t>(request_.address.size()),&e);
+        if(e!=vr::VRSettingsError_None){report("explicit listen address missing; ordinary video");return false;}
+        const auto port=settings->GetInt32(section,"controlPort",&e);
+        if(e!=vr::VRSettingsError_None||port<1||port>65535){report("explicit control port invalid; ordinary video");return false;}
+        PWSTR appData=nullptr;const HRESULT found=SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DONT_VERIFY,nullptr,&appData);
+        if(FAILED(found)||!appData){report("private user data unavailable; ordinary video");return false;}
+        try {request_.pairingsDirectory=std::filesystem::path(appData)/L"steam-link-native-passthrough"/L"pairings";}
+        catch(...){CoTaskMemFree(appData);return false;}
+        CoTaskMemFree(appData);request_.port=static_cast<std::uint16_t>(port);request_.explicitlyEnabled=true;runtime_.configure(request_);return true;
+    }
+    void restoreDirect(){
+        directMode().stop();if(!directSlots_)return;
+        DWORD old=0;if(VirtualProtect(directSlots_,sizeof(void*)*8,PAGE_READWRITE,&old)){
+            for(unsigned i=0;i<8;++i)InterlockedCompareExchangePointer(directSlots_+i,directOriginal_[i],directWrapped_[i]);
+            DWORD ignored=0;VirtualProtect(directSlots_,sizeof(void*)*8,old,&ignored);
+        }directSlots_=nullptr;
+    }
+    bool attachDirect(HMODULE module){
+        constexpr std::array<std::uint32_t,8> rvas{{0x9f40f0,0x9f4920,0x9f45a0,0x9e5da0,0x9ed780,0x9ea110,0x9e95c0,0x9e5850}};
+        auto* base=reinterpret_cast<std::uint8_t*>(module);auto* slots=reinterpret_cast<void**>(base+0xc349b8);
+        for(unsigned i=0;i<8;++i){directOriginal_[i]=base+rvas[i];if(slots[i]!=directOriginal_[i])return false;}
+        stream_bridge::sender::DirectModeFunctions original{};static_assert(sizeof(original)==sizeof(directOriginal_),"public DirectMode009 table layout");
+        original.create=pointerBits<decltype(original.create)>(directOriginal_[0]);original.destroy=pointerBits<decltype(original.destroy)>(directOriginal_[1]);
+        original.destroyAll=pointerBits<decltype(original.destroyAll)>(directOriginal_[2]);original.next=pointerBits<decltype(original.next)>(directOriginal_[3]);
+        original.submit=pointerBits<decltype(original.submit)>(directOriginal_[4]);original.present=pointerBits<decltype(original.present)>(directOriginal_[5]);
+        original.post=pointerBits<decltype(original.post)>(directOriginal_[6]);original.timing=pointerBits<decltype(original.timing)>(directOriginal_[7]);
+        if(!directMode().prepare(original))return false;
+        const auto wrapped=directMode().entryPoints();std::memcpy(directWrapped_.data(),&wrapped,sizeof wrapped);
+        DWORD old=0;if(!VirtualProtect(slots,sizeof(void*)*8,PAGE_READWRITE,&old)){directMode().stop();return false;}
+        unsigned installed=0;for(;installed<8;++installed)if(InterlockedCompareExchangePointer(slots+installed,directWrapped_[installed],directOriginal_[installed])!=directOriginal_[installed])break;
+        DWORD ignored=0;const bool restored=VirtualProtect(slots,sizeof(void*)*8,old,&ignored)!=0;
+        if(installed!=8||!restored){
+            DWORD undo=0;if(VirtualProtect(slots,sizeof(void*)*8,PAGE_READWRITE,&undo)){for(unsigned i=0;i<installed;++i)InterlockedCompareExchangePointer(slots+i,directOriginal_[i],directWrapped_[i]);VirtualProtect(slots,sizeof(void*)*8,old,&ignored);}
+            directMode().stop();return false;
+        }
+        directSlots_=slots;return true;
+    }
     bool attach(HMODULE candidate){
         wchar_t path[32768]{};const auto n=GetModuleFileNameW(candidate,path,32768);
         if(!n||n>=32768)return false;
@@ -117,41 +171,53 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
             pointerBits<LPCWSTR>(&procAddress),&self))return false;
         (void)boundary();
-        DWORD old=0;if(!VirtualProtect(slot_,sizeof(void*),PAGE_READWRITE,&old))return false;
+        if(request_.explicitlyEnabled&&!attachDirect(candidate))return false;
+        DWORD old=0;if(!VirtualProtect(slot_,sizeof(void*),PAGE_READWRITE,&old)){restoreDirect();return false;}
         const auto previous=InterlockedCompareExchangePointer(slot_,pointerBits<void*>(&procAddress),pointerBits<void*>(OriginalGetProcAddress));
         DWORD ignored=0;const bool protection=VirtualProtect(slot_,sizeof(void*),old,&ignored)!=0;
-        if(previous!=pointerBits<void*>(OriginalGetProcAddress)){slot_=nullptr;return false;}
+        if(previous!=pointerBits<void*>(OriginalGetProcAddress)){slot_=nullptr;restoreDirect();return false;}
         if(!protection){ // Undo our entry; never leave a successful partial activation.
             InterlockedCompareExchangePointer(slot_,pointerBits<void*>(OriginalGetProcAddress),pointerBits<void*>(&procAddress));
-            slot_=nullptr;return false;
+            slot_=nullptr;restoreDirect();return false;
         }
         bootstrapStatus.store(4);return true; // Armed; future factory call not yet observed.
     }
     void run(){
         bootstrapStatus.store(1);
+        if(!configure()){bootstrapStatus.store(3);return;}
+        bool attached=false;
         for(;;){
             {std::lock_guard<std::mutex> guard(mutex_);if(stopped_)return;}
             HMODULE candidate=nullptr;
             if(GetModuleHandleExW(0,L"driver_vrlink.dll",&candidate)){
                 source_=candidate;
-                try {if(!attach(candidate))bootstrapStatus.store(3);}catch(...){bootstrapStatus.store(3);}
-                return; // One actual module attempt per provider epoch, no automatic retry.
+                try {attached=attach(candidate);if(!attached)bootstrapStatus.store(3);}catch(...){bootstrapStatus.store(3);}
+                break; // One actual module attempt per provider epoch, no automatic retry.
             }
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(250),[this]{return stopped_;});
         }
+        if(!attached)return;
+        auto last=stream_bridge::sender::RuntimeState::Off;unsigned reports=0;
+        for(;;){
+            {std::lock_guard<std::mutex> guard(mutex_);if(stopped_)break;}
+            try{runtime_.tick();}catch(...){runtime_.stop();report("worker refused; ordinary video");break;}
+            if(runtime_.state()!=last&&reports<32){last=runtime_.state();++reports;report(stream_bridge::sender::runtimeStateName(last));}
+            std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(8),[this]{return stopped_;});
+        }
+        runtime_.stop();
     }
 public:
     vr::EVRInitError Init(vr::IVRDriverContext* context)override{
         if(!context||initialized_)return vr::VRInitError_Driver_Failed;
         // This observer provides no HMD/device and makes no OpenVR property calls.
-        initialized_=true;try{worker_=std::thread([this]{run();});}
+        context_=context;initialized_=true;try{worker_=std::thread([this]{run();});}
         catch(...){bootstrapStatus.store(3);return vr::VRInitError_Driver_Failed;}
         return vr::VRInitError_None;
     }
     void Cleanup()override{
         {std::lock_guard<std::mutex> guard(mutex_);stopped_=true;}changed_.notify_all();
         if(worker_.joinable())worker_.join();
-        boundary().stop();
+        runtime_.stop();boundary().stop();restoreDirect();
         if(slot_){DWORD old=0;if(VirtualProtect(slot_,sizeof(void*),PAGE_READWRITE,&old)){
             // Another hook's later change is not ours to overwrite.
             InterlockedCompareExchangePointer(slot_,pointerBits<void*>(OriginalGetProcAddress),pointerBits<void*>(&procAddress));
@@ -168,9 +234,18 @@ public:
     void LeaveStandby()override{}
 };
 Provider& getProvider(){static auto* value=new Provider;return *value;}
+class CompositorProvider final:public vr::IVRCompositorPluginProvider {
+public:
+    vr::EVRInitError Init(vr::IVRDriverContext* context)override{return getProvider().Init(context);}
+    void Cleanup()override{getProvider().Cleanup();}
+    const char*const* GetInterfaceVersions()override{static const char*const versions[]{vr::IVRCompositorPluginProvider_Version,nullptr};return versions;}
+    void* GetComponent(const char*)override{return nullptr;} // No HMD/device/renderer replacement.
+};
+CompositorProvider& getCompositorProvider(){static auto* value=new CompositorProvider;return *value;}
 }
 extern "C" __declspec(dllexport) void* HmdDriverFactory(const char* name,int* error){
     if(name&&std::strcmp(name,vr::IServerTrackedDeviceProvider_Version)==0){if(error)*error=vr::VRInitError_None;return &getProvider();}
+    if(name&&std::strcmp(name,vr::IVRCompositorPluginProvider_Version)==0){if(error)*error=vr::VRInitError_None;return &getCompositorProvider();}
     if(error)*error=vr::VRInitError_Init_InterfaceNotFound;
     return nullptr;
 }

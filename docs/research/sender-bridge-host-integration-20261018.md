@@ -35,7 +35,7 @@ All other symbol/ordinal requests are forwarded once with their original result
 and last-error state. Only a future lookup of the exact NVENC factory from the
 actual `nvEncodeAPI64.dll` handle receives our wrapper.
 
-The wrapper invokes NVIDIA's original factory once. It changes six public
+The wrapper invokes NVIDIA's original factory once. It changes the checked public
 function-table entries only for the exact reviewed SDK 11.1 table ABI and a
 consistent original function set. Session creation, HEVC initialization,
 reconfiguration and destruction establish bounded source lifetimes. Successful
@@ -52,28 +52,58 @@ It avoids dependence on a private encoder object's address or ABI. Its bounded
 fake-public-table tests execute these callbacks, including deferred Unlock and
 cleanup, rather than merely simulating a proposed private jump.
 
-## Deliberately inactive runtime
+## Explicit current runtime (2026-10-18 follow-up)
 
-Installing this prototype by itself cannot add even a HELLO: its live provider
-has **no control-authority entry point**, never calls `requestDiscovery`, and
-therefore always preserves the original AU pointer, size and bytes. The portable
-adapter's explicit trusted-authority API is exercised only by host fixtures.
-Its optional payload-sealer port permits an authenticated envelope before SEI
-insertion without conflating signed local send capability with peer confirmation.
-Raw payload mode is fixture/backwards-compatible plumbing, not live authorization.
+The version-pinned provider exports both Server004 and the documented CompositorPlugin001 (loaded in vrcompositor.exe), with no replacement device/component. Each process owns only its observed module/encoder lifecycle. The version-pinned provider now has an actual cold owner for `ControlRuntime`.
+Public `IVRSettings_003`, section `driver_steam_link_native_passthrough`, must
+explicitly enable `enableStreamBridge` and provide numeric private/loopback
+`controlListenAddress` and `controlPort` (1–65535). Missing/default-off settings
+retain ordinary video. The selected private pairing comes from the installer's
+`%LOCALAPPDATA%/steam-link-native-passthrough/pairings` directory via the existing
+strict loader. Keys never appear in settings/logs/argv. The worker opens the
+listener only when exactly one actual initialized HEVC encoder exists. It wires
+the real sender sealer/receiver TCP replies into that observed encoder, resets
+on source generation loss, and originates a fresh coded-AU probe after mutual
+confirmation. No timer expires a feature or restarts SteamVR.
 
-The first live extension still needs an explicitly paired authenticated return
-route and fresh session material; no guessed Steam Link private control option or
-unauthenticated socket is implemented. A discovery HELLO may precede mutual
-confirmation, otherwise negotiation would be circular. Actual handoff advances
-its send state; construction alone does not. An exact authenticated probe echo
-would prove only coded-AU transport, never frame/eye/mask correctness.
-`coveragePermitted()` remains false, even after both COMMITs and a probe echo.
+The worker executes on the existing provider thread; native frame/encoder
+callbacks do no socket/file work. At most 32 state transitions are logged.
+Unsupported codecs, missing/mismatched peers and actual EOF leave ordinary
+VCL bytes and image dimensions unchanged. A transport/handshake/probe is not
+coverage permission. The new certificate/mask `OutputAugmenter` port still needs
+the actual GPU route to register it before any MR readiness can be granted.
 
-The provider must be loaded **before a future NVENC factory lookup**. Late loading
-reports armed/waiting; it does not scan or modify existing function tables. NVENC
-may not be the active backend. These remaining runtime facts must be observed
-before calling this a usable sender adapter. A different driver hash stays inert.
+Five additional **public** NVENC callbacks track RegisterResource → Map →
+EncodePicture → LockBitstream. Records are bounded (four encoders; 32 resources,
+maps and submissions per encoder). Resource/map generations are separate from
+submission ordinals and encoder epochs. A successful Encode (or documented
+NEED_MORE_INPUT queueing) and a unique exact output-handle/output-timestamp pair
+are required. Input format/extent must agree with registration and initialized
+coded extent. An arbitrary latest input, timestamp approximation, encoder slot
+or application counter cannot supply this evidence. Ambiguity/failure/retired
+resources stay unassociated. An input observer can freeze a genuine immutable
+R8 copy receipt before the original Encode under its native submission key.
+The later output augmenter receives exactly that accepted key. Final bytes are
+owned independently through matching successful Unlock, including when no
+handshake SEI was needed, and survive reconfigure/failed Unlock.
+
+With explicit enablement the checked DirectMode009 eight-entry vtable is also
+compare-exchanged transactionally after both the native file and loaded code
+pins pass. Every original call is forwarded exactly once. Actual
+CreateSwapTextureSet PID/description/three handles, destruction and submitted
+per-eye bounds/projection/pose establish ownership, not GPU completion. A
+bounded `DirectFrame` is available **only** inside the real original Present or
+PostPresent call and only while its registry epoch remains valid. Unrecognized
+handles, invalid geometry, overflow and lifetime conflict return no source.
+The native D3D11 draw must still establish actual acquisition, source sample,
+foveation/UV and matching R8 output; metadata alone does not prove any of them.
+
+The provider must be loaded before a future NVENC factory and before the app's
+swapsets are created. Unknown preexisting swapsets are never reconstructed from
+pointers. A different driver hash or changed original vtable stays inert. No
+real Windows/Steam/Frame execution is established by a cross-build or the local
+public-call/loopback fixtures. No image route/installability is enabled by this
+checkpoint.
 
 ## Lifetime and removal
 
@@ -85,8 +115,8 @@ replace another hook's later change, unload retained callbacks, restart SteamVR,
 or free an outstanding locked AU. A process restart is the clean unload boundary;
 there is no automatic expiry/restart and no runtime uninstaller in this prototype.
 
-No registration or installation script is supplied. A future controlled package
-would register its own driver directory and remove that registration to uninstall;
+The separately gated setup package
+registers its own driver directory when eligible and remove that registration to uninstall;
 it must not replace Valve/NVIDIA files. Startup order and whether another hook is
 present remain hardware observations, not claims from the local build.
 
@@ -118,3 +148,5 @@ precise source/encoder/transmit association, bounded mask encoding, receiving
 backend, and verified current-frame/eye/UV use. The existing
 [driver dataflow report](../PC-DRIVER-20261011.md) explains those separate identity
 domains. Neither a working SEI append nor public API interception supplies them.
+
+Focused host checkpoint: original public-boundary 54, exact input/device/output association 41, DirectMode ownership 18, actual provider/control/SEI/TCP/probe composition 46, and sender capability policy 81 checks pass. All affected fixtures pass ASan/UBSan. Four semantic controls independently reject wrong output timestamps, failed Encode acceptance, stale DirectMode registry epochs and retained transport trust after EOF. The final Windows DLL links against system libraries only. The CompositorPlugin interface, actual Steam load ordering and headset picture still require the integrated runtime test; no hardware outcome is claimed.
