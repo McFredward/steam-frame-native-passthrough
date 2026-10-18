@@ -37,6 +37,7 @@ MAX_NEIGHBORS = 64
 VIRTUAL = re.compile(r'(?i)(vpn|wireguard|tailscale|zerotier|virtual|vmware|vbox|hyper-v|docker|podman|loopback|^lo$|^wsl|^tun\d*|^tap\d*|^veth|^virbr|^br-)')
 TEXT = {
     'en': {
+        'bridge_current': 'The checked connection is already up to date. Nothing was changed or restarted.',
         'bridge_available': 'The new passthrough connection is available for this package.',
         'bridge_remove_plan': 'Remove the new PC and Frame connection and restore the previous setup. SteamVR must be closed on the PC, and Steam must be closed on the Frame. No restart is performed.',
         'bridge_removed': 'The new connection was removed and the previous settings restored. Start SteamVR yourself when ready.',
@@ -101,6 +102,7 @@ TEXT = {
         'cancelled': 'Setup stopped. No automatic restart was performed.',
     },
     'de': {
+        'bridge_current': 'Die geprüfte Verbindung ist bereits aktuell. Es wurde nichts geändert oder neu gestartet.',
         'bridge_available': 'Die neue Passthrough-Verbindung ist mit diesem Paket verfügbar.',
         'bridge_remove_plan': 'Die neue Verbindung auf PC und Frame entfernen und den vorherigen Zustand wiederherstellen. SteamVR muss auf dem PC und Steam auf der Frame geschlossen sein. Es wird nichts neu gestartet.',
         'bridge_removed': 'Die neue Verbindung wurde entfernt und die vorherigen Einstellungen wiederhergestellt. Starte SteamVR selbst, sobald du bereit bist.',

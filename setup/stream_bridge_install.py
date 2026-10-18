@@ -223,19 +223,27 @@ class LocalInstall:
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before installing or updating the connection.')
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
         old=self.state();planned={name:bundle.files[name] for name in PC_FILES}
+        tool_pin=bundle.pc['runtime_files']['vrpathreg'];tool=self.local.verify_tool(pc,tool_pin)
         driver=self.local.root/'pc-provider'
         if driver.exists():
             present={str(p.relative_to(self.local.root)).replace('\\','/') for p in driver.rglob('*') if p.is_file() or p.is_symlink()}
             e.require(present<=set(old['files'] if old else {}),'An unknown PC provider is already present; it was preserved.')
         if old:
-            for name,pin in old['files'].items():
-                e.require(e.sha(e.read(self.local.root/e.relative(name)))==pin['sha256'],'Changed provider files preserved.')
             e.require(old['bundle']==bundle.pin,'Remove the previous checked connection before installing a different package.')
-            return {'reason':'current','changed':False,'automatic_restart':False}
+            missing=[]
+            for name,pin in old['files'].items():
+                path=self.local.root/e.relative(name)
+                if not path.exists():missing.append((path,planned[name]))
+                else:e.require(e.sha(e.read(path))==pin['sha256'],'Changed provider files preserved.')
+            for path,raw in missing:e.put(path,raw)
+            if not pc.get('registered'):
+                self.local.register(tool,'adddriver')
+                e.require(self.local.inventory()['registered'],'The repaired provider registration could not be confirmed.')
+            return {'reason':'repaired' if missing or not pc.get('registered') else 'current',
+                    'changed':bool(missing) or not pc.get('registered'),'automatic_restart':False}
         edits=SettingsChange(e,self.settings_path(),{SETTINGS_SECTION:{'enableStreamBridge':True,
               'controlListenAddress':private_ipv4(address),'controlPort':port}})
         edits.planned() # All settings validation before first payload write.
-        tool_pin=bundle.pc['runtime_files']['vrpathreg'];tool=self.local.verify_tool(pc,tool_pin)
         undo=[];settings=None;registered=False
         pairdir=self.local.root/'pairings';key=pairdir/(pair['pair_id']+'.json');active=pairdir/'active.json'
         pair_raw=e.encoded(pair);active_raw=e.encoded({'schema':e.ACTIVE,'pair_id':pair['pair_id']})
@@ -620,8 +628,18 @@ class FrameInstall:
         if current:
             e.require(current['phase']=='installed' and current['bundle']==bundle.pin and current['pair']==pair['pair_id'],
                       'Repair or remove the previous Frame transaction before replacing it.')
-            e.require(self.inventory(bundle)['files_current'],'Changed Frame files were preserved; checked repair is required.')
-            return {'reason':'current','automatic_restart':False}
+            if self.inventory(bundle)['files_current']:return {'reason':'current','automatic_restart':False}
+            self.cold(steam=True)
+            missing=[]
+            for operation in current['operations']:
+                observed=self.tx.current(Path(operation['path']))
+                if observed==operation['after']:continue
+                e.require(observed is None and operation['before'] is None and operation['after'] is not None,
+                          'Changed Frame files were preserved; only missing owned components can be repaired.')
+                missing.append(operation)
+            for operation in missing:self.tx.replace(operation)
+            self.system('daemon-reload')
+            return {'reason':'repaired','automatic_restart':False,'manual_restart_required':True}
         operations,settings,(before,after)=self.plan(bundle,pair,address,port)
         self.tx.begin(bundle.pin,operations,settings,pair['pair_id'])
         try:
@@ -786,9 +804,10 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
         if frame is not None:ui.status('receiver_ready' if frame.get('runtime_compatible') else 'receiver_changed','info')
         ui.status('bridge_available' if available else 'bridge_unavailable','info')
     actions=['check','exit']
-    if available and frame is not None:
-        if report['pc']['compatible'] and frame.get('runtime_compatible'):actions.insert(0,'install' if not state else 'repair')
-        if state or frame.get('installed'):actions.insert(1,'uninstall')
+    if frame is not None and (state or frame.get('installed')):actions.insert(0,'uninstall')
+    if available and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
+        if state is None:actions.insert(0,'install')
+        elif state['bundle']==bundle.pin:actions.insert(0,'repair')
     action=args.action or (ui.choose_action(actions,recommended='check') if ui else None)
     if action in (None,'exit','check'):return 0
     e.require(interactive and action in actions,'That action is not available for this checked package.')
@@ -811,8 +830,8 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
     with ui.suspend():baseline=remote.call(request(bundle,'bridge-health-baseline'))
     local.apply_started=True
     try:
-        with ui.suspend():remote.call(request(bundle,'bridge-prepare',pairing={**pair,'role':'receiver'},address=address_to_bind,port=port))
-        installed.install(bundle,pc,pair,address_to_bind,port)
+        with ui.suspend():frame_result=remote.call(request(bundle,'bridge-prepare',pairing={**pair,'role':'receiver'},address=address_to_bind,port=port))
+        pc_result=installed.install(bundle,pc,pair,address_to_bind,port)
         with ui.suspend():remote.call({'command':'bridge-commit'})
     except BaseException:
         # A failed post-install start never triggers an automatic rollback.
@@ -827,6 +846,8 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
             ui.say('bridge_removed')
             return 0
         raise
+    if frame_result.get('reason')=='current' and pc_result.get('reason')=='current':
+        ui.say('bridge_current');return 0
     e.remember_frame(local,address,args.user)
     log=e.write_report(local,action,report,{'reason':'installed','coverage_operational':False,'automatic_restart':False})
     ui.path(log)

@@ -188,6 +188,20 @@ class Tests(unittest.TestCase):
         self.unit.tx.commit();self.unit.undo()
         self.assertEqual(s.read(dropin),old_dropin);self.assertEqual(s.read(control),old_control);self.assertEqual(os.readlink(link),target);self.assertEqual(s.read(receipt),old_receipt)
 
+
+    def test_actual_remote_bootstrap_inventory_creates_no_frame_files(self):
+        import subprocess
+        request=b.request(self.bundle,'bridge-inventory')
+        request['_engine']=base64.b64encode((ROOT/'setup/steam_link_setup.py').read_bytes()).decode()
+        request['_bridge']=base64.b64encode((ROOT/'setup/stream_bridge_install.py').read_bytes()).decode()
+        before={str(p):p.read_bytes() for p in self.fhome.rglob('*') if p.is_file()}
+        env=dict(os.environ,HOME=str(self.fhome),XDG_DATA_HOME='',XDG_CONFIG_HOME='')
+        result=subprocess.run([s.sys.executable,'-I','-B','-c',b.REMOTE_BOOTSTRAP],input=s.encoded(request),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20,env=env)
+        self.assertEqual(result.returncode,0,result.stderr.decode())
+        reply=json.loads(result.stdout);self.assertIn('architecture',reply);self.assertFalse(reply['installed'])
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.fhome.rglob('*') if p.is_file()})
+        self.assertNotIn('files',request)
+
     def test_remote_request_validates_actual_transferred_manifest(self):
         observed=b.remote_request(s,b.request(self.bundle,'bridge-inventory'),unit=self.unit)
         self.assertTrue(observed['runtime_compatible']);self.assertFalse(observed['installed'])
@@ -211,6 +225,32 @@ class Tests(unittest.TestCase):
         self.unit.undo();self.assertFalse(self.unit.tx.path.exists());self.assertFalse((self.froot/'receiver.enable').exists())
         self.assertFalse(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'])
 
+
+
+    def test_repair_only_missing_owned_code_and_registration(self):
+        installer=b.LocalInstall(s,self.local);installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        driver=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll';driver.unlink()
+        paths=s.parse(s.read(self.local.registry));paths['external_drivers']=[];s.put(self.local.registry,s.encoded(paths),s.read(self.local.registry))
+        self.assertEqual(installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)['reason'],'repaired')
+        self.assertEqual(s.read(driver),self.bundle.files[str(driver.relative_to(self.local.root))]);self.assertTrue(self.local.inventory()['registered'])
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();image=self.froot/'coverage.spv';image.unlink()
+        self.assertEqual(self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)['reason'],'repaired')
+        self.assertEqual(s.read(image),b'fixture coverage')
+        s.put(image,b'user changed',s.read(image))
+        with self.assertRaisesRegex(s.SetupError,'Changed Frame'):self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.assertEqual(s.read(image),b'user changed')
+
+    def test_loaded_selector_requires_steam_stop_before_uninstall(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();real=self.unit.run
+        def running(args,**kw):
+            if args[2:]==['show','steam.service','--property=ActiveState','--value']:return 0,b'active\n'
+            return real(args,**kw)
+        self.unit.run=running
+        before=self.unit.tx.path.read_bytes()
+        with self.assertRaisesRegex(s.SetupError,'Stop Steam on'):self.unit.undo()
+        self.assertEqual(self.unit.tx.path.read_bytes(),before);self.assertTrue((self.froot/b.LIBRARY).exists())
 
     def test_failed_start_offers_default_undo_without_automatic_action(self):
         import types,contextlib
