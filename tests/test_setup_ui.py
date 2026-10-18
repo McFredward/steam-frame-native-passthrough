@@ -331,6 +331,8 @@ class Presentation(unittest.TestCase):
             self.assertTrue(ui.TEXT['de'][key])
         self.assertNotIn('pip install', str(ui.TEXT))
         self.assertNotIn('apt install', str(ui.TEXT))
+        self.assertIn('manually', ui.TEXT['en']['remove_pending'])
+        self.assertIn('manuell', ui.TEXT['de']['remove_pending'])
 
     def test_pipe_has_plain_bounded_output_and_no_progress_thread(self):
         p = presenter()
@@ -344,7 +346,7 @@ class Presentation(unittest.TestCase):
         self.assertIn('nothing will be installed', text)
         self.assertLess(len(text), 600)
         self.assertIsNone(p._thread)
-        box = text.splitlines()[:3]
+        box = [line for line in text.splitlines() if line.startswith(('  +', '  |'))]
         self.assertEqual(len(box[0]), len(box[1]))
         self.assertEqual(len(box[1]), len(box[2]))
 
@@ -411,6 +413,155 @@ class Presentation(unittest.TestCase):
                 child.kill()
             child.wait()
             os.close(master)
+
+
+class ActionChooser(unittest.TestCase):
+    def make(self, responses=(), *, lang='en', width=32, prompting=True):
+        answers = iter(responses)
+        output = io.StringIO()
+        prompts = []
+        def read(prompt):
+            prompts.append(prompt)
+            try:
+                value = next(answers)
+            except StopIteration:
+                raise EOFError()
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        p = ui.Presenter(output, read, lang=lang, input_enabled=prompting, width=width)
+        return p, output, prompts
+
+    def assert_width(self, text, width):
+        self.assertTrue(all(len(line) < width for line in text.splitlines()), text)
+        self.assertNotIn('\x1b', text)
+        self.assertNotIn('\r', text)
+
+    def test_narrow_en_de_sections_status_and_paths_are_separate_and_wrapped(self):
+        for lang in ('en', 'de'):
+            for width in (20, 32, 80):
+                with self.subTest(lang=lang, width=width):
+                    p, output, _ = self.make(lang=lang, width=width)
+                    p.banner()
+                    p.section('pc_check')
+                    p.status('pc_partial', state='warning')
+                    p.path(r'C:\Games\Steam\very-long-report-folder\setup-inspection.json')
+                    text = output.getvalue()
+                    self.assert_width(text, width)
+                    self.assertIn('[!]', text)
+                    self.assertIn('\n\n', text)
+                    label = p.text('report').strip()
+                    if len(label) + 2 < width:
+                        self.assertIn('  ' + label + '\n    C:', text)
+
+    def test_numbered_uninstall_is_usable_even_with_redirected_output(self):
+        p, output, prompts = self.make(['2'])
+        result = p.choose_action(['check', 'uninstall', 'exit'], recommended='check')
+        self.assertEqual(result, 'uninstall')
+        self.assertIn('2. Uninstall', output.getvalue())
+        self.assertNotIn('1. Install', output.getvalue())
+        self.assertEqual(len(prompts), 1)
+        self.assert_width(output.getvalue(), 32)
+
+    def test_enter_defaults_to_check_unless_offered_recommendation(self):
+        for actions, recommended, expected in [
+            (['uninstall', 'check', 'exit'], None, 'check'),
+            (['uninstall', 'check', 'exit'], 'uninstall', 'uninstall'),
+            (['check', 'exit'], 'install', 'check'),
+            (['repair', 'exit'], None, 'exit'),
+            (['install'], None, None),
+        ]:
+            with self.subTest(actions=actions, recommended=recommended):
+                p, output, _ = self.make([''])
+                self.assertEqual(p.choose_action(actions, recommended), expected)
+                self.assertNotIn('Install [recommended]', output.getvalue())
+
+    def test_offered_install_update_repair_labels_have_localized_descriptions(self):
+        actions = ['install', 'update', 'repair', 'uninstall', 'check', 'exit']
+        for lang in ('en', 'de'):
+            p, output, _ = self.make(['6'], lang=lang, width=42)
+            self.assertEqual(p.choose_action(actions), 'exit')
+            text = output.getvalue()
+            for action in actions:
+                self.assertIn(p.text('action_' + action), text)
+            self.assert_width(text, 42)
+
+    def test_cancel_eof_interrupt_and_long_input_never_start_an_action(self):
+        for responses in (['0'], ['q'], ['cancel'], ['abbrechen'], [], [KeyboardInterrupt()], ['9', 'x' * 10000, '1' * 10000]):
+            p, output, prompts = self.make(responses)
+            self.assertIsNone(p.choose_action(['uninstall', 'check'], recommended='uninstall'))
+            self.assertLessEqual(len(prompts), 3)
+            self.assertNotIn('x' * 20, output.getvalue())
+
+    def test_invalid_then_valid_selection_and_empty_set(self):
+        p, output, prompts = self.make(['oops', '2'])
+        self.assertEqual(p.choose_action(['repair', 'check']), 'check')
+        self.assertEqual(len(prompts), 2)
+        self.assertIn('numbers shown', output.getvalue())
+        p, output, prompts = self.make([])
+        self.assertIsNone(p.choose_action([]))
+        self.assertEqual(prompts, [])
+        self.assertEqual(output.getvalue(), '')
+        for actions in (['unknown'], ['check', 'check'], 'uninstall'):
+            with self.assertRaises(ValueError):
+                p.choose_action(actions)
+
+    def test_noninteractive_never_selects_recommended_mutating_action(self):
+        p, output, prompts = self.make(['1'], prompting=False)
+        self.assertIsNone(p.choose_action(['uninstall', 'check'], recommended='uninstall'))
+        self.assertFalse(p.confirm_uninstall())
+        self.assertEqual(prompts, [])
+        self.assertEqual(output.getvalue(), '')
+
+    def test_uninstall_confirmation_is_explicit_localized_and_cancel_safe(self):
+        for lang, answer, expected in [('en', 'REMOVE', True), ('de', 'entfernen', True),
+                                       ('en', '', False), ('de', 'yes', False),
+                                       ('en', EOFError(), False)]:
+            p, output, _ = self.make([answer], lang=lang)
+            self.assertEqual(p.confirm_uninstall(), expected)
+            self.assert_width(output.getvalue(), 32)
+
+    def test_menu_and_confirmation_keep_parent_spinner_paused(self):
+        p, output, _ = self.make(['1', 'REMOVE'])
+        def read(prompt):
+            self.assertGreater(p._paused, 0)
+            return '1' if 'choice' in prompt.lower() else 'REMOVE'
+        p.input_fn = read
+        with p.progress('pc_check'):
+            self.assertEqual(p.choose_action(['uninstall']), 'uninstall')
+            self.assertTrue(p.confirm_uninstall())
+        self.assertEqual(p._paused, 0)
+        self.assertIsNone(p._thread)
+
+    def test_terminal_width_is_read_from_output_stream_and_spinner_stays_on_one_line(self):
+        p, output, _ = self.make([])
+        p._terminal_width = None
+        output.fileno = lambda: 41
+        with mock.patch.object(ui.os, 'get_terminal_size', return_value=os.terminal_size((26, 24))) as size:
+            p.say('pc_partial')
+            size.assert_called_with(41)
+        self.assert_width(output.getvalue(), 26)
+        with mock.patch.object(ui.os, 'get_terminal_size', return_value=os.terminal_size((0, 0))):
+            self.assertEqual(p.columns(), 79)
+        p._terminal_width = 24
+        p.interactive = True
+        output.seek(0)
+        output.truncate()
+        with p.progress('pc_partial'):
+            time.sleep(.15)
+        self.assertTrue(all(len(chunk) < 24 for line in output.getvalue().split('\n') for chunk in line.split('\r')))
+        self.assertIsNone(p._thread)
+
+    def test_real_pipe_action_chooser_can_select_uninstall_without_ansi(self):
+        code = ('import sys;sys.path.insert(0,' + repr(str(ROOT / 'setup')) + ');'
+                'from steam_link_setup_ui import Presenter;'
+                'p=Presenter(lang="en",input_enabled=True,width=32);'
+                'print("SELECTED="+str(p.choose_action(["check","uninstall","exit"])))')
+        child = subprocess.run([sys.executable, '-I', '-c', code], input=b'2\n', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertIn(b'SELECTED=uninstall', child.stdout)
+        self.assertNotIn(b'\x1b', child.stdout)
+        self.assertNotIn(b'\r', child.stdout)
 
 
 if __name__ == '__main__':

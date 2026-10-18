@@ -47,3 +47,25 @@ The tests use injected sources/connectors/validators and do not scan a real LAN.
 They include real bounded Python child processes, a redirected pipe, a POSIX PTY,
 DNS packet parsing and fixed Windows/Linux command-adapter vectors. Windows
 PowerShell runtime behavior and actual Frame discovery require separate evidence.
+
+## Readable maintenance UI
+
+The presenter wraps text to the current terminal width, leaving its last column
+unused. A zero-sized PTY is treated as unknown width (80 columns). `section(key)`
+separates phases, `status(key, state='info')` adds an ASCII information/ok/warning
+marker, and `path(value, key='report')` puts a report label and path on separate
+lines. Redirected output remains plain text; a redirected output stream does not
+disable an otherwise interactive input stream.
+
+`choose_action(actions, recommended=None)` accepts distinct names from
+`install`, `update`, `repair`, `uninstall`, `check`, and `exit`. The engine must
+supply only actions actually available for its checked package and installation.
+No action is added by the presenter. It returns the chosen name, or `None` on
+cancellation/no input capability. Enter selects an offered recommendation,
+otherwise an offered `check`, otherwise `exit`/cancellation. Three invalid
+entries cancel; there is no timer or automatic action.
+
+The engine displays its real uninstall plan before `confirm_uninstall()`. That
+method requires explicit localized `REMOVE`/`ENTFERNEN` input; Enter, EOF and
+noninteractive input return `False`. Selection and confirmation do not execute
+anything or establish runtime compatibility.

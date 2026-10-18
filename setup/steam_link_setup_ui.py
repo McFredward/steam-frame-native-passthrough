@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import concurrent.futures
 import ctypes
 import ipaddress
+import io
 import json
 import locale
 import ntpath
@@ -25,6 +26,7 @@ import struct
 import subprocess
 import sys
 import threading
+import textwrap
 import time
 
 PRIVATE = tuple(ipaddress.ip_network(v) for v in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
@@ -35,6 +37,31 @@ MAX_NEIGHBORS = 64
 VIRTUAL = re.compile(r'(?i)(vpn|wireguard|tailscale|zerotier|virtual|vmware|vbox|hyper-v|docker|podman|loopback|^lo$|^wsl|^tun\d*|^tap\d*|^veth|^virbr|^br-)')
 TEXT = {
     'en': {
+        'bridge_unavailable': 'The new connection is not available yet. You can check or remove the existing Frame patch.',
+        'remove_plan': 'This removes only the existing Frame patch. The PC stays unchanged, and Steam is not restarted. If SteamVR still has the patch loaded, stop it manually and run this setup again to finish.',
+        'remove_done': 'The existing Frame patch has been removed. Steam was not restarted.',
+        'remove_pending': 'The Frame patch is disabled but is still loaded. Stop SteamVR manually, then run this setup again to finish removing it.',
+        'confirm_uninstall': 'Remove the installed components shown above?',
+        'confirm_remove_prompt': 'Type REMOVE to confirm (Enter to cancel): ',
+        'confirm_remove_word': 'REMOVE',
+        'actions': 'What would you like to do?',
+        'action_install': 'Install',
+        'action_install_description': 'Install the components included in this package.',
+        'action_update': 'Update',
+        'action_update_description': 'Update the existing installation with this package.',
+        'action_repair': 'Repair',
+        'action_repair_description': 'Check and restore the existing installation.',
+        'action_uninstall': 'Uninstall',
+        'action_uninstall_description': 'Remove the installed components.',
+        'action_check': 'Check only',
+        'action_check_description': 'Check this PC and Frame without changing them.',
+        'action_exit': 'Exit',
+        'action_exit_description': 'Close without making changes.',
+        'recommended': 'recommended',
+        'choice': 'Your choice',
+        'choice_help': 'Enter = {default}.  0 = Exit.',
+        'choice_invalid': 'Please enter one of the numbers shown, or 0 to exit.',
+        'choice_cancelled': 'No action selected.',
         'pc_check': 'Checking SteamVR on this PC',
         'pc_ready': 'PC files match the supported version.',
         'pc_partial': 'One or more PC files could not be confirmed; details are in the report.',
@@ -61,6 +88,31 @@ TEXT = {
         'cancelled': 'Setup stopped. No automatic restart was performed.',
     },
     'de': {
+        'bridge_unavailable': 'Die neue Verbindung ist noch nicht verfügbar. Du kannst den vorhandenen Frame-Patch prüfen oder entfernen.',
+        'remove_plan': 'Es wird nur der vorhandene Frame-Patch entfernt. Der PC bleibt unverändert und Steam wird nicht neu gestartet. Falls SteamVR den Patch noch geladen hat, bitte manuell beenden und diese Einrichtung erneut starten, um das Entfernen abzuschließen.',
+        'remove_done': 'Der vorhandene Frame-Patch wurde entfernt. Steam wurde nicht neu gestartet.',
+        'remove_pending': 'Der Frame-Patch ist deaktiviert, aber noch geladen. Bitte SteamVR manuell beenden und diese Einrichtung erneut starten, um das Entfernen abzuschließen.',
+        'confirm_uninstall': 'Die oben angezeigten installierten Komponenten entfernen?',
+        'confirm_remove_prompt': 'Zum Bestätigen ENTFERNEN eingeben (Enter zum Abbrechen): ',
+        'confirm_remove_word': 'ENTFERNEN',
+        'actions': 'Was möchtest du tun?',
+        'action_install': 'Installieren',
+        'action_install_description': 'Die in diesem Paket enthaltenen Komponenten installieren.',
+        'action_update': 'Aktualisieren',
+        'action_update_description': 'Die vorhandene Installation mit diesem Paket aktualisieren.',
+        'action_repair': 'Reparieren',
+        'action_repair_description': 'Die vorhandene Installation prüfen und wiederherstellen.',
+        'action_uninstall': 'Deinstallieren',
+        'action_uninstall_description': 'Die installierten Komponenten entfernen.',
+        'action_check': 'Nur prüfen',
+        'action_check_description': 'PC und Frame prüfen, ohne etwas zu ändern.',
+        'action_exit': 'Beenden',
+        'action_exit_description': 'Ohne Änderungen schließen.',
+        'recommended': 'empfohlen',
+        'choice': 'Deine Auswahl',
+        'choice_help': 'Enter = {default}.  0 = Beenden.',
+        'choice_invalid': 'Bitte eine angezeigte Nummer oder 0 zum Beenden eingeben.',
+        'choice_cancelled': 'Keine Aktion ausgewählt.',
         'pc_check': 'SteamVR auf diesem PC wird geprüft',
         'pc_ready': 'Die PC-Dateien entsprechen der unterstützten Version.',
         'pc_partial': 'Einige PC-Dateien konnten nicht bestätigt werden; Einzelheiten stehen im Bericht.',
@@ -107,12 +159,13 @@ class Presenter:
     Wrap any OpenSSH/password operation in suspend(). It clears the progress
     line before yielding; the background writer cannot race the prompt.
     """
-    def __init__(self, stream=None, input_fn=input, lang=None, input_enabled=None):
+    def __init__(self, stream=None, input_fn=input, lang=None, input_enabled=None, width=None):
         self.stream = sys.stdout if stream is None else stream
         self.input_fn = input_fn
         self.lang = language(lang)
         self.interactive = bool(getattr(self.stream, 'isatty', lambda: False)())
         self.prompting = bool(sys.stdin.isatty()) if input_enabled is None else bool(input_enabled)
+        self._terminal_width = width
         self._lock = threading.RLock()
         self._tasks = []
         self._paused = 0
@@ -130,22 +183,77 @@ class Presenter:
         self.stream.write(value)
         self.stream.flush()
 
+    def columns(self):
+        """Leave the terminal's final column unused to avoid implicit wrapping."""
+        width = self._terminal_width
+        if width is None:
+            try:
+                width = os.get_terminal_size(self.stream.fileno()).columns
+            except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+                width = shutil.get_terminal_size(fallback=(80, 24)).columns
+        # PTYs/redirected consoles may report an unset zero-sized window.
+        # Treat that as unknown, rather than collapsing every paragraph.
+        width = int(width)
+        return max(12, min(width if width > 0 else 80, 120)) - 1
+
+    def _paragraph(self, value, *, indent=2):
+        prefix = ' ' * indent
+        value = str(value)
+        lines = textwrap.wrap(value, width=max(1, self.columns() - indent),
+                              break_long_words=True, break_on_hyphens=False,
+                              replace_whitespace=True) or ['']
+        self._write(''.join(prefix + line + '\n' for line in lines))
+
     def _clear(self):
         if self._width:
-            self._write('\r' + ' ' * self._width + '\r')
+            self._write('\r' + ' ' * min(self._width, self.columns()) + '\r')
             self._width = 0
 
     def say(self, key):
         with self._lock:
             self._clear()
-            self._write(self.text(key) + '\n')
+            self._paragraph(self.text(key))
+            self._write('\n')
+
+    def section(self, key):
+        with self._lock:
+            self._clear()
+            self._write('\n')
+            self._paragraph(self.text(key))
+            self._write('  ' + '-' * min(48, self.columns() - 2) + '\n\n')
+
+    def status(self, key, state='info'):
+        """A caller-classified status, without inferring installation readiness."""
+        if state not in ('info', 'ok', 'warning'):
+            raise ValueError('unknown status state')
+        with self._lock:
+            self._clear()
+            marker = {'info': '[i]', 'ok': '[ok]', 'warning': '[!]'}[state]
+            self._paragraph(marker + ' ' + self.text(key))
+            self._write('\n')
+
+    def path(self, value, key='report'):
+        """Display the label and path separately; never append it to a status row."""
+        with self._lock:
+            self._clear()
+            self._paragraph(self.text(key).strip())
+            # Do not let a path containing control characters move the cursor.
+            value = ''.join(c if c.isprintable() else '?' for c in str(value))
+            self._paragraph(value, indent=4)
+            self._write('\n')
 
     def banner(self, inspection=True):
         with self._lock:
-            self._write('  +------------------------+\n'
-                        '  |  [o]  STEAM FRAME  [o] |\n'
-                        '  +------------------------+\n'
-                        '  ' + self.text('title') + '\n\n')
+            self._write('\n')
+            if self.columns() >= 28:
+                self._write('  +------------------------+\n'
+                            '  |  [o]  STEAM FRAME  [o] |\n'
+                            '  +------------------------+\n\n')
+            else:
+                self._paragraph('[o] FRAME [o]')
+                self._write('\n')
+            self._paragraph(self.text('title'))
+            self._write('\n')
         self.say('inspection' if inspection else 'setup')
 
     def _animate(self, stopped):
@@ -155,7 +263,10 @@ class Presenter:
                 if self._paused or not self._tasks:
                     continue
                 value = '  ' + '|/-\\'[phase % 4] + ' ' + self._tasks[-1]
-                self._write('\r' + value + ' ' * max(0, self._width - len(value)))
+                width = self.columns()
+                if len(value) > width:
+                    value = value[:max(0, width - 3)] + '...'
+                self._write('\r' + value + ' ' * max(0, min(self._width, width) - len(value)))
                 self._width = len(value)
                 phase += 1
 
@@ -170,7 +281,9 @@ class Presenter:
                     self._thread = threading.Thread(target=self._animate, args=(self._stop,), name='sfnp-progress', daemon=True)
                     self._thread.start()
             else:
-                self._write(label + '...\n')
+                self._write('\n')
+                self._paragraph(label + '...')
+                self._write('\n')
         okay = False
         try:
             yield
@@ -179,7 +292,8 @@ class Presenter:
             with self._lock:
                 self._tasks.pop()
                 self._clear()
-                self._write('  [' + self.text('done' if okay else 'failed') + '] ' + label + '\n')
+                self._paragraph('[' + self.text('done' if okay else 'failed') + '] ' + label)
+                self._write('\n')
                 worker = None
                 if not self._tasks and self._thread is not None:
                     self._stop.set()
@@ -198,11 +312,78 @@ class Presenter:
             with self._lock:
                 self._paused -= 1
 
+    def _input(self, label):
+        with self.suspend():
+            with self._lock:
+                if len(label) + 2 <= self.columns():
+                    prompt = '  ' + label
+                else:
+                    self._paragraph(label)
+                    prompt = '  > '
+            return self.input_fn(prompt)
+
     def ask(self, key):
         if not self.prompting:
             return ''
+        return self._input(self.text(key))
+
+    def choose_action(self, actions, recommended=None):
+        """Offer only caller-approved actions; cancellation never implies a write.
+
+        Enter uses an offered recommendation, otherwise Check only, otherwise
+        Exit. No prompt capability, EOF, Ctrl-C or three invalid entries cancel.
+        This selects an action; the engine still owns its plan and permissions.
+        """
+        known = ('install', 'update', 'repair', 'uninstall', 'check', 'exit')
+        if (type(actions) not in (list, tuple) or len(actions) > len(known) or
+                any(type(action) is not str or action not in known for action in actions) or
+                len(set(actions)) != len(actions)):
+            raise ValueError('actions must be distinct supported action names')
+        if not actions or not self.prompting:
+            return None
+        default = recommended if recommended in actions else ('check' if 'check' in actions else ('exit' if 'exit' in actions else None))
+        # Keep the complete menu paused if a parent operation owns a spinner.
         with self.suspend():
-            return self.input_fn(self.text(key))
+            self.section('actions')
+            with self._lock:
+                for number, action in enumerate(actions, 1):
+                    label = self.text('action_' + action)
+                    if action == recommended:
+                        label += ' [' + self.text('recommended') + ']'
+                    self._paragraph(str(number) + '. ' + label)
+                    self._paragraph(self.text('action_' + action + '_description'), indent=5)
+                    self._write('\n')
+                self._paragraph(self.text('choice_help').format(default=self.text('action_' + (default or 'exit'))))
+                self._write('\n')
+            number = actions.index(default) + 1 if default is not None else 0
+            label = self.text('choice') + ' [' + str(number) + ']: '
+            for _ in range(3):
+                try:
+                    answer = self._input(label).strip()
+                except (EOFError, KeyboardInterrupt):
+                    self.say('choice_cancelled')
+                    return None
+                if not answer:
+                    return default
+                if answer.lower() in ('0', 'q', 'exit', 'cancel', 'abbrechen'):
+                    return None
+                if len(answer) == 1 and answer in '123456' and int(answer) <= len(actions):
+                    return actions[int(answer) - 1]
+                self.say('choice_invalid')
+            self.say('choice_cancelled')
+            return None
+
+    def confirm_uninstall(self):
+        """Confirm only an already displayed uninstall plan; default is cancel."""
+        if not self.prompting:
+            return False
+        with self.suspend():
+            self.say('confirm_uninstall')
+            try:
+                answer = self._input(self.text('confirm_remove_prompt')).strip()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return answer.casefold() == self.text('confirm_remove_word').casefold()
 
 
 @dataclass(frozen=True)
