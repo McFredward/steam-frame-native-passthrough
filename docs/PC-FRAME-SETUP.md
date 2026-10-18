@@ -1,283 +1,133 @@
 # PC and Steam Frame setup assistant
 
-## Current paired bridge preview
+The **paired preview** installs a companion on both the PC and Steam Frame.
+It is intended to carry transparency without reducing the game's normal colour
+image. That quality improvement and the combined game/Steam-menu picture are
+**not yet confirmed in a headset test**.
 
-The explicit `dev/get-preview.ps1` entry now selects the installable
-`stream-bridge-preview-v1` candidate. It requires the pinned Windows/NVIDIA
-sender and Frame runtime, and GloomhavenVR Build708 or newer. The stable entry
-points and historical bundle contract below remain separate. A software-validated
-preview is not a verified combined headset result.
+For the already demonstrated **Frame-only receiver**, use the separate
+[stable installation guide](INSTALL.md). The two routes and their limits are
+compared in [Compatibility](COMPATIBILITY.md).
 
-The interactive wizard uses [Textual](https://textual.textualize.io/), with a
-persistent PC/Frame overview, a focused action list, explicit confirmations and
-progress. Arrow keys, Tab, Enter and mouse input are supported; the layout adapts
-to the terminal size. Paths and technical output stay in a separate Details
-area. Redirected input/output retains the plain interface, and `--check` remains
-JSON-only. Failures and missing devices offer Retry; an uncertain write is
-reconciled through its owned checkpoint rather than blindly repeated.
+## Before you begin
 
-The synchronous workflow runs in one owned backend thread. Only the UI thread
-updates widgets; modal answers return to the backend without blocking rendering.
-Cancellation never kills a running installation/recovery thread. Completion
-stays visible until the user closes it. Textual and its pinned pure-Python
-dependencies are included privately with their licenses, requiring no user pip
-installation or system-wide Python packages.
+- Use the supported **Frame SteamVR 2.18.2, build 1791331621**. Exact runtime
+  checks must also pass.
+- The installable sender preview requires **Windows, NVIDIA and HEVC**. Other
+  codecs are not admitted for paired passthrough. Linux can inspect the setup
+  and maintain the Frame; installing a native Linux sender is not supported yet.
+  A Windows game running through Proton still uses a Linux SteamVR driver host.
+- Your game needs an integration explicitly supporting this preview. See the
+  [supported-games table](../README.md#supported-games); an old game-side
+  integration cannot be upgraded by installing the companions alone.
+- Keep the Frame awake, connected to the same network, and stop the VR stream.
+  Enable [persistent SSH access](INSTALL.md#keep-ssh-enabled-after-a-restart)
+  first. The assistant does not change the Frame's SSH service or system image.
 
-The bridge wizard keeps one authenticated OpenSSH connection for its lifetime.
-Check, install, health checks and explicit Undo reuse that connection on Windows
-and Linux. OpenSSH alone owns password/fingerprint prompts; no password is
-stored and no key is added. The terminal app temporarily yields the console only
-for interactive SSH authentication; established-session operations retain its
-progress display. A broken connection can be reopened for a deliberate
-retry or recovery; it never silently repeats an uncertain installation request.
-Failed discovery candidates and the final wizard exit close their processes.
+## Start the assistant
 
-Interactive bridge runs create a bounded private diagnostic file before the
-package check, outside the temporary bootstrap directory. Failures print its
-exact path and the recovery-record locations before offering Undo. Windows
-logs are under `%LOCALAPPDATA%/steam-link-native-passthrough/logs/`; Linux uses
-`$XDG_DATA_HOME/steam-link-native-passthrough/logs/` or the usual
-`~/.local/share` fallback. The PC receipt is `bridge-install.json` in that data
-root. The Frame reports its exact `SteamLinkNativePassthrough/stream-bridge/setup-restore.json`
-location (normally under `/home/steamos/.local/share`). A path is a recovery
-location, not proof that a failed operation created a receipt there.
-
-Logs contain fixed stages, commands, authored-check identifiers and OS error
-numbers, never console transcripts, SSH prompts, payloads or pairing keys.
-An authored check ID is the first16 lowercase hex digits of SHA256 over the
-exact source check message, prefixed `check_`; the client displays only its own
-matching static message. This preserves the reason for a remote refusal without
-forwarding arbitrary remote exception text. Logging failure reports the attempted
-path and never replaces the operation error. `--check` and `--dry-run` retain
-their no-log-write contract.
-
-After the concrete Apply confirmation the assistant closes only verified owned
-PC SteamVR processes and leaves that PC runtime closed after success. Its later
-startup belongs to the normal Steam Link/game launch. It never stops
-Frame SteamVR for file preparation: exact replacements are staged atomically
-with the original mapped files and UI still alive. It then requests an immediate
-coordinated restart of Steam and SteamVR and checks new service generations,
-native compositor/browser startup and the user's picture verdict. SteamVR is not
-restarted twice if restarting Steam already refreshed it. No device reboot or
-unrelated process kill is part of this workflow.
-
-Failed installation/startup automatically restores the current operation's exact
-private `setup-restore.json` checkpoints, then restarts and checks the original
-Frame interface. These checkpoints differ from installation uninstall receipts:
-rolling back a repair preserves the previously installed connection. Settings
-restore only owned keys and retain unrelated changes. Durable `lifecycle.json`
-records retain the PC's original running state and the Frame restart baseline.
-Recovery is never marked complete until original files/settings are verified,
-both Frame services are running and native startup health passes. Unknown changed
-files remain untouched. An interrupted/incomplete recovery offers Retry and stays
-available as a menu action on the next run, even if new installation is unavailable.
-If a confirmed Update first needs to recover an unfinished operation, it then
-continues installing the same checked package after refreshing both inventories.
-Recovery does not consume or silently discard that confirmed update. Explicit
-Restore remains a separate action. The completion overview refreshes the actual
-installed state, and the bounded log records action selection and confirmation.
-
-Release engineering prepares the pinned UI dependencies with
-`python3 -B tools/package_setup_textual.py --cache PATH --download`, then supplies
-`--textual-wheels PATH` to the package generator. This is a build input, not an
-end-user installation step. Dependency licenses and exact wheel provenance are
-kept in the private runtime.
-
-The remainder describes the separate older stable/inspection bundle contracts.
-
-**Development status:** the assistant can check and explain a PC/Frame setup.
-The new sender/receiver bridge is still a prototype, so current prototype bundles
-cannot install components or create pairings. An existing public Frame
-scene-atlas patch is reported separately; it is not a negotiated receiver.
-
-The [guided maintenance command](SETUP-INSPECTION.md) is available now for
-**Check / Uninstall / Exit**, including removal of the old public Frame patch.
-That separate maintenance archive cannot install or activate an unfinished
-bridge. Stop SteamVR manually and repeat removal if it reports pending.
-
-## Online entry points
-
-The repository contains `get.ps1` and `get.sh` for the planned public one-line
-setup. The intended stable entry points are:
+On **Windows**, paste this into PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.ps1 | iex
+irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/dev/get-preview.ps1 | iex
 ```
+
+On **Linux**, the inspection/Frame-maintenance entry is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/dev/get-preview.sh | bash
 ```
 
-**These are not a published complete PC/Frame installation yet.** Publish the
-stable entry points and dedicated setup asset only after both native providers
-and their runtime integration are admitted. Until that asset exists, the
-bootstrap refuses installation instead of using an older Frame-only release.
-Do not present the development snapshot as an installable passthrough fix.
+These are explicit preview entry points. They select the checked preview package;
+they do not turn an older stable Frame-only release into a paired installation.
+Read a downloaded script before executing it if you prefer reviewing the source.
+The assistant prepares its private Python/UI dependencies and, on Windows, an
+OpenSSH fallback when needed. You do not need to install Python or use `pip`.
 
-The bootstrap selects only the fixed `steam-link-native-passthrough-setup.zip`
-asset of this repository's latest stable GitHub release. It verifies GitHub's
-reported SHA-256 digest, bounded archive paths and every inner file before
-starting the assistant. These checks protect download/package consistency;
-the repository and GitHub release remain the trust source, not independent
-cryptographic publishers. Neither bootstrap requests elevation or a restart.
-Its temporary download/runtime directory is removed after the assistant exits.
+Use **arrow keys**, **Tab**, **Enter** or the mouse. The PC and Frame cards show
+what is actually installed. **Legacy patch only** means that the Frame-only
+receiver exists, not that the new paired connection is installed. Technical
+information and the exact log path are available in **Details**.
 
-Windows setup assets must contain the pinned portable Python runtime, so users
-do not need a separate Python installation for the online command. The bundle's
-bootstrap manifest is `sfnp-bootstrap-package-v1` with exact `schema`,
-`readiness: release`, `windows_python: setup/runtime/python/python.exe` and
-`files` fields. `files` pins every archive file except the manifest itself by
-length and SHA-256. The pinned `steam-link-bundle.json` and assistant engine are
-mandatory; the inner bundle must independently be a complete admitted release.
-Bash uses Python3.9+ (existing or privately prepared) and gives the wizard `/dev/tty` as stdin so piping
-the bootstrap into Bash does not swallow interactive review/SSH prompts.
+## Connect and apply
 
-Release engineering uses `tools/package_stream_link_setup.py` to assemble the
-already admitted native bundle, these launchers/engine and an explicitly pinned
-official amd64 embeddable Python archive. It performs no download or installation,
-retains Python's license/provenance and invokes the independent real Frame
-package verifier. It refuses to relabel a prototype or an unknown native
-package variant as an installable setup. Upload the resulting ZIP under the
-exact asset name above; GitHub's reported asset digest is required by bootstrap.
+1. Let the assistant find the Frame. It tries known addresses and nearby
+   devices before asking for an IP address. A failed search offers **Retry**,
+   manual address entry or a PC-only check.
+2. Confirm a new SSH fingerprint only after verifying it belongs to your Frame.
+   Enter your SSH password in the masked prompt inside the assistant. It is
+   reused in memory for this setup session, never written to logs or saved for
+   the next run. An incorrect password can be entered again.
+3. Choose the offered **Install**, **Update** or **Repair** action and review the
+   concrete changes before confirming **Apply**. An unsupported runtime, missing
+   payload or unknown changed file is not overwritten to force installation.
+4. The assistant prepares Frame files while its current interface remains
+   running, then performs the required coordinated Steam/SteamVR restart. It
+   checks fresh startup and asks whether the Frame picture is normal. Keep the
+   Frame awake until this is complete.
+5. Start Steam Link and the game normally when setup finishes. **PC SteamVR is
+   left closed after installation**; the assistant does not launch it for you.
+   Enable the game's native Steam Link passthrough option and check both eyes.
 
-## Run the assistant
+The assistant may close its verified PC SteamVR processes after Apply. It does
+not reboot the Frame or stop unrelated applications. A passed startup check
+establishes software health, not that the game picture, resolution or menu
+composition is correct.
 
-Extract the complete dedicated setup archive. On Windows, open
-`patch-steam-link.cmd`; on Linux, run `bash patch-steam-link.sh`.
-Keep its `setup` folder and supplied payloads alongside the launcher.
+## Update, uninstall and Undo
 
-The online Windows command prepares a bundled, release-verified Python runtime
-and portable OpenSSH fallback without installing either system-wide. The Bash
-command uses Python3.9+ or downloads an exact pinned private interpreter if
-needed; Linux currently uses the OS OpenSSH client. The source-checkout launchers
-can also reuse an existing interpreter. The native Linux sender is not yet reviewed: Linux can check/plan, but
-the assistant refuses to install a Windows DLL there. A Windows game running
-under Proton does not turn a Linux SteamVR process into a Windows driver host.
+Run the same command again. The assistant inspects the current files and offers
+appropriate actions, including **Update**, **Repair**, **Uninstall** and
+**Restore previous setup** (Undo). A current installation needs no changes.
+Changed or unknown files are preserved rather than silently replaced.
 
-The assistant first inventories the PC and Frame without installing anything.
-It automatically tries a confirmed previous address, local Frame names, nearby
-devices and one bounded private-network search. Only if these fail does it ask
-for an IP address; users never need to specify a subnet. The search checks port22
-on at most one proven physical private IPv4 /24 and validates actual Frame
-inventory before accepting a device. Enable Frame SSH beforehand using the
-[existing Frame instructions](INSTALL.md); the assistant does not change its
-SSH service or system image.
+A normal failed install or startup triggers recovery of the previous owned
+files/settings and a restart of the original Frame interface. **Previous setup
+restored** means that recovery succeeded; it does not mean the new connection
+was installed. An incomplete recovery remains available on the next run and
+must be reconciled before another write is attempted. Retry checks its recorded
+state instead of blindly repeating an uncertain operation.
 
-Normal OpenSSH handles keys, password prompts and fingerprint confirmation.
-Verify the Frame's fingerprint before accepting a new host. The assistant never
-stores an SSH password, disables fingerprint checks or sends a password through
-its command line. Read-only automated checks require an already trusted host
-and usable SSH key; they do not accept host keys or update SSH connection caches.
+**Ctrl+C aborts setup without automatic Undo or another restart.** Recovery
+records are retained and their paths are shown. Run the assistant again and
+choose **Restore previous setup** when ready. Undo is complete only after the
+original files/settings have been checked and the Frame interface is running
+again. Closing a password prompt or cancelling an action confirmation alone
+does not authorize installation or uninstall.
 
-After the check, choose **Install**, **Update**, **Repair**, **Uninstall** or
-**Quit** and review the concrete action. Missing, altered, unsupported or
-prototype payloads refuse installation and pairing. No component is fetched as
-an unreviewed substitute. Repeating an already current installation is a no-op.
-“Current” includes rehashing the actual installed Frame artifacts against the
-checked bundle, including the native library and setup helper. An unchanged
-receipt or component marker alone cannot hide a missing or corrupted file.
+## Logs and troubleshooting
 
-All writes finish before the final exit prompt. The assistant never stops or
-restarts Steam, SteamVR, the stream or the Frame. Close SteamVR before updating
-loaded provider code, then start it yourself after setup. A safe refusal is not
-proof that streamed mixed reality works.
+Failures show the exact log path and any recovery-record locations. Interactive
+setup logs normally live under:
 
-## Read-only checks and plans
+- Windows: `%LOCALAPPDATA%\steam-link-native-passthrough\logs\`
+- Linux: `$XDG_DATA_HOME/steam-link-native-passthrough/logs/`, or
+  `~/.local/share/steam-link-native-passthrough/logs/`
+
+Keep that log when reporting a problem. Logs contain bounded setup stages and
+recognized failure reasons, not SSH passwords, pairing keys or console captures.
+The PC installation receipt is `bridge-install.json` in the same application
+data root. The Frame reports its exact private recovery-record path; a displayed
+path alone does not prove that a record was created there.
+
+If the streamed picture is wrong, first disable native Steam Link passthrough
+in the game to return to ordinary output. If the Frame itself does not recover,
+use **Restore previous setup** and retain its reported log. Do not delete unknown
+files or replace Valve binaries manually. The [compatibility page](COMPATIBILITY.md)
+explains runtime updates, codecs and remaining picture limits.
+
+## Developer and automated checks
+
+The extracted setup supports read-only JSON inspection and a proposed-change
+view:
 
 ```text
 python setup/steam_link_setup.py --check --frame steamframe.local
 python setup/steam_link_setup.py --dry-run --action install --frame 192.168.1.20
 ```
 
-`--check` emits JSON without writing setup logs, credentials or cached addresses.
-`--dry-run` shows the proposal without staging or applying it. Applying changes
-requires interactive review; supplying `--action` alone is not unattended
-permission. `--bundle` selects an extracted complete setup bundle and
-`--steamvr` can identify a SteamVR library that was not discovered automatically.
-
-## Pairing, logs and recovery
-
-A future admitted release pairs the two components using a fresh 256-bit random
-key delivered through verified SSH standard input. The key never enters the
-bundle manifest, process arguments or setup log. Credentials are private files:
-POSIX mode `0600`; Windows uses a protected owner/system-only DACL before secret
-bytes are written. Only the explicitly selected `active.json` pairing is used;
-older key files remain available for explicit rollback. No automatic key search
-or attempt with every old key is allowed.
-
-After an applied action, the non-secret log is `setup-last.log` under the user's
-`steam-link-native-passthrough` data directory: Local AppData on Windows, or
-XDG data / `~/.local/share` on Linux. The same directory contains the checked
-PC installation receipt. Frame credentials are under
-`~/.config/steam-link-native-passthrough/pairings/`.
-Failures after release admission also retain a redacted report describing the
-possible partial installation. Unknown existing log/address-cache files are
-preserved rather than adopted. Read-only and prototype refusals create no log.
-
-Use **Uninstall** with a valid setup bundle to unregister the exact owned PC
-provider and invoke the existing transactional Frame uninstaller. Changed or
-unknown files are preserved. Credentials are retained, so uninstalling code
-does not destroy a user's rollback key. The assistant does not delete another
-driver, overwrite Valve binaries or require administrator access.
-An updated Frame runtime blocks new activation but does not by itself block
-ownership-based removal with a checked setup bundle. Removal uses the verified
-setup helper and valid owned receipt; it does not import installed scripts or
-re-admit the changed runtime as compatible. If the native uninstaller reports
-pending restoration, use the checked Frame setup's **emergency-off**, stop
-SteamVR manually and retry. The assistant never reports full removal while that
-step is pending.
-
-SSH cannot make two machines one atomic transaction. On failure the assistant
-undoes its new pairing selection/key when ownership still matches. A Frame
-package already installed successfully by the native transactional helper can
-remain installed if a later PC step fails. This is a partial installation, not
-a claim that the old Frame version was restored. Run **Check**, then **Repair**
-to complete the missing delta. If a pairing transaction is interrupted, preserve
-its private journal and use the same checked bundle for repair; never delete
-unrecognized state to make a warning disappear. SteamVR may ask for a manual
-stop before its native uninstaller can finish camera restoration.
-
-## Bundle contract for release engineering
-
-`steam-link-bundle.json` is `sfnp-steam-link-setup-v1`, with exact top-level
-`schema`, `readiness`, `bridge_protocol`, `platforms` and `frame` fields.
-`readiness` is `prototype` or `release`; only a complete reviewed release can
-apply. `bridge_protocol` contains exact `major`, `minor` and `wire_sha256` pins.
-Each component has the same protocol, its explicit `producer`/`receiver` role,
-`x86_64`/`aarch64` architecture, `reviewed` and `native_bridge` booleans and a
-bounded relative-file inventory of lengths and SHA-256 hashes. These manifest
-fields are not cryptographic attestation or a replacement for release review.
-
-The Windows entry uses `provider_root: pc-provider`,
-`provider_manifest: pc-provider/driver.vrdrivermanifest`,
-`provider_registration: user`. Its driver name is
-`steam_link_native_passthrough`. `vrpathreg` pins the bytes/hash and fixed path
-`bin/win64/vrpathreg.exe` inside the detected SteamVR installation. Registration
-uses Valve's [documented user driver registration utility](https://github.com/ValveSoftware/openvr/wiki/Local-Driver-Registration),
-including collision checks and registry readback. No arbitrary manifest command
-is executed.
-
-The Frame entry uses `package_root: frame-package`, fixed
-`setup_entry: frame-package/tools/native_passthrough_setup.py`, and exact
-`runtime_files` pins (`base`, relative `path`, `bytes`, `sha256`) matching the
-package compatibility profile. An admitted release additionally needs its
-pinned `bridge-component.json`: schema `sfnp-bridge-component-v1`, role
-`receiver`, matching protocol and provider `vrlink-complete-au-v1`. An old v3
-package cannot substitute for this native provider; the unchanged real native
-package verifier also must admit the complete package variant.
-
-All local payload hashes and remote runtime capabilities are checked before
-writes. After explicit Apply, exact checked bytes may be staged privately on the
-Frame (`0700` directories, `0600` files). The existing `verify_package` then
-checks that real staged package before activation, PC registration or pairing.
-Uninstallation is different: a checked helper removes only receipt-owned files;
-it must not require the updated runtime to pass installation admission again.
-The assistant invokes the existing transactional native setup, never rewrites
-service definitions itself, and removes only its unchanged owned staging files.
-
-The fixture executes this actual embedded remote agent in temporary homes with
-an explicitly fake native helper/runtime, and separately mocks system/SSH
-tools. It validates control flow and file safety, not Windows ACL execution,
-actual driver loading, Frame deployment or headset image quality. Existing
-native setup tests cover that helper's own transaction policy; this focused
-wizard suite is not a new full native test run.
+These modes do not apply changes or write setup logs/credentials. Applying an
+action still requires interactive review; `--action` is not unattended consent.
+`--bundle` selects a complete checked bundle and `--steamvr` supplies a library
+path when automatic discovery cannot find it. Native protocol, provider and
+package details belong in the [developer guide](DEVELOPING.md).

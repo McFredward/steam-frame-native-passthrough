@@ -1,4 +1,10 @@
-# Install and use Steam Link Native Passthrough
+# Stable Frame-only installation
+
+This guide installs the **stable Frame-only receiver**, whose native passthrough
+has been demonstrated in the headset. It shares video space between colour and
+transparency, which can reduce sharpness. For the separate Windows/NVIDIA/HEVC
+**PC + Frame preview**, use the [paired setup assistant](PC-FRAME-SETUP.md). Its
+intended full-colour quality is not yet confirmed in a headset test.
 
 Installation runs **on the Steam Frame**, either directly in Desktop Mode or
 from a PC over SSH. Both methods install the same files in your home directory.
@@ -109,13 +115,17 @@ an experimental build.
 
 1. Confirm that `bash setup.sh status` accepts the installed receiver, then
    start the PC VR stream and GloomhavenVR normally.
-2. Open **VR Options → World & sound**. Choose **Mixed Reality** in the
+2. Open **VR Options → World → Scenery**. Choose **Mixed Reality** in the
    environment selector, then check **Steam Link native passthrough** directly
    below it. The native choice is available only on an identified Steam Frame
    connection through Steam Link.
 3. Changes apply immediately, including while VR Options remains open. Opening
    the options does not turn passthrough off. Disable the native choice or
    Mixed Reality to stop it; there is no automatic timeout.
+
+The matching game integration is required; see the [supported games and minimum
+versions](../README.md#supported-games). Steam Frame standalone passthrough is
+built into the mod and does not need this streamed receiver.
 
 On a fresh GloomhavenVR installation, Mixed Reality starts off and the native
 Steam Link preference starts on. An existing saved off preference is kept.
@@ -179,7 +189,10 @@ your next manual restart. Do not bypass compatibility checks.
 If the game shows a packed or incorrect image, turn off **Steam Link native
 passthrough** in GloomhavenVR. Restart the game if the ordinary image does not
 return, inspect `status` and consult the [compatibility notes](COMPATIBILITY.md).
-Opening VR Options alone does not turn the source off.
+Opening VR Options alone does not turn the source off. The game temporarily
+pauses the legacy source on known XR input-focus loss; this is not a guarantee
+that every local Steam menu is composited correctly over passthrough. See
+[picture and menu limits](COMPATIBILITY.md#picture-edges-and-menus).
 
 Earlier development attempts caused recoverable black/blue screens and Steam
 startup failures. User-directory installation and startup checks reduce repeat

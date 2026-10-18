@@ -6,7 +6,44 @@ headset result from software-only checks. Dated research pages describe their
 own historical checkpoints; a statement there that a later feature is missing
 does not override the current implementation.
 
-## Architecture
+## Two current routes
+
+The **stable Frame-only atlas route** below has a visible headset result but
+uses part of the video image for opacity, with a known sharpness tradeoff.
+The **paired Windows/NVIDIA/HEVC preview** uses a separate sender/receiver
+companion and exact source/frame/eye association; it is intended to preserve
+ordinary RGB quality but has not yet passed a combined headset picture test.
+Use [Compatibility](COMPATIBILITY.md) for current evidence and
+[PC + Frame setup](PC-FRAME-SETUP.md) for the installed preview workflow. Dated
+research pages retain historical checkpoints, not current user instructions.
+
+## Paired preview architecture
+
+```text
+Game: current eye E + A
+  → admitted ordinary-RGBA source
+  → Windows/NVIDIA sender companion: exact source/eye association
+  → authenticated coverage in the same HEVC access unit as colour
+  → matching Frame import/decode/eye association
+  → guarded native composition over the Frame camera
+```
+
+The preview must establish compatible peers and actual source/frame/eye/extent
+association before activating coverage. A format capability grant is separate
+from operational coverage; a handshake alone is not proof of the final native
+surface binding or visible output. Missing association retains opaque rendering.
+The colour route must not be resized or replaced with an atlas merely because
+paired native coverage was requested.
+
+The current software contracts are the [bridge protocol](protocols/stream-bridge-v1.md),
+[session authentication](protocols/stream-bridge-auth-v1.md),
+[sender host integration](research/sender-bridge-host-integration-20261018.md) and
+[receiver host integration](research/receiver-hosted-bridge-20261018.md). Their
+dated evidence does not certify an end-to-end headset quality/menu result.
+The remaining atlas sections describe the independent stable fallback, not an
+instruction to enable both formats for the same eye.
+
+## Stable atlas architecture
 
 ```text
 Supported game/mod, PC                       Steam Frame
@@ -23,7 +60,7 @@ current eye: RGB contribution E + coverage A
                                   E + (1 − A) × local camera
 ```
 
-The native camera never travels to the PC. This path does not patch the PC
+The native camera never travels to the PC. This stable atlas path does not patch the PC
 Steam Link sender, add a camera stream, or join a separately received “latest
 mask” to a video frame. The game places both signals in one current per-eye
 image. The receiver reads both through the original invocation's current image
