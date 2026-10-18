@@ -1,5 +1,6 @@
 #pragma once
 #include "stream_bridge_credentials.h"
+#include "stream_bridge_frame.h"
 #include "../pc/stream-bridge-sender.h"
 #include "../receiver/stream_bridge_receiver.h"
 #include <memory>
@@ -9,6 +10,7 @@ enum class ControlStatus{Disabled,WaitingVideo,Listening,Connecting,TransportCon
 struct ControlRequest{
     bool explicitlyEnabled=false;
     Role role=Role::Producer;std::uint64_t buildId=0;
+    std::uint64_t offered=RequiredCapabilities,required=RequiredCapabilities;
     std::filesystem::path pairingsDirectory;
     // Numeric IPv4 only; no DNS/discovery or implicit public listener.
     std::array<char,16> address{};std::uint16_t port=0;
@@ -50,6 +52,16 @@ public:
     bool pollSent(SendReceipt&) noexcept;
     bool pollVerified(VerifiedControl&) noexcept;
     bool peerVerified() const noexcept;
+    // The caller supplies actual successful encode/output evidence. A completed
+    // byte certificate is not itself proof of alpha, stereo or selected image.
+    bool certifyAccessUnit(Bytes,const FrameDescriptor&,CoverageEncoding,Bytes coverage,
+        std::vector<std::uint8_t>& output) noexcept;
+    // Only owned bytes from this currently prepared native source are accepted.
+    // A valid certificate proves the complete original encoder AU; the first
+    // one additionally must contain the matching authenticated producer HELLO.
+    // This read-only verification neither binds nor advances control state.
+    bool verifyAccessUnit(Bytes,const stream_bridge_receiver::AccessUnitContext&,
+        CertifiedAccessUnit&) noexcept;
 private:
     static bool sealVideo(Bytes,std::vector<std::uint8_t>&,void*);
     static bool verifyVideo(Bytes,const stream_bridge_receiver::AccessUnitContext&,

@@ -80,6 +80,15 @@ void defaultsAndAddress(){
     for(const auto* address:{"0.0.0.0","255.255.255.255","224.0.0.1","8.8.8.8","localhost"}){std::strcpy(r.address.data(),address);check(runtime.prepare(r)==sb::ControlStatus::AddressRefused,"unspecified/public/multicast/DNS endpoints refused before credentials");}
     std::strcpy(r.address.data(),"127.0.0.1");check(runtime.prepare(r)==sb::ControlStatus::PairingRefused&&runtime.credentialStatus()==sb::CredentialStatus::MissingSelection,"missing private pairing gives bounded useful status");
 }
+void capabilities(){
+    Files files;sb::ControlRuntime runtime;auto req=request(files.producer,sb::Role::Producer);
+    req.offered=req.required=sb::KnownCapabilities;
+    check(runtime.prepare(req)==sb::ControlStatus::Listening,"actual full image capabilities configured");
+    sb::LocalConfig local;check(runtime.configuredLocal(local)&&local.offered==sb::KnownCapabilities&&local.required==sb::KnownCapabilities,"capabilities retained through real configuration");
+    req.offered|=32;check(runtime.prepare(req)==sb::ControlStatus::AddressRefused,"unknown runtime capability refused");
+    req.offered=sb::RequiredCapabilities;req.required=sb::KnownCapabilities;
+    check(runtime.prepare(req)==sb::ControlStatus::AddressRefused,"required capability must be offered");
+}
 void loopbackHandshake(){
     Files files;sb::ControlRuntime p,r;auto rp=request(files.producer,sb::Role::Producer);
     check(p.prepare(rp)==sb::ControlStatus::Listening&&p.localPort()!=0,"actual nonblocking producer listener prepared from private key");
@@ -126,4 +135,4 @@ void partialAndInvalid(){
     sb::VerifiedControl output;check(runtime.status()==sb::ControlStatus::AuthenticationRefused&&!runtime.peerVerified()&&!runtime.pollVerified(output),"complete unauthenticated packet closes trust without an output");close(raw);
 }
 }
-int main(){try{credentials();defaultsAndAddress();loopbackHandshake();partialAndInvalid();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{credentials();defaultsAndAddress();capabilities();loopbackHandshake();partialAndInvalid();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

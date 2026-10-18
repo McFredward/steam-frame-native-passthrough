@@ -75,6 +75,8 @@ ControlStatus ControlRuntime::prepare(const ControlRequest& request) noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);impl_->close(ControlStatus::Disabled);
     if(!request.explicitlyEnabled)return impl_->state;
     if((request.role!=Role::Producer&&request.role!=Role::Receiver)||!request.buildId
+        ||(request.offered&~KnownCapabilities)||(request.required&~request.offered)
+        ||(request.required&RequiredCapabilities)!=RequiredCapabilities
         ||(request.role==Role::Receiver&&(!nonzero(request.video.connection)||!request.video.generation)))return impl_->state=ControlStatus::AddressRefused;
     sockaddr_in endpoint{};if(!address(request,endpoint)||(request.role==Role::Receiver&&(!request.port||endpoint.sin_addr.s_addr==INADDR_ANY)))return impl_->state=ControlStatus::AddressRefused;
     Pairing pair;struct Erase{Pairing& p;~Erase(){secureZero(p.key.data(),p.key.size());}}erase{pair};
@@ -85,7 +87,7 @@ ControlStatus ControlRuntime::prepare(const ControlRequest& request) noexcept{
         ||(request.role==Role::Producer&&(!bridgeSystemRandom(binding.data(),binding.size())||!nonzero(binding))))return impl_->state=ControlStatus::RandomRefused;
     const auto auth=request.role==Role::Producer?impl_->auth.prepareProducer(pair,binding):impl_->auth.prepareReceiver(pair,request.video);
     if(auth!=AuthStatus::Ok)return impl_->state=ControlStatus::AuthenticationRefused;
-    impl_->config={request.role,request.buildId,local};impl_->video=request.video;
+    impl_->config={request.role,request.buildId,local,request.offered,request.required};impl_->video=request.video;
 #ifdef _WIN32
     WSADATA data{};if(WSAStartup(MAKEWORD(2,2),&data)!=0){impl_->close(ControlStatus::IoRefused);return impl_->state;}impl_->winsock=true;
 #endif
@@ -112,6 +114,30 @@ ControlStatus ControlRuntime::status()const noexcept{std::lock_guard<std::mutex>
 CredentialStatus ControlRuntime::credentialStatus()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->credential;}
 std::uint16_t ControlRuntime::localPort()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->port;}
 bool ControlRuntime::peerVerified()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->auth.peerVerified();}
+bool ControlRuntime::certifyAccessUnit(Bytes source,const FrameDescriptor& descriptor,CoverageEncoding encoding,
+    Bytes coverage,std::vector<std::uint8_t>& output) noexcept{
+    try{
+        std::unique_lock<std::mutex> lock(impl_->mutex,std::try_to_lock);
+        if(!lock.owns_lock()||!impl_->prepared||impl_->config.role!=Role::Producer)return false;
+        return appendCertifiedFrame(source,descriptor,encoding,coverage,impl_->auth,output)==FrameStatus::Ok;
+    }catch(...){return false;}
+}
+bool ControlRuntime::verifyAccessUnit(Bytes source,const stream_bridge_receiver::AccessUnitContext& context,
+    CertifiedAccessUnit& output) noexcept{
+    try{
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if(!impl_->prepared||impl_->config.role!=Role::Receiver||!context.sourceBoundaryVerified||!context.native.generation||
+            context.authority.session!=impl_->video.connection||context.authority.streamGeneration!=impl_->video.generation)return false;
+        CertifiedAccessUnit candidate;
+        if(inspectCertifiedFrame(source,impl_->auth,candidate)!=FrameStatus::Ok)return false;
+        if(!impl_->auth.bound()){
+            std::vector<std::uint8_t> hello;
+            if(inspectOwned({candidate.original.data(),candidate.original.size()},hello)!=SeiStatus::Ok||
+                impl_->auth.verifyInitialVideoHello({hello.data(),hello.size()},candidate.binding)!=AuthStatus::Ok)return false;
+        }
+        output=std::move(candidate);return true;
+    }catch(...){return false;}
+}
 bool ControlRuntime::configuredLocal(LocalConfig& output)const noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);if(!impl_->prepared)return false;output=impl_->config;return true;
 }

@@ -1,4 +1,5 @@
 #include "stream_bridge_auth.h"
+#include "stream_bridge_frame.h"
 #include "../receiver/sha256.h"
 #include <algorithm>
 #include <cstring>
@@ -172,5 +173,50 @@ AuthStatus AuthSession::openControl(Bytes envelope,AuthPayload& payload,Verified
     const auto status=inspect(envelope,&binding_,result,binding,sequence,false);
     if(status!=AuthStatus::Ok)return status;
     received_=sequence;peerVerified_=true;payload=result;channel={true,binding_};return AuthStatus::Ok;
+}
+namespace {
+AuthStatus frameHeaderTag(const Secret& key,Bytes header,AuthTag& tag) noexcept {
+    constexpr char domain[]="SFNP-EXACT-ACCESS-UNIT-V1";
+    std::array<std::uint8_t,sizeof(domain)-1+FrameSignedHeaderBytes> bytes{};
+    std::copy_n(reinterpret_cast<const std::uint8_t*>(domain),sizeof(domain)-1,bytes.begin());
+    std::copy_n(header.data,header.size,bytes.begin()+sizeof(domain)-1);
+    return hmacSha256({key.data(),key.size()},{bytes.data(),bytes.size()},tag);
+}
+bool frameHeaderShape(Bytes header) noexcept {
+    return header.data&&header.size==FrameSignedHeaderBytes&&
+        !std::memcmp(header.data,"SFV1",4)&&header.data[4]==1&&header.data[5]<=2&&
+        get(header.data+6,2)==FrameCertificateBytes;
+}
+}
+AuthStatus AuthSession::signFrameHeader(Bytes header,AuthTag& tag) const noexcept {
+    if(!prepared_)return AuthStatus::NotPrepared;
+    if(role_!=Role::Producer)return AuthStatus::RoleMismatch;
+    if(!bound_)return AuthStatus::NotBound;
+    if(!frameHeaderShape(header))return AuthStatus::Malformed;
+    if(!std::equal(pairId_.begin(),pairId_.end(),header.data+8))return AuthStatus::PairMismatch;
+    if(!std::equal(binding_.begin(),binding_.end(),header.data+24))return AuthStatus::BindingMismatch;
+    return frameHeaderTag(key_,header,tag);
+}
+AuthStatus AuthSession::verifyFrameHeader(Bytes header,Bytes tag,Nonce& binding) const noexcept {
+    if(!prepared_)return AuthStatus::NotPrepared;
+    if(role_!=Role::Receiver)return AuthStatus::RoleMismatch;
+    if(!frameHeaderShape(header)||!tag.data||tag.size!=AuthTagBytes)return AuthStatus::Malformed;
+    if(!std::equal(pairId_.begin(),pairId_.end(),header.data+8))return AuthStatus::PairMismatch;
+    Nonce candidate{};std::copy_n(header.data+24,candidate.size(),candidate.begin());
+    if(!nonzero(candidate)||(bound_&&candidate!=binding_)||
+        (!bound_&&pairId_==previousPair_&&candidate==previousBinding_))return AuthStatus::BindingMismatch;
+    AuthTag expected{};auto result=frameHeaderTag(key_,header,expected);
+    if(result==AuthStatus::Ok&&!constantTimeEqual(expected,tag.data))result=AuthStatus::BadMac;
+    secureZero(expected.data(),expected.size());
+    if(result==AuthStatus::Ok)binding=candidate;
+    return result;
+}
+AuthStatus AuthSession::verifyInitialVideoHello(Bytes envelope,const Nonce& certifiedBinding) const noexcept {
+    if(!prepared_)return AuthStatus::NotPrepared;
+    if(role_!=Role::Receiver)return AuthStatus::RoleMismatch;
+    if(bound_)return AuthStatus::AlreadyBound;
+    AuthPayload body{};Nonce binding{};std::uint64_t sequence=0;
+    const auto status=inspect(envelope,nullptr,body,binding,sequence,true);
+    return status==AuthStatus::Ok&&binding!=certifiedBinding?AuthStatus::BindingMismatch:status;
 }
 } // namespace stream_bridge

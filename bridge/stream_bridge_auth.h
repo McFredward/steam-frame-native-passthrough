@@ -56,6 +56,12 @@ public:
     // Bound control channel: authenticate every packet before use by handshake
     // or probe code. A raw TCP payload can never bootstrap a receiver.
     AuthStatus openControl(Bytes envelope,AuthPayload&,VerifiedChannel&) noexcept;
+    // Domain-separated exact-AU certificates. Validation does not consume a
+    // control sequence, bootstrap a channel or grant any image permission.
+    AuthStatus signFrameHeader(Bytes,AuthTag&) const noexcept;
+    AuthStatus verifyFrameHeader(Bytes header,Bytes tag,Nonce& binding) const noexcept;
+    AuthStatus verifyInitialVideoHello(Bytes envelope,const Nonce& certifiedBinding) const noexcept;
+    Nonce pairId() const noexcept { return pairId_; }
     bool prepared() const noexcept { return prepared_; }
     bool bound() const noexcept { return bound_; }
     bool peerVerified() const noexcept { return peerVerified_; }
