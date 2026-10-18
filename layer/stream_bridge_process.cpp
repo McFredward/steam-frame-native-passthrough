@@ -1,4 +1,5 @@
 #include "stream_bridge_process.h"
+#include "stream_bridge_artifacts.h"
 #include "pixel_snapshot_io.h"
 #include "../receiver/stream_bridge_native_loader.h"
 #include "../bridge/stream_bridge_credentials.h"
@@ -211,7 +212,7 @@ void unregisterConsumerCold(void* owner) noexcept{
         p.channel.stop();
     }
 }
-bool readCoverageFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("coverage.spv",7140,"54760d17ec2933ca667923ca713f64d6810914f9b2b53503d9a6ebb68ee2bdc0",output);}catch(...){return false;}}
-bool readLegacyFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("legacy.spv",31384,"44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49",output);}catch(...){return false;}}
+bool readCoverageFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("coverage.spv",stream_bridge_artifacts::CoverageBytes,stream_bridge_artifacts::CoverageSha256,output);}catch(...){return false;}}
+bool readLegacyFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("legacy.spv",stream_bridge_artifacts::LegacyBytes,stream_bridge_artifacts::LegacySha256,output);}catch(...){return false;}}
 __attribute__((constructor)) static void prepareBeforeMain(){prepareProcessCold();}
 } // namespace stream_bridge_renderer

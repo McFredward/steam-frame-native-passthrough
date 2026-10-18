@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Private-input controls for the actual stream coverage shader generator."""
 import hashlib
+import ast
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -74,6 +76,25 @@ class CoverageTests(unittest.TestCase):
         for binary, count in ((bytes(wrong), 1), (self.original, 0), (self.original, True)):
             with self.assertRaises(ValueError):
                 coverage.transform(binary, count)
+
+    def test_installer_runtime_and_generator_use_the_same_owned_pins(self):
+        root = Path(__file__).resolve().parents[1]
+        header = (root / 'layer/stream_bridge_artifacts.h').read_text()
+        runtime = {}
+        for name, filename in (('Coverage', 'coverage.spv'), ('Legacy', 'legacy.spv')):
+            size = re.search(r'\b' + name + r'Bytes=(\d+);', header)
+            digest = re.search(r'\b' + name + r'Sha256="([a-f0-9]{64})";', header)
+            self.assertIsNotNone(size)
+            self.assertIsNotNone(digest)
+            runtime[filename] = {'bytes': int(size[1]), 'sha256': digest[1]}
+        assignments = ast.parse((root / 'setup/stream_bridge_install.py').read_text()).body
+        installed = [ast.literal_eval(node.value) for node in assignments
+                     if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'GENERATED' for target in node.targets)]
+        self.assertEqual(installed, [runtime])
+        binary, _ = coverage.transform(self.original)
+        self.assertEqual(runtime['coverage.spv'], {'bytes': len(binary),
+                                                  'sha256': hashlib.sha256(binary).hexdigest()})
 
 
 if __name__ == '__main__':

@@ -28,7 +28,7 @@
 namespace sr=stream_bridge_renderer;namespace sb=stream_bridge;namespace local=stream_bridge_local;
 namespace {
 std::vector<std::uint32_t> words(const char* path){std::ifstream f(path,std::ios::binary|std::ios::ate);check(bool(f),"private source opens");const auto n=f.tellg();check(n>0&&n<65536&&n%4==0,"bounded private words");std::vector<std::uint32_t> out(std::size_t(n)/4);f.seekg(0);f.read(reinterpret_cast<char*>(out.data()),n);check(bool(f),"private source fully read");return out;}
-sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords,legacyWords;std::atomic<bool> leaseCurrent{true};
+sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords,legacyWords;std::atomic<bool> leaseCurrent{true};bool coverageReadable=true;
 struct Driver:Fake {
  struct Update{std::uint64_t buffer;VkDeviceSize offset;float value;bool fill=false;};
  std::map<std::uint64_t,std::vector<Update>> commands;
@@ -83,7 +83,7 @@ namespace stream_bridge_renderer {
 bool prepareProcessCold()noexcept{return true;}bool enabled()noexcept{return true;}ProcessKind processKind()noexcept{return ProcessKind::Compositor;}
 stream_bridge_native::NativeImages* sourceImages()noexcept{return nullptr;}void sourceExportedFd(int)noexcept{}
 bool registerConsumerCold(ProcessConsumer c)noexcept{consumer=c;return true;}void unregisterConsumerCold(void*)noexcept{consumer={};}
-bool readCoverageFragmentCold(std::vector<std::uint32_t>& out)noexcept{out=coverageWords;return true;}bool readLegacyFragmentCold(std::vector<std::uint32_t>& out)noexcept{out=legacyWords;return true;}
+bool readCoverageFragmentCold(std::vector<std::uint32_t>& out)noexcept{if(!coverageReadable)return false;out=coverageWords;return true;}bool readLegacyFragmentCold(std::vector<std::uint32_t>& out)noexcept{out=legacyWords;return true;}
 }
 namespace stream_bridge_local {
 struct LeaseReader::Impl{};LeaseReader::LeaseReader():impl_(new Impl){}LeaseReader::~LeaseReader()=default;
@@ -135,6 +135,9 @@ struct Integration {
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
 void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ {coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline!=handle<VkPipeline>(0x60)&&f.vk.createdPipelines.size()==1,"unavailable coverage artifact must preserve the independently published legacy decoder");
+  const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"legacy-only preparation forwards native submit exactly once without unprepared guard commands");
+  check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;}
  {Integration f(vs,ps,1);auto draw=f.record();check(draw.ready&&draw.coverage&&draw.control,"documented native 29-binding count1 gets both companion pipelines");check(f.submit()==VK_SUCCESS&&f.vk.reads.back()==1,"native count1 current exact mask reaches original draw");}
  {Integration f(vs,ps,1,false,false);check(!f.record().ready,"pending count1 cannot be admitted by observed layout alone");}
  {auto wrong=ps;wrong.back()^=1;Integration f(vs,wrong,1,true,false);check(!f.record().ready,"mutated native fragment cannot authorize count1");}
@@ -161,4 +164,7 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
  {Integration f(vs,ps);f.record();for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSubmissionFences;++n)check(f.submit(false)==VK_SUCCESS,"bounded unsignaled retirement reservation");f.submit(false);check(f.vk.reads.back()==0,"retirement capacity refusal must disable image guard before original submit");}
 }
 }
-int main(int argc,char** argv){try{check(argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);legacyWords=words(argv[4]);integration(vs,ps);std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{check(argc==5||argc==6,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);legacyWords=words(argv[4]);
+ if(argc==6){check(std::strcmp(argv[5],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline!=handle<VkPipeline>(0x60)&&f.vk.createdPipelines.size()==1,"unavailable coverage artifact must preserve the independently published legacy decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"legacy-only preparation forwards native submit exactly once without unprepared guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
+ else integration(vs,ps);
+ std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

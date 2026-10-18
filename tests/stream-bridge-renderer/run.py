@@ -8,16 +8,17 @@ The existing standalone native-fragment and R8 GPU proofs remain separate.
 import argparse, hashlib, json, pathlib, shutil, subprocess
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--legacy',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--mutants',action='store_true');a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--legacy',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');a=p.parse_args()
  here=pathlib.Path(__file__).resolve().parent;root=a.native_root.resolve();out=a.output.resolve();cache=out/'cache';cache.mkdir(parents=True,exist_ok=True);source=out/'source';source.mkdir(exist_ok=True)
  fixtures=here/'fixture.cpp';shutil.copy2(fixtures,source/'fixture.cpp')
- files=['layer/stream_bridge_renderer.cpp','layer/stream_bridge_renderer.h','layer/stream_bridge_process.h','layer/stream_bridge_coverage_gpu.cpp','layer/stream_bridge_coverage_gpu.h','layer/native_presenter_pipeline.h']
+ files=['layer/stream_bridge_renderer.cpp','layer/stream_bridge_renderer.h','layer/stream_bridge_process.h','layer/stream_bridge_artifacts.h','layer/stream_bridge_coverage_gpu.cpp','layer/stream_bridge_coverage_gpu.h','layer/native_presenter_pipeline.h']
  pins={}
  for relative in files:
   original=root/relative;target=source/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,target);pins[relative]=hashlib.sha256(original.read_bytes()).hexdigest()
  renderer=source/'layer/stream_bridge_renderer.cpp';pool=source/'layer/stream_bridge_coverage_gpu.cpp'
  shared=[root/f for f in ['bridge/stream_bridge_frame.cpp','bridge/stream_bridge_auth.cpp','bridge/stream_bridge_protocol.cpp','bridge/hevc_bridge_sei.cpp']]
  args=[str(a.vs.resolve()),str(a.ps.resolve()),str(a.coverage.resolve()),str(a.legacy.resolve())]
+ if a.artifact_fallback_only:args+=['artifact-fallback']
  input_pins={str(path.resolve()):hashlib.sha256(path.read_bytes()).hexdigest() for path in [a.vs,a.ps,a.coverage,a.legacy]}
  def run(name,production,sanitize=False,negative=False):
   binary=cache/name;command=['c++','-std=c++17','-O1','-g','-Wall','-Wextra','-Wpedantic','-Werror','-Wno-missing-field-initializers','-I'+str(source),'-I'+str(root),'-I'+str(root/'layer'),'-pthread']
@@ -39,6 +40,7 @@ def main():
    'missing-native-count1-proof':('p.definitions.authorizeProbeInterface(proof->profile)','false'),
    'raw-native-baseline':('original=entry->legacy;','original=entry->native;'),
   }
+  if a.artifact_fallback_only:mutations={'coverage-failure-removes-baseline':('if(!readCoverageFragmentCold(p.coverageWords)){','if(!readCoverageFragmentCold(p.coverageWords)){p.prepared=false;return false;')}
   for name,(old,new) in mutations.items():
    if old not in text:raise AssertionError('semantic control anchor missing: '+name)
    path=source/(name+'.cpp');path.write_text(text.replace(old,new,1));results[name]=run(name,path,negative=True)

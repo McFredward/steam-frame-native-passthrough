@@ -34,6 +34,16 @@ public/private pipeline retirement have focused controls; a raw-native baseline
 mutant must fail. Custom allocation callbacks remain unsupported and keep their
 original object untouched. No caller-owned callback context is retained.
 
+The optional coverage artifact and GPU preparation are independent of baseline
+decoder preparation. Missing coverage must still publish the verified legacy
+decoder without advertising an exact-mask route. Its submits forward directly,
+without any unprepared guard command. `--artifact-fallback-only` runs this bounded
+preparation/forwarding check and a valid scalar-coverage control; its causal
+mutation makes coverage-file failure disable the decoder and must fail. The
+separate `tests/stream-bridge-process/artifacts.py` fixture uses the actual cold
+file readers, so a generator/runtime pin mismatch cannot hide behind the
+renderer fixture's explicitly supplied artifact observations.
+
 External process admission, authenticated picture callbacks and lease validity
 are explicitly supplied fixture observations. A regular temporary fd tests the
 renderer's kernel-object join, not an actual DMA_BUF export. This is not a

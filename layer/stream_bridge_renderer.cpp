@@ -45,7 +45,7 @@ struct Renderer::Impl {
     };
     std::atomic<std::uint64_t> observationEpoch{1};std::atomic<bool> lost{false};std::atomic<unsigned> admittedPipelines{0};
     mutable std::mutex gate;VkDevice device{};PFN_vkGetDeviceProcAddr gdpa{};VkPhysicalDeviceMemoryProperties memory{};
-    std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,registered=false,count1Authorized=false;
+    std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,coveragePrepared=false,registered=false,count1Authorized=false;
     gpu::Pool pool;journal::Journal definitions{1,{},journal::PendingCount1::RetainFacts};
     std::vector<std::uint32_t> coverageWords,legacyWords;
     VkDescriptorSetLayout controlLayout{};VkDescriptorPool controlPool{};VkCommandPool guardPool{};
@@ -194,18 +194,28 @@ bool Renderer::prepareCold(VkDevice device,VkPhysicalDeviceMemoryProperties memo
         p.device=device;p.memory=memory;p.gdpa=get;p.api=api;p.family=family;
         p.definitions.createDevice(device,create,VK_SUCCESS);
         if(processKind()==ProcessKind::Vrlink)return true;
-        if(family==UINT32_MAX||api<VK_API_VERSION_1_1||!p.load()||!readCoverageFragmentCold(p.coverageWords)||!readLegacyFragmentCold(p.legacyWords)||!p.pool.prepare(device,get,memory,family))return false;
+        if(api<VK_API_VERSION_1_1){coldNote("renderer unavailable: negotiated Vulkan API below 1.1; original retained");return false;}
+        if(!p.load()){coldNote("renderer unavailable: required Vulkan dispatch missing; original retained");return false;}
+        if(!readLegacyFragmentCold(p.legacyWords)){coldNote("renderer unavailable: legacy.spv missing, changed or inaccessible; original retained");return false;}
+        // The independently verified atlas decoder is a safe baseline even if
+        // optional exact-coverage preparation fails. Never expose an undecoded
+        // atlas merely because a coverage artifact, queue or pool is unavailable.
+        p.prepared=true;
+        if(!readCoverageFragmentCold(p.coverageWords)){coldNote("exact coverage unavailable: coverage.spv missing, changed or inaccessible; legacy decoder retained");return true;}
+        if(family==UINT32_MAX){coldNote("exact coverage unavailable: no admitted graphics queue; legacy decoder retained");return true;}
+        if(!p.pool.prepare(device,get,memory,family)){coldNote("exact coverage unavailable: GPU pool preparation failed; legacy decoder retained");return true;}
         VkDescriptorSetLayoutBinding binding{0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};layout.bindingCount=1;layout.pBindings=&binding;
-        if(p.CreateDescriptorSetLayout(device,&layout,nullptr,&p.controlLayout)!=VK_SUCCESS)return false;
+        if(p.CreateDescriptorSetLayout(device,&layout,nullptr,&p.controlLayout)!=VK_SUCCESS){coldNote("exact coverage unavailable: control layout creation failed; legacy decoder retained");return true;}
         VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,128};VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pool.flags=VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;pool.maxSets=128;pool.poolSizeCount=1;pool.pPoolSizes=&size;
-        if(p.CreateDescriptorPool(device,&pool,nullptr,&p.controlPool)!=VK_SUCCESS)return false;
+        if(p.CreateDescriptorPool(device,&pool,nullptr,&p.controlPool)!=VK_SUCCESS){coldNote("exact coverage unavailable: control pool creation failed; legacy decoder retained");return true;}
         // Exactly one requested nonprotected queue in this admitted graphics
         // family. Other families cannot record one of our eligible primaries.
         unsigned queues=0;for(unsigned n=0;n<create.queueCreateInfoCount;++n)if(create.pQueueCreateInfos[n].queueFamilyIndex==family&&!create.pQueueCreateInfos[n].flags)queues+=create.pQueueCreateInfos[n].queueCount;
-        if(queues!=1||!p.makeControls())return false;
-        p.GetDeviceQueue(device,family,0,&p.queue);if(!p.queue)return false;
-        p.prepared=true;return true;
-    }catch(...){return false;}
+        if(queues!=1){coldNote("exact coverage unavailable: graphics family does not request exactly one queue; legacy decoder retained");return true;}
+        if(!p.makeControls()){coldNote("exact coverage unavailable: immutable control preparation failed; legacy decoder retained");return true;}
+        p.GetDeviceQueue(device,family,0,&p.queue);if(!p.queue){coldNote("exact coverage unavailable: native graphics queue missing; legacy decoder retained");return true;}
+        p.coveragePrepared=true;coldNote("native decoder and exact-coverage resources verified");return true;
+    }catch(...){coldNote("renderer preparation failed; exact coverage disabled");return p.prepared;}
 }
 void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCreateInfo& info,const VkAllocationCallbacks* allocator,VkPipeline& original) noexcept{
     auto&p=*impl_;if(!p.prepared)return;
@@ -231,6 +241,7 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
         // Epoch loss, missing masks, unknown recordings and hot try-lock misses
         // can now only disable coverage; they cannot expose a raw legacy atlas.
         entry->native=original;entry->id=handle(entry->legacy);original=entry->legacy;
+        if(!p.coveragePrepared){coldNote("native legacy decoder active; exact coverage unavailable");return;}
         VkDescriptorSetLayout layouts[3]{from<VkDescriptorSetLayout>(ready->recipe.provenance[0].value),p.pool.descriptorLayout(),p.controlLayout};
         VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};ci.setLayoutCount=3;ci.pSetLayouts=layouts;ci.pushConstantRangeCount=ready->recipe.layout.count;ci.pPushConstantRanges=ready->recipe.layout.ranges.data();
         VkPipelineLayout coverageLayout{};
@@ -334,7 +345,7 @@ void Renderer::commandReset(VkCommandBuffer value) noexcept{
 void Renderer::trackingLost() noexcept{impl_->lost.store(true,std::memory_order_release);}
 VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* infos,VkFence fence) noexcept{
     auto&p=*impl_;if(!p.QueueSubmit)return VK_ERROR_INITIALIZATION_FAILED;
-    if(!p.prepared||queue!=p.queue)return p.QueueSubmit(queue,count,infos,fence);
+    if(!p.coveragePrepared||queue!=p.queue)return p.QueueSubmit(queue,count,infos,fence);
     p.pool.drainUploads(queue);
     // Same native queue owner, bounded stack-only scratch, original semaphores,
     // pNext and fence retained. A leading immutable zero command makes even a
@@ -382,7 +393,7 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
 }
 VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2* infos,VkFence fence,bool khr) noexcept{
     auto&p=*impl_;const auto forward=khr?p.QueueSubmit2KHR:p.QueueSubmit2;if(!forward)return VK_ERROR_EXTENSION_NOT_PRESENT;
-    if(!p.prepared||queue!=p.queue)return forward(queue,count,infos,fence);
+    if(!p.coveragePrepared||queue!=p.queue)return forward(queue,count,infos,fence);
     p.pool.drainUploads(queue);
     std::array<VkSubmitInfo2,65> submits{};std::array<VkCommandBufferSubmitInfo,1024> commands{};
     const VkCommandBufferSubmitInfo zero{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,p.zero,1};
@@ -427,6 +438,6 @@ void Renderer::stopCold() noexcept{
         if(p.controlLayout)p.DestroyDescriptorSetLayout(p.device,p.controlLayout,nullptr);
     }else p.pool.abandonAfterDeviceDestroy(); // Native DestroyDevice owns eventual reclamation.
     for(auto& memory:p.memories)if(memory.duplicate>=0)close(memory.duplicate);
-    p.prepared=false;p.device={};
+    p.prepared=p.coveragePrepared=false;p.device={};
 }
 } // namespace stream_bridge_renderer
