@@ -17,7 +17,8 @@ bool startCode(Bytes b,std::size_t from,std::size_t& at,std::size_t& length){
     for(std::size_t i=from;i+2<b.size;++i)if(!b.data[i]&&!b.data[i+1]){
         if(b.data[i+2]==1){at=i;length=3;return true;}
         if(i+3<b.size&&!b.data[i+2]&&b.data[i+3]==1){at=i;length=4;return true;}
-    }return false;
+    }
+    return false;
 }
 FrameStatus nals(Bytes b,std::vector<Nal>& out){
     if(!b.data||!b.size)return FrameStatus::InvalidArgument;
