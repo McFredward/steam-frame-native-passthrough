@@ -117,7 +117,7 @@ struct SenderCoverage::Impl {
     std::atomic<std::uint64_t> failedSerial{0};std::atomic<bool> retirePending{false};std::uintptr_t module=0;bool stopped=false;
     ID3D11Device* pendingDevice=nullptr;ID3D11Device* device=nullptr;ID3D11DeviceContext* context=nullptr;
     void* nativeDevicePointer=nullptr; // Comparison only; never dereferenced as a guessed interface.
-    ID3D11Multithread* multithread=nullptr;void** table=nullptr;NativeDraw originalDraw=nullptr;Map originalMap=nullptr;Unmap originalUnmap=nullptr;Copy originalCopy=nullptr;
+    ID3D11Multithread* multithread=nullptr;CoverageContextFacade facade;
     std::array<ID3D11Texture2D*,2> witnessTargets{};
     ID3D11Texture2D* target=nullptr;ID3D11RenderTargetView* targetView=nullptr;ID3D11BlendState* blend=nullptr;
     std::uint32_t width=0,height=0;std::uint64_t activeSerial=0,activeEpoch=0;unsigned drawBits=0;std::array<unsigned,2> witnessBits{};bool invalid=false;
@@ -170,18 +170,18 @@ struct SenderCoverage::Impl {
             bool rawWitness=(slot.witnessBits[0]|slot.witnessBits[1])!=0;
             for(unsigned kind=0;kind<2;++kind)if(slot.witnessBits[kind]){
                 D3D11_MAPPED_SUBRESOURCE sample{};
-                if(SUCCEEDED(s.originalMap(s.context,slot.witnesses[kind],0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&sample))){
+                if(SUCCEEDED(forwardMap(s.context,slot.witnesses[kind],0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&sample))){
                     rawWitness=rawWitness&&sourceInteriorTranslucent(sample,slot.witnessBits[kind]);
-                    s.originalUnmap(s.context,slot.witnesses[kind],0);
+                    forwardUnmap(s.context,slot.witnesses[kind],0);
                 }else rawWitness=false;
             }
             if(!rawWitness){s.gates.refuse(CoverageGate::RawWitness);break;}
             pixels.resize(std::size_t(s.width)*s.height);
-            const auto result=s.originalMap(s.context,slot.texture,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&data);
+            const auto result=forwardMap(s.context,slot.texture,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&data);
             if(SUCCEEDED(result)){
                 bool valid=data.pData&&data.RowPitch>=s.width;
                 if(valid)for(unsigned y=0;y<s.height;++y){auto* row=static_cast<const std::uint8_t*>(data.pData)+std::size_t(y)*data.RowPitch;auto* out=pixels.data()+std::size_t(y)*s.width;for(unsigned x=0;x<s.width;++x)out[x]=std::uint8_t(255-row[x]);}
-                s.originalUnmap(s.context,slot.texture,0);
+                forwardUnmap(s.context,slot.texture,0);
                 if(valid)maskPid=slot.pid;else pixels.clear();
             }else{s.gates.refuse(CoverageGate::Readback);pixels.clear();}
             break; // Never block or substitute a later staging frame.
@@ -194,37 +194,30 @@ struct SenderCoverage::Impl {
         // explicitly does NOT permit transparent rendering on the receiver.
         return s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);
     }
+    static void STDMETHODCALLTYPE forwardDraw(ID3D11DeviceContext* context,UINT count,UINT start){
+        auto& s=*instance.load();bits<NativeDraw>(s.facade.originalFunction(13))(context,count,start);
+    }
+    static HRESULT STDMETHODCALLTYPE forwardMap(ID3D11DeviceContext* context,ID3D11Resource* resource,UINT sub,D3D11_MAP mode,UINT flags,D3D11_MAPPED_SUBRESOURCE* output){
+        auto& s=*instance.load();return bits<Map>(s.facade.originalFunction(14))(context,resource,sub,mode,flags,output);
+    }
+    static void STDMETHODCALLTYPE forwardUnmap(ID3D11DeviceContext* context,ID3D11Resource* resource,UINT sub){
+        auto& s=*instance.load();bits<Unmap>(s.facade.originalFunction(15))(context,resource,sub);
+    }
+    static void STDMETHODCALLTYPE forwardCopy(ID3D11DeviceContext* context,ID3D11Resource* destination,ID3D11Resource* source){
+        auto& s=*instance.load();bits<Copy>(s.facade.originalFunction(47))(context,destination,source);
+    }
     bool installContext(){
         if(!device||device->GetCreationFlags()&D3D11_CREATE_DEVICE_SINGLETHREADED)return false;
         device->GetImmediateContext(&context);if(!context||FAILED(context->QueryInterface(__uuidof(ID3D11Multithread),reinterpret_cast<void**>(&multithread))))return false;
-        // Public synchronization is enabled cold before admitting any companion
-        // work. It remains enabled for this device's process lifetime.
-        if(!multithread->GetMultithreadProtected())multithread->SetMultithreadProtected(TRUE);
+        // The pinned native caller enables protection before NVENC Open. Keep
+        // that native mode; never force it for an unsupported caller/device.
         if(!multithread->GetMultithreadProtected())return false;
-        // The native runtime initializes/refreshes its public dispatch table
-        // lazily on the first rendering call. Finish that zero-work transition
-        // before saving or publishing hooks, under the same public protection.
-        // Zero vertices preserve every binding and produce no scene pixels.
-        MultithreadScope protect(multithread);context->Flush();context->Draw(0,0);
-        table=*reinterpret_cast<void***>(context);originalDraw=bits<NativeDraw>(table[13]);originalMap=bits<Map>(table[14]);originalUnmap=bits<Unmap>(table[15]);originalCopy=bits<Copy>(table[47]);
-        if(!originalDraw||!originalMap||!originalUnmap||!originalCopy)return false;
         Impl* expected=nullptr;if(!instance.compare_exchange_strong(expected,this)&&expected!=this)return false;
-        std::array<unsigned,4> positions{{13,14,15,47}};std::array<void*,4> before{{bits<void*>(originalDraw),bits<void*>(originalMap),bits<void*>(originalUnmap),bits<void*>(originalCopy)}};
-        std::array<void*,4> after{{bits<void*>(&draw),bits<void*>(&map),bits<void*>(&unmap),bits<void*>(&copy)}};
-        DWORD old=0;if(!VirtualProtect(table,48*sizeof(void*),PAGE_READWRITE,&old))return false;
-        unsigned count=0;for(;count<4;++count)if(InterlockedCompareExchangePointer(table+positions[count],after[count],before[count])!=before[count])break;
-        DWORD ignored=0;bool protectedAgain=VirtualProtect(table,48*sizeof(void*),old,&ignored)!=0;
-        if(count!=4||!protectedAgain){DWORD rollback=0;if(VirtualProtect(table,48*sizeof(void*),PAGE_READWRITE,&rollback)){for(unsigned i=0;i<count;++i)InterlockedCompareExchangePointer(table+positions[i],before[i],after[i]);VirtualProtect(table,48*sizeof(void*),old,&ignored);}return false;}
+        const std::array<std::uintptr_t,4> callbacks{{bits<std::uintptr_t>(&draw),bits<std::uintptr_t>(&map),bits<std::uintptr_t>(&unmap),bits<std::uintptr_t>(&copy)}};
+        if(!facade.prepare(context,callbacks)||!facade.publish())return false;
         enabled=true;gates.signal(CoverageSignal::ContextsReady);return true;
     }
-    bool dispatchOwned()const noexcept{
-        if(!context||!table||!multithread||!multithread->GetMultithreadProtected())return false;
-        void** current=nullptr;SIZE_T bytes=0;std::array<void*,48> entries{};
-        if(!ReadProcessMemory(GetCurrentProcess(),context,&current,sizeof current,&bytes)||bytes!=sizeof current||current!=table||
-           !ReadProcessMemory(GetCurrentProcess(),current,entries.data(),sizeof entries,&bytes)||bytes!=sizeof entries)return false;
-        return entries[13]==bits<void*>(&draw)&&entries[14]==bits<void*>(&map)&&
-            entries[15]==bits<void*>(&unmap)&&entries[47]==bits<void*>(&copy);
-    }
+    bool dispatchOwned()const noexcept{return context&&multithread&&multithread->GetMultithreadProtected()&&facade.installed();}
     void loseDispatch()noexcept{
         // Public runtime mode changes can replace dispatch legitimately. Never
         // reinstall over those new/native/third-party entries or keep granting
@@ -303,7 +296,7 @@ struct SenderCoverage::Impl {
         bool okay=outputResource&&desc.Width==width&&desc.Height==height&&(desc.Format==DXGI_FORMAT_NV12||desc.Format==DXGI_FORMAT_P010)&&(!nativeOutput||same(nativeOutput,outputResource));
         if(okay&&!nativeOutput)nativeOutput=identity(outputResource);
         release(outputResource);if(!okay)return gates.refuse(CoverageGate::OutputShape);
-        if(!drawTransmittance(ctx,targetView,blend,originalDraw,count,start))return gates.refuse(CoverageGate::BlendDraw);
+        if(!drawTransmittance(ctx,targetView,blend,forwardDraw,count,start))return gates.refuse(CoverageGate::BlendDraw);
         drawBits|=sourceBit;activePid=pid;gates.signal(CoverageSignal::EyeDraws);
         if(drawBits==((1u<<(2*frame.layerCount))-1)){preparedPid=pid;if(state!=7)state=6;gates.signal(CoverageSignal::CompletePairs);}return true;
     }
@@ -314,15 +307,15 @@ struct SenderCoverage::Impl {
         const bool ours=ctx==s.context&&s.enabled&&caller&&frame;
         if(!ours){
             if(caller){if(ctx!=s.context)s.gates.refuse(CoverageGate::Context);else if(!s.enabled)s.gates.refuse(CoverageGate::Prepared);else s.gates.refuse(CoverageGate::DirectFrame);}
-            s.originalDraw(ctx,count,start);return;
+            forwardDraw(ctx,count,start);return;
         }
         s.gates.signal(CoverageSignal::SourceFrames);
-        MultithreadScope protect(s.multithread);s.originalDraw(ctx,count,start);
+        MultithreadScope protect(s.multithread);forwardDraw(ctx,count,start);
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.gates.refuse(CoverageGate::Lock);s.failedSerial=frame->presentSerial;return;}
         if(!s.luma(ctx,count,start,*frame)){s.invalid=true;s.failedSerial=frame->presentSerial;}
     }
     static HRESULT STDMETHODCALLTYPE map(ID3D11DeviceContext* ctx,ID3D11Resource* resource,UINT sub,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* output){
-        auto& s=*instance.load();const auto result=s.originalMap(ctx,resource,sub,type,flags,output);
+        auto& s=*instance.load();const auto result=forwardMap(ctx,resource,sub,type,flags,output);
         const bool caller=s.site(__builtin_return_address(0),0x9f36f2);if(caller)s.gates.signal(CoverageSignal::NativeMaps);
         if(ctx!=s.context||!s.enabled||!caller||FAILED(result)||!output||!output->pData||sub||type!=D3D11_MAP_WRITE_DISCARD||flags){
             if(caller)s.gates.refuse(ctx!=s.context?CoverageGate::Context:CoverageGate::ConstantBuffer);
@@ -338,10 +331,10 @@ struct SenderCoverage::Impl {
     }
     static void STDMETHODCALLTYPE unmap(ID3D11DeviceContext* ctx,ID3D11Resource* resource,UINT sub){
         auto& s=*instance.load();if(ctx==s.context&&s.enabled&&s.site(__builtin_return_address(0),0x9f372c)&&!sub){std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(lock)for(auto& c:s.constants)if(c.pointer&&same(c.resource,resource)){std::memcpy(c.bytes.data(),c.pointer,c.bytes.size());c.pointer=nullptr;c.valid=true;s.gates.signal(CoverageSignal::ConstantCaptures);}}
-        s.originalUnmap(ctx,resource,sub);
+        forwardUnmap(ctx,resource,sub);
     }
     static void STDMETHODCALLTYPE copy(ID3D11DeviceContext* ctx,ID3D11Resource* destination,ID3D11Resource* source){
-        auto& s=*instance.load();s.originalCopy(ctx,destination,source);const auto* frame=DirectModeBoundary::currentFrame();
+        auto& s=*instance.load();forwardCopy(ctx,destination,source);const auto* frame=DirectModeBoundary::currentFrame();
         const bool caller=s.site(__builtin_return_address(0),0xa217fb);if(caller)s.gates.signal(CoverageSignal::NativeCopies);
         if(ctx!=s.context||!s.enabled||!caller||!frame){if(caller)s.gates.refuse(ctx!=s.context?CoverageGate::Context:CoverageGate::DirectFrame);return;}
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.gates.refuse(CoverageGate::Lock);return;}
@@ -349,7 +342,7 @@ struct SenderCoverage::Impl {
         // Frozen slots cannot be evicted by a resource pointer reused later.
         Stage* free=nullptr;for(auto& slot:s.stages){if(!slot.submission&&same(slot.input,destination)){release(slot.input);slot.present=0;}if(!slot.present&&!free)free=&slot;}
         if(!free){s.gates.refuse(CoverageGate::StageFull);return;}
-        MultithreadScope protect(s.multithread);s.originalCopy(ctx,free->texture,s.target);for(unsigned kind=0;kind<2;++kind)if(s.witnessBits[kind])s.originalCopy(ctx,free->witnesses[kind],s.witnessTargets[kind]);free->witnessBits=s.witnessBits;free->input=identity(destination);if(!free->input)return;free->present=frame->presentSerial;free->pid=s.activePid;s.gates.signal(CoverageSignal::CapturedCopies);
+        MultithreadScope protect(s.multithread);forwardCopy(ctx,free->texture,s.target);for(unsigned kind=0;kind<2;++kind)if(s.witnessBits[kind])forwardCopy(ctx,free->witnesses[kind],s.witnessTargets[kind]);free->witnessBits=s.witnessBits;free->input=identity(destination);if(!free->input)return;free->present=frame->presentSerial;free->pid=s.activePid;s.gates.signal(CoverageSignal::CapturedCopies);
     }
 };
 std::atomic<SenderCoverage::Impl*> SenderCoverage::Impl::instance{nullptr};
@@ -376,8 +369,7 @@ void SenderCoverage::tick()noexcept{
 void SenderCoverage::stop()noexcept{
     auto& s=*impl_;s.enabled=false;s.prepared=false;s.lastPid=0;s.preparedPid=0;s.state=8;
     std::lock_guard<std::mutex> lock(s.mutex);s.stopped=true;
-    MultithreadScope protect(s.multithread);
-    if(s.table){std::array<unsigned,4> index{{13,14,15,47}};std::array<void*,4> native{{bits<void*>(s.originalDraw),bits<void*>(s.originalMap),bits<void*>(s.originalUnmap),bits<void*>(s.originalCopy)}};std::array<void*,4> ours{{bits<void*>(&Impl::draw),bits<void*>(&Impl::map),bits<void*>(&Impl::unmap),bits<void*>(&Impl::copy)}};DWORD old=0;if(VirtualProtect(s.table,48*sizeof(void*),PAGE_READWRITE,&old)){for(unsigned i=0;i<4;++i)InterlockedCompareExchangePointer(s.table+index[i],native[i],ours[i]);DWORD ignored=0;VirtualProtect(s.table,48*sizeof(void*),old,&ignored);}}
+    s.facade.restore();
     // No COM or staging release while a cached callback/borrowed AU can exist.
 }
 bool SenderCoverage::ready(std::uint32_t pid)const noexcept{return impl_->enabled&&impl_->prepared&&impl_->preparedPid==pid&&impl_->direct.ownsProcess(pid);}
@@ -391,13 +383,14 @@ CoverageGateStats SenderCoverage::gateStats()const noexcept{
     void** current=nullptr;SIZE_T bytes=0;std::array<void*,48> entries{};
     if(ReadProcessMemory(GetCurrentProcess(),s.context,&current,sizeof current,&bytes)&&bytes==sizeof current&&current&&
        ReadProcessMemory(GetCurrentProcess(),current,entries.data(),sizeof entries,&bytes)&&bytes==sizeof entries){
-        result.contextTableReadable=true;result.contextTableStable=current==s.table;
+        result.contextTableReadable=true;result.contextTableStable=s.facade.installed();
         const std::array<unsigned,4> indices{{13,14,15,47}};
         const std::array<void*,4> expected{{bits<void*>(&Impl::draw),bits<void*>(&Impl::map),bits<void*>(&Impl::unmap),bits<void*>(&Impl::copy)}};
-        const std::array<void*,4> original{{bits<void*>(s.originalDraw),bits<void*>(s.originalMap),bits<void*>(s.originalUnmap),bits<void*>(s.originalCopy)}};
+        const std::array<void*,4> original{{reinterpret_cast<void*>(s.facade.originalFunction(13)),reinterpret_cast<void*>(s.facade.originalFunction(14)),reinterpret_cast<void*>(s.facade.originalFunction(15)),reinterpret_cast<void*>(s.facade.originalFunction(47))}};
         for(unsigned i=0;i<indices.size();++i){if(entries[indices[i]]==expected[i])result.contextHookSlots|=1u<<i;
             if(entries[indices[i]]==original[i])result.contextOriginalSlots|=1u<<i;}
     }
+    result.contextFacadeSlots=s.facade.slotCount();result.nativeDispatchMutations=s.facade.nativeMutationCount();
     result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;return result;
 }
 const char* SenderCoverage::stateName()const noexcept{
