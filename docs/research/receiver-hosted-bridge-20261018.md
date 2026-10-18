@@ -73,11 +73,13 @@ For this exact retained binary, the CAPTURE public-call return addresses are:
 
 Actual successful DQBUF establishes the exact fd/index, source pool, capture
 pool and content cycle. Requeue revokes the old content before calling the
-original ioctl, including failure/unsupported-shape paths. The renderer must
-call `pinnedCaptureLeaseCurrent` at each relevant draw: it uses a try-lock and
-scalar comparisons only, never I/O. A worker-cached event alone cannot authorize
-a resource after the native queue has already reused it. This immediate check
-does not replace native Vulkan synchronization/fences for GPU content lifetime.
+original ioctl, including failure/unsupported-shape paths. An in-process consumer
+can call `pinnedCaptureLeaseCurrent`: it uses a try-lock and scalar comparisons
+only, never I/O. The actual compositor is another process; it requires the
+authenticated local transport and immediate shared lease in
+[the process-boundary follow-up](receiver-local-coverage-20261018.md).
+A worker-cached event alone cannot authorize a resource after native reuse.
+Neither scalar check replaces native Vulkan synchronization/fences.
 
 `NativeImages` independently records public successful external image creation,
 DMA-BUF allocation, binding and export. The current source-pinned cold export
@@ -92,9 +94,9 @@ allocation/image generations and supported offset zero. Same fd number alone
 is never sufficient. Multiple aliased images, wrong handle type, missing
 preparation, close/reuse, free/destroy and unknown shapes refuse the join.
 
-Only DMA-BUF images/memories consume the 64-entry registry. Selected rendering
-uses `NativeImages::current` (nonblocking scalar check) **and** the immediate
-provider capture-lease check. A consumer must additionally prove the exact
+Only DMA-BUF images/memories consume the 64-entry exporter registry. These are
+the decoder's own handles; the compositor needs its separate public imported
+allocation/image join. A consumer must additionally prove the exact
 public descriptor-bound selected VkImage, source certificate, eye/layout/UV,
 coverage extent, current mutual confirmation and GPU lifetime. A live VkImage
 allocation, frame certificate or tiny metadata handshake alone is insufficient.

@@ -31,7 +31,7 @@ struct Event {nd::Observation fact{};std::vector<std::uint8_t> coded;};
 struct Fixture {
     Files files;std::deque<Event> input;std::deque<nd::CaptureObservation> capture;
     nd::SnapshotStats counts{};unsigned polls=0,capturePolls=0,randomCalls=0,certified=0,decoded=0;
-    bool randomFails=false;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
+    bool randomFails=false,routeReady=true;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
     nd::DecodedFrame lastDecoded{};nd::CertifiedFrame lastCertified{};sb::CertifiedAccessUnit retained{};
     sb::ControlRuntime producer;nd::ReceiverWorker worker;sb::Handshake sender;
     sb::LocalConfig local{};sb::LocalSendAuthority authority{};std::uint64_t content=0,sourceFrame=1000;
@@ -42,6 +42,7 @@ struct Fixture {
         check(sender.begin(local,authority.channel)==sb::Status::Ok,"actual full-capability producer handshake");}
     static tx::VerifiedSource source(){tx::VerifiedSource s;s.verified=s.ordinaryStream=s.completeAccessUnit=true;s.codec=tx::VerifiedSource::Codec::HevcAnnexB;s.moduleSha256[0]=1;s.apiVersion=0x7102000b;s.encoderGeneration=81;return s;}
     nd::RuntimeRequest request(){nd::RuntimeRequest r;r.explicitlyEnabled=true;r.buildId=712;r.pairingsDirectory=files.receiver;r.producerPort=producer.localPort();std::strcpy(r.producerAddress.data(),"127.0.0.1");
+        r.imageRoutePrepared=[](void* v) noexcept{return static_cast<Fixture*>(v)->routeReady;};r.imageRouteContext=this;
         r.callbacks={onCertified,onDecoded,onCapture,onNotice,this};return r;}
     nd::SourceProvider provider(){return {poll,pollCapture,stats,random,this};}
     static bool poll(nd::Observation& out,std::uint8_t* destination,std::size_t capacity,void* v) noexcept {
@@ -54,7 +55,7 @@ struct Fixture {
     static void onDecoded(const nd::DecodedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.decoded;f.lastDecoded=frame;}
     static void onCapture(const nd::SourceIdentity&,const nd::CaptureObservation& c,void* v) noexcept{static_cast<Fixture*>(v)->invalidations.push_back(c);}
     static void onNotice(const nd::RuntimeNotice& n,void* v) noexcept{static_cast<Fixture*>(v)->notices.push_back(n);}
-    void enqueue(std::vector<std::uint8_t> coded,std::uint32_t token,std::uint64_t pool=7){nd::Observation o{23,2,static_cast<std::uint32_t>(coded.size()),pool,++content,token,false};input.push_back({o,std::move(coded)});}
+    void enqueue(std::vector<std::uint8_t> coded,std::uint32_t token,std::uint64_t pool=7){nd::Observation o{23,2,static_cast<std::uint32_t>(coded.size()),pool,++content,token,false,4096};input.push_back({o,std::move(coded)});}
     void pump(){for(unsigned i=0;i<80;++i){worker.tick();producer.tick();sb::VerifiedControl got{};while(producer.pollVerified(got))check(sender.receive(bytes(got.payload),got.channel)==sb::Status::Ok,"actual verified reverse handshake");}}
     std::vector<std::uint8_t> signedDiscovery(){sb::Message message{};check(sender.next(message)==sb::Status::Ok,"actual producer discovery action");
         sb::AuthPayload plain{};check(sb::encode(message,plain)==sb::Status::Ok,"actual producer full-capability encoding");
@@ -67,10 +68,15 @@ struct Fixture {
         const std::array<std::uint8_t,2> coverage{{16,255}};
         check(producer.certifyAccessUnit(bytes(discovery),descriptor,sb::CoverageEncoding::Rle,bytes(coverage),certified),"actual paired exact AU certificate");
         return certified;}
-    void start(){check(worker.prepare(request(),provider()),"actual hosted worker prepared");}
+    void start(){check(worker.prepare(request(),provider()),"actual hosted worker prepared");enqueue(ordinary,9);pump();
+        capture.push_back({nd::CaptureKind::Decoded,23,73,0,9,7,21,9});pump();}
     void negotiate(){start();for(std::uint32_t token=10;token<13;++token){enqueue(certifiedDiscovery(),token);pump();
             capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});pump();}
         check(sender.confirmed()&&worker.status().state==nd::RuntimeState::PeerConfirmed,"actual video certificate plus real reverse socket confirms peer");}
+    void relisten(std::uint16_t port){sb::ControlRequest r;r.explicitlyEnabled=true;r.role=sb::Role::Producer;r.buildId=712;r.pairingsDirectory=files.producer;
+        r.offered=r.required=sb::KnownCapabilities;r.port=port;std::strcpy(r.address.data(),"127.0.0.1");
+        check(producer.prepare(r)==sb::ControlStatus::Listening&&producer.localConfig(local,authority),"actual fresh producer control admission on same configured endpoint");
+        sender.reset();check(sender.begin(local,authority.channel)==sb::Status::Ok,"new real paired binding after route reconnect");}
 };
 void offAndPreparation(){
     nd::ReceiverWorker worker;nd::RuntimeRequest r;r.pairingsDirectory="/does/not/exist";
@@ -82,7 +88,7 @@ void realVideoAndCapture(){
     Fixture f;f.negotiate();check(f.certified==3&&f.decoded==3,"every exact certified QBUF joins actual capture once");
     check(f.lastDecoded.descriptor.sourceFrame==1003&&f.lastDecoded.capture.dmabufFd==73
         &&f.lastDecoded.capture.capturePoolGeneration==21&&f.lastDecoded.submitted.nativeTimestampToken==12
-        &&f.lastDecoded.submitted.contentGeneration==3,"source frame, native token, output content and capture leases stay distinct");
+        &&f.lastDecoded.submitted.contentGeneration==4,"source frame, native token, output content and capture leases stay distinct");
     check(f.lastCertified.source.stream.connection[0]==1&&f.lastCertified.source.stream.generation==7
         &&!f.lastCertified.submitted.completeAccessUnit&&f.retained.coverageEncoding==sb::CoverageEncoding::Rle,"authenticated completeness never edits original native fact");
     check(f.lastCertified.peerConfirmed||f.lastDecoded.peerConfirmed,"full mutual state reported separately from image proof");
@@ -127,5 +133,23 @@ void ambiguityAndBound(){
     Fixture pairing;auto r=pairing.request();r.pairingsDirectory=pairing.files.root/"missing";check(pairing.worker.prepare(r,pairing.provider()),"missing credentials checked on worker after real source");
     pairing.enqueue(ordinary,71);pairing.pump();check(pairing.worker.status().state==nd::RuntimeState::PairingRefused,"missing selected receiver credential gets bounded status");
 }
+void imageRouteAdmission(){
+    Fixture waiting;waiting.routeReady=false;waiting.start();
+    check(waiting.worker.status().state==nd::RuntimeState::WaitingImageRoute&&waiting.randomCalls==0&&waiting.polls==0,
+        "unprepared final image route starts no source identity, full-cap control or repeating source copies");
+    waiting.routeReady=true;waiting.pump();check(waiting.randomCalls==0&&waiting.input.empty(),"first route readiness discards held stale snapshots and waits for new native input");
+    waiting.enqueue(ordinary,30);waiting.pump();check(waiting.randomCalls==1&&waiting.worker.status().state==nd::RuntimeState::Negotiating,"new actual QBUF alone begins ready-route capacity/auth admission");
+    Fixture missing;auto r=missing.request();r.imageRoutePrepared=nullptr;check(missing.worker.prepare(r,missing.provider()),"missing route proof stays configured ordinary");
+    missing.enqueue(ordinary,31);missing.pump();check(missing.randomCalls==0&&missing.worker.status().state==nd::RuntimeState::WaitingImageRoute,"missing route callback defaults false");
+    Fixture f;f.negotiate();const auto original=f.worker.status().source;const auto port=f.producer.localPort();
+    f.routeReady=false;f.pump();check(f.worker.status().state==nd::RuntimeState::WaitingImageRoute&&f.producer.status()==sb::ControlStatus::Lost,
+        "actual image-route loss closes existing authenticated control and revokes prior admission");
+    f.relisten(port);f.routeReady=true;f.pump();f.enqueue(ordinary,40);f.pump();
+    for(std::uint32_t token=41;token<44;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
+    const auto fresh=f.worker.status().source;
+    check(f.sender.confirmed()&&f.worker.status().state==nd::RuntimeState::PeerConfirmed&&fresh.outputPoolGeneration==original.outputPoolGeneration
+        &&fresh.stream.generation>original.stream.generation&&fresh.stream.connection!=original.stream.connection,
+        "same actual native pool recovers only through fresh route admission lifecycle and full real handshake");
 }
-int main(){try{offAndPreparation();realVideoAndCapture();unprovedInputs();lifecycleAndLoss();ambiguityAndBound();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int main(){try{offAndPreparation();realVideoAndCapture();unprovedInputs();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

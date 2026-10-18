@@ -58,6 +58,7 @@ struct Fake{
     unsigned ioctlCalls=0,mapCalls=0,unmapCalls=0,closeCalls=0,reads=0,dataReads=0;
     int result=0,error=EOVERFLOW,receivedErrno=0;std::uint32_t dequeue=0;
     bool readFails=false,mapFails=false,zeroCopyDuringQbuf=false;
+    bool requireCaptureSink=false;unsigned sinkCalls=0;nd::CaptureObservation lastSink{};
     nd::DecodeProvider* revokeDuringQbuf=nullptr;
 } fake;
 bool copy(void* output,std::uintptr_t source,std::size_t n,void*) noexcept{
@@ -80,6 +81,8 @@ int originalIoctl(int fd,unsigned long request,...){
             if(fake.revokeDuringQbuf)fake.revokeDuringQbuf->stop();
         }
     }
+    if(request==VIDIOC_QBUF&&static_cast<v4l2_buffer*>(p)->type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE&&fake.requireCaptureSink)
+        check(fake.sinkCalls&&fake.lastSink.kind==nd::CaptureKind::Requeue,"synchronous registered sink invalidates capture before original QBUF even on failure");
     errno=fake.error;return fake.result;
 }
 void* originalMmap(void* address,std::size_t size,int prot,int flags,int fd,off_t offset){
@@ -117,7 +120,8 @@ void noObservation(nd::DecodeProvider& p,const char* label){nd::Observation fact
 nd::Observation poll(nd::DecodeProvider& p,std::uint8_t expected){nd::Observation fact{};std::array<std::uint8_t,128> out{};
     check(p.poll(fact,out.data(),out.size())&&fact.usedBytes==64,"successful source chunk copied into caller-owned storage");
     check(std::all_of(out.begin(),out.begin()+64,[expected](auto b){return b==expected;}),"snapshot copies bytes before native QBUF handoff");
-    check(!fact.completeAccessUnit&&fact.nativeTimestampToken==0x12345678&&fact.poolGeneration&&fact.contentGeneration,"native timestamp preserved independently; no invented complete-AU flag");return fact;}
+    check(!fact.completeAccessUnit&&fact.nativeTimestampToken==0x12345678&&fact.poolGeneration&&fact.contentGeneration,"native timestamp preserved independently; no invented complete-AU flag");
+    check(fact.bufferCapacity==4096,"native capacity comes from exact queried/mapped buffer, not snapshot limit");return fact;}
 void identityAndOwnership(){
     auto p=provider();auto wrong=image();wrong.file[0]^=1;
     check(!p->prepare(wrong,calls(),{copy,nullptr}),"wrong exact executable refuses admission");
@@ -181,7 +185,9 @@ void unsafeShapes(){
     const auto entries=nd::preparedEntries();check(!entries.ioctl&&!entries.mmap&&!entries.close&&!entries.munmap,"unprepared runtime exposes no hook entries");
 }
 void captureOwnership(){
-    auto p=provider();setup(*p);map(*p,0);map(*p,1);fake.memory[0].fill(0x42);fake.memory[1].fill(0x43);
+    auto p=provider();check(p->setCaptureSink([](const nd::CaptureObservation& fact,void*) noexcept{++fake.sinkCalls;fake.lastSink=fact;},nullptr),"source sink registers before actual native pool");
+    setup(*p);check(!p->setCaptureSink(nullptr,nullptr),"late sink registration refused after lifecycle already began");
+    map(*p,0);map(*p,1);fake.memory[0].fill(0x42);fake.memory[1].fill(0x43);
     auto capture=format();capture.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     check(p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&capture)==0,"actual capture format forwarded");
     v4l2_requestbuffers request{};request.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;request.memory=V4L2_MEMORY_DMABUF;request.count=4;
@@ -189,7 +195,7 @@ void captureOwnership(){
     Buffer b(0);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;
     check(p->invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b)==0,"capture slot query observed");
     nd::CaptureObservation event{};while(p->pollCapture(event)){}
-    b.plane.m.fd=73;b.b.timestamp.tv_sec=0x4321;b.b.timestamp.tv_usec=0;
+    b.plane.m.fd=73;b.b.timestamp.tv_sec=0x4321;b.b.timestamp.tv_usec=0;fake.requireCaptureSink=true;
     check(p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==0,"DMABUF capture queued unchanged");
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Requeue&&event.dmabufFd==73&&event.index==0
         &&event.sourcePoolGeneration&&event.capturePoolGeneration&&event.contentGeneration==1,"requeue invalidation precedes decode and names exact DMABUF lease");
@@ -212,6 +218,8 @@ void captureOwnership(){
     p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&capture);
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Reset&&event.capturePoolGeneration!=generation,"capture reconfiguration retires exact old pool");
     queue(*p,1);poll(*p,0x43);
+    p->stop();check(fake.lastSink.kind==nd::CaptureKind::SourceReset,"stop revokes shared source sink synchronously before teardown");
+    check(p->setCaptureSink(nullptr,nullptr),"sink can detach only after stopped native ownership");
 }
 }
 int main(){try{identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}

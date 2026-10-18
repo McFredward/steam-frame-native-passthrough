@@ -27,6 +27,7 @@ struct Observation{
     std::uint32_t nativeTimestampToken=0;
     // A V4L2 OUTPUT chunk is NOT by itself a proven complete HEVC access unit.
     bool completeAccessUnit=false;
+    std::uint32_t bufferCapacity=0;
 };
 enum class CaptureKind:std::uint8_t{Reset,Requeue,Decoded,SourceReset};
 struct CaptureObservation{
@@ -35,6 +36,7 @@ struct CaptureObservation{
     std::uint64_t sourcePoolGeneration=0,capturePoolGeneration=0,contentGeneration=0;
 };
 struct SnapshotStats{std::uint64_t accepted=0,dropped=0,rejected=0,captureDropped=0;};
+using CaptureSink=void(*)(const CaptureObservation&,void*) noexcept;
 
 // Public V4L2 lifecycle observer. No private C++ object fields, metadata parser,
 // authentication, renderer, settings or transport. Each original runs once.
@@ -58,6 +60,7 @@ public:
     bool poll(Observation&,std::uint8_t* output,std::size_t capacity) noexcept;
     bool pollCapture(CaptureObservation&) noexcept;
     bool captureLeaseCurrent(const CaptureObservation&) const noexcept;
+    bool setCaptureSink(CaptureSink,void*) noexcept;
     SnapshotStats stats() const noexcept;
     OriginalIoctl originalIoctl() const noexcept;
     std::uintptr_t imageBase() const noexcept;
@@ -74,6 +77,7 @@ bool pollPinnedProcess(Observation&,std::uint8_t*,std::size_t) noexcept;
 bool pollPinnedCapture(CaptureObservation&) noexcept;
 SnapshotStats pinnedSnapshotStats() noexcept;
 bool pinnedCaptureLeaseCurrent(const CaptureObservation&) noexcept;
+bool setPinnedCaptureSink(CaptureSink,void*) noexcept;
 struct Entries{void* ioctl=nullptr;OriginalMmap mmap=nullptr;OriginalMunmap munmap=nullptr;OriginalClose close=nullptr;};
 Entries preparedEntries() noexcept;
 std::uintptr_t preparedImageBase() noexcept;

@@ -44,11 +44,13 @@ struct DecodeProvider::Impl{
     struct Slot{enum State{Free,Reserved,Ready}state=Free;std::uint64_t ticket=0;Observation fact{};std::array<std::uint8_t,MaxCodedBytes> bytes{};};
     mutable std::mutex mutex;std::uintptr_t base=0;Originals calls{};Reader reader{};
     bool prepared=false,active=false;std::uint64_t generation=0,ticket=0;
+    CaptureSink sink=nullptr;void* sinkContext=nullptr;
     std::array<CaptureObservation,64> captureEvents{};std::size_t captureHead=0,captureSize=0;
     std::array<Device,MaxDevices> devices{};std::array<Slot,SnapshotCapacity> slots{};SnapshotStats counts{};
     Device* find(int fd){for(auto& d:devices)if(d.fd==fd&&fd>=0)return &d;return nullptr;}
     Device* allocate(int fd){if(auto* d=find(fd))return d;for(auto& d:devices)if(d.fd<0){d.fd=fd;return &d;}return nullptr;}
     void captureEvent(const CaptureObservation& event){
+        if(sink)sink(event,sinkContext);
         if(captureSize==captureEvents.size()){increment(counts.captureDropped);return;}
         captureEvents[(captureHead+captureSize)%captureEvents.size()]=event;++captureSize;
     }
@@ -76,7 +78,9 @@ bool DecodeProvider::prepare(const ImageIdentity& image,const Originals& origina
     impl_->base=image.base;impl_->calls=originals;impl_->reader=reader;impl_->prepared=impl_->active=true;return true;
 }
 void DecodeProvider::stop() noexcept{
-    std::lock_guard<std::mutex> lock(impl_->mutex);impl_->active=false;impl_->devices={};
+    std::lock_guard<std::mutex> lock(impl_->mutex);impl_->active=false;
+    for(auto& device:impl_->devices)if(device.fd>=0)impl_->revokeCapture(device,true);
+    impl_->devices={};
     for(auto& s:impl_->slots){s.state=Impl::Slot::Free;}
     impl_->captureEvents={};impl_->captureHead=impl_->captureSize=0;
 }
@@ -138,7 +142,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                     auto& slot=impl_->slots[slotIndex];slot.state=Impl::Slot::Reserved;reservation=slot.ticket=++impl_->ticket;
                     const auto used=plane.bytesused-plane.data_offset;
                     if(impl_->reader.copy(slot.bytes.data(),b.address+plane.data_offset,used,impl_->reader.context)){
-                        b.pending=true;slot.fact={fd,buffer.index,used,d->generation,0,static_cast<std::uint32_t>(buffer.timestamp.tv_sec),false};
+                        b.pending=true;slot.fact={fd,buffer.index,used,d->generation,0,static_cast<std::uint32_t>(buffer.timestamp.tv_sec),false,b.length};
                     }else{slot.state=Impl::Slot::Free;slotIndex=SnapshotCapacity;increment(impl_->counts.rejected);}
                 }else increment(impl_->counts.dropped);
             }else increment(impl_->counts.rejected);
@@ -269,6 +273,11 @@ bool DecodeProvider::captureLeaseCurrent(const CaptureObservation& fact)const no
     const auto& buffer=d->capture[fact.index];return buffer.queried&&buffer.decoded&&!buffer.queued
         &&buffer.dmabuf==fact.dmabufFd&&buffer.cycle==fact.contentGeneration&&buffer.token==fact.nativeTimestampToken;
 }
+bool DecodeProvider::setCaptureSink(CaptureSink sink,void* context) noexcept{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    for(const auto& device:impl_->devices)if(device.fd>=0)return false;
+    impl_->sink=sink;impl_->sinkContext=context;return true;
+}
 SnapshotStats DecodeProvider::stats()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->counts;}
 
 namespace {
@@ -316,6 +325,7 @@ bool pollPinnedProcess(Observation& fact,std::uint8_t* output,std::size_t size) 
 bool pollPinnedCapture(CaptureObservation& fact) noexcept{return runtime&&runtime->pollCapture(fact);}
 SnapshotStats pinnedSnapshotStats() noexcept{return runtime?runtime->stats():SnapshotStats{};}
 bool pinnedCaptureLeaseCurrent(const CaptureObservation& fact) noexcept{return runtime&&runtime->captureLeaseCurrent(fact);}
+bool setPinnedCaptureSink(CaptureSink sink,void* context) noexcept{return runtime&&runtime->setCaptureSink(sink,context);}
 std::uintptr_t preparedImageBase() noexcept{return runtime?runtime->imageBase():0;}
 Entries preparedEntries() noexcept{
 #if defined(__aarch64__)

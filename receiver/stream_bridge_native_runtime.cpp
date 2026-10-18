@@ -18,6 +18,7 @@ struct ReceiverWorker::Impl {
     struct Sending {bool used=false,echo=false;std::uint64_t ticket=0;stream_bridge::Message message{};stream_bridge::ProbeMessage probe{};};
     RuntimeRequest request{};SourceProvider provider{};SourceIdentity source{};
     RuntimeNotice current{};bool enabled=false,blocked=false;SnapshotStats lastStats{};
+    bool routeSeen=false,routeWasReady=false;std::uint64_t admissionGeneration=0;
     stream_bridge::ControlRuntime control;stream_bridge_receiver::Receiver receiver;
     stream_bridge_receiver::Authority authority{};
     std::array<Pending,ReceiverWorker::PendingCapacity> pending{};Sending sending{};
@@ -34,13 +35,16 @@ struct ReceiverWorker::Impl {
         notice(state);if(!keepSource)source={};
     }
     bool begin(const Observation& fact){
-        if(!fact.poolGeneration||fact.fd<0)return false;
+        if(!fact.poolGeneration||fact.fd<0||!fact.bufferCapacity||fact.usedBytes>fact.bufferCapacity)return false;
         clear(RuntimeState::SourceLost,false);
-        source.decoderFd=fact.fd;source.outputPoolGeneration=fact.poolGeneration;source.stream.generation=fact.poolGeneration;
+        if(admissionGeneration==~std::uint64_t(0)){blocked=true;notice(RuntimeState::SourceRefused);return false;}
+        admissionGeneration=std::max(admissionGeneration+1,fact.poolGeneration);
+        source.decoderFd=fact.fd;source.outputPoolGeneration=fact.poolGeneration;source.stream.generation=admissionGeneration;
         if(!provider.random(source.stream.connection.data(),source.stream.connection.size(),provider.context)||!nonzero(source.stream.connection)){
             blocked=true;notice(RuntimeState::SourceRefused);return false;}
         stream_bridge::ControlRequest config{};config.explicitlyEnabled=true;config.role=stream_bridge::Role::Receiver;
         config.offered=config.required=stream_bridge::KnownCapabilities;
+        config.nativeAccessUnitCapacity=static_cast<std::uint32_t>(std::min<std::size_t>(fact.bufferCapacity,MaxCodedBytes));
         config.buildId=request.buildId;config.pairingsDirectory=request.pairingsDirectory;
         config.address=request.producerAddress;config.port=request.producerPort;config.video=source.stream;
         const auto status=control.prepare(config);
@@ -94,7 +98,7 @@ struct ReceiverWorker::Impl {
         stream_bridge::LocalConfig local{};stream_bridge::LocalSendAuthority localAuthority{};
         if(control.localConfig(local,localAuthority))authority.channel=localAuthority.channel;
         slot->certified=true;slot->descriptor=certificate.descriptor;
-        const CertifiedFrame frame{source,fact,&certificate,receiver.snapshot().peerConfirmed};
+        const CertifiedFrame frame{source,fact,&certificate,receiver.snapshot().peerConfirmed,observed};
         if(request.callbacks.certified)request.callbacks.certified(frame,request.callbacks.context);
     }
     void controlTick(){
@@ -129,6 +133,19 @@ bool ReceiverWorker::prepare(const RuntimeRequest& request,SourceProvider provid
 void ReceiverWorker::tick() noexcept{
     if(!impl_->enabled)return;
     try{
+        const bool ready=impl_->request.imageRoutePrepared&&impl_->request.imageRoutePrepared(impl_->request.imageRouteContext);
+        if(!ready){
+            if(impl_->routeWasReady)impl_->clear(RuntimeState::SourceLost,false);
+            impl_->routeSeen=true;impl_->routeWasReady=false;
+            CaptureObservation discarded{};for(unsigned i=0;i<64&&impl_->provider.capture(discarded,impl_->provider.context);++i){}
+            impl_->lastStats=impl_->provider.stats(impl_->provider.context);impl_->notice(RuntimeState::WaitingImageRoute);return;
+        }
+        if(impl_->routeSeen&&!impl_->routeWasReady){
+            Observation discarded{};for(unsigned i=0;i<SnapshotCapacity&&impl_->provider.poll(discarded,impl_->bytes.data(),impl_->bytes.size(),impl_->provider.context);++i){}
+            CaptureObservation retired{};for(unsigned i=0;i<64&&impl_->provider.capture(retired,impl_->provider.context);++i){}
+            impl_->lastStats=impl_->provider.stats(impl_->provider.context);impl_->routeWasReady=true;impl_->notice(RuntimeState::WaitingNativeSource);return;
+        }
+        impl_->routeSeen=impl_->routeWasReady=true;
         const auto stats=impl_->provider.stats(impl_->provider.context);
         if(stats.dropped!=impl_->lastStats.dropped||stats.rejected!=impl_->lastStats.rejected||stats.captureDropped!=impl_->lastStats.captureDropped){
             impl_->clear(RuntimeState::SourceLost,true);}
@@ -144,6 +161,7 @@ void ReceiverWorker::tick() noexcept{
 void ReceiverWorker::stop() noexcept{
     if(!impl_)return;
     impl_->clear(RuntimeState::Disabled,false);impl_->enabled=false;impl_->request={};impl_->provider={};
+    impl_->routeSeen=impl_->routeWasReady=false;
 }
 RuntimeNotice ReceiverWorker::status()const noexcept{return impl_->current;}
 namespace {

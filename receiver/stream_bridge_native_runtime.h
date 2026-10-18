@@ -16,6 +16,7 @@ struct CertifiedFrame {
     Observation submitted{};
     const stream_bridge::CertifiedAccessUnit* certificate=nullptr;
     bool peerConfirmed=false;
+    stream_bridge::Bytes observed{};
 };
 struct DecodedFrame {
     SourceIdentity source{};
@@ -25,7 +26,7 @@ struct DecodedFrame {
     bool peerConfirmed=false;
 };
 enum class RuntimeState:std::uint8_t {
-    Disabled,WaitingNativeSource,Negotiating,PeerConfirmed,SourceLost,
+    Disabled,WaitingNativeSource,WaitingImageRoute,Negotiating,PeerConfirmed,SourceLost,
     SenderUnavailable,PairingRefused,SourceRefused
 };
 struct RuntimeNotice {
@@ -49,6 +50,8 @@ struct RuntimeRequest {
     std::filesystem::path pairingsDirectory;
     std::array<char,16> producerAddress{};
     std::uint16_t producerPort=0;
+    bool (*imageRoutePrepared)(void*) noexcept=nullptr;
+    void* imageRouteContext=nullptr;
     RuntimeCallbacks callbacks{};
 };
 // All provider ports are used only by the worker, not by a rendering callback.
