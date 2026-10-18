@@ -95,10 +95,12 @@ def file_identity(info, *, cross_api=False):
     # Reading may update atime; content, ownership and replacement must not change.
     fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns')
     # CPython Windows stat reports creation time as ctime, while fstat reports
-    # change time (cpython#157671). Compare ctime only within the same API below.
+    # change time (cpython#157671). Path stat also invents execute bits from an
+    # .exe/.cmd extension; fstat does not. Same-API checks retain every bit/time.
     if not (cross_api and os.name == 'nt'):
         fields += ('st_ctime_ns',)
-    return tuple(getattr(info, field) for field in fields)
+    return tuple((getattr(info, field) & ~0o111) if cross_api and os.name == 'nt' and field == 'st_mode'
+                 else getattr(info, field) for field in fields)
 
 
 def read(path, limit=MAX_FILE, private=False):

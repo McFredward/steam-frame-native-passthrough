@@ -55,6 +55,15 @@ An older report containing only `unreadable` does not establish which failure
 occurred. In particular, a hardlink rejection is a source-proven possibility,
 not a confirmed explanation of that user's executable.
 
+The actual Windows embeddable-runtime fixture additionally reproduced the
+executable-extension mode mismatch: path stat reports mode33279 for an EXE,
+whereas fstat reports33206 for that same unchanged open file. CPython's
+[`update_st_mode_from_path`](https://github.com/python/cpython/blob/v3.14.8/Modules/posixmodule.c)
+adds execute bits from the filename extension. The cross-API identity comparison
+now normalizes only those Windows synthetic execute bits; the before/after
+comparisons within each API retain all mode and timestamp checks. This is a
+concrete EXE false rejection, separate from the potential hardlink restriction.
+
 Inspection can save only its own non-secret PC report:
 
 - Windows: `%LOCALAPPDATA%\steam-link-native-passthrough\setup-inspection.json`

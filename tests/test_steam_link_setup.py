@@ -212,6 +212,16 @@ class WizardTests(unittest.TestCase):
                 changed=types.SimpleNamespace(**{**vars(opened),field:3})
                 self.assertNotEqual(s.file_identity(before,cross_api=True),s.file_identity(changed,cross_api=True))
 
+    def test_windows_executable_extension_is_not_a_cross_api_identity_change(self):
+        fields=('st_dev','st_ino','st_mode','st_nlink','st_uid','st_gid','st_size','st_mtime_ns','st_ctime_ns')
+        opened=types.SimpleNamespace(**{**dict.fromkeys(fields,1),'st_mode':stat.S_IFREG|0o666})
+        named=types.SimpleNamespace(**{**vars(opened),'st_mode':stat.S_IFREG|0o777})
+        with mock.patch.object(os,'name','nt'):
+            self.assertEqual(s.file_identity(named,cross_api=True),s.file_identity(opened,cross_api=True))
+            self.assertNotEqual(s.file_identity(named),s.file_identity(opened))
+            readonly=types.SimpleNamespace(**{**vars(opened),'st_mode':stat.S_IFREG|0o444})
+            self.assertNotEqual(s.file_identity(named,cross_api=True),s.file_identity(readonly,cross_api=True))
+
     def test_combined_platform_inventory_shares_only_identical_producer_files(self):
         linux=copy.deepcopy(self.manifest['platforms']['windows-x86_64'])
         linux['reviewed']=False;linux['native_bridge']=False
