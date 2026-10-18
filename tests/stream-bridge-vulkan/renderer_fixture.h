@@ -49,7 +49,7 @@ public:
     VkResult submit(VkQueue q,std::uint32_t n,const VkSubmitInfo* s,VkFence f) noexcept {return reinterpret_cast<PFN_vkQueueSubmit>(gdpa(device,"vkQueueSubmit"))(q,n,s,f);}
     VkResult submit2(VkQueue q,std::uint32_t n,const VkSubmitInfo2* s,VkFence f,bool khr) noexcept {return reinterpret_cast<PFN_vkQueueSubmit2>(gdpa(device,khr?"vkQueueSubmit2KHR":"vkQueueSubmit2"))(q,n,s,f);}
 #define NOOP(name,signature) void name signature noexcept {}
-    NOOP(graphicsCreated,(VkPipelineCache,const VkGraphicsPipelineCreateInfo&,const VkAllocationCallbacks*,VkPipeline))
+    NOOP(graphicsCreated,(VkPipelineCache,const VkGraphicsPipelineCreateInfo&,const VkAllocationCallbacks*,VkPipeline&))
     NOOP(pipelineDestroyed,(VkPipeline)) NOOP(imageCreated,(VkImage,const VkImageCreateInfo&)) NOOP(imageDestroyed,(VkImage))
     MemoryPreparation memoryPreparing(const VkMemoryAllocateInfo&) noexcept{return {};}
     NOOP(memoryAllocated,(VkDeviceMemory,const VkMemoryAllocateInfo&,MemoryPreparation&,VkResult)) NOOP(memoryFreed,(VkDeviceMemory))

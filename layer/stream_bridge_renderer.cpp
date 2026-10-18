@@ -35,7 +35,7 @@ struct Renderer::Impl {
     struct Image{std::uint64_t id=0,generation=0,memory=0,memoryGeneration=0;std::uint32_t width=0,height=0;};
     struct View{std::uint64_t id=0,image=0,generation=0,serial=0;};
     struct Descriptor{std::uint64_t id=0,view=0,viewSerial=0;bool valid=false;};
-    struct Pipeline{std::uint64_t id=0;VkPipeline coverage{},legacy{};VkPipelineLayout layout{};};
+    struct Pipeline{std::uint64_t id=0;VkPipeline native{},coverage{},legacy{};VkPipelineLayout layout{};};
     struct Use{gpu::Lease lease{};LocalPicture picture;std::uint64_t descriptor=0,viewSerial=0,image=0,imageGeneration=0,memoryGeneration=0;};
     struct Control{VkBuffer buffer{};VkDeviceSize offset=0;VkDescriptorSet set{};VkCommandBuffer one{};bool assigned=false;};
     struct Command{
@@ -207,24 +207,36 @@ bool Renderer::prepareCold(VkDevice device,VkPhysicalDeviceMemoryProperties memo
         p.prepared=true;return true;
     }catch(...){return false;}
 }
-void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCreateInfo& info,const VkAllocationCallbacks* allocator,VkPipeline original) noexcept{
+void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCreateInfo& info,const VkAllocationCallbacks* allocator,VkPipeline& original) noexcept{
     auto&p=*impl_;if(!p.prepared)return;
-    (void)allocator;
+    // Native profile uses the default allocator. A caller-owned allocation
+    // context has no retained lifetime here, so keep that unsupported object
+    // entirely native instead of borrowing callbacks after this cold call.
+    if(allocator){coldNote("custom pipeline allocator retained without replacement");return;}
     try{journal::Event event;if(!p.definitions.createPipeline(original,info,VK_SUCCESS,&event)){
             if(event.contract.reason==frame_pixel_ssbo_clone::Reason::Image9Extent)coldNote("native pipeline refused: image interface not verified");
             return;
         }auto ready=std::make_unique<journal::Ready>();if(!p.definitions.lookupPipeline({handle(p.device),event.value,event.generation},*ready))return;
         if(frame_native_presenter::inspectCompletedPipeline(p.device,p.api,VK_SUCCESS,info,original,ready->recipe).reason!=frame_native_presenter::Reason::None)return;
         std::lock_guard<std::mutex> lock(p.gate);auto* entry=add(p.pipelines,handle(original));if(!entry)return;
-        VkDescriptorSetLayout layouts[3]{from<VkDescriptorSetLayout>(ready->recipe.provenance[0].value),p.pool.descriptorLayout(),p.controlLayout};
-        VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};ci.setLayoutCount=3;ci.pSetLayouts=layouts;ci.pushConstantRangeCount=ready->recipe.layout.count;ci.pPushConstantRanges=ready->recipe.layout.ranges.data();
-        if(p.CreatePipelineLayout(p.device,&ci,nullptr,&entry->layout)!=VK_SUCCESS){*entry={};return;}
         auto create=[&](const std::vector<std::uint32_t>& words,VkPipelineLayout layout,VkPipeline& pipeline){
             VkShaderModuleCreateInfo shader{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};shader.codeSize=words.size()*4;shader.pCode=words.data();VkShaderModule module{};if(p.CreateShaderModule(p.device,&shader,nullptr,&module)!=VK_SUCCESS)return;
             auto candidate=info;std::array<VkPipelineShaderStageCreateInfo,2> stages{{info.pStages[0],info.pStages[1]}};for(auto& stage:stages)if(stage.stage==VK_SHADER_STAGE_FRAGMENT_BIT)stage.module=module;candidate.pStages=stages.data();candidate.layout=layout;
             const auto result=p.CreateGraphicsPipelines(p.device,cache,1,&candidate,nullptr,&pipeline);p.DestroyShaderModule(p.device,module,nullptr);if(result!=VK_SUCCESS&&pipeline){p.DestroyPipeline(p.device,pipeline,nullptr);pipeline={};}
         };
-        create(p.coverageWords,entry->layout,entry->coverage);create(p.legacyWords,info.layout,entry->legacy);
+        create(p.legacyWords,info.layout,entry->legacy);
+        if(!entry->legacy||entry->legacy==original){*entry={};coldNote("native legacy pipeline unavailable; original retained");return;}
+        // Publish the self-detecting legacy decoder as the application's
+        // ordinary pipeline, before any command can bind this returned handle.
+        // Epoch loss, missing masks, unknown recordings and hot try-lock misses
+        // can now only disable coverage; they cannot expose a raw legacy atlas.
+        entry->native=original;entry->id=handle(entry->legacy);original=entry->legacy;
+        VkDescriptorSetLayout layouts[3]{from<VkDescriptorSetLayout>(ready->recipe.provenance[0].value),p.pool.descriptorLayout(),p.controlLayout};
+        VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};ci.setLayoutCount=3;ci.pSetLayouts=layouts;ci.pushConstantRangeCount=ready->recipe.layout.count;ci.pPushConstantRanges=ready->recipe.layout.ranges.data();
+        VkPipelineLayout coverageLayout{};
+        if(p.CreatePipelineLayout(p.device,&ci,nullptr,&coverageLayout)==VK_SUCCESS&&coverageLayout){
+            entry->layout=coverageLayout;create(p.coverageWords,entry->layout,entry->coverage);
+        }
         if(entry->coverage&&entry->legacy){
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
             if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted});
@@ -233,7 +245,15 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
     }catch(...){/* Native original has already succeeded and remains untouched. */}
 }
 void Renderer::pipelineDestroyed(VkPipeline original) noexcept{
-    auto&p=*impl_;try{p.definitions.destroyPipeline(original);std::lock_guard<std::mutex> lock(p.gate);if(auto* entry=find(p.pipelines,handle(original))){if(entry->coverage&&entry->legacy)p.admittedPipelines.fetch_sub(1,std::memory_order_release);if(entry->coverage)p.DestroyPipeline(p.device,entry->coverage,nullptr);if(entry->legacy)p.DestroyPipeline(p.device,entry->legacy,nullptr);if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);*entry={};}}catch(...){}
+    auto&p=*impl_;try{std::lock_guard<std::mutex> lock(p.gate);if(auto* entry=find(p.pipelines,handle(original))){
+        p.definitions.destroyPipeline(entry->native);
+        if(entry->coverage&&entry->legacy)p.admittedPipelines.fetch_sub(1,std::memory_order_release);
+        if(entry->coverage)p.DestroyPipeline(p.device,entry->coverage,nullptr);
+        if(entry->native)p.DestroyPipeline(p.device,entry->native,nullptr);
+        if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);
+        // The downstream original vkDestroyPipeline owns the exposed baseline.
+        *entry={};
+    }else p.definitions.destroyPipeline(original);}catch(...){}
 }
 void Renderer::imageCreated(VkImage value,const VkImageCreateInfo& info) noexcept{
     auto&p=*impl_;bool dma=false;auto* node=static_cast<const VkBaseInStructure*>(info.pNext);
@@ -402,7 +422,7 @@ void Renderer::stopCold() noexcept{
     if(p.DeviceWaitIdle&&p.DeviceWaitIdle(p.device)==VK_SUCCESS){
         for(auto& command:p.commands)p.release(command);
         p.pool.destroyAfterIdle();p.destroyControls();
-        for(auto& entry:p.pipelines){if(entry.coverage)p.DestroyPipeline(p.device,entry.coverage,nullptr);if(entry.legacy)p.DestroyPipeline(p.device,entry.legacy,nullptr);if(entry.layout)p.DestroyPipelineLayout(p.device,entry.layout,nullptr);entry={};}
+        for(auto& entry:p.pipelines){if(entry.coverage)p.DestroyPipeline(p.device,entry.coverage,nullptr);if(entry.native)p.DestroyPipeline(p.device,entry.native,nullptr);if(entry.legacy)p.DestroyPipeline(p.device,entry.legacy,nullptr);if(entry.layout)p.DestroyPipelineLayout(p.device,entry.layout,nullptr);entry={};}
         if(p.controlPool)p.DestroyDescriptorPool(p.device,p.controlPool,nullptr);
         if(p.controlLayout)p.DestroyDescriptorSetLayout(p.device,p.controlLayout,nullptr);
     }else p.pool.abandonAfterDeviceDestroy(); // Native DestroyDevice owns eventual reclamation.

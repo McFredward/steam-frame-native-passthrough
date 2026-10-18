@@ -24,6 +24,16 @@ mutated original fragment, cannot promote it. The older count3 integration cases
 remain unchanged. The generated coverage module defaults to an independently
 specialized count1 interface, also usable with a larger count3 layout.
 
+The creation callback publishes the already verified self-detecting legacy
+decoder as the application's baseline pipeline. The original native object is
+private and retained only until baseline retirement. Coverage can temporarily
+replace that baseline, then restore it. Losing command observation, an epoch,
+or a mask never requires a hot callback to reconstruct the legacy baseline.
+Publication, unknown/lost observation, coverage creation failure and exactly-once
+public/private pipeline retirement have focused controls; a raw-native baseline
+mutant must fail. Custom allocation callbacks remain unsupported and keep their
+original object untouched. No caller-owned callback context is retained.
+
 External process admission, authenticated picture callbacks and lease validity
 are explicitly supplied fixture observations. A regular temporary fd tests the
 renderer's kernel-object join, not an actual DMA_BUF export. This is not a

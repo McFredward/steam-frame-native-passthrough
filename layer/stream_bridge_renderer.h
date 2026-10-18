@@ -27,7 +27,7 @@ public:
     // exact original fragment's independently verified constant-zero profile.
     void shaderCreated(VkShaderModule,const VkShaderModuleCreateInfo&) noexcept;
     void graphicsCreated(VkPipelineCache,const VkGraphicsPipelineCreateInfo&,
-        const VkAllocationCallbacks*,VkPipeline) noexcept;
+        const VkAllocationCallbacks*,VkPipeline&) noexcept;
     void pipelineDestroyed(VkPipeline) noexcept;
     void imageCreated(VkImage,const VkImageCreateInfo&) noexcept;
     void imageDestroyed(VkImage) noexcept;

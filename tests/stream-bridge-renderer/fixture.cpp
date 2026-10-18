@@ -34,8 +34,9 @@ struct Driver:Fake {
  std::map<std::uint64_t,std::vector<Update>> commands;
  std::map<std::uint64_t,std::uint64_t> boundMemory,setBuffer,appControl;std::map<std::uint64_t,VkDeviceSize> bufferSizes,setOffset,appOffset;
  std::vector<float> reads;std::vector<VkFence> originalFences;std::vector<std::size_t> nativeSubmitCounts;std::vector<const void*> originalNexts,allForwardedExtensions;std::vector<VkFence> allSubmitFences;
+ std::vector<VkPipeline> createdPipelines,destroyedPipelines;
  VkSemaphore wait=handle<VkSemaphore>(0x9871),signalSemaphore=handle<VkSemaphore>(0x9872);VkFence appFence=handle<VkFence>(0x9998);
- bool failOriginal=false;unsigned forwardOriginal=0,waitPreserved=0,signalPreserved=0,barrierReads=0,khrCalls=0;
+ bool failOriginal=false,failCoverage=false;unsigned forwardOriginal=0,waitPreserved=0,signalPreserved=0,barrierReads=0,khrCalls=0;
  static Driver* self;Driver(){self=this;Fake::active=this;}
  static VkResult VKAPI_CALL beginCommand(VkCommandBuffer cb,const VkCommandBufferBeginInfo* i){++self->calls;check(i->flags==VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT||i->flags==VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,"owned guard immutable-SIMULT or upload one-time");self->commands[number(cb)].clear();return VK_SUCCESS;}
  static void VKAPI_CALL bufferUpdate(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,VkDeviceSize size,const void* bytes){check(offset%256==0&&size==4,"one immutable aligned guard float");float v;std::memcpy(&v,bytes,4);check(v==0||v==1,"guard only boolean");self->commands[number(cb)].push_back({number(buffer),offset,v,false});}
@@ -53,8 +54,8 @@ struct Driver:Fake {
  }
  static VkResult VKAPI_CALL createShader(VkDevice,const VkShaderModuleCreateInfo* ci,const VkAllocationCallbacks*,VkShaderModule* out){check(ci&&ci->codeSize&&ci->pCode,"production shader creation uses owned words");*out=self->make<VkShaderModule>();return VK_SUCCESS;}
  static void VKAPI_CALL destroyShader(VkDevice,VkShaderModule,const VkAllocationCallbacks*){}
- static VkResult VKAPI_CALL createPipelines(VkDevice,VkPipelineCache,std::uint32_t n,const VkGraphicsPipelineCreateInfo* ci,const VkAllocationCallbacks*,VkPipeline* out){check(n==1&&ci->stageCount==2,"production bounded original pipeline clone");*out=self->make<VkPipeline>();return VK_SUCCESS;}
- static void VKAPI_CALL destroyPipeline(VkDevice,VkPipeline,const VkAllocationCallbacks*){}
+ static VkResult VKAPI_CALL createPipelines(VkDevice,VkPipelineCache,std::uint32_t n,const VkGraphicsPipelineCreateInfo* ci,const VkAllocationCallbacks*,VkPipeline* out){check(n==1&&ci->stageCount==2,"production bounded original pipeline clone");if(self->failCoverage&&!self->createdPipelines.empty()){*out={};return VK_ERROR_OUT_OF_DEVICE_MEMORY;}*out=self->make<VkPipeline>();self->createdPipelines.push_back(*out);return VK_SUCCESS;}
+ static void VKAPI_CALL destroyPipeline(VkDevice,VkPipeline value,const VkAllocationCallbacks*){check(std::find(self->destroyedPipelines.begin(),self->destroyedPipelines.end(),value)==self->destroyedPipelines.end(),"pipeline destroyed only once");self->destroyedPipelines.push_back(value);}
  static VkResult VKAPI_CALL createLayout(VkDevice,const VkPipelineLayoutCreateInfo* ci,const VkAllocationCallbacks*,VkPipelineLayout* out){check(ci->setLayoutCount==3,"native+mask+guard descriptor layouts");*out=self->make<VkPipelineLayout>();return VK_SUCCESS;}
  static void VKAPI_CALL destroyLayout(VkDevice,VkPipelineLayout,const VkAllocationCallbacks*){}
  static VkResult VKAPI_CALL freeSets(VkDevice,VkDescriptorPool,std::uint32_t,const VkDescriptorSet*){return VK_SUCCESS;}
@@ -96,9 +97,10 @@ namespace {
 struct Integration {
  Driver vk;sr::Renderer renderer;CloneFixture native;
  std::array<VkDescriptorSetLayoutBinding,29> observedBindings{};
+ VkPipeline publicPipeline=handle<VkPipeline>(0x60);
  VkDevice device=handle<VkDevice>(1);VkCommandBuffer cb=handle<VkCommandBuffer>(0x71000);VkImage image=handle<VkImage>(0x72000);VkImageView view=handle<VkImageView>(0x73000);VkDescriptorSet set=handle<VkDescriptorSet>(0x74000);VkDeviceMemory imported=handle<VkDeviceMemory>(0x75000);
  std::shared_ptr<std::atomic<bool>> connection=std::make_shared<std::atomic<bool>>(true);int file=-1;sr::LocalPicture picture;VkBuffer guard=VK_NULL_HANDLE;
- Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true){
+ Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true,bool failCoverage=false,bool customAllocator=false){
   leaseCurrent=true;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
   VkPhysicalDeviceMemoryProperties m{};m.memoryTypeCount=1;m.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   check(renderer.prepareCold(device,m,Driver::get,native.device,VK_API_VERSION_1_1,0),"actual renderer cold prepare registers process consumer");check(!consumer.owner,"pool preparation alone cannot advertise actual selected-image renderer");
@@ -113,7 +115,8 @@ struct Integration {
   if(useColdProof)renderer.shaderCreated(native.stages[0].module,shader);
   else check(definitions.createShader(native.stages[0].module,shader,VK_SUCCESS),"unpromoted exact native FS recorded without interface authority");
   native.colorBlend.blendEnable=VK_FALSE;
-  renderer.graphicsCreated(VK_NULL_HANDLE,native.graphics,nullptr,handle<VkPipeline>(0x60));
+  vk.failCoverage=failCoverage;VkAllocationCallbacks unsupportedAllocator{};
+  renderer.graphicsCreated(VK_NULL_HANDLE,native.graphics,customAllocator?&unsupportedAllocator:nullptr,publicPipeline);
   if(!expectReady){check(!consumer.owner,"pending or unpinned native count1 stays unadmitted");return;}
   check(consumer.owner&&consumer.coverage&&consumer.picture&&consumer.tick,"only both actual native companion pipelines register receiver route");
   VkExternalMemoryImageCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};external.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};info.pNext=&external;info.imageType=VK_IMAGE_TYPE_2D;info.extent={16,2,1};info.mipLevels=info.arrayLayers=1;info.samples=VK_SAMPLE_COUNT_1_BIT;info.format=VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;renderer.imageCreated(image,info);
@@ -128,16 +131,20 @@ struct Integration {
  }
  ~Integration(){renderer.stopCold();if(file>=0)close(file);}
  void writeView(VkImageView selected){VkDescriptorImageInfo imageInfo{};imageInfo.imageView=selected;imageInfo.imageLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};write.dstSet=set;write.dstBinding=9;write.descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;write.descriptorCount=1;write.pImageInfo=&imageInfo;renderer.descriptorWrites(1,&write,0,nullptr);}
- sr::Draw record(VkCommandBufferUsageFlags flags=0){VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=flags;renderer.commandBegin(cb,&begin);renderer.pipelineBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,handle<VkPipeline>(0x60));renderer.setsBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,0,1,&set,0);auto result=renderer.beforeDraw(cb);if(result.control){guard=handle<VkBuffer>(vk.setBuffer.at(number(result.control)));vk.appControl[number(cb)]=number(guard);vk.appOffset[number(cb)]=vk.setOffset.at(number(result.control));}return result;}
+ sr::Draw record(VkCommandBufferUsageFlags flags=0){VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=flags;renderer.commandBegin(cb,&begin);renderer.pipelineBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,publicPipeline);renderer.setsBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,0,1,&set,0);auto result=renderer.beforeDraw(cb);if(result.control){guard=handle<VkBuffer>(vk.setBuffer.at(number(result.control)));vk.appControl[number(cb)]=number(guard);vk.appOffset[number(cb)]=vk.setOffset.at(number(result.control));}return result;}
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
 void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  {Integration f(vs,ps,1);auto draw=f.record();check(draw.ready&&draw.coverage&&draw.control,"documented native 29-binding count1 gets both companion pipelines");check(f.submit()==VK_SUCCESS&&f.vk.reads.back()==1,"native count1 current exact mask reaches original draw");}
  {Integration f(vs,ps,1,false,false);check(!f.record().ready,"pending count1 cannot be admitted by observed layout alone");}
  {auto wrong=ps;wrong.back()^=1;Integration f(vs,wrong,1,true,false);check(!f.record().ready,"mutated native fragment cannot authorize count1");}
- {Integration f(vs,ps);auto draw=f.record();check(draw.ready&&draw.coverage&&draw.control&&draw.original==handle<VkPipeline>(0x60),"actual source import/descriptor/current uploaded mask selects coverage route");check(f.submit()==VK_SUCCESS&&f.vk.reads.back()==1,"zero then exact one guard reaches original native CB");check(f.vk.originalFences.back()==f.vk.appFence&&f.vk.waitPreserved==1&&f.vk.signalPreserved==1,"original fence and semaphore contract forwarded");
+ {Integration f(vs,ps);auto draw=f.record();check(draw.ready&&draw.coverage&&draw.control&&draw.original==f.publicPipeline&&f.publicPipeline!=handle<VkPipeline>(0x60),"actual source import selects coverage over published legacy baseline");check(f.submit()==VK_SUCCESS&&f.vk.reads.back()==1,"zero then exact one guard reaches original native CB");check(f.vk.originalFences.back()==f.vk.appFence&&f.vk.waitPreserved==1&&f.vk.signalPreserved==1,"original fence and semaphore contract forwarded");
   check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"legal flags0 re-submit gets fresh immutable GPU guard without host UBO writes");leaseCurrent=false;check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"previously successful reused recording turns opaque once actual selected lease expires");
  }
+ {Integration f(vs,ps,1);const auto baseline=f.publicPipeline;check(baseline==f.vk.createdPipelines.front()&&baseline!=handle<VkPipeline>(0x60),"legacy baseline published before original create returns");f.record();f.renderer.commandUnknown(f.cb);check(!f.renderer.beforeDraw(f.cb).ready&&f.publicPipeline==baseline,"unknown recording cannot expose raw native atlas pipeline");f.renderer.trackingLost();check(!f.record().ready&&f.publicPipeline==baseline,"lost observer still leaves native caller bound to legacy decoder");}
+ {Integration f(vs,ps,1,true,false,true);check(f.publicPipeline!=handle<VkPipeline>(0x60),"coverage creation failure preserves independently created legacy baseline");}
+ {Integration f(vs,ps,1,true,false,false,true);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unsupported custom allocator leaves original native handle untouched");}
+ {Integration f(vs,ps,1);const auto baseline=f.publicPipeline,coverage=f.vk.createdPipelines.back();f.renderer.pipelineDestroyed(baseline);check(std::count(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),handle<VkPipeline>(0x60))==1&&std::count(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),coverage)==1,"public baseline retirement releases private original and coverage once");check(std::find(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),baseline)==f.vk.destroyedPipelines.end(),"renderer never double-destroys caller-owned exposed baseline");Driver::destroyPipeline(f.device,baseline,nullptr);f.renderer.stopCold();check(std::count(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),baseline)==1,"downstream original destroy owns exposed baseline exactly once");}
  {Integration f(vs,ps);auto draw=f.record();check(draw.control!=VK_NULL_HANDLE,"record coverage before connection loss");f.connection->store(false);check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"source connection loss revokes recorded draw before submit");}
  {Integration f(vs,ps);auto draw=f.record();check(draw.control!=VK_NULL_HANDLE,"record exact descriptor before legal rewrite");f.writeView(handle<VkImageView>(0xdead));check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"descriptor rewrite after record cannot authorize a different native selected image");}
  {Integration f(vs,ps);auto draw=f.record();check(draw.control!=VK_NULL_HANDLE,"record before unknown command");f.renderer.commandUnknown(f.cb);f.submit(false);check(f.vk.reads.back()==0,"unknown recorded command revokes guard");}
