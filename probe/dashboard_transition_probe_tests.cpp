@@ -2,10 +2,16 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <fstream>
+#include <limits>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 namespace dashboard_transition_probe {
 namespace {
 unsigned checks=0,submits=0;
+unsigned queryMode=0,createBufferCalls=0;
 std::vector<unsigned> operations;
 void check(bool value,const char* message){++checks;if(!value)throw std::runtime_error(message);}
 template<class T>T h(std::uint64_t value){T out{};std::memcpy(&out,&value,sizeof(out));return out;}
@@ -16,6 +22,29 @@ VKAPI_ATTR void VKAPI_CALL bindPipeline(VkCommandBuffer,VkPipelineBindPoint,VkPi
 VKAPI_ATTR void VKAPI_CALL bindSet(VkCommandBuffer,VkPipelineBindPoint,VkPipelineLayout,std::uint32_t first,std::uint32_t count,const VkDescriptorSet*,std::uint32_t dynamic,const std::uint32_t*){
     check(first==1&&count==1&&!dynamic,"Set0 is never rebound or disturbed");operations.push_back(77);
 }
+VKAPI_ATTR void VKAPI_CALL fakeQueueQuery(VkPhysicalDevice,std::uint32_t* count,VkQueueFamilyProperties* values){
+    if(!values){*count=queryMode==1?0:queryMode==2?65:9;return;}
+    if(queryMode==3){*count=8;return;}
+    for(unsigned i=0;i<*count;++i)values[i].queueFlags=queryMode==4?VK_QUEUE_COMPUTE_BIT:VK_QUEUE_GRAPHICS_BIT;
+}
+VKAPI_ATTR VkResult VKAPI_CALL failingCreateBuffer(VkDevice,const VkBufferCreateInfo*,const VkAllocationCallbacks*,VkBuffer*){
+    ++createBufferCalls;return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+VKAPI_ATTR void VKAPI_CALL unusedDriverFunction(){}
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fakeDispatch(VkDevice,const char* name){
+    return !std::strcmp(name,"vkCreateBuffer")?reinterpret_cast<PFN_vkVoidFunction>(failingCreateBuffer):unusedDriverFunction;
+}
+std::string readFile(const std::string& path){std::ifstream input(path);return {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};}
+struct PrivateRun {
+    std::string directory;int fd=-1;
+    explicit PrivateRun(const std::vector<char>& artifact){
+        char pattern[]="/tmp/dashboard-queue-vector-XXXXXX";const auto* made=mkdtemp(pattern);check(made,"private queue-vector directory");directory=made;
+        fd=open(directory.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC);check(fd>=0,"private directory descriptor");
+        const auto put=[&](const char* name,const void* data,std::size_t size){const int file=openat(fd,name,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);check(file>=0,"owned fixture input");const auto written=write(file,data,size);close(file);check(written==static_cast<ssize_t>(size),"whole bounded fixture input");};
+        const char magic[]="SFNP_DASHBOARD_TRANSITION/1\n";put("dashboard-transition.enable",magic,sizeof(magic)-1);put("dashboard-transition.spv",artifact.data(),artifact.size());
+    }
+    ~PrivateRun(){if(fd>=0){for(const char* name:{"dashboard-transition.enable","dashboard-transition.spv","dashboard-transition-queue-profile.json","dashboard-transition-status-00.json"})unlinkat(fd,name,0);close(fd);}if(!directory.empty())rmdir(directory.c_str());}
+};
 }
 struct TestAccess {
     static void setup(Probe& p){
@@ -30,7 +59,70 @@ struct TestAccess {
     static void seedOldRoute(Probe& p,VkCommandBuffer value){auto* c=p.lookup(value);c->usedRoutes=0x80;c->unknownRoute=true;}
     static bool cleanRoutes(Probe& p,VkCommandBuffer value){const auto* c=p.lookup(value);return c&&!c->usedRoutes&&!c->unknownRoute;}
     static bool absentCommand(Probe& p,VkCommandBuffer value){return !p.lookup(value);}
+    static QueueProfile queueProfile(const Probe& p){return p.queueProfile_;}
+    static std::uint32_t family(const Probe& p){return p.family_;}
 };
+int queueVectors(const char* artifactPath){
+    std::ifstream input(artifactPath,std::ios::binary);std::vector<char> artifact{std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
+    check(artifact.size()==ShaderBytes,"exact existing pinned private diagnostic artifact");
+    for(unsigned mode=0;mode<22;++mode){
+        queryMode=0;createBufferCalls=0;
+        float priority=1;
+        VkDeviceQueueGlobalPriorityCreateInfoKHR global{};global.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR;
+        const std::array<VkQueueGlobalPriorityKHR,4> known{{VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR,VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR,VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR,VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR}};
+        VkDeviceQueueCreateInfo queue{};queue.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;queue.queueFamilyIndex=7;queue.queueCount=1;queue.pQueuePriorities=&priority;
+        VkPhysicalDeviceFeatures enabled{};enabled.fragmentStoresAndAtomics=VK_TRUE;
+        VkDeviceCreateInfo device{};device.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;device.queueCreateInfoCount=1;device.pQueueCreateInfos=&queue;device.pEnabledFeatures=&enabled;
+        bool expectedAdmission=mode<5;std::uint32_t expected=0;
+        if(mode>=1&&mode<=4){global.globalPriority=known[mode-1];queue.pNext=&global;}
+        switch(mode){
+        case 5:global.globalPriority=static_cast<VkQueueGlobalPriorityKHR>(0);queue.pNext=&global;expected=QueueGlobalPriority;break;
+        case 6:global.sType=VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO;global.pNext=reinterpret_cast<const void*>(1);queue.pNext=&global;expected=QueueNextType|QueueNextChain;break;
+        case 7:global.globalPriority=VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;global.pNext=reinterpret_cast<const void*>(1);queue.pNext=&global;expected=QueueNextChain;break;
+        case 8:queue.flags=VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT;expected=QueueFlags;break;
+        case 9:queryMode=4;expected=QueueNotGraphics;break;
+        case 10:expected=QueueQueryMissing;break;
+        case 11:queryMode=1;expected=QueueQueryCount;break;
+        case 12:queryMode=2;expected=QueueQueryCount;break;
+        case 13:queryMode=3;expected=QueueQueryChanged;break;
+        case 14:queue.queueFamilyIndex=9;expected=QueueQueryRange;break;
+        case 15:device.pQueueCreateInfos=nullptr;expected=QueueMissing;break;
+        case 16:queue.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;expected=QueueType;break;
+        case 17:queue.pQueuePriorities=nullptr;expected=QueuePriorityMissing;break;
+        case 18:priority=std::numeric_limits<float>::quiet_NaN();expected=QueuePriorityValue;break;
+        case 19:priority=1.1f;expected=QueuePriorityValue;break;
+        case 20:queue.queueCount=2;expected=QueueCount;break;
+        case 21:queue.queueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;expected=QueueFamily|QueueQueryRange;break;
+        }
+        const auto deviceBefore=device;const auto queueBefore=queue;const auto globalBefore=global;std::uint32_t priorityBefore{};std::memcpy(&priorityBefore,&priority,4);
+        const auto rawFamily=device.pQueueCreateInfos?queue.queueFamilyIndex:UINT32_MAX;
+        const auto observation=observeQueueFamily(mode==10?nullptr:fakeQueueQuery,h<VkPhysicalDevice>(3),rawFamily);
+        PrivateRun run(artifact);
+        {
+            Probe probe;VkPhysicalDeviceMemoryProperties memory{};
+            probe.prepare(h<VkDevice>(4),device,fakeDispatch,memory,run.fd,observation.flags,&observation);
+            const auto facts=TestAccess::queueProfile(probe);
+            check(expectedAdmission?(probe.refusal()==Refusal::Resource&&createBufferCalls==1):
+                  (probe.refusal()==Refusal::QueueProfile&&createBufferCalls==0),"actual prepare admits only safe queue profiles before fake native resource failure");
+            check(expectedAdmission?facts.failures==0:(facts.failures&expected)==expected,"actual prepare exposes exact failing predicate bits");
+            check(TestAccess::family(probe)==rawFamily,"raw family retained even on refusal; missing family is UINT32_MAX");
+            check(facts.query.pfnPresent==(mode!=10)&&facts.query.rawFamily==rawFamily,"query provenance retained separately from queue creation");
+            if(mode>=1&&mode<=4)check(facts.globalPriorityObserved&&facts.globalPriority==std::int32_t(known[mode-1]),"each known original scheduling priority retained unchanged");
+            for(unsigned retry=0;retry<40&&readFile(run.directory+"/dashboard-transition-status-00.json").empty();++retry)std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto status=readFile(run.directory+"/dashboard-transition-status-00.json");
+            const auto report=readFile(run.directory+"/dashboard-transition-queue-profile.json");
+            check(!status.empty()&&status.size()<1024&&!report.empty()&&report.size()<1024,"actual background status and one-time cold observation each fit existing helper bound");
+            check(status.find("\"observed_device\":4")!=std::string::npos&&report.find("\"observed_device\":4")!=std::string::npos,"queue receipt and status belong to the same original successful device");
+            if(mode==15)check(report.find("\"raw_family\":4294967295")!=std::string::npos&&status.find("\"native_queue_family\":4294967295")!=std::string::npos,"unavailable family telemetry never becomes zero");
+            if(mode==10)check(report.find("\"query_pfn\":false")!=std::string::npos,"missing PFN is visible, not an ambiguous absent graphics bit");
+            probe.release(VK_SUCCESS);
+        }
+        std::uint32_t priorityAfter{};std::memcpy(&priorityAfter,&priority,4);
+        check(!std::memcmp(&deviceBefore,&device,sizeof(device))&&!std::memcmp(&queueBefore,&queue,sizeof(queue))&&
+              !std::memcmp(&globalBefore,&global,sizeof(global))&&priorityBefore==priorityAfter,"queue observation never mutates original device/queue/priority request");
+    }
+    std::cout<<"{\"queue_vectors\":22,\"checks\":"<<checks<<",\"actual_prepare_fake_native_resource_failure\":true,\"native_hardware_proven\":false}\n";return 0;
+}
 int run(){
     PhaseSequence phases;
     check(!phases.request(1),"cannot skip first closed phase");
@@ -91,4 +183,7 @@ int run(){
     return 0;
 }
 }
-int main(){try{return dashboard_transition_probe::run();}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{
+    if(argc==3&&!std::strcmp(argv[1],"--queue-profile-only"))return dashboard_transition_probe::queueVectors(argv[2]);
+    return dashboard_transition_probe::run();
+}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -1,12 +1,24 @@
 #include "dashboard_transition_probe.h"
 #include "../layer/pixel_snapshot_io.h"
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace dashboard_transition_probe {
+QueueObservation observeQueueFamily(PFN_vkGetPhysicalDeviceQueueFamilyProperties query,
+                                    VkPhysicalDevice physical,std::uint32_t family) noexcept {
+    QueueObservation out;out.detailed=true;out.pfnPresent=query!=nullptr;out.rawFamily=family;
+    if(!query)return out;
+    std::uint32_t count=0;query(physical,&count,nullptr);out.firstCount=count;
+    if(!count||count>64)return out;
+    std::array<VkQueueFamilyProperties,64> families{};
+    out.secondQueryCalled=true;query(physical,&count,families.data());out.secondCount=count;
+    if(count==out.firstCount&&family<count)out.flags=families[family].queueFlags;
+    return out;
+}
 namespace {
 bool ownedRead(int directory, const char* name, void* bytes, std::size_t size) noexcept {
     const int fd = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
@@ -28,6 +40,49 @@ bool ownedWrite(int directory, const char* name, const void* bytes, std::size_t 
     if (fd < 0) return false;
     const bool ok = frame_pixel_io::writeAll(fd, bytes, size); close(fd); return ok;
 }
+QueueProfile inspectQueue(const VkDeviceCreateInfo& info,VkQueueFlags flags,const QueueObservation* observation) noexcept {
+    QueueProfile out;
+    if(observation)out.query=*observation;
+    else out.query.flags=flags; // Legacy owned-host fixture: flags only, no claimed query receipt.
+    if(info.queueCreateInfoCount!=1)out.failures|=QueueCreateCount;
+    if(!info.queueCreateInfoCount||!info.pQueueCreateInfos)out.failures|=QueueMissing;
+    else {
+        const auto& q=info.pQueueCreateInfos[0];out.available=true;out.type=std::uint32_t(q.sType);
+        out.flags=q.flags;out.count=q.queueCount;out.rawFamily=q.queueFamilyIndex;
+        if(q.sType!=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO)out.failures|=QueueType;
+        if(q.flags)out.failures|=QueueFlags;
+        if(q.queueCount!=1)out.failures|=QueueCount;
+        if(q.queueFamilyIndex==VK_QUEUE_FAMILY_IGNORED)out.failures|=QueueFamily;
+        if(!q.pQueuePriorities)out.failures|=QueuePriorityMissing;
+        else if(q.queueCount){
+            out.priorityObserved=true;std::memcpy(&out.priorityBits,q.pQueuePriorities,4);
+            if(!std::isfinite(q.pQueuePriorities[0])||q.pQueuePriorities[0]<0||q.pQueuePriorities[0]>1)out.failures|=QueuePriorityValue;
+        }
+        if(q.pNext){
+            out.nextPresent=true;const auto* node=static_cast<const VkBaseInStructure*>(q.pNext);
+            out.nextType=std::uint32_t(node->sType);out.nextHasNext=node->pNext!=nullptr;
+            if(node->sType!=VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR)out.failures|=QueueNextType;
+            if(node->pNext)out.failures|=QueueNextChain;
+            // Do not follow any chain or read an unknown payload. This matches
+            // the already reviewed Transaction::deviceCreated priority shape.
+            if(node->sType==VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR&&!node->pNext){
+                const auto priority=reinterpret_cast<const VkDeviceQueueGlobalPriorityCreateInfoKHR*>(node)->globalPriority;
+                out.globalPriorityObserved=true;out.globalPriority=std::int32_t(priority);
+                if(priority!=VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR&&priority!=VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR&&
+                   priority!=VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR&&priority!=VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR)out.failures|=QueueGlobalPriority;
+            }
+        }
+    }
+    if(out.query.detailed){
+        if(!out.query.pfnPresent)out.failures|=QueueQueryMissing;
+        if(!out.query.firstCount||out.query.firstCount>64)out.failures|=QueueQueryCount;
+        if(!out.query.secondQueryCalled||out.query.secondCount!=out.query.firstCount)out.failures|=QueueQueryChanged;
+        if(out.query.rawFamily!=out.rawFamily||out.query.rawFamily>=out.query.secondCount)out.failures|=QueueQueryRange;
+        if(out.query.flags!=flags)out.failures|=QueueQueryFlags;
+    }
+    if(!(flags&VK_QUEUE_GRAPHICS_BIT))out.failures|=QueueNotGraphics;
+    return out;
+}
 } // namespace
 
 Probe::~Probe() {
@@ -41,7 +96,8 @@ void Probe::refuse(Refusal value) noexcept {
     if (refusal_.compare_exchange_strong(before, value)) ++revision_;
 }
 void Probe::prepare(VkDevice device, const VkDeviceCreateInfo& info, PFN_vkGetDeviceProcAddr gdpa,
-                    const VkPhysicalDeviceMemoryProperties& properties, int directory, VkQueueFlags queueFlags) noexcept {
+                    const VkPhysicalDeviceMemoryProperties& properties, int directory, VkQueueFlags queueFlags,
+                    const QueueObservation* observation) noexcept {
     if (directoryFd_ >= 0 || ready_ || released_) return;
     constexpr char magic[] = "SFNP_DASHBOARD_TRANSITION/1\n";
     char marker[sizeof(magic)-1]{};
@@ -57,10 +113,9 @@ void Probe::prepare(VkDevice device, const VkDeviceCreateInfo& info, PFN_vkGetDe
     featureObserved_=feature.observed;featureEnabled_=feature.enabled;featureSource_=unsigned(feature.source);
     nativeQueueCreateInfos_=info.queueCreateInfoCount;
     if(info.queueCreateInfoCount==1&&info.pQueueCreateInfos)nativeQueueCount_=info.pQueueCreateInfos[0].queueCount;
-    if (info.queueCreateInfoCount != 1 || !info.pQueueCreateInfos ||
-        info.pQueueCreateInfos[0].flags || info.pQueueCreateInfos[0].queueCount != 1 ||
-        info.pQueueCreateInfos[0].pNext || !(queueFlags&VK_QUEUE_GRAPHICS_BIT)) refuse(Refusal::QueueProfile);
-    else family_ = info.pQueueCreateInfos[0].queueFamilyIndex;
+    queueProfile_=inspectQueue(info,queueFlags,observation);
+    family_=queueProfile_.rawFamily;
+    if(queueProfile_.failures)refuse(Refusal::QueueProfile);
 #define LOAD(name) name##_=reinterpret_cast<PFN_vk##name>(gdpa(device,"vk" #name)); if(!name##_)refuse(Refusal::Dispatch);
     LOAD(CreateBuffer) LOAD(DestroyBuffer) LOAD(GetBufferMemoryRequirements)
     LOAD(AllocateMemory) LOAD(FreeMemory) LOAD(BindBufferMemory) LOAD(MapMemory) LOAD(UnmapMemory)
@@ -329,6 +384,18 @@ void Probe::beforeSubmit(VkQueue queue, bool ordinary, std::uint32_t count, cons
             }
 }
 void Probe::writer() noexcept {
+    // Immutable copied cold values only. The compositor callbacks never write
+    // files, and a future rejection exposes the exact failed predicate set.
+    const auto& q=queueProfile_;
+    char queueOutput[1024]{};
+    const auto queueLength=std::snprintf(queueOutput,sizeof(queueOutput),
+        "{\"schema\":\"sfnp-dashboard-queue-profile-v1\",\"observed_device\":%llu,\"failure_bits\":%u,\"available\":%s,\"type\":%u,\"flags\":%u,\"count\":%u,\"raw_family\":%u,\"priority_observed\":%s,\"priority_bits\":%u,\"next_present\":%s,\"next_type\":%u,\"next_has_next\":%s,\"global_priority_observed\":%s,\"global_priority\":%d,\"query_detailed\":%s,\"query_pfn\":%s,\"query_first_count\":%u,\"query_second_called\":%s,\"query_second_count\":%u,\"query_raw_family\":%u,\"query_flags\":%u}\n",
+        static_cast<unsigned long long>(frame_pixel_ssbo_clone::handle(device_)),q.failures,q.available?"true":"false",q.type,q.flags,q.count,q.rawFamily,
+        q.priorityObserved?"true":"false",q.priorityBits,q.nextPresent?"true":"false",q.nextType,q.nextHasNext?"true":"false",
+        q.globalPriorityObserved?"true":"false",q.globalPriority,q.query.detailed?"true":"false",q.query.pfnPresent?"true":"false",
+        q.query.firstCount,q.query.secondQueryCalled?"true":"false",q.query.secondCount,q.query.rawFamily,q.query.flags);
+    if(queueLength<=0||std::size_t(queueLength)>=sizeof(queueOutput)||
+       !ownedWrite(directoryFd_,"dashboard-transition-queue-profile.json",queueOutput,std::size_t(queueLength)))refuse(Refusal::Collection);
     unsigned update = 0; std::uint64_t previous = UINT64_MAX;bool terminalWritten=false;
     while (!stop_.load(std::memory_order_acquire)) {
         char command[2]{};
@@ -358,11 +425,11 @@ void Probe::writer() noexcept {
         if ((revision != previous && update < 24) || (collected_.load()&&!terminalWritten)) {
             char output[1024]{}, name[64]{};
             const auto length = std::snprintf(output, sizeof(output),
-                "{\"schema\":\"sfnp-dashboard-transition-status-v1\",\"ready\":%s,\"refusal\":%u,\"requested_phase\":%u,\"queued_phase\":%u,\"instrumented_draws\":%llu,\"unobserved_draws\":%llu,\"submits\":%llu,\"collected\":%s,\"fragment_stores_observed\":%s,\"fragment_stores_enabled\":%s,\"feature_source\":%u,\"native_queue_create_infos\":%u,\"native_queue_count\":%u,\"native_queue_family\":%u,\"visibility_claim\":false,\"overlay_transport_claim\":false}\n",
-                ready_ ? "true" : "false", unsigned(refusal()), sequence_.requested.load(), queuedPhase_.load(),
+                "{\"schema\":\"sfnp-dashboard-transition-status-v1\",\"observed_device\":%llu,\"ready\":%s,\"refusal\":%u,\"requested_phase\":%u,\"queued_phase\":%u,\"instrumented_draws\":%llu,\"unobserved_draws\":%llu,\"submits\":%llu,\"collected\":%s,\"fragment_stores_observed\":%s,\"fragment_stores_enabled\":%s,\"feature_source\":%u,\"native_queue_create_infos\":%u,\"native_queue_count\":%u,\"native_queue_family\":%u,\"queue_failure_bits\":%u,\"visibility_claim\":false,\"overlay_transport_claim\":false}\n",
+                static_cast<unsigned long long>(frame_pixel_ssbo_clone::handle(device_)),ready_ ? "true" : "false", unsigned(refusal()), sequence_.requested.load(), queuedPhase_.load(),
                 static_cast<unsigned long long>(draws_.load()), static_cast<unsigned long long>(missed_.load()),
                 static_cast<unsigned long long>(submits_.load()), collected_.load() ? "true" : "false",
-                featureObserved_?"true":"false",featureEnabled_?"true":"false",featureSource_,nativeQueueCreateInfos_,nativeQueueCount_,family_);
+                featureObserved_?"true":"false",featureEnabled_?"true":"false",featureSource_,nativeQueueCreateInfos_,nativeQueueCount_,family_,q.failures);
             if(update<24){
                 std::snprintf(name, sizeof(name), "dashboard-transition-status-%02u.json", update++);
                 if (length > 0 && std::size_t(length) < sizeof(output)) ownedWrite(directoryFd_, name, output, std::size_t(length));

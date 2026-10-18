@@ -22,6 +22,32 @@ enum class Refusal : unsigned {
     Mutation, Collection, PhaseOrder
 };
 
+// Cold public API facts, copied before vkCreateDevice's borrowed inputs expire.
+// UINT32_MAX means unavailable, never an invented queue family0.
+struct QueueObservation {
+    bool detailed=false, pfnPresent=false, secondQueryCalled=false;
+    std::uint32_t firstCount=UINT32_MAX, secondCount=UINT32_MAX, rawFamily=UINT32_MAX;
+    VkQueueFlags flags=0;
+};
+QueueObservation observeQueueFamily(PFN_vkGetPhysicalDeviceQueueFamilyProperties,
+                                   VkPhysicalDevice,std::uint32_t rawFamily) noexcept;
+enum QueueFailure : std::uint32_t {
+    QueueCreateCount=1u<<0, QueueMissing=1u<<1, QueueType=1u<<2, QueueFlags=1u<<3,
+    QueueCount=1u<<4, QueuePriorityMissing=1u<<5, QueuePriorityValue=1u<<6,
+    QueueFamily=1u<<7, QueueNextType=1u<<8, QueueNextChain=1u<<9,
+    QueueGlobalPriority=1u<<10, QueueQueryMissing=1u<<11,
+    QueueQueryCount=1u<<12, QueueQueryChanged=1u<<13,
+    QueueQueryRange=1u<<14, QueueNotGraphics=1u<<15, QueueQueryFlags=1u<<16
+};
+struct QueueProfile {
+    QueueObservation query{};
+    std::uint32_t failures=0, type=UINT32_MAX, flags=0, count=0, rawFamily=UINT32_MAX;
+    std::uint32_t priorityBits=0, nextType=UINT32_MAX;
+    std::int32_t globalPriority=INT32_MIN;
+    bool available=false, priorityObserved=false, nextPresent=false,
+         nextHasNext=false, globalPriorityObserved=false;
+};
+
 // Each stage is spent once. Reopening a session, resetting a command pool or
 // re-reading a marker cannot rearm old slots. The final stage disables GPU writes.
 class PhaseSequence {
@@ -47,7 +73,8 @@ public:
     Probe& operator=(const Probe&) = delete;
     ~Probe(); // Joins CPU writer only; Vulkan release is explicit and quiescent.
     void prepare(VkDevice, const VkDeviceCreateInfo&, PFN_vkGetDeviceProcAddr,
-                 const VkPhysicalDeviceMemoryProperties&, int ownedDirectoryFd, VkQueueFlags observedQueueFlags) noexcept;
+                 const VkPhysicalDeviceMemoryProperties&, int ownedDirectoryFd, VkQueueFlags observedQueueFlags,
+                 const QueueObservation* detailedObservation=nullptr) noexcept;
     void pipeline(VkPipeline normal, VkPipelineCache, const VkGraphicsPipelineCreateInfo&,
                   const frame_pixel_ssbo_clone::Recipe&) noexcept;
     void pipelineRetiring(VkPipeline) noexcept;
@@ -122,7 +149,8 @@ private:
     std::atomic<bool> disabledFenceSubmitted_{false};
     std::thread writer_;
     VkQueue queue_{};
-    std::uint32_t family_{};
+    std::uint32_t family_=UINT32_MAX;
+    QueueProfile queueProfile_{};
     std::uint32_t nativeQueueCreateInfos_{}, nativeQueueCount_{}, featureSource_{};
     bool featureObserved_{}, featureEnabled_{};
     int directoryFd_ = -1;

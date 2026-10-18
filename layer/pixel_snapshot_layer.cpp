@@ -1070,15 +1070,10 @@ VKAPI_ATTR VkResult VKAPI_CALL traceCreateDevice(VkPhysicalDevice physical,const
         auto memoryProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(i->gipa(i->native,"vkGetPhysicalDeviceMemoryProperties"));
         if(session().allowed && memoryProperties){
             memoryProperties(physical,&diagnosticMemory);
-            VkQueueFlags diagnosticFlags=0;std::array<VkQueueFamilyProperties,64> diagnosticFamilies{};
             auto queueProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(i->gipa(i->native,"vkGetPhysicalDeviceQueueFamilyProperties"));
-            std::uint32_t familyCount=0;if(queueProperties)queueProperties(physical,&familyCount,nullptr);
-            if(queueProperties&&familyCount&&familyCount<=diagnosticFamilies.size()&&info->queueCreateInfoCount==1&&info->pQueueCreateInfos){
-                auto count=familyCount;queueProperties(physical,&count,diagnosticFamilies.data());
-                const auto family=info->pQueueCreateInfos[0].queueFamilyIndex;
-                if(count==familyCount&&family<count)diagnosticFlags=diagnosticFamilies[family].queueFlags;
-            }
-            d->dashboardProbe.prepare(*out,*info,d->gdpa,diagnosticMemory,session().config.directoryFd,diagnosticFlags);
+            const auto family=info->queueCreateInfoCount&&info->pQueueCreateInfos?info->pQueueCreateInfos[0].queueFamilyIndex:UINT32_MAX;
+            const auto observedQueue=dashboard_transition_probe::observeQueueFamily(queueProperties,physical,family);
+            d->dashboardProbe.prepare(*out,*info,d->gdpa,diagnosticMemory,session().config.directoryFd,observedQueue.flags,&observedQueue);
         }
 #endif
 #undef LOAD_PRESENT
