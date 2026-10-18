@@ -278,9 +278,7 @@ CoverageGateStats SenderCoverage::gateStats()const noexcept{
         const std::array<void*,4> expected{{bits<void*>(&Impl::draw),bits<void*>(&Impl::map),bits<void*>(&Impl::unmap),bits<void*>(&Impl::copy)}};
         for(unsigned i=0;i<indices.size();++i)if(entries[indices[i]]==expected[i])result.contextHookSlots|=1u<<i;
     }
-    ID3D11DeviceContext* immediate=nullptr;if(s.device)s.device->GetImmediateContext(&immediate);
-    result.immediateContextSame=immediate&&immediate==s.context;result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;
-    release(immediate);return result;
+    result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;return result;
 }
 const char* SenderCoverage::stateName()const noexcept{
     switch(impl_->state.load()){case 0:return "coverage-waiting-native-device";case 1:return "coverage-unsupported-device";case 2:return "coverage-device-observed";case 3:return "coverage-context-or-hook-refused";case 4:return "coverage-waiting-supported-encoder-or-source";case 5:return "coverage-pool-preparation-refused";case 6:return "coverage-source-pair-prepared-waiting-raw-receipt";case 7:return "coverage-native-receipt-certified-not-selected-proof";default:return "coverage-stopped";}

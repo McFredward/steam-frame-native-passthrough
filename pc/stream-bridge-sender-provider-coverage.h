@@ -47,7 +47,7 @@ struct CoverageGateStats {
     // CopyResource on the retained context's currently published vtable.
     // Approximate diagnostics only; these fields never authorize a frame.
     std::uint32_t contextHookSlots=0;
-    bool contextTableReadable=false,contextTableStable=false,immediateContextSame=false,nativeDeviceSame=false;
+    bool contextTableReadable=false,contextTableStable=false,nativeDeviceSame=false;
 };
 class CoverageGateCounters {
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free,"render diagnostics must never use an atomic-library lock");

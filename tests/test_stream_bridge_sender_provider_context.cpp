@@ -48,15 +48,15 @@ void run(){
     check(installed[13]!=drawBefore&&installed[14]!=mapBefore&&installed[15]!=unmapBefore&&installed[47]!=copyBefore,"all four actual CreateDevice-context dispatch slots intercepted");
     submittedContext->Draw(0,0);
     auto stats=coverage.gateStats();
-    check(stats.contextTableReadable&&stats.contextTableStable&&stats.immediateContextSame&&stats.nativeDeviceSame&&stats.contextHookSlots==15,"cold production snapshot verifies actual current dispatch without publishing addresses");
+    check(stats.contextTableReadable&&stats.contextTableStable&&stats.nativeDeviceSame&&stats.contextHookSlots==15,"cold production snapshot verifies actual current dispatch without publishing addresses");
     check(stats.hookDraws==1&&stats.otherDraws==1&&stats.nativeDraws==0,"CreateDevice output Draw reaches production hook on rendering thread");
     check(stats.sourceFrames==0&&stats.certifiedMasks==0,"fixture call cannot authorize a fabricated native source");
     Com<ID3D11DeviceContext> queried;std::thread queryWorker([&]{device->GetImmediateContext(queried.out());});queryWorker.join();
     queried->Draw(0,0);
     stats=coverage.gateStats();
-    std::printf("context diagnostic after queried Draw: draws=%llu, other=%llu, same-created=%u, readable=%u, stable=%u, immediate-same=%u, native-device-same=%u, slots=%u\n",
+    std::printf("context diagnostic after queried Draw: draws=%llu, other=%llu, same-created=%u, readable=%u, stable=%u, native-device-same=%u, slots=%u\n",
         static_cast<unsigned long long>(stats.hookDraws),static_cast<unsigned long long>(stats.otherDraws),unsigned(queried.p==submittedContext.p),
-        unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.immediateContextSame),unsigned(stats.nativeDeviceSame),stats.contextHookSlots);
+        unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextHookSlots);
     check(stats.hookDraws==2,"cold GetImmediateContext alias reaches the same production observer");
     Com<ID3D11DeviceContext1> extended;
     check(SUCCEEDED(submittedContext->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(extended.out()))),"native versioned context interface");
