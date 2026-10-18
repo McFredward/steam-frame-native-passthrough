@@ -111,7 +111,7 @@ struct SenderCoverage::Impl {
         // lazily on the first rendering call. Finish that zero-work transition
         // before saving or publishing hooks, under the same public protection.
         // Zero vertices preserve every binding and produce no scene pixels.
-        {MultithreadScope protect(multithread);context->Draw(0,0);}
+        MultithreadScope protect(multithread);context->Draw(0,0);
         table=*reinterpret_cast<void***>(context);originalDraw=bits<NativeDraw>(table[13]);originalMap=bits<Map>(table[14]);originalUnmap=bits<Unmap>(table[15]);originalCopy=bits<Copy>(table[47]);
         if(!originalDraw||!originalMap||!originalUnmap||!originalCopy)return false;
         Impl* expected=nullptr;if(!instance.compare_exchange_strong(expected,this)&&expected!=this)return false;
@@ -264,6 +264,7 @@ void SenderCoverage::tick()noexcept{
 void SenderCoverage::stop()noexcept{
     auto& s=*impl_;s.enabled=false;s.prepared=false;s.lastPid=0;s.preparedPid=0;s.state=8;
     std::lock_guard<std::mutex> lock(s.mutex);s.stopped=true;
+    MultithreadScope protect(s.multithread);
     if(s.table){std::array<unsigned,4> index{{13,14,15,47}};std::array<void*,4> native{{bits<void*>(s.originalDraw),bits<void*>(s.originalMap),bits<void*>(s.originalUnmap),bits<void*>(s.originalCopy)}};std::array<void*,4> ours{{bits<void*>(&Impl::draw),bits<void*>(&Impl::map),bits<void*>(&Impl::unmap),bits<void*>(&Impl::copy)}};DWORD old=0;if(VirtualProtect(s.table,48*sizeof(void*),PAGE_READWRITE,&old)){for(unsigned i=0;i<4;++i)InterlockedCompareExchangePointer(s.table+index[i],native[i],ours[i]);DWORD ignored=0;VirtualProtect(s.table,48*sizeof(void*),old,&ignored);}}
     // No COM or staging release while a cached callback/borrowed AU can exist.
 }

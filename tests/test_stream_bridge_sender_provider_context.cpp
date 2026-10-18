@@ -11,6 +11,15 @@ namespace {
 unsigned checks=0;
 void check(bool value,const char* why){++checks;if(!value)throw std::runtime_error(why);}
 template<class T>struct Com{T* p=nullptr;~Com(){if(p)p->Release();}T** out(){return &p;}T* operator->()const{return p;}};
+using NativeUnmap=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT);
+NativeUnmap otherPreviousUnmap=nullptr;
+void STDMETHODCALLTYPE otherUnmap(ID3D11DeviceContext* context,ID3D11Resource* resource,UINT sub){otherPreviousUnmap(context,resource,sub);}
+template<class To,class From>To pointerBits(From value){static_assert(sizeof(To)==sizeof(From),"same Win64 pointer size");To out{};std::memcpy(&out,&value,sizeof out);return out;}
+void replace(void** slot,void* before,void* after){
+    DWORD previous=0;check(VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&previous)!=0,"fixture owns one temporary external hook slot write");
+    void* observed=InterlockedCompareExchangePointer(slot,after,before);DWORD ignored=0;
+    check(VirtualProtect(slot,sizeof(void*),previous,&ignored)!=0&&observed==before,"fixture external hook replacement is exact and restored protection");
+}
 NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void** value){*value=reinterpret_cast<void*>(0x1010);return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI reconfigure(void*,NV_ENC_RECONFIGURE_PARAMS*){return NV_ENC_SUCCESS;}
@@ -133,7 +142,14 @@ void run(){
     check(SUCCEEDED(submittedContext->Map(staging.p,0,D3D11_MAP_READ,0,&mapped)),"actual intercepted native Map succeeds");
     check(mapped.pData&&std::memcmp(mapped.pData,bytes.data(),16)==0,"ordinary native RGB bytes preserved through production hooks");
     submittedContext->Unmap(staging.p,0);
+    // A later independent observer owns its replacement. Cleanup must not
+    // overwrite it even while restoring the other three original slots.
+    void** const live=*reinterpret_cast<void***>(submittedContext.p);void* const installedUnmap=live[15];
+    otherPreviousUnmap=pointerBits<NativeUnmap>(installedUnmap);
+    replace(live+15,installedUnmap,pointerBits<void*>(&otherUnmap));
     coverage.stop();
+    check(live[15]==pointerBits<void*>(&otherUnmap)&&coverage.gateStats().contextOriginalSlots==11,"production stop preserves a later independent hook while restoring only its own slots");
+    replace(live+15,pointerBits<void*>(&otherUnmap),installedUnmap);coverage.stop();
     stats=coverage.gateStats();diagnostic("after stop",stats,true);
     check(stats.contextTableReadable&&stats.contextTableStable&&stats.contextHookSlots==0&&stats.contextOriginalSlots==15,"production stop restores the exact native slots recorded after public initialization");
 }
