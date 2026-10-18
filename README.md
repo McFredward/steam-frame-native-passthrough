@@ -18,18 +18,27 @@
 > [!IMPORTANT]
 > **Supported SteamVR on the Frame: 2.18.2 · build 1791331621**
 
-**For Steam Frame.** Bring supported PC VR games into your room over Steam Link.
+**For Steam Frame.** Play supported PC VR games in your real room over Steam Link.
 
 ## Native passthrough — no colour replacement
 
-Unlike Virtual Desktop's colour-key passthrough, this keeps every game colour and
-lets the game tell the Frame which parts of the picture are see-through, and by
-how much. The headset blends that information with its own live camera view, so
-partially transparent objects can blend with your real room too.
+The game sends a separate description of what is see-through, so every game
+colour stays available. The Frame combines it with its own live camera image,
+including partial transparency; the camera picture never needs to reach the PC.
 
-**[Install on the Frame](docs/INSTALL.md#directly-on-the-frame)** ·
-**[Install via SSH](docs/INSTALL.md#from-a-pc-over-ssh)** ·
-[Compatibility](docs/COMPATIBILITY.md)
+**[Install the stable Frame receiver](docs/INSTALL.md)** ·
+**[Try the paired PC + Frame preview](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/PC-FRAME-SETUP.md#start-the-assistant)** ·
+[Compatibility](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/COMPATIBILITY.md)
+
+## Choose your setup
+
+| Route | What to expect | Install |
+|---|---|---|
+| **Stable: Frame only** | Native passthrough has been confirmed in the headset. Sharing video space with transparency can reduce sharpness. | [Desktop Mode](docs/INSTALL.md#directly-on-the-frame) or [SSH](docs/INSTALL.md#from-a-pc-over-ssh) |
+| **Preview: PC + Frame** | Windows + NVIDIA + HEVC. Intended to retain normal RGB resolution; **not yet confirmed in a combined headset test**. | [One-command setup assistant](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/PC-FRAME-SETUP.md#start-the-assistant) |
+
+The preview is a separate opt-in. It is not yet a verified fix for sharpness or
+Steam-menu behaviour. See [current limits and updates](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/COMPATIBILITY.md).
 
 ## Supported games
 
@@ -38,35 +47,23 @@ partially transparent objects can blend with your real room too.
 | Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (upcoming) |
 
 Other games need their own integration. Installing this patch alone does not
-add mixed reality to an unmodified game.
-
-## Requirements
-
-| Requirement | Supported |
-|---|---|
-| Setup | Steam Frame streaming from a Windows PC through Steam Link |
-| SteamVR on the Frame | **2.18.2 — build 1791331621** |
-
-**Experimental:** some edges and motion still need improvement.
-See [known limits and update support](docs/COMPATIBILITY.md).
+add mixed reality to an unmodified game. Preview tests need a matching preview
+build of the game integration.
 
 ## Get started
 
-1. Install using [Desktop Mode on the Frame](docs/INSTALL.md#directly-on-the-frame)
-   or [SSH from your PC](docs/INSTALL.md#from-a-pc-over-ssh).
-2. Start your PC VR stream and enable native passthrough in the supported game or mod.
-   Follow its mixed-reality setup instructions.
+1. Choose one installation route above. Keep the Frame awake and stop your VR stream.
+2. Start the game normally and enable its native Steam Link passthrough option.
+3. Turn that option off whenever you want the ordinary picture back.
 
-The installation stays on the Frame between sessions. You can turn passthrough
-off in the game whenever you want.
-
-[Update](docs/INSTALL.md#update) · [Uninstall](docs/INSTALL.md#uninstall) ·
-[Recover if something goes wrong](docs/INSTALL.md#recovery)
+Installation remains between sessions. For **Update**, **Uninstall** or **Undo**,
+use the [paired assistant](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/PC-FRAME-SETUP.md#update-uninstall-and-undo), or the
+[stable Frame instructions](docs/INSTALL.md#update) if you installed only that receiver.
 
 ## For developers
 
-[Integrate your game](docs/DEVELOPING.md) ·
-[Runtime compatibility and limitations](docs/COMPATIBILITY.md)
+[Integrate your game](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/DEVELOPING.md) ·
+[Runtime compatibility and limits](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/COMPATIBILITY.md)
 
 ## Credits
 

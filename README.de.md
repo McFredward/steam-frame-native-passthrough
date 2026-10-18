@@ -18,20 +18,29 @@
 > [!IMPORTANT]
 > **Unterstütztes SteamVR auf der Frame: 2.18.2 · Build 1791331621**
 
-**Für Steam Frame.** Hole unterstützte PC-VR-Spiele über Steam Link in dein Zimmer.
+**Für Steam Frame.** Spiele unterstützte PC-VR-Spiele über Steam Link in deinem echten Zimmer.
 
 ## Natives Passthrough — keine Farbersetzung
 
-Anders als bei Virtual Desktops Farbersetzung bleiben alle Spielfarben erhalten:
-Das Spiel teilt der Frame mit, welche Bildbereiche durchsichtig sind und wie stark.
-Die Brille verbindet diese Information mit ihrem eigenen Live-Kamerabild, sodass
-sich auch halbtransparente Objekte mit deinem echten Zimmer mischen können.
+Das Spiel überträgt separat, welche Bildbereiche durchsichtig sind; alle
+Spielfarben bleiben erhalten. Die Frame verbindet das mit ihrem eigenen
+Live-Kamerabild, auch bei teilweiser Transparenz; das Kamerabild muss nicht zum PC.
 
-**[Auf der Frame installieren](docs/INSTALL.md#directly-on-the-frame)** ·
-**[Über SSH installieren](docs/INSTALL.md#from-a-pc-over-ssh)** ·
-[Kompatibilität](docs/COMPATIBILITY.md)
+**[Stabilen Frame-Empfänger installieren](docs/INSTALL.md)** ·
+**[Gekoppelte PC- und Frame-Vorschau testen](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/PC-FRAME-SETUP.md#start-the-assistant)** ·
+[Kompatibilität](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/COMPATIBILITY.md)
 
 Die weiterführenden Anleitungen sind auf Englisch.
+
+## Wähle deine Einrichtung
+
+| Variante | Was dich erwartet | Installation |
+|---|---|---|
+| **Stabil: nur Frame** | Natives Passthrough ist im Headset bestätigt. Die Transparenz teilt sich Platz im Videobild und kann die Schärfe verringern. | [Desktop-Modus](docs/INSTALL.md#directly-on-the-frame) oder [SSH](docs/INSTALL.md#from-a-pc-over-ssh) |
+| **Vorschau: PC + Frame** | Windows + NVIDIA + HEVC. Soll die normale RGB-Auflösung erhalten; **noch nicht im gemeinsamen Headset-Test bestätigt**. | [Einrichtungsassistent mit einem Befehl](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/PC-FRAME-SETUP.md#start-the-assistant) |
+
+Die Vorschau wird separat gewählt. Sie ist noch keine bestätigte Lösung für
+Bildschärfe oder Steam-Menüs. Siehe [Grenzen und Updates](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/COMPATIBILITY.md).
 
 ## Unterstützte Spiele
 
@@ -40,35 +49,24 @@ Die weiterführenden Anleitungen sind auf Englisch.
 | Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (noch nicht veröffentlicht) |
 
 Andere Spiele benötigen eine eigene Integration. Dieser Patch allein ergänzt
-kein Mixed Reality in einem unveränderten Spiel.
-
-## Voraussetzungen
-
-| Voraussetzung | Unterstützt |
-|---|---|
-| Einrichtung | Steam Frame mit Streaming von einem Windows-PC über Steam Link |
-| SteamVR auf der Frame | **2.18.2 — Build 1791331621** |
-
-**Experimentell:** Manche Kanten und Bewegungen brauchen noch Verbesserungen.
-Siehe [bekannte Grenzen und Update-Unterstützung](docs/COMPATIBILITY.md).
+kein Mixed Reality in einem unveränderten Spiel. Vorschau-Tests benötigen einen
+passenden Vorschau-Build der Spielintegration.
 
 ## Loslegen
 
-1. Installiere den Patch [im Desktop-Modus der Frame](docs/INSTALL.md#directly-on-the-frame)
-   oder [per SSH vom PC](docs/INSTALL.md#from-a-pc-over-ssh).
-2. Starte den PC-VR-Stream und aktiviere natives Passthrough im unterstützten Spiel
-   oder Mod. Folge dessen Anleitung für Mixed Reality.
+1. Wähle oben eine Installationsvariante. Lass die Frame eingeschaltet und beende deinen VR-Stream.
+2. Starte das Spiel wie gewohnt und aktiviere dessen natives Steam-Link-Passthrough.
+3. Schalte die Option aus, wenn du das normale Bild zurückhaben möchtest.
 
-Die Installation bleibt zwischen Spielsitzungen auf der Frame erhalten.
-Du kannst Passthrough jederzeit im Spiel ausschalten.
-
-[Aktualisieren](docs/INSTALL.md#update) · [Deinstallieren](docs/INSTALL.md#uninstall) ·
-[Hilfe bei Problemen](docs/INSTALL.md#recovery)
+Die Installation bleibt zwischen Sitzungen erhalten. Für **Aktualisieren**,
+**Deinstallieren** oder **Rücknahme** nutze den
+[gekoppelten Assistenten](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/PC-FRAME-SETUP.md#update-uninstall-and-undo), oder die
+[stabile Frame-Anleitung](docs/INSTALL.md#update), wenn du nur diesen Empfänger installiert hast.
 
 ## Für Entwickler
 
-[Eigenes Spiel integrieren](docs/DEVELOPING.md) ·
-[Laufzeit-Kompatibilität und Grenzen](docs/COMPATIBILITY.md)
+[Eigenes Spiel integrieren](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/DEVELOPING.md) ·
+[Laufzeit-Kompatibilität und Grenzen](https://github.com/McFredward/steam-link-native-passthrough/blob/dev/docs/COMPATIBILITY.md)
 
 ## Credits
 
