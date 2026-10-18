@@ -24,16 +24,25 @@ initialization `0x35b48` calls codec startup at `0x35b90` (`0x337e8` → `0x3366
 call at `0x35b98` (`0x349b8` → `0x33f68`, native `vkCreateInstance` at `0x33fdc`).
 Therefore Vulkan negotiation alone is too late to observe initial OUTPUT setup.
 The checked candidate needs process-scoped early preload before native main.
-An owned wrapper around the exact pinned stock `vrlink`, with the original file
-preserved and rehashed, can set preload for only that exec. The later Vulkan
-loader must reuse the same library inode/state. Cold preparation must be
-idempotent; callbacks/library/originals remain loaded (NODELETE).
+The release build of the existing tiny C exec/spawn selector can provide that
+early boundary through a reversible user Steam-service drop-in. Only the tiny
+selector is preloaded in Steam. It adds the heavy library solely to the exact
+`/opt/steamvr/tools/vrlink/bin/linuxarm64/vrlink` child. The heavy constructor
+must remove its own preload token from actual environ before starting threads;
+the later Vulkan loader reuses the same library inode/state. Cold preparation
+must be idempotent, and callbacks/library/originals remain loaded (NODELETE).
 
-An eventual installer must retain original/wrapper identities and recovery
-instructions before activation. If an update replaces the owned wrapper with a
-new stock executable, removal must preserve the updated file rather than
-restoring/downgrading the old backup. None of that installation is performed by
-these source modules or their fixtures.
+No stock SteamVR executable or operating-system file is rewritten. The installer
+must retain the identities of its owned user files and recovery instructions
+before activation. A changed executable pin leaves ordinary native forwarding.
+The selector freezes only its private four-line launch.conf once in its cold
+constructor; public exec/spawn wrappers perform no configuration I/O. The exact
+format is `SFNP_STREAM_LAUNCH/1`, native target path, absolute tiny-selector path,
+and absolute heavy-library path, each followed by LF. Its final parent is owned
+0700; the regular config must be owned0600, nlink1, bounded and stable, with no
+symlink traversal. The release selector preserves foreign loader/diagnostic
+variables and adds no LD_AUDIT or probe settings. None of the user-service
+installation is performed by these source modules or fixtures.
 
 ## Two-stage messages, no copied video
 

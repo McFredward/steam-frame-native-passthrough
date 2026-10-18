@@ -56,15 +56,23 @@ static int starts(const char *s, const char *prefix) {
     return !strncmp(s, prefix, n);
 }
 static int diagnostic_key(const char *s) {
+#ifdef FRAME_LAUNCH_RELEASE_BRIDGE
+    (void)s; return 0;
+#else
     return starts(s, "GHVR_FRAME_COMPOSITOR_RAW_") || starts(s, "FRAME_MASK_TRACE");
+#endif
 }
 static int separator(char ch) { return ch == ':' || ch == ' ' || ch == '\t'; }
 static int token_equals(const char *p, size_t n, const char *value) {
     return strlen(value) == n && !memcmp(p, value, n);
 }
 static int loader_owned(const char *p, size_t n, const struct frame_launch_config *c, int audit, int include_selector) {
+#ifdef FRAME_LAUNCH_RELEASE_BRIDGE
+    return audit ? 0 : token_equals(p, n, c->payload) || (include_selector && token_equals(p, n, c->selector));
+#else
     return audit ? token_equals(p, n, c->audit) :
         token_equals(p, n, c->payload) || (include_selector && token_equals(p, n, c->selector));
+#endif
 }
 /* Foreign tokens and their original separators remain byte-for-byte. Owned token
  * bytes alone are removed; repeated separators are legal loader delimiters. */
@@ -160,8 +168,12 @@ HIDDEN enum frame_launch_result frame_launch_build_environment(const struct fram
             if (!filter_loader(value, buffer + keylen, cap - keylen, c, is_audit, &foreign))
                 return oversized(envp, c, out);
             if (is_audit) {
+#ifdef FRAME_LAUNCH_RELEASE_BRIDGE
+                out->entries[nout++] = s;
+#else
                 if (target && !append_path(buffer + keylen, cap - keylen, c->audit)) return oversized(envp, c, out);
                 if (foreign || target) out->entries[nout++] = buffer;
+#endif
             } else {
                 if (!append_path(buffer + keylen, cap - keylen, c->selector) ||
                     (target && !append_path(buffer + keylen, cap - keylen, c->payload))) return oversized(envp, c, out);
@@ -175,6 +187,7 @@ HIDDEN enum frame_launch_result frame_launch_build_environment(const struct fram
             (target && !append_path(out->preload + 11, sizeof out->preload - 11, c->payload))) return oversized(envp, c, out);
         out->entries[nout++] = out->preload;
     }
+#ifndef FRAME_LAUNCH_RELEASE_BRIDGE
     if (target) {
         if (!audit_seen) {
             strcpy(out->audit, "LD_AUDIT=");
@@ -188,6 +201,7 @@ HIDDEN enum frame_launch_result frame_launch_build_environment(const struct fram
         out->entries[nout++] = "FRAME_MASK_TRACE=1";
         out->entries[nout++] = "FRAME_MASK_TRACE_BINDINGS=1";
     }
+#endif
     out->entries[nout] = NULL; out->forward = out->entries;
     return FRAME_LAUNCH_REWRITTEN;
 }
