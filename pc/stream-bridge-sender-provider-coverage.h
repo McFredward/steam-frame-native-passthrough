@@ -43,6 +43,11 @@ struct CoverageGateStats {
     std::array<std::uint64_t,static_cast<unsigned>(CoverageGate::Count)> refusals{};
     std::uint32_t lastConstantBytes=0,lastSourceWidth=0,lastSourceHeight=0,lastSourceFormat=0,
         lastOutputWidth=0,lastOutputHeight=0,lastOutputFormat=0;
+    // Cold dispatch-integrity metadata. Bits 0..3 name Draw, Map, Unmap,
+    // CopyResource on the retained context's currently published vtable.
+    // Approximate diagnostics only; these fields never authorize a frame.
+    std::uint32_t contextHookSlots=0;
+    bool contextTableReadable=false,contextTableStable=false,immediateContextSame=false,nativeDeviceSame=false;
 };
 class CoverageGateCounters {
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free,"render diagnostics must never use an atomic-library lock");

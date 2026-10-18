@@ -22,6 +22,7 @@ struct SenderCoverage::Impl {
     mutable std::mutex mutex;std::atomic<bool> enabled{false},prepared{false};std::atomic<unsigned> state{0};std::atomic<std::uint32_t> lastPid{0},preparedPid{0};
     std::atomic<std::uint64_t> failedSerial{0};std::atomic<bool> retirePending{false};std::uintptr_t module=0;bool stopped=false;
     ID3D11Device* pendingDevice=nullptr;ID3D11Device* device=nullptr;ID3D11DeviceContext* context=nullptr;
+    void* nativeDevicePointer=nullptr; // Comparison only; never dereferenced as a guessed interface.
     ID3D11Multithread* multithread=nullptr;void** table=nullptr;NativeDraw originalDraw=nullptr;Map originalMap=nullptr;Unmap originalUnmap=nullptr;Copy originalCopy=nullptr;
     std::array<ID3D11Texture2D*,2> witnessTargets{};
     ID3D11Texture2D* target=nullptr;ID3D11RenderTargetView* targetView=nullptr;ID3D11BlendState* blend=nullptr;
@@ -41,7 +42,7 @@ struct SenderCoverage::Impl {
         ID3D11Device* actual=nullptr;
         if(FAILED(static_cast<IUnknown*>(value)->QueryInterface(IID_ID3D11Device,reinterpret_cast<void**>(&actual)))){s.gates.refuse(CoverageGate::Device);return;}
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||s.stopped||(s.pendingDevice&&!same(s.pendingDevice,actual))||(s.device&&!same(s.device,actual))){release(actual);return;}
-        if(!s.pendingDevice){s.pendingDevice=actual;s.state=2;}else release(actual);
+        if(!s.pendingDevice){s.pendingDevice=actual;s.nativeDevicePointer=value;s.state=2;}else release(actual);
     }
     static void inputCapture(const NvencOutputEvidence& e,void* opaque){
         auto& s=*static_cast<Impl*>(opaque);std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);
@@ -263,7 +264,24 @@ void SenderCoverage::stop()noexcept{
 }
 bool SenderCoverage::ready(std::uint32_t pid)const noexcept{return impl_->enabled&&impl_->prepared&&impl_->preparedPid==pid&&impl_->direct.ownsProcess(pid);}
 bool SenderCoverage::operational(std::uint32_t pid)const noexcept{return ready(pid)&&impl_->lastPid==pid;}
-CoverageGateStats SenderCoverage::gateStats()const noexcept{return impl_->gates.snapshot();}
+CoverageGateStats SenderCoverage::gateStats()const noexcept{
+    auto& s=*impl_;auto result=s.gates.snapshot();
+    std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||!s.context)return result;
+    // A successfully installed context can later acquire another runtime
+    // dispatch table. Observe its public interface, without following any
+    // private renderer object fields or treating diagnostic reads as proof.
+    void** current=nullptr;SIZE_T bytes=0;std::array<void*,48> entries{};
+    if(ReadProcessMemory(GetCurrentProcess(),s.context,&current,sizeof current,&bytes)&&bytes==sizeof current&&current&&
+       ReadProcessMemory(GetCurrentProcess(),current,entries.data(),sizeof entries,&bytes)&&bytes==sizeof entries){
+        result.contextTableReadable=true;result.contextTableStable=current==s.table;
+        const std::array<unsigned,4> indices{{13,14,15,47}};
+        const std::array<void*,4> expected{{bits<void*>(&Impl::draw),bits<void*>(&Impl::map),bits<void*>(&Impl::unmap),bits<void*>(&Impl::copy)}};
+        for(unsigned i=0;i<indices.size();++i)if(entries[indices[i]]==expected[i])result.contextHookSlots|=1u<<i;
+    }
+    ID3D11DeviceContext* immediate=nullptr;if(s.device)s.device->GetImmediateContext(&immediate);
+    result.immediateContextSame=immediate&&immediate==s.context;result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;
+    release(immediate);return result;
+}
 const char* SenderCoverage::stateName()const noexcept{
     switch(impl_->state.load()){case 0:return "coverage-waiting-native-device";case 1:return "coverage-unsupported-device";case 2:return "coverage-device-observed";case 3:return "coverage-context-or-hook-refused";case 4:return "coverage-waiting-supported-encoder-or-source";case 5:return "coverage-pool-preparation-refused";case 6:return "coverage-source-pair-prepared-waiting-raw-receipt";case 7:return "coverage-native-receipt-certified-not-selected-proof";default:return "coverage-stopped";}
 }
