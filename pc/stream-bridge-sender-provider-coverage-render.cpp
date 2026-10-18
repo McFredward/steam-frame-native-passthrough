@@ -2,6 +2,29 @@
 #include <array>
 #include <cmath>
 namespace stream_bridge::sender {
+namespace {
+bool allocationHandle(ID3D11Resource* resource,std::uint64_t expected)noexcept{
+    IDXGIResource* shared=nullptr;
+    if(!resource||FAILED(resource->QueryInterface(IID_IDXGIResource,reinterpret_cast<void**>(&shared)))||!shared)return false;
+    HANDLE actual=nullptr;const auto result=shared->GetSharedHandle(&actual);shared->Release();
+    return SUCCEEDED(result)&&actual&&static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(actual))==expected;
+}
+bool textureShape(ID3D11Resource* resource,const SharedTextureShape& expected)noexcept{
+    ID3D11Texture2D* texture=nullptr;
+    if(!resource||FAILED(resource->QueryInterface(IID_ID3D11Texture2D,reinterpret_cast<void**>(&texture)))||!texture)return false;
+    D3D11_TEXTURE2D_DESC actual{};texture->GetDesc(&actual);texture->Release();
+    return actual.Width==expected.width&&actual.Height==expected.height&&actual.Format==static_cast<DXGI_FORMAT>(expected.format)
+        &&actual.SampleDesc.Count==expected.samples&&actual.ArraySize==1&&actual.MipLevels==1;
+}
+}
+bool submittedSharedResource(ID3D11Resource* native,ID3D11Texture2D* held,
+    const SharedTextureOwner& opened,const SharedTextureOwner& submitted,const SharedTextureShape& shape)noexcept{
+    if(!native||!held||!submitted.handle||!submitted.generation||!submitted.processId
+        ||opened.handle!=submitted.handle||opened.generation!=submitted.generation||opened.processId!=submitted.processId
+        ||!shape.width||!shape.height||shape.width>16384||shape.height>16384||!shape.format||shape.samples!=1)return false;
+    return textureShape(native,shape)&&textureShape(held,shape)
+        &&allocationHandle(native,submitted.handle)&&allocationHandle(held,submitted.handle);
+}
 bool createTransmittanceBlend(ID3D11Device* device,ID3D11BlendState** output)noexcept{
     if(!device||!output)return false;
     D3D11_BLEND_DESC desc{};auto& rt=desc.RenderTarget[0];rt.BlendEnable=TRUE;

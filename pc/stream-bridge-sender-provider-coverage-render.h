@@ -9,6 +9,17 @@
 #include <cstdint>
 namespace stream_bridge::sender {
 using NativeDraw=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT);
+struct SharedTextureOwner {std::uint64_t handle=0,generation=0;std::uint32_t processId=0;};
+struct SharedTextureShape {std::uint32_t width=0,height=0,format=0,samples=0;};
+// Separately opened DXGI resource wrappers have different IUnknown identities.
+// Admit only the SAME legacy shared-allocation handle on the actual native SRV
+// resource AND the held open, plus the current DirectMode generation/PID/shape.
+// The held open keeps the shared handle/allocation alive. No pointer, size-only,
+// latest-frame or NT-handle fallback; generation comes from the live registry.
+bool submittedSharedResource(ID3D11Resource* native,ID3D11Texture2D* held,
+    const SharedTextureOwner& opened,const SharedTextureOwner& submitted,
+    const SharedTextureShape&)noexcept;
+
 // Native PS output alpha supplies coverage. Its RGB/luma is ignored; the R8
 // target stores transmittance T <- T*(1-a), cleared to1 once per native frame.
 // The backend emits A=255-T. No independent shader, RGB classification or UV.
