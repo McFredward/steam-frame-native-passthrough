@@ -192,12 +192,27 @@ transactionally. Excessive/incompressible data restores the exact original AU.
 A private per-user, local-only named pipe exposes the fixed128-byte `SBN1`
 source-preparation contract. Its kernel client PID must match the request PID;
 that PID must own the actual source swapsets and have a fully observed two-eye
-GPU route. The reply echoes the request nonce and active paired binding/encoder
-generation. Flag1 additionally requires mutual compatibility and an exact
-coded-AU roundtrip. Flag2 is **not emitted**: a local reply cannot prove remote
-selected-image rendering. Opening/closing the live app pipe does not invent
-frame identities. EOF, worker failure and provider Cleanup revoke it without a
-feature-expiry timer. Socket/file work stays on the cold worker.
+GPU route. Its first flag1 grant additionally requires current authenticated
+mutual compatibility and an exact coded-AU roundtrip. That **source-format lease**
+then retains its admitted binding/generation for this exact pipe client
+(PID, request nonce and server PID), including temporary encoder/pool
+renegotiation. Otherwise releasing the legacy uniform-stream settings could
+recreate the encoder, revoke its own source capability and switch back to the
+atlas repeatedly. This retained source lease is not current encoder proof:
+Flag2 is **never emitted**, and fresh negotiation, exact input/output generation,
+authentication and selected-image coverage remain mandatory independently.
+EOF, cancellation, client change and provider Cleanup reset the source lease
+without a feature-expiry timer. Socket/file work stays on the cold worker.
+
+Known-version successful HEVC `Reconfigure` revokes old negotiation/submissions
+before calling the native API and readmits the actual new dimensions afterward.
+Native resource registrations/maps that survive the call are retained in place,
+then assigned fresh metadata identities. Records changed or unregistered during
+the native call are never restored from a saved snapshot. Failed/unknown
+reconfiguration remains ineligible; borrowed output bytes still survive through
+their original successful Unlock. An old resource extent cannot match a new
+coded extent merely because its registration survived. Neither this recovery
+nor the stable source-format lease preserves old mask or peer permissions.
 
 ## Verification and remaining runtime observations
 

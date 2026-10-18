@@ -27,6 +27,26 @@ inline SourceIpcMessage sourceReply(const SourceIpcRequest& request,std::uint32_
     return out;
 }
 struct SourceIpcState {Nonce binding{};std::uint64_t generation=0;bool compatible=false;};
+// A source-format lease belongs to one already kernel-validated local pipe
+// client. It survives encoder/pool renegotiation, but never grants image or
+// coverage authority; those still require the fresh exact native frame proof.
+class SourceIpcPermission {
+public:
+    void reset()noexcept{client_={};server_=0;binding_={};generation_=0;}
+    SourceIpcMessage update(const SourceIpcRequest& client,std::uint32_t server,
+        const SourceIpcState& current,bool prepared)noexcept{
+        if(client.processId!=client_.processId||client.nonce!=client_.nonce||server!=server_){
+            reset();client_=client;server_=server;
+        }
+        bool nonce=false,binding=false;for(auto v:client.nonce)nonce|=v!=0;for(auto v:current.binding)binding|=v!=0;
+        if(!generation_&&client.processId&&server&&nonce&&current.compatible&&prepared&&current.generation&&binding){
+            binding_=current.binding;generation_=current.generation;
+        }
+        return sourceReply(client,server,binding_,generation_,generation_!=0);
+    }
+private:
+    SourceIpcRequest client_{};std::uint32_t server_=0;Nonce binding_{};std::uint64_t generation_=0;
+};
 class SourceIpcServer {
 public:
     using Prepared=bool(*)(std::uint32_t,void*);

@@ -12,10 +12,11 @@ static_assert(offsetof(NV_ENCODE_API_FUNCTION_LIST,nvEncLockBitstream)==0x90&&
 std::atomic<NvencBoundary*> NvencBoundary::instance_{nullptr};
 NvencBoundary::NvencBoundary(const std::array<std::uint8_t,32>& hash):hash_(hash){}
 NvencBoundary::Session* NvencBoundary::find(void* e){for(auto& s:sessions_)if(s.encoder==e&&e)return &s;return nullptr;}
-std::uint64_t NvencBoundary::revoke(Session& s){
+std::uint64_t NvencBoundary::revoke(Session& s,bool retainRegistrations){
     s.adapter.stop();s.initialized=false;s.hevc=false;s.encoded=false;
     for(auto& p:s.submissions)if(p.evidence.submission&&inputObserver_.retire)try{inputObserver_.retire(p.evidence,inputObserver_.context);}catch(...){}
-    s.maps={};s.resources={};s.submissions={};s.probeQueued=false;
+    if(!retainRegistrations){s.maps={};s.resources={};}
+    s.submissions={};s.probeQueued=false;
     s.generation=nextGeneration_==std::numeric_limits<std::uint64_t>::max()?0:++nextGeneration_;
     return s.generation;
 }
@@ -73,10 +74,33 @@ NVENCSTATUS NVENCAPI NvencBoundary::init(void* encoder,NV_ENC_INITIALIZE_PARAMS*
 }
 NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE_PARAMS* params){
     auto& self=*instance_.load(std::memory_order_acquire);
-    // Never continue a negotiated source identity across any reconfiguration,
-    // even a failed attempt. No borrowed AU is freed by revocation.
-    {std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder)){self.revoke(*s);}}
-    return self.original_.nvEncReconfigureEncoder(encoder,params);
+    const bool typed=params&&params->version==NV_ENC_RECONFIGURE_PARAMS_VER
+        &&params->reInitEncodeParams.version==NV_ENC_INITIALIZE_PARAMS_VER;
+    const auto* init=typed?&params->reInitEncodeParams:nullptr;
+    const bool hevc=init&&std::memcmp(&init->encodeGUID,&NV_ENC_CODEC_HEVC_GUID,sizeof(GUID))==0
+        &&!init->enableOutputInVidmem&&!init->enableMEOnlyMode&&!init->reportSliceOffsets&&!init->enableSubFrameWrite
+        &&init->encodeWidth&&init->encodeHeight&&init->encodeWidth<=16384&&init->encodeHeight<=16384;
+    const auto width=hevc?init->encodeWidth:0,height=hevc?init->encodeHeight:0;
+    std::uint64_t generation=0;
+    // Revoke before calling native code. Native registration/map handles can
+    // remain valid after successful Reconfigure, but no submission, handshake,
+    // mask, or old metadata identity crosses the generation boundary.
+    {std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder))generation=self.revoke(*s,hevc);}
+    const auto result=self.original_.nvEncReconfigureEncoder(encoder,params);
+    std::lock_guard<std::mutex> guard(self.mutex_);
+    if(auto s=self.find(encoder);s&&generation&&s->generation==generation){
+        if(self.enabled_&&result==NV_ENC_SUCCESS&&hevc&&s->nextIdentity<=std::numeric_limits<std::uint64_t>::max()-64){
+            // Rebase CURRENT records, not a pre-call snapshot: a nested native
+            // unregister/unmap must never be resurrected on return.
+            for(auto& r:s->resources)if(r.registered)r.generation=++s->nextIdentity;
+            for(auto& m:s->maps)if(m.mapped){
+                Session::Resource* found=nullptr;for(auto& r:s->resources)if(r.registered==m.registered)found=&r;
+                if(found){m.resourceGeneration=found->generation;m.generation=++s->nextIdentity;}else m={};
+            }
+            s->initialized=s->hevc=true;s->width=width;s->height=height;
+        }else{s->maps={};s->resources={};}
+    }
+    return result;
 }
 NVENCSTATUS NVENCAPI NvencBoundary::registerResource(void* encoder,NV_ENC_REGISTER_RESOURCE* params){
     auto& self=*instance_.load(std::memory_order_acquire);

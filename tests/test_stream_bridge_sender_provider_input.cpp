@@ -10,10 +10,18 @@ void* encoder=reinterpret_cast<void*>(0x1010);void* resource=reinterpret_cast<vo
 std::vector<std::uint8_t> au{0,0,0,1,0x26,1,0x80,0x34,0x56};
 void* observedDevice=nullptr;std::uint64_t deviceGeneration=0;NV_ENC_DEVICE_TYPE observedDeviceType=NV_ENC_DEVICE_TYPE_CUDA;
 NvencOutputEvidence captured{},observed{};bool allowAugment=false,wrongTimestamp=false;
-std::uint64_t timestamp=0;NVENCSTATUS encodeResult=NV_ENC_SUCCESS,unlockResult=NV_ENC_SUCCESS;
+std::uint64_t timestamp=0;NVENCSTATUS encodeResult=NV_ENC_SUCCESS,unlockResult=NV_ENC_SUCCESS,reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
+NvencBoundary* activeBoundary=nullptr;PNVENCUNREGISTERRESOURCE nestedUnregister=nullptr;bool unregisterInside=false,discoveryRevokedInside=false;
+unsigned localNonce=7;
+LocalConfig localConfig(){LocalConfig c{};c.buildId=1;c.nonce[0]=static_cast<std::uint8_t>(localNonce);return c;}
+VerifiedChannel authority(){VerifiedChannel a{};a.authenticated=true;a.binding[0]=8;return a;}
 NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void** e){*e=encoder;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*){return NV_ENC_SUCCESS;}
-NVENCSTATUS NVENCAPI reconfigure(void*,NV_ENC_RECONFIGURE_PARAMS*){return NV_ENC_ERR_INVALID_PARAM;}
+NVENCSTATUS NVENCAPI reconfigure(void* handle,NV_ENC_RECONFIGURE_PARAMS*){
+    discoveryRevokedInside=!activeBoundary->requestDiscovery(handle,localConfig(),authority());
+    if(unregisterInside)nestedUnregister(handle,reg);
+    return reconfigureResult;
+}
 NVENCSTATUS NVENCAPI registration(void*,NV_ENC_REGISTER_RESOURCE* p){p->registeredResource=reg;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI unregistration(void*,NV_ENC_REGISTERED_PTR){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI map(void*,NV_ENC_MAP_INPUT_RESOURCE* p){p->mappedResource=mapped;p->mappedBufferFmt=NV_ENC_BUFFER_FORMAT_NV12;return NV_ENC_SUCCESS;}
@@ -28,7 +36,7 @@ void capture(const NvencOutputEvidence& e,void*){++captures;captureEvent=++event
 void retire(const NvencOutputEvidence& e,void*){retirementValid=retirementValid&&e.submission!=0;++retires;}
 bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8_t>& owned,void*){++augments;observed=e;if(!allowAugment||!e.exactInput)return false;owned.assign(candidate.data,candidate.data+candidate.size);owned.push_back(0xab);return true;}
 void run(){
-    NvencBoundary bridge({{1}});bridge.setInputObserver({capture,retire,nullptr});bridge.setDeviceObserver({device,nullptr});bridge.setOutputAugmenter({augment,nullptr});
+    NvencBoundary bridge({{1}});activeBoundary=&bridge;bridge.setInputObserver({capture,retire,nullptr});bridge.setDeviceObserver({device,nullptr});bridge.setOutputAugmenter({augment,nullptr});
     NV_ENCODE_API_FUNCTION_LIST table{};table.version=NV_ENCODE_API_FUNCTION_LIST_VER;check(bridge.create(factory,&table)==NV_ENC_SUCCESS,"actual public input/output API table wrapped");
     void* handle=nullptr;NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS op{};op.version=NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;op.device=reinterpret_cast<void*>(0x9090);op.deviceType=NV_ENC_DEVICE_TYPE_DIRECTX;table.nvEncOpenEncodeSessionEx(&op,&handle);
     check(observedDevice==op.device&&observedDeviceType==op.deviceType&&deviceGeneration==bridge.generation(handle),"actual public Open device and epoch observed without guessed object layout");
@@ -59,6 +67,33 @@ void run(){
     check(held!=au.data()&&bridge.liveLeases()==1,"final augmentation lease exists independently of discovery ticket");
     NV_ENC_RECONFIGURE_PARAMS reconfig{};reconfig.version=NV_ENC_RECONFIGURE_PARAMS_VER;table.nvEncReconfigureEncoder(handle,&reconfig);
     check(bridge.liveLeases()==1&&held[au.size()]==0xab,"reconfiguration revokes inputs without freeing outstanding final bytes");release();
+    // Native Reconfigure can keep registration/map handles alive. Reuse those
+    // actual handles, but require fresh metadata, handshake and Encode evidence.
+    table.nvEncInitializeEncoder(handle,&ip);table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
+    check(bridge.requestDiscovery(handle,localConfig(),authority()),"pre-reconfigure explicit discovery exists");
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();const auto before=observed;release();
+    check(before.exactInput,"pre-reconfigure exact input evidence exists");
+    reconfig.reInitEncodeParams=ip;reconfigureResult=NV_ENC_SUCCESS;
+    check(table.nvEncReconfigureEncoder(handle,&reconfig)==NV_ENC_SUCCESS&&discoveryRevokedInside,"native successful Reconfigure sees old authority revoked before return");
+    const auto state=bridge.encoderStates()[0];
+    check(state.hevc&&state.width==1152&&state.height==4608&&!state.encoded&&!state.peerConfirmed&&!state.probeObserved&&state.generation>before.encoderGeneration,"successful typed HEVC recovers source dimensions without stale peer/probe/encode proof");
+    p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"old submission cannot authorize new generation before fresh Encode");release();
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();
+    check(observed.exactInput&&observed.encoderGeneration==state.generation&&observed.resourceGeneration>before.resourceGeneration&&observed.mapGeneration>before.mapGeneration&&observed.submission>before.submission,"retained native registrations/maps recover without re-registering but every metadata identity is fresh");release();
+    ++localNonce;check(bridge.requestDiscovery(handle,localConfig(),authority()),"fresh nonce negotiation can begin after actual native reconfigure");
+    reconfig.reInitEncodeParams.encodeWidth=2304;table.nvEncReconfigureEncoder(handle,&reconfig);
+    check(bridge.encoderStates()[0].width==2304,"new actual coded dimensions published");
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"old resource dimensions cannot match new coded extent");release();
+    reconfig.reInitEncodeParams=ip;table.nvEncReconfigureEncoder(handle,&reconfig);
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(observed.exactInput,"retained native input recovers when actual extent matches again without re-registration");release();
+    nestedUnregister=table.nvEncUnregisterResource;unregisterInside=true;table.nvEncReconfigureEncoder(handle,&reconfig);unregisterInside=false;
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"native unregister during original Reconfigure cannot be resurrected by a saved snapshot");release();
+    table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
+    ++reconfig.version;table.nvEncReconfigureEncoder(handle,&reconfig);--reconfig.version;
+    check(!bridge.encoderStates()[0].hevc&&!bridge.requestDiscovery(handle,localConfig(),authority()),"successful unknown reconfigure ABI remains ineligible");
+    table.nvEncInitializeEncoder(handle,&ip);table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
+    reconfigureResult=NV_ENC_ERR_GENERIC;table.nvEncReconfigureEncoder(handle,&reconfig);
+    check(!bridge.encoderStates()[0].hevc&&!bridge.requestDiscovery(handle,localConfig(),authority()),"failed known HEVC reconfigure remains ineligible");
     check(retirementValid,"all retirement callbacks carry an exact submission identity");
     table.nvEncDestroyEncoder(handle);bridge.stop();check(!bridge.encoderStates()[0].encoder,"destroyed source epoch not exposed to worker");
 }

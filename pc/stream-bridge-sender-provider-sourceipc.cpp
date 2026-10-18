@@ -8,15 +8,15 @@ namespace stream_bridge::sender {
 struct SourceIpcServer::Impl {
     Prepared prepared;void* context;HANDLE pipe=INVALID_HANDLE_VALUE;OVERLAPPED connect{},read{},write{};
     bool connecting=false,reading=false,writing=false,connected=false,cancelling=false,accepted=false;unsigned writes=0;
-    SourceIpcMessage request{},reply{},previous{};SourceIpcRequest client{};std::uint8_t unexpected=0;
+    SourceIpcMessage request{},reply{},previous{};SourceIpcRequest client{};SourceIpcPermission permission{};std::uint8_t unexpected=0;
     Impl(Prepared p,void* c):prepared(p),context(c){connect.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);read.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);write.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);}
     bool done(OVERLAPPED& op,DWORD& bytes){return GetOverlappedResult(pipe,&op,&bytes,FALSE)!=0;}
     bool pending(OVERLAPPED& op){DWORD bytes=0;if(done(op,bytes))return false;return GetLastError()==ERROR_IO_INCOMPLETE;}
-    void cancel(){if(pipe==INVALID_HANDLE_VALUE)return;cancelling=true;CancelIoEx(pipe,nullptr);DisconnectNamedPipe(pipe);}
+    void cancel(){permission.reset();if(pipe==INVALID_HANDLE_VALUE)return;cancelling=true;CancelIoEx(pipe,nullptr);DisconnectNamedPipe(pipe);}
     void reap(){
         if(!cancelling)return;
         if((connecting&&pending(connect))||(reading&&pending(read))||(writing&&pending(write)))return;
-        CloseHandle(pipe);pipe=INVALID_HANDLE_VALUE;connecting=reading=writing=connected=cancelling=accepted=false;writes=0;client={};request={};reply={};previous={};
+        CloseHandle(pipe);pipe=INVALID_HANDLE_VALUE;connecting=reading=writing=connected=cancelling=accepted=false;writes=0;permission.reset();client={};request={};reply={};previous={};
     }
     bool create(){
         if(!connect.hEvent||!read.hEvent||!write.hEvent)return false;
@@ -53,7 +53,7 @@ struct SourceIpcServer::Impl {
         if(!reading)beginRead(); // An extra byte or EOF revokes this connection.
         if(!accepted||cancelling)return;
         if(writing){if(done(write,bytes)){writing=false;if(bytes!=128){cancel();return;}}else{if(GetLastError()!=ERROR_IO_INCOMPLETE){writing=false;cancel();}return;}}
-        const auto next=sourceReply(client,GetCurrentProcessId(),state.binding,state.generation,state.compatible&&prepared(client.processId,context));
+        const auto next=permission.update(client,GetCurrentProcessId(),state,prepared(client.processId,context));
         if(writes&&next==previous)return;
         if(writes>=256){cancel();return;} // Bounded connection telemetry, no timer.
         reply=next;previous=next;ResetEvent(write.hEvent);writing=true;++writes;
