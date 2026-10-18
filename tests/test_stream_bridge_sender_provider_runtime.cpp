@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <fstream>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 using namespace stream_bridge;using namespace stream_bridge::sender;
 namespace rx=stream_bridge_receiver;
@@ -69,15 +71,62 @@ void run(){
     for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){
         check(receiveVideo()==rx::Result::Handshake,"actual native output discovery reaches receiver");Message reply;check(receiver.nextOutbound(reply)==Status::Ok&&reply.kind==kind,"receiver schedules exact handshake response");AuthPayload body{};encode(reply,body);std::uint64_t ticket=0;check(reverse.queueControl({body.data(),body.size()},ticket),"reverse action enters actual bounded TCP");pump();SendReceipt sent;check(reverse.pollSent(sent)&&sent.ticket==ticket,"actual socket handoff receipt");check(receiver.markOutboundSent(reply,authority)==Status::Ok,"receiver advances only after socket send");}
     pump();check(runtime.state()==RuntimeState::Confirmed&&receiver.snapshot().peerConfirmed,"actual provider worker mutually confirms existing native output session");
+    check(runtime.lastFailure().reason==RuntimeFailure::None,"healthy actual handshake has no failure classification");
     check(receiveVideo()==rx::Result::MetadataObserved,"real native AU carries fresh post-handshake probe");ProbeMessage echo;check(receiver.nextEcho(echo),"probe echoed only after actual coded-AU observation");AuthPayload encoded{};encodeProbe(echo,encoded);std::uint64_t ticket=0;check(reverse.queueControl({encoded.data(),encoded.size()},ticket),"exact observed probe echo enters reverse transport");pump();check(runtime.state()==RuntimeState::ProbeObserved,"actual provider worker verifies matching roundtrip probe");
     const auto stats=boundary.reconfigureStats();check(stats.total==qosCalls&&stats.preservedSuccessful==(qosCalls+1)/2&&stats.preservedRejected==qosCalls/2&&stats.revoked==0&&reconfigureCalls==qosCalls,"bounded cold counters classify every repeated accepted/rejected QoS call");
     check(!receiver.snapshot().metadataSelected,"probe transport does not fabricate selected GPU identity");
     reverse.stop();for(unsigned i=0;i<80;++i){reverse.tick();runtime.tick();}check(runtime.state()==RuntimeState::Failed&&!runtime.control().peerVerified(),"actual reverse EOF revokes provider handshake without a timeout");
+    const auto lost=runtime.lastFailure();check(lost.reason==RuntimeFailure::TransportLost&&lost.control==ControlStatus::Lost
+        &&!lost.hasProtocolStatus&&lost.encoder.generation==stableGeneration&&lost.encoder.hevc&&lost.encoder.encoded,
+        "real reverse EOF preserves exact pre-revocation transport and encoder facts");
     NV_ENC_LOCK_BITSTREAM fallback{};fallback.version=NV_ENC_LOCK_BITSTREAM_VER;fallback.outputBitstream=output;table.nvEncLockBitstream(handle,&fallback);check(fallback.bitstreamBufferPtr==au.data()&&fallback.bitstreamSizeInBytes==au.size(),"lost paired peer leaves ordinary actual native AU pointer and size intact");table.nvEncUnlockBitstream(handle,output);
     const auto previous=runtime.encoder().generation;NV_ENC_RECONFIGURE_PARAMS rc{};rc.version=NV_ENC_RECONFIGURE_PARAMS_VER;reconfigureResult=NV_ENC_ERR_INVALID_PARAM;table.nvEncReconfigureEncoder(handle,&rc);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder&&!runtime.control().peerVerified()&&runtime.control().localPort()==0,"real source reconfiguration tears down authenticated transport immediately");
     ip.encodeGUID=NV_ENC_CODEC_H264_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder,"non-HEVC source remains ordinary after reconfiguration");
     ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(handle,&ip);submit();runtime.tick();check(runtime.encoder().generation>previous&&runtime.state()==RuntimeState::WaitingPeer,"new actual codec epoch gets fresh session and must reconfirm");
+    check(runtime.lastFailure().reason==RuntimeFailure::TransportLost&&runtime.lastFailure().encoder.generation==stableGeneration,
+        "later source admission retains the earlier failure snapshot for bounded cold reporting");
+    auto missing=request;missing.pairingsDirectory=files.path/"missing";runtime.configure(missing);runtime.tick();
+    check(runtime.state()==RuntimeState::Failed&&runtime.lastFailure().reason==RuntimeFailure::PrepareControl
+        &&runtime.lastFailure().control==ControlStatus::PairingRefused&&runtime.control().status()==ControlStatus::Disabled,
+        "actual missing credential reports prepare refusal before cleanup replaces the native status");
+    runtime.configure(request);runtime.tick();runtime.control().stop();runtime.tick();
+    check(runtime.lastFailure().reason==RuntimeFailure::TransportDisabled&&runtime.lastFailure().control==ControlStatus::Disabled,
+        "actual local transport stop is classified separately from peer loss");
+    runtime.configure(request);runtime.tick();
+    NV_ENC_LOCK_BITSTREAM leased{};leased.version=NV_ENC_LOCK_BITSTREAM_VER;leased.outputBitstream=output;
+    check(table.nvEncLockBitstream(handle,&leased)==NV_ENC_SUCCESS&&leased.bitstreamBufferPtr!=au.data()&&boundary.liveLeases()==1,
+        "actual augmented output stays borrowed while a new cold admission is attempted");
+    runtime.configure(request);runtime.tick();const auto denied=runtime.lastFailure();
+    check(runtime.state()==RuntimeState::Failed&&denied.reason==RuntimeFailure::RequestDiscovery
+        &&denied.control==ControlStatus::Listening&&denied.liveOutputLeases==1&&denied.encoder.generation==boundary.generation(handle),
+        "actual leased output refusal reports discovery admission and outstanding native lease count");
+    table.nvEncUnlockBitstream(handle,output);
+    runtime.configure(request);runtime.tick();
+    const int raw=socket(AF_INET,SOCK_STREAM,0);check(raw>=0,"actual invalid-control peer socket");
+    sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(runtime.control().localPort());inet_pton(AF_INET,"127.0.0.1",&address.sin_addr);
+    check(connect(raw,reinterpret_cast<const sockaddr*>(&address),sizeof address)==0,"actual unauthenticated peer reaches control endpoint");
+    const AuthEnvelope invalid{};check(send(raw,invalid.data(),invalid.size(),0)==static_cast<ssize_t>(invalid.size()),"actual invalid control envelope sent");
+    for(unsigned i=0;i<80;++i)runtime.tick();
+    close(raw);
+    check(runtime.lastFailure().reason==RuntimeFailure::TransportAuthenticationRefused&&runtime.lastFailure().control==ControlStatus::AuthenticationRefused,
+        "actual MAC failure is classified separately from EOF and disabled transport");
+    runtime.configure(request);runtime.tick();rr.port=runtime.control().localPort();++rr.video.connection[0];++rr.video.generation;reverse.prepare(rr);
+    for(unsigned i=0;i<80;++i){reverse.tick();runtime.tick();}
+    reverse.configuredLocal(receiverLocal);authority={rr.video.connection,rr.video.generation,{}};
+    check(receiver.beginAuthenticated(authority,receiverLocal,reverse.receiverVerifier(),reverse.verifierContext())&&receiveVideo()==rx::Result::Handshake,
+        "new real signed video bootstrap enables authenticated reverse-protocol refusal fixture");
+    Message outOfOrder;AuthPayload malformed{};std::uint64_t invalidTicket=0;
+    check(receiver.nextOutbound(outOfOrder)==Status::Ok,"actual receiver schedules its initial handshake reply");
+    outOfOrder.kind=Kind::Ack;outOfOrder.peerNonce.fill(44);outOfOrder.selected=outOfOrder.offered;
+    check(encode(outOfOrder,malformed)==Status::Ok&&reverse.queueControl({malformed.data(),malformed.size()},invalidTicket),
+        "real authenticated channel seals a valid but out-of-order protocol action");
+    for(unsigned i=0;i<80;++i){reverse.tick();runtime.tick();}
+    check(runtime.lastFailure().reason==RuntimeFailure::ReceiveControl&&runtime.lastFailure().hasProtocolStatus
+        &&runtime.lastFailure().protocol!=Status::Ok&&runtime.lastFailure().control==ControlStatus::TransportConnected,
+        "actual authenticated invalid protocol records the exact receive-control status before socket cleanup");
+    reverse.stop();
     runtime.stop();runtime.tick();check(runtime.state()==RuntimeState::Off&&runtime.control().localPort()==0,"explicit stop never autonomously restarts control");table.nvEncDestroyEncoder(handle);boundary.stop();
+    check(runtime.lastFailure().reason==RuntimeFailure::None,"explicit stop clears prior session diagnostic state");
 }
 }
 int main(){try{run();std::printf("sender actual provider/control composition: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"sender runtime failed after %u: %s\n",checks,e.what());return 1;}}
