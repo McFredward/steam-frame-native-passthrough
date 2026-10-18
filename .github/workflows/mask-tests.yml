@@ -34,6 +34,16 @@ on:
       - 'tests/test_stream_bridge_artifact_pins.py'
       - '.github/workflows/setup-tests.yml'
       - '.github/workflows/mask-tests.yml'
+      # Bounded lifecycle-only repairs have their own production-code gate.
+      - '.github/workflows/stream-lifecycle-tests.yml'
+      - 'bridge/stream_bridge_control.*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-sender-provider-runtime.*'
+      - 'receiver/stream_bridge_native_runtime.*'
+      - 'tests/test_stream_bridge_control.cpp'
+      - 'tests/test_stream_bridge_sender_provider*.cpp'
+      - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'cmake/StreamBridge.cmake'
   pull_request:
     paths-ignore:
       - '**/*.md'
@@ -67,6 +77,15 @@ on:
       - 'tests/test_stream_bridge_artifact_pins.py'
       - '.github/workflows/setup-tests.yml'
       - '.github/workflows/mask-tests.yml'
+      - '.github/workflows/stream-lifecycle-tests.yml'
+      - 'bridge/stream_bridge_control.*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-sender-provider-runtime.*'
+      - 'receiver/stream_bridge_native_runtime.*'
+      - 'tests/test_stream_bridge_control.cpp'
+      - 'tests/test_stream_bridge_sender_provider*.cpp'
+      - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'cmake/StreamBridge.cmake'
   workflow_dispatch:
 
 permissions:

@@ -80,9 +80,17 @@ never downloads it. Existing rendering, shader, installer and GPU evidence is
 inherited only where its code is unchanged. No headset picture or current
 Windows/NVIDIA runtime success is established by these software checks.
 
-Recovery after a previously confirmed connection is lost also depends on the
-producer reopening its endpoint. The general producer socket/TIME_WAIT policy
-was not changed in this bounded repair.
+A further production control regression confirmed that gracefully closing an
+established producer peer could retain its fixed port in TCP TIME_WAIT, blocking
+the next admission. Revocation now aborts only this private auxiliary control
+peer and discards its obsolete queued messages. It changes no Steam-owned video
+socket or listener-sharing option. Six fully authenticated localhost sessions
+reuse the same endpoint immediately, with fresh authority and active duplicate
+listeners still refused; the previous production source fails this regression.
+
+After the passing broad CI run, only the affected lifecycle gate is repeated for
+this bounded transport repair. Lifecycle-only changes now have a dedicated fast
+CI workflow; rendering changes continue to trigger the full native gate.
 
 Public API background: [NVIDIA's reconfiguration guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/nvenc-video-encoder-api-prog-guide/index.html#reconfiguring-an-existing-encode-session).
 The actual supported ABI remains pinned to SDK 11.1.

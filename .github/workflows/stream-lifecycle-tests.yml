@@ -1,0 +1,51 @@
+name: Stream connection lifecycle checks
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'bridge/stream_bridge_control.*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-sender-provider-runtime.*'
+      - 'receiver/stream_bridge_native_runtime.*'
+      - 'tests/test_stream_bridge_control.cpp'
+      - 'tests/test_stream_bridge_sender_provider*.cpp'
+      - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'cmake/StreamBridge.cmake'
+      - '.github/workflows/stream-lifecycle-tests.yml'
+  pull_request:
+    paths:
+      - 'bridge/stream_bridge_control.*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-sender-provider-runtime.*'
+      - 'receiver/stream_bridge_native_runtime.*'
+      - 'tests/test_stream_bridge_control.cpp'
+      - 'tests/test_stream_bridge_sender_provider*.cpp'
+      - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'cmake/StreamBridge.cmake'
+      - '.github/workflows/stream-lifecycle-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stream-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare the exact reviewed public SDK header
+        run: |
+          mkdir -p build/nvenc-sdk
+          curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/FFmpeg/nv-codec-headers/43d91706e097565f57b311e567f0219838bcc2f6/include/ffnvcodec/nvEncodeAPI.h -o build/nvenc-sdk/nvEncodeAPI.h
+          echo 'be0c29a41ae3260fd016a9001fd959e747bac93ad21411759736abba4ffdea86  build/nvenc-sdk/nvEncodeAPI.h' | sha256sum --check --strict
+      - name: Build the affected production control and encoder boundaries
+        run: |
+          cmake -S . -B build/lifecycle -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
+          cmake --build build/lifecycle --parallel 4 --target test_stream_bridge_control test_stream_bridge_native_runtime test_stream_bridge_sender_provider test_stream_bridge_sender_provider_input test_stream_bridge_sender_provider_runtime
+      - name: Exercise actual TCP admission, reconfiguration and frame receipts
+        run: ctest --test-dir build/lifecycle --output-on-failure --parallel 4 -R '^stream_bridge_(control|native_runtime|sender_provider(_input|_runtime)?)$'
