@@ -146,7 +146,7 @@ class Menus(unittest.TestCase):
         presenter, _ = self.make()
         presenter.interactive = True
         source = types.SimpleNamespace(isatty=lambda: False)
-        with mock.patch.object(ui.sys, 'stdin', source):
+        with mock.patch.object(ui.sys, 'stdin', source), mock.patch.dict(os.environ, {'TERM': 'xterm'}):
             self.assertFalse(presenter._arrow_capable())
         source.isatty = lambda: True
         with mock.patch.object(ui.sys, 'stdin', source), mock.patch.dict(os.environ, {'TERM': 'xterm'}):
