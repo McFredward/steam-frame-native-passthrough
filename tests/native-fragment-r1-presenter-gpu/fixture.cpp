@@ -191,6 +191,7 @@ std::vector<PresenterCase> readPresenterCases(const char* path){
     return result;
 }
 }
+#ifndef SFNP_R1_FIXTURE_NO_MAIN
 int main(int argc,char** argv){
     try{
         require(argc==7,"usage: r1-presenter-fixture VERTEX ORIGINAL PRESENTER CASES enabled|disabled 1|3");
@@ -256,3 +257,5 @@ int main(int argc,char** argv){
             <<",\"sampled_image_descriptor_count\":"<<descriptors<<",\"device_name\":\""<<gpu.properties.deviceName<<"\",\"passthrough_authorized\":false}\n";return 0;
     }catch(const std::exception& e){std::cerr<<"current-R1 presenter fixture failed: "<<e.what()<<"; checks="<<checks<<'\n';return 1;}
 }
+
+#endif

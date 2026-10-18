@@ -87,3 +87,16 @@ if(BUILD_TESTING)
         endif()
     endif()
 endif()
+
+if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND)
+        add_executable(test_native_stream_coverage_gpu EXCLUDE_FROM_ALL
+            tests/native-fragment-stream-coverage-gpu/fixture.cpp)
+        target_compile_options(test_native_stream_coverage_gpu PRIVATE
+            -Wall -Wextra -Wno-unused-function -Wno-missing-field-initializers)
+        target_link_libraries(test_native_stream_coverage_gpu PRIVATE Vulkan::Vulkan)
+        # Requires private installed shader inputs and active validation.
+        # No public fixture can establish an actual selected-video lease.
+    endif()
+endif()
