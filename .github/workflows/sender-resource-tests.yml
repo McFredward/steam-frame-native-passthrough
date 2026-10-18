@@ -6,13 +6,21 @@ on:
     paths:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'tests/test_stream_bridge_sender_shared_resource.cpp'
+      - 'tests/test_stream_bridge_sender_provider_context.cpp'
       - '.github/workflows/sender-resource-tests.yml'
   pull_request:
     paths:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'tests/test_stream_bridge_sender_shared_resource.cpp'
+      - 'tests/test_stream_bridge_sender_provider_context.cpp'
       - '.github/workflows/sender-resource-tests.yml'
   workflow_dispatch:
+    inputs:
+      focus:
+        description: Focused Windows production check
+        type: choice
+        options: [context, all]
+        default: context
 
 permissions:
   contents: read
@@ -23,6 +31,7 @@ concurrency:
 
 jobs:
   shared-resource:
+    if: github.event_name != 'workflow_dispatch' || inputs.focus == 'all'
     runs-on: windows-2025
     timeout-minutes: 3
     steps:
@@ -57,3 +66,38 @@ jobs:
         with:
           name: windows-shared-resource-evidence
           path: build/shared-resource-*.log
+  context-observer:
+    runs-on: windows-2025
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare pinned public SDK headers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/nvenc-sdk | Out-Null
+          Invoke-WebRequest 'https://raw.githubusercontent.com/FFmpeg/nv-codec-headers/43d91706e097565f57b311e567f0219838bcc2f6/include/ffnvcodec/nvEncodeAPI.h' -OutFile build/nvenc-sdk/nvEncodeAPI.h
+          Invoke-WebRequest 'https://raw.githubusercontent.com/ValveSoftware/openvr/0924064316de3effbcd1acf1e309182a2deb1c05/headers/openvr_driver.h' -OutFile build/nvenc-sdk/openvr_driver.h
+          foreach ($pin in @(@('nvEncodeAPI.h','be0c29a41ae3260fd016a9001fd959e747bac93ad21411759736abba4ffdea86'),@('openvr_driver.h','1036efe998d63e82d1d3db2b32a2f58df4a8eeaf5280f50aaf28220ff60a40ab'))) {
+            if ((Get-FileHash ('build/nvenc-sdk/'+$pin[0])).Hash.ToLowerInvariant() -ne $pin[1]) { throw ('SDK pin mismatch: '+$pin[0]) }
+          }
+      - name: Compile actual production context observer
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /I. /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_provider_context.cpp pc/stream-bridge-sender-provider-coverage.cpp pc/stream-bridge-sender-provider-coverage-render.cpp pc/stream-bridge-sender-provider-directmode.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_capacity.cpp bridge/stream_bridge_credentials.cpp bridge/stream_bridge_control.cpp receiver/stream_bridge_receiver.cpp bridge/hevc_bridge_sei.cpp /Fe:build\native-context.exe /Fo:build\ /link d3d11.lib dxgi.lib dxguid.lib uuid.lib bcrypt.lib ws2_32.lib advapi32.lib
+          if errorlevel 1 exit /b 1
+      - name: Exercise real context dispatch from a separate rendering thread
+        shell: cmd
+        run: |
+          build\native-context.exe >build\native-context.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\native-context.log
+          exit /b %SFNP_RESULT%
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-native-context-evidence
+          path: build/native-context.log
