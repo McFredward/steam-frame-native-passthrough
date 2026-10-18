@@ -5,6 +5,43 @@ The new sender/receiver bridge is still a prototype, so current prototype bundle
 cannot install components or create pairings. An existing public Frame
 scene-atlas patch is reported separately; it is not a negotiated receiver.
 
+## Online entry points
+
+The repository contains `get.ps1` and `get.sh` for the planned public one-line
+setup. The intended stable entry points are:
+
+```powershell
+irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.ps1 | iex
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.sh | bash
+```
+
+**These are not a published complete PC/Frame installation yet.** Publish the
+stable entry points and dedicated setup asset only after both native providers
+and their runtime integration are admitted. Until that asset exists, the
+bootstrap refuses installation instead of using an older Frame-only release.
+Do not present the development snapshot as an installable passthrough fix.
+
+The bootstrap selects only the fixed `steam-link-native-passthrough-setup.zip`
+asset of this repository's latest stable GitHub release. It verifies GitHub's
+reported SHA-256 digest, bounded archive paths and every inner file before
+starting the assistant. These checks protect download/package consistency;
+the repository and GitHub release remain the trust source, not independent
+cryptographic publishers. Neither bootstrap requests elevation or a restart.
+Its temporary download/runtime directory is removed after the assistant exits.
+
+Windows setup assets must contain the pinned portable Python runtime, so users
+do not need a separate Python installation for the online command. The bundle's
+bootstrap manifest is `sfnp-bootstrap-package-v1` with exact `schema`,
+`readiness: release`, `windows_python: setup/runtime/python/python.exe` and
+`files` fields. `files` pins every archive file except the manifest itself by
+length and SHA-256. The pinned `steam-link-bundle.json` and assistant engine are
+mandatory; the inner bundle must independently be a complete admitted release.
+Bash uses system Python 3.9+ and gives the wizard `/dev/tty` as stdin so piping
+the bootstrap into Bash does not swallow interactive review/SSH prompts.
+
 ## Run the assistant
 
 Extract the complete dedicated setup archive. On Windows, open
