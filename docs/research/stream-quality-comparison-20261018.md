@@ -74,6 +74,33 @@ exact selected-image and shared-ray association described in the
 [public API review](app-only-public-api-feasibility-20261018.md). No such new
 runtime adapter or quality result is established by this arithmetic.
 
+## Larger same-stream carrier: mathematically valid, not admitted by the inspected host
+
+The maintainer proposes enlarging only the transported carrier to retain the
+selected scene raster and add coverage outside it. This would compensate the
+current spatial budget if the *actual* encoded image grew:99/64 per axis,
+2.392822265625 times its area. It is distinct from rendering more scene samples
+and reducing them into an unchanged video. A4040-square scene would require an
+ideal6249.375-square carrier, or6272 at upward64-pixel alignment.
+
+The [new host sizing audit](larger-carrier-host-limits-20261018.md) traces the
+entire retained settings/layout/fit chain. Each associated layout limits its
+square input to3200; the larger complete dimensions in other layouts pay for
+their own packing. Public target/min/max settings and queried GPU capabilities
+do not raise those later internal limits. The [receiver review](larger-carrier-receiver-negotiation-20261018.md)
+shows capture allocation following the decoder-reported stream format and finds
+no established outgoing override of that independent host bound. Retained
+source identities versus current runtimes, active chart versus decode padding,
+and foveated versus uniform sampling remain explicitly separate.
+
+Consequently another width multiplier, layout toggle or enlarged Frame buffer
+is not a supported full-quality repair through this inspected unchanged host.
+Raising its implementation limit would cross the user's no-PC-sender-change
+boundary. No production/build/Frame behavior changes or new headset test follow
+from this research. A compact in-band mask is a separate, unproved capacity
+strategy; a separate channel still needs resource/latency and exact-association
+proof rather than being selected automatically.
+
 ## Activation and the local dashboard are separate boundaries
 
 The game previously started atlas preparation while its asynchronous stream
