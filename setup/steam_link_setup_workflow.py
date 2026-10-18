@@ -52,6 +52,7 @@ class Workflow:
                 if not self.ui.confirm('bridge_picture'):
                     raise self.ports.error('The user could not confirm a usable Frame picture.')
                 self.ports.finish(restored=False)
+                self.ui.say('bridge_pc_stopped')
                 self.ui.say('bridge_removed' if action=='uninstall' else 'bridge_installed')
                 return 0
             except BaseException as error:

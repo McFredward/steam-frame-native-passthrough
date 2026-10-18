@@ -110,7 +110,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Terminal menu checks failed.' }
           python -B tests/test_setup_pc.py
           if ($LASTEXITCODE -ne 0) { throw 'PC runtime control checks failed.' }
-          python -B tests/test_setup_workflow.py Files.test_pc_install_rollback_removes_only_its_new_credentials Files.test_pc_repair_rollback_preserves_original_receipt_and_missing_file
+          python -B tests/test_setup_workflow.py Files.test_pc_install_rollback_removes_only_its_new_credentials Files.test_pc_repair_rollback_preserves_original_receipt_and_missing_file Files.test_pc_update_retains_initial_uninstall_baseline_and_pairing Files.test_pc_update_rollback_restores_previous_version_and_owned_preferences
           if ($LASTEXITCODE -ne 0) { throw 'Windows file rollback checks failed.' }
       - name: Execute the actual packaged portable Python without Frame access
         shell: powershell

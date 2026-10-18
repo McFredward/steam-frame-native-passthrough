@@ -26,7 +26,7 @@ class Checkpoint:
         if not self.path.exists():return None
         e=self.e;value=e.parse(e.read(self.path,LIMIT,private=True))
         e.require(type(value)is dict and set(value)=={'schema','action','operations','settings','registered'} and
-                  value['schema']==SCHEMA and value['action'] in ('install','repair','uninstall') and
+                  value['schema']==SCHEMA and value['action'] in ('install','update','repair','uninstall') and
                   type(value['operations'])is list and len(value['operations'])<=128 and
                   type(value['settings'])is list and len(value['settings'])<=4 and
                   (value['registered'] is None or type(value['registered'])is bool),'Unknown setup recovery checkpoint preserved.')

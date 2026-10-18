@@ -1,4 +1,4 @@
-"""Exact-package full-resolution connection setup, with no automatic restart.
+"""Exact-package full-resolution setup with confirmed lifecycle orchestration.
 
 This module is loaded by the verified setup entry. Prototype manifests provide
 inventory only. Source identities and successful software tests do not turn a
@@ -70,7 +70,7 @@ TOOLS = frozenset('frame/tools/'+name+'.py' for name in (
     'native_fragment_packed_output','native_fragment_r1_presenter','native_fragment_scene_presenter',
     'native_fragment_ssa_probe','native_fragment_stream_coverage','pixel_payload_recovery'))
 PROFILES = frozenset('frame/docs/protocols/scene-contribution-atlas-v'+str(n)+'.json' for n in (1,3))
-GENERATED = {'coverage.spv': {'bytes':7140,'sha256':'54760d17ec2933ca667923ca713f64d6810914f9b2b53503d9a6ebb68ee2bdc0'},
+GENERATED = {'coverage.spv': {'bytes':7188,'sha256':'316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e'},
              'legacy.spv': {'bytes':31384,'sha256':'44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49'}}
 
 
@@ -271,7 +271,9 @@ class LocalInstall:
             present={str(p.relative_to(self.local.root)).replace('\\','/') for p in driver.rglob('*') if p.is_file() or p.is_symlink()}
             e.require(present<=set(old['files'] if old else {}),'An unknown PC provider is already present; it was preserved.')
         if old:
-            e.require(old['bundle']==bundle.pin,'Remove the previous checked connection before installing a different package.')
+            if old['bundle']!=bundle.pin:
+                e.require(backup,'Updating a different checked package requires the confirmed recoverable workflow.')
+                return self.update(bundle,pc,pair,address,port,old,tool)
             missing=[]
             for name,pin in old['files'].items():
                 path=self.local.root/e.relative(name)
@@ -324,6 +326,49 @@ class LocalInstall:
             for path,raw in reversed(undo):e.remove_owned(path,raw)
             raise
         return {'reason':'installed','changed':True,'automatic_restart':False}
+
+    def update(self,bundle,pc,pair,address,port,old,tool):
+        """Retain the initial uninstall baseline and checkpoint this update."""
+        e=self.e;helper=load_helper(e,'steam_link_setup_checkpoint')
+        e.require(old['pair']==pair['pair_id'],'The existing connection pairing must be preserved during an update.')
+        e.require(e.parse(e.read(self.local.root/'pairings/active.json',4096,private=True))==
+                  {'schema':e.ACTIVE,'pair_id':old['pair']},'The active connection changed; it was preserved.')
+        changes=[]
+        for name,pin in old['files'].items():
+            path=self.local.root/e.relative(name);raw=e.read(path) if path.exists() else None
+            e.require(raw is None or len(raw)==pin['bytes'] and e.sha(raw)==pin['sha256'],
+                      'Changed provider files preserved.')
+            desired=bundle.files[name]
+            if raw!=desired:changes.append((path,raw,desired))
+        settings_path=self.settings_path();before=e.read(settings_path,2*1024*1024)
+        preferences=e.parse(before)
+        replacement=e.parse(e.encoded(old))
+        desired={SETTINGS_SECTION:{'enableStreamBridge':True,'controlListenAddress':private_ipv4(address),'controlPort':port}}
+        for section,spec in old['settings']['baseline'].items():
+            current=preferences.get(section)
+            e.require(type(current)is dict and all(key in current and type(current[key])is type(entry['installed']) and
+                      current[key]==entry['installed'] for key,entry in spec['keys'].items()),'Changed SteamVR settings preserved; update stopped.')
+            for key in spec['keys']:
+                current[key]=desired[section][key]
+                replacement['settings']['baseline'][section]['keys'][key]['installed']=current[key]
+        replacement.update(bundle=bundle.pin,files={n:bundle.value['files'][n] for n in PC_FILES},
+                           vrpathreg=bundle.pc['runtime_files']['vrpathreg'])
+        receipt_before=e.read(self.receipt,2*1024*1024,private=True);receipt_after=e.encoded(replacement)
+        checkpoint=self.checkpoint(pair['pair_id'])
+        operations=[checkpoint.operation(path,[helper.file_value(raw)]) for path,_,raw in changes]
+        operations.append(checkpoint.operation(self.receipt,[helper.file_value(receipt_after)]))
+        settings=[checkpoint.setting(settings_path,section,key,[{'present':True,'value':value}])
+                  for section,values in desired.items() for key,value in values.items()]
+        checkpoint.begin('update',operations,settings,bool(pc.get('registered')))
+        for path,previous,raw in changes:e.put(path,raw,previous)
+        mode=stat.S_IMODE(settings_path.stat().st_mode)
+        e.put(settings_path,e.encoded(preferences),before)
+        if os.name!='nt':os.chmod(settings_path,mode)
+        e.put(self.receipt,receipt_after,receipt_before)
+        if not pc.get('registered'):
+            self.local.register(tool,'adddriver')
+            e.require(self.local.inventory()['registered'],'The updated provider registration could not be confirmed.')
+        return {'reason':'updated','changed':True,'automatic_restart':False}
 
     def uninstall(self,pc,*,backup=False):
         e=self.e;state=self.state()
@@ -725,8 +770,11 @@ class FrameInstall:
     def install(self,bundle,pair,address,port,*,backup=False,live=False):
         e=self.e;current=self.tx.state()
         if current:
-            e.require(current['phase']=='installed' and current['bundle']==bundle.pin and current['pair']==pair['pair_id'],
+            e.require(current['phase']=='installed' and current['pair']==pair['pair_id'],
                       'Repair or remove the previous Frame transaction before replacing it.')
+            if current['bundle']!=bundle.pin:
+                e.require(backup and live,'Updating a different Frame package requires the confirmed recoverable workflow.')
+                return self.update(bundle,pair,address,port,current)
             if self.inventory(bundle)['files_current']:return {'reason':'current','automatic_restart':False}
             if not live:self.cold(steam=True)
             missing=[]
@@ -759,6 +807,57 @@ class FrameInstall:
             self.undo(live=live)
             raise
         return {'reason':'prepared','pair_id':pair['pair_id'],'automatic_restart':False,
+                'manual_restart_required':True,'coverage_operational':False}
+
+    def update(self,bundle,pair,address,port,current):
+        """Replace owned payloads live while retaining the initial predecessors."""
+        e=self.e;bundle.admit('Windows');compatible,original=self.runtime(bundle)
+        e.require(compatible and original is not None,'The Frame runtime does not match this package.')
+        e.require(self.machine().lower() in ('aarch64','arm64'),'The selected device is not a supported Steam Frame.')
+        e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
+        address=private_ipv4(address)
+        e.require(e.parse(e.read(self.root/'pairings'/ (current['pair']+'.json'),4096,private=True))==pair,
+                  'The existing Frame pairing must be preserved during an update.')
+        for op in current['operations']:
+            observed=self.tx.current(Path(op['path']))
+            e.require(observed==op['after'] or observed is None and op['before'] is None and
+                      op['after'] is not None and op['after']['kind']=='file',
+                      'Changed Frame files were preserved; only owned components can be updated.')
+        settings=current['settings'];preferences=e.parse(e.read(Path(settings['path']),2*1024*1024))
+        for section,spec in settings['baseline'].items():
+            values=preferences.get(section)
+            e.require(type(values)is dict and all(key in values and type(values[key])is type(entry['installed']) and
+                      values[key]==entry['installed'] for key,entry in spec['keys'].items()),
+                      'Changed Frame settings preserved; update stopped.')
+        with tempfile.TemporaryDirectory(prefix='prepare-update-',dir=self.root.parent) as stage:
+            outputs=generate_shaders(e,bundle,original,Path(stage))
+        wanted={self.root/LIBRARY:bundle.files['frame/'+LIBRARY],
+                self.root/'libsfnp_stream_launch.so':bundle.files['frame/libsfnp_stream_launch.so'],
+                self.root/'receiver.conf':MARKER+address.encode()+b'\n'+str(port).encode()+b'\n'}
+        wanted.update({self.root/name:raw for name,raw in outputs.items()})
+        wanted.update({self.root/Path(name).relative_to('frame'):bundle.files[name]
+                       for name in TOOLS|PROFILES})
+        operations=e.parse(e.encoded(current))['operations'];by_path={op['path']:op for op in operations};changes=[]
+        for path,raw in wanted.items():
+            observed=self.tx.current(path);desired={'kind':'file','bytes':base64.b64encode(raw).decode()}
+            if str(path) in by_path:by_path[str(path)]['after']=desired
+            else:
+                op=self.tx.operation(path,raw);operations.append(op);by_path[str(path)]=op
+            if observed!=desired:
+                changes.append({'path':str(path),'before':observed,'after':desired,'mode':by_path[str(path)]['mode']})
+        for op in operations:
+            path=Path(op['path'])
+            if path not in wanted:
+                observed=self.tx.current(path)
+                if observed!=op['after']:changes.append({**op,'before':observed})
+        pending={**current,'bundle':bundle.pin,'operations':operations,'phase':'pending'}
+        committed={**pending,'phase':'installed'};helper=load_helper(e,'steam_link_setup_checkpoint')
+        previous=e.read(self.tx.path,64*1024*1024,private=True)
+        self.backup('update',changes,settings,[helper.file_value(e.encoded(pending)),helper.file_value(e.encoded(committed))])
+        e.put(self.tx.path,e.encoded(pending),previous)
+        for op in changes:self.tx.replace(op)
+        self.system('daemon-reload')
+        return {'reason':'prepared-update','pair_id':current['pair'],'automatic_restart':False,
                 'manual_restart_required':True,'coverage_operational':False}
 
     def undo(self,*,backup=False,live=False):
@@ -985,7 +1084,10 @@ class Automation:
         self.phase('frame_commit');self.call('bridge-commit')
 
     def restart_prepared(self):
-        self.phase('runtime_start');self.call('bridge-runtime-restart');self.runtime.start()
+        # The maintainer wants the PC runtime left closed after Apply. Steam
+        # Link/game launch owns its later startup. Only rollback restores the
+        # PC's original on/off state through runtime.restore().
+        self.phase('runtime_start');self.call('bridge-runtime-restart')
 
     def prepared_health(self):
         self.phase('startup_health');result=self.call('bridge-health',baseline=self.baseline)
@@ -1190,7 +1292,8 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if available and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
         if state is None:actions.insert(0,'install')
         elif state['bundle']==bundle.pin:actions.insert(0,'repair')
-    recommended='rollback' if pending else 'install' if 'install' in actions else 'repair' if 'repair' in actions else 'check'
+        else:actions.insert(0,'update')
+    recommended='rollback' if pending else 'install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'check'
     action=args.action or (ui.choose_action(actions,recommended=recommended) if ui else None)
     if action in (None,'exit','check'):return 0
     e.require(interactive and action in actions,'That action is not available for this checked package.')

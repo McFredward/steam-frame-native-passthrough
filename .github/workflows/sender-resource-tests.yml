@@ -1,0 +1,58 @@
+name: Native Windows sender resource checks
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'tests/test_stream_bridge_sender_shared_resource.cpp'
+      - '.github/workflows/sender-resource-tests.yml'
+  pull_request:
+    paths:
+      - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'tests/test_stream_bridge_sender_shared_resource.cpp'
+      - '.github/workflows/sender-resource-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sender-resource-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-resource:
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the actual production resource matcher with the Windows SDK
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          mkdir build
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I. tests/test_stream_bridge_sender_shared_resource.cpp pc/stream-bridge-sender-provider-coverage-render.cpp /Fe:build\shared-resource.exe /Fo:build\ /link d3d11.lib dxgi.lib dxguid.lib uuid.lib
+          if errorlevel 1 exit /b 1
+      - name: Verify metadata guards and independently opened native D3D11 resources
+        shell: cmd
+        run: |
+          build\shared-resource.exe --metadata >build\shared-resource-metadata.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\shared-resource-metadata.log
+          if not "%SFNP_RESULT%"=="0" exit /b %SFNP_RESULT%
+          build\shared-resource.exe --gpu >build\shared-resource-gpu.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\shared-resource-gpu.log
+          if "%SFNP_RESULT%"=="77" (
+            echo ::notice::The hosted adapter cannot provide native shared D3D11 resources. This is an unsupported capability, not GPU validation.
+            exit /b 0
+          )
+          exit /b %SFNP_RESULT%
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-shared-resource-evidence
+          path: build/shared-resource-*.log

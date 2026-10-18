@@ -17,6 +17,98 @@ s,b=fixtures.s,fixtures.b
 
 class Files(fixtures.Tests):
     # Inherit only the fixture setup; unittest filters inherited cases below.
+    def newer_bundle(self):
+        for name in ('pc-provider/bin/win64/driver_steam_link_native_passthrough.dll','frame/'+b.LIBRARY):
+            path=self.bundle_root/name;raw=s.read(path)+b' owned update fixture'
+            s.put(path,raw,s.read(path));self.manifest['files'][name]={'bytes':len(raw),'sha256':s.sha(raw)}
+        path=self.bundle_root/'stream-bridge-bundle.json';s.put(path,s.encoded(self.manifest),s.read(path))
+        return b.Bundle(self.bundle_root,s)
+
+    def test_pc_update_retains_initial_uninstall_baseline_and_pairing(self):
+        installer=b.LocalInstall(s,self.local);initial=s.parse(s.read(self.settings))
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        key=self.local.root/'pairings'/(self.pair['pair_id']+'.json');credential=s.read(key,4096,private=True)
+        next_bundle=self.newer_bundle()
+        result=installer.install(next_bundle,self.local.inventory(),self.pair,'192.168.1.5',47631,backup=True)
+        self.assertEqual(result['reason'],'updated');self.assertEqual(installer.state()['bundle'],next_bundle.pin)
+        self.assertEqual(s.read(key,4096,private=True),credential)
+        self.assertEqual(s.parse(s.read(self.settings))[b.SETTINGS_SECTION]['controlListenAddress'],'192.168.1.5')
+        installer.checkpoint().finish()
+        installer.uninstall(self.local.inventory())
+        self.assertEqual(s.parse(s.read(self.settings)),initial);self.assertFalse(self.local.inventory()['registered'])
+
+    def test_pc_update_rollback_restores_previous_version_and_owned_preferences(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        receipt=s.read(installer.receipt);preferences=s.parse(s.read(self.settings))
+        image=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll';original=s.read(image)
+        installer.install(self.newer_bundle(),self.local.inventory(),self.pair,'192.168.1.5',47631,backup=True)
+        installer.checkpoint().restore();installer.checkpoint().verify_restored()
+        self.assertEqual(s.read(installer.receipt),receipt);self.assertEqual(s.read(image),original)
+        self.assertEqual(s.parse(s.read(self.settings)),preferences);self.assertTrue(self.local.inventory()['registered'])
+        installer.checkpoint().finish(restored=True)
+
+    def test_frame_update_runs_live_and_retains_initial_uninstall_baseline(self):
+        initial=s.parse(s.read(self.fsettings))
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();self.active=True;next_bundle=self.newer_bundle()
+        with self.fake_generation(),mock.patch.object(self.unit,'cold',side_effect=AssertionError('Do not stop the Frame UI')):
+            result=self.unit.install(next_bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.assertEqual(result['reason'],'prepared-update');self.unit.tx.commit()
+        self.assertTrue(self.unit.inventory(next_bundle)['files_current']);self.assertTrue(self.active)
+        self.unit.checkpoint().finish();self.unit.undo(live=True)
+        self.assertEqual(s.parse(s.read(self.fsettings)),initial);self.assertFalse((self.froot/b.LIBRARY).exists())
+
+    def test_failed_frame_update_restores_previous_version_and_transaction(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();receipt=s.read(self.unit.tx.path);image=s.read(self.froot/b.LIBRARY)
+        with self.fake_generation(),mock.patch.object(self.unit,'system',side_effect=s.SetupError('fixture reload failure')):
+            with self.assertRaises(s.SetupError):
+                self.unit.install(self.newer_bundle(),{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+        self.assertEqual(s.read(self.unit.tx.path),receipt);self.assertEqual(s.read(self.froot/b.LIBRARY),image)
+        self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
+        self.unit.checkpoint().finish(restored=True)
+
+    def test_frame_update_repairs_missing_owned_activation_and_rollback_retains_its_absence(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();marker=self.froot/'receiver.enable';marker.unlink();receipt=s.read(self.unit.tx.path)
+        with self.fake_generation():self.unit.install(self.newer_bundle(),{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit();self.assertTrue(marker.exists())
+        self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+        self.assertFalse(marker.exists());self.assertEqual(s.read(self.unit.tx.path),receipt)
+        self.unit.checkpoint().finish(restored=True)
+
+    def test_changed_bundle_offers_update_without_uninstall(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();self.newer_bundle();seen=[]
+        class Screen:
+            def banner(inner,**kw):pass
+            def status(inner,*a):pass
+            def path(inner,*a,**kw):pass
+            def say(inner,key):pass
+            def suspend(inner):return contextlib.nullcontext()
+            def choose_action(inner,actions,**kw):seen.append((actions,kw));return 'update'
+            def confirm(inner,key):return False
+        class Peer:
+            def call(inner,request):return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())):
+            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        self.assertIn('update',seen[0][0]);self.assertEqual(seen[0][1]['recommended'],'update')
+
+    def test_update_refuses_foreign_changed_payload_before_any_mutation(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();next_bundle=self.newer_bundle();image=self.froot/b.LIBRARY
+        s.put(image,b'foreign replacement',s.read(image));receipt=s.read(self.unit.tx.path)
+        with self.fake_generation(),self.assertRaisesRegex(s.SetupError,'Changed Frame files'):
+            self.unit.install(next_bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.assertEqual(s.read(image),b'foreign replacement');self.assertEqual(s.read(self.unit.tx.path),receipt)
+        self.assertFalse(self.unit.checkpoint().path.exists())
+
     def test_live_frame_install_and_restore_keep_ui_up_and_original_settings(self):
         self.active=True;before=s.read(self.fsettings)
         with self.fake_generation(),mock.patch.object(self.unit,'cold',side_effect=AssertionError('UI must remain running')):
@@ -145,6 +237,20 @@ class Files(fixtures.Tests):
             self.assertFalse(flow.Workflow(ports,screen).recover())
         self.assertIn('bridge-runtime-restart',commands);self.assertIn('bridge-health',commands)
         self.assertNotIn('bridge_rolled_back',screen.messages);self.assertIn('bridge_recovery_incomplete',screen.messages)
+
+    def test_prepared_restart_leaves_pc_steamvr_closed(self):
+        commands=[];screen=UI();screen.suspend=lambda:contextlib.nullcontext()
+        class Runtime:
+            def __init__(inner,*a):pass
+            def start(inner):raise AssertionError('Installing must not start PC SteamVR')
+        class Peer:
+            def call(inner,request):commands.append(request['command']);return {'running':True}
+        real=b.load_helper
+        with mock.patch.object(b,'load_helper',side_effect=lambda e,name:types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else real(e,name)):
+            ports=b.Automation(s,self.bundle,self.local,b.LocalInstall(s,self.local),Peer(),screen,
+                {'log':None,'peers':[],'stage':'runtime_start'},None,'192.168.1.25','steamos')
+        ports.restart_prepared()
+        self.assertEqual(commands,['bridge-runtime-restart'])
 
 
 class UI:

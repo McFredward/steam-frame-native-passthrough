@@ -40,7 +40,8 @@ path and never replaces the operation error. `--check` and `--dry-run` retain
 their no-log-write contract.
 
 After the concrete Apply confirmation the assistant closes only verified owned
-PC SteamVR processes and starts the prepared PC runtime itself. It never stops
+PC SteamVR processes and leaves that PC runtime closed after success. Its later
+startup belongs to the normal Steam Link/game launch. It never stops
 Frame SteamVR for file preparation: exact replacements are staged atomically
 with the original mapped files and UI still alive. It then requests an immediate
 coordinated restart of Steam and SteamVR and checks new service generations,

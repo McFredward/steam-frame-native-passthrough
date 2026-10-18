@@ -39,6 +39,7 @@ TEXT = {
     'en': {
         'bridge_stopping': 'Closing SteamVR on this PC; your Frame interface stays running',
         'bridge_starting': 'Briefly restarting Steam on the Frame and checking its startup',
+        'bridge_pc_stopped': 'SteamVR on this PC stays closed. Start your game normally when you are ready.',
         'bridge_rolled_back': 'The previous setup has been restored and its startup checks passed. The log and recovery paths are kept below.',
         'bridge_retry_question': 'Would you like to try again?',
         'bridge_reconnect': 'Reconnecting to your Frame after the restart',
@@ -132,6 +133,7 @@ TEXT = {
     'de': {
         'bridge_stopping': 'SteamVR auf diesem PC wird beendet; die Frame-Oberfläche läuft weiter',
         'bridge_starting': 'Steam auf der Frame wird kurz neu gestartet und der Start geprüft',
+        'bridge_pc_stopped': 'SteamVR auf diesem PC bleibt geschlossen. Starte dein Spiel wie gewohnt, sobald du bereit bist.',
         'bridge_rolled_back': 'Der vorherige Zustand ist wiederhergestellt und hat die Startprüfungen bestanden. Das Log und die Wiederherstellungspfade bleiben unten erhalten.',
         'bridge_retry_question': 'Möchtest du es erneut versuchen?',
         'bridge_reconnect': 'Nach dem Neustart wieder mit der Frame verbinden',
