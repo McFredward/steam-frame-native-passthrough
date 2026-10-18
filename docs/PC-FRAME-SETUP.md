@@ -8,10 +8,16 @@ sender and Frame runtime, and GloomhavenVR Build708 or newer. The stable entry
 points and historical bundle contract below remain separate. A software-validated
 preview is not a verified combined headset result.
 
+The bridge wizard uses arrow-key menus (Up/Down, Home/End, Enter and Escape) on
+Windows/POSIX terminals. Redirected or unsupported terminals retain a plain
+numbered fallback. Failures and missing devices offer Retry; an uncertain write
+is reconciled through its owned checkpoint rather than blindly repeated.
+
 The bridge wizard keeps one authenticated OpenSSH connection for its lifetime.
 Check, install, health checks and explicit Undo reuse that connection on Windows
 and Linux. OpenSSH alone owns password/fingerprint prompts; no password is
-stored, no key is added, and a broken connection does not retry a mutation.
+stored and no key is added. A broken connection can be reopened for a deliberate
+retry or recovery; it never silently repeats an uncertain installation request.
 Failed discovery candidates and the final wizard exit close their processes.
 
 Interactive bridge runs create a bounded private diagnostic file before the
@@ -20,7 +26,7 @@ exact path and the recovery-record locations before offering Undo. Windows
 logs are under `%LOCALAPPDATA%/steam-link-native-passthrough/logs/`; Linux uses
 `$XDG_DATA_HOME/steam-link-native-passthrough/logs/` or the usual
 `~/.local/share` fallback. The PC receipt is `bridge-install.json` in that data
-root. The Frame reports its exact `SteamLinkNativePassthrough/stream-bridge/install.json`
+root. The Frame reports its exact `SteamLinkNativePassthrough/stream-bridge/setup-restore.json`
 location (normally under `/home/steamos/.local/share`). A path is a recovery
 location, not proof that a failed operation created a receipt there.
 
@@ -32,6 +38,28 @@ matching static message. This preserves the reason for a remote refusal without
 forwarding arbitrary remote exception text. Logging failure reports the attempted
 path and never replaces the operation error. `--check` and `--dry-run` retain
 their no-log-write contract.
+
+After the concrete Apply confirmation the assistant closes only verified owned
+PC SteamVR processes and starts the prepared PC runtime itself. It never stops
+Frame SteamVR for file preparation: exact replacements are staged atomically
+with the original mapped files and UI still alive. It then requests an immediate
+coordinated restart of Steam and SteamVR and checks new service generations,
+native compositor/browser startup and the user's picture verdict. SteamVR is not
+restarted twice if restarting Steam already refreshed it. No device reboot or
+unrelated process kill is part of this workflow.
+
+Failed installation/startup automatically restores the current operation's exact
+private `setup-restore.json` checkpoints, then restarts and checks the original
+Frame interface. These checkpoints differ from installation uninstall receipts:
+rolling back a repair preserves the previously installed connection. Settings
+restore only owned keys and retain unrelated changes. Durable `lifecycle.json`
+records retain the PC's original running state and the Frame restart baseline.
+Recovery is never marked complete until original files/settings are verified,
+both Frame services are running and native startup health passes. Unknown changed
+files remain untouched. An interrupted/incomplete recovery offers Retry and stays
+available as a menu action on the next run, even if new installation is unavailable.
+
+The remainder describes the separate older stable/inspection bundle contracts.
 
 **Development status:** the assistant can check and explain a PC/Frame setup.
 The new sender/receiver bridge is still a prototype, so current prototype bundles

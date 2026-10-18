@@ -18,6 +18,10 @@ on:
       - 'tests/test_stream_bridge_install.py'
       - 'tests/test_setup_session.py'
       - 'tests/test_setup_log.py'
+      - 'tests/test_setup_tui.py'
+      - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_pc.py'
+      - 'tests/test_setup_workflow.py'
       - 'tests/test_package_stream_bridge.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
@@ -41,6 +45,10 @@ on:
       - 'tests/test_stream_bridge_install.py'
       - 'tests/test_setup_session.py'
       - 'tests/test_setup_log.py'
+      - 'tests/test_setup_tui.py'
+      - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_pc.py'
+      - 'tests/test_setup_workflow.py'
       - 'tests/test_package_stream_bridge.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
@@ -72,6 +80,10 @@ jobs:
           python -B tests/test_stream_bridge_install.py
           python -B tests/test_setup_session.py
           python -B tests/test_setup_log.py
+          python -B tests/test_setup_tui.py
+          python -B tests/test_setup_frame.py
+          python -B tests/test_setup_pc.py
+          python -B tests/test_setup_workflow.py
           python -B tests/test_package_stream_bridge.py
           python -B tests/test_setup_bootstrap.py
           python -B tests/test_setup_ui.py
@@ -94,6 +106,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'SSH session checks failed.' }
           python -B tests/test_setup_log.py
           if ($LASTEXITCODE -ne 0) { throw 'Setup log checks failed.' }
+          python -B tests/test_setup_tui.py
+          if ($LASTEXITCODE -ne 0) { throw 'Terminal menu checks failed.' }
+          python -B tests/test_setup_pc.py
+          if ($LASTEXITCODE -ne 0) { throw 'PC runtime control checks failed.' }
       - name: Execute the actual packaged portable Python without Frame access
         shell: powershell
         run: |

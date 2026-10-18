@@ -16,6 +16,16 @@
   handshake alone never proves exact video/coverage association. This does not
   authorize an unattended Frame installation or restart; device changes still
   require the maintainer's coordinated permission and readiness.
+- The maintainer's 2026-10-18 installer ruling authorizes the interactive setup,
+  after its concrete Apply confirmation, to close owned PC SteamVR processes,
+  atomically prepare Frame files while its UI stays running, perform the required
+  immediate coordinated service restart, monitor startup and restore the original
+  files/settings on failure. Do not leave Frame SteamVR stopped during file work
+  or while waiting for user input. Rollback is complete only after Steam and
+  SteamVR on the Frame are running and the original UI passes startup health.
+  Failed discovery/operations offer an explicit retry; uncertain writes are
+  reconciled through exact owned checkpoints, never blindly replayed. This
+  authorizes installer behavior, not uncoordinated developer device testing.
 - A mask belongs to one source session, video frame, eye and extent. A compositor
   submit counter, approximate timestamp or latest received mask is not proof of
   that association. Missing/invalid associations must retain opaque rendering.

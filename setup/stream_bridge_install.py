@@ -31,7 +31,7 @@ def fixed_checks(*sources):
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node,ast.Call):continue
             name=node.func.attr if isinstance(node.func,ast.Attribute) else node.func.id if isinstance(node.func,ast.Name) else None
-            index=1 if name=='require' else 0 if name=='SetupError' else None
+            index=1 if name=='require' else 0 if name in ('SetupError','error') else None
             if index is not None and len(node.args)>index and isinstance(node.args[index],ast.Constant) and type(node.args[index].value)is str:
                 message=node.args[index].value
                 result['check_'+hashlib.sha256(message.encode()).hexdigest()[:16]]=message
@@ -50,6 +50,8 @@ def failure_record(engine,error,checks):
 
 
 def load_helper(engine,name):
+    cached=sys.modules.get('sfnp_'+name)
+    if cached is not None and getattr(cached,'_sfnp_verified_helper',False):return cached
     path=engine.no_links(Path(__file__).with_name(name+'.py'))
     return load_module(path.read_bytes(),'sfnp_'+name)
 
@@ -249,7 +251,15 @@ class LocalInstall:
             except (OSError,ValueError,TypeError):matches[role]=False
         return bool(matches) and all(matches.values())
 
-    def install(self,bundle,pc,pair,address,port):
+    def checkpoint(self,pair_id=None):
+        helper=load_helper(self.e,'steam_link_setup_checkpoint')
+        paths={self.local.root/name for name in PC_FILES}|{self.receipt,self.settings_path(),self.local.root/'pairings/active.json'}
+        def allowed(path):
+            return path in paths or path.parent==self.local.root/'pairings' and re.fullmatch('[0-9a-f]{32}[.]json',path.name) is not None
+        return helper.Checkpoint(self.e,self.local.root/'setup-restore.json',allowed,
+            lambda p:helper.read_value(self.e,p),lambda p,old,new:helper.replace_value(self.e,p,old,new))
+
+    def install(self,bundle,pc,pair,address,port,*,backup=False):
         e=self.e;bundle.admit(self.local.system)
         e.require(self.check(bundle,pc),'This SteamVR version is not supported by this package.')
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before installing or updating the connection.')
@@ -267,6 +277,9 @@ class LocalInstall:
                 path=self.local.root/e.relative(name)
                 if not path.exists():missing.append((path,planned[name]))
                 else:e.require(e.sha(e.read(path))==pin['sha256'],'Changed provider files preserved.')
+            if backup:
+                helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint(pair['pair_id'])
+                checkpoint.begin('repair',[checkpoint.operation(path,[helper.file_value(raw)]) for path,raw in missing],[],bool(pc.get('registered')))
             for path,raw in missing:e.put(path,raw)
             if not pc.get('registered'):
                 self.local.register(tool,'adddriver')
@@ -280,6 +293,19 @@ class LocalInstall:
         pairdir=self.local.root/'pairings';key=pairdir/(pair['pair_id']+'.json');active=pairdir/'active.json'
         pair_raw=e.encoded(pair);active_raw=e.encoded({'schema':e.ACTIVE,'pair_id':pair['pair_id']})
         e.require(not key.exists() and not active.exists(),'Existing pairing credentials require explicit checked repair.')
+        if backup:
+            helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint(pair['pair_id'])
+            planned_ops=[checkpoint.operation(self.local.root/name,[helper.file_value(raw)]) for name,raw in planned.items()]
+            planned_ops.extend([checkpoint.operation(key,[helper.file_value(pair_raw)]),checkpoint.operation(active,[helper.file_value(active_raw)])])
+            # The receipt is deterministic and can be in either absent or fully
+            # published state if a response is lost during installation.
+            _,_,baseline=edits.planned()
+            receipt={'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
+                     'settings':{'path':str(self.settings_path()),'baseline':baseline},'registered_before':bool(pc.get('registered')),
+                     'pair':pair['pair_id'],'vrpathreg':tool_pin}
+            planned_ops.append(checkpoint.operation(self.receipt,[helper.file_value(e.encoded(receipt))]))
+            settings=[checkpoint.setting(self.settings_path(),SETTINGS_SECTION,k,[{'present':True,'value':v}]) for k,v in edits.edits[SETTINGS_SECTION].items()]
+            checkpoint.begin('install',planned_ops,settings,bool(pc.get('registered')))
         try:
             for name,raw in planned.items():
                 path=self.local.root/e.relative(name);e.put(path,raw);undo.append((path,raw))
@@ -299,7 +325,7 @@ class LocalInstall:
             raise
         return {'reason':'installed','changed':True,'automatic_restart':False}
 
-    def uninstall(self,pc):
+    def uninstall(self,pc,*,backup=False):
         e=self.e;state=self.state()
         if state is None:return {'reason':'not_installed','automatic_restart':False}
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before removing the connection.')
@@ -312,6 +338,13 @@ class LocalInstall:
             e.require(type(current.get(section))is dict and all(k in current[section] and
                       current[section][k]==v['installed'] and type(current[section][k])is type(v['installed'])
                       for k,v in spec['keys'].items()),'Changed SteamVR settings preserved; removal stopped.')
+        if backup:
+            helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint(state['pair'])
+            paths=[self.local.root/name for name in state['files']]+[self.local.root/'pairings/active.json',self.receipt]
+            operations=[checkpoint.operation(path,[None]) for path in paths]
+            settings=[checkpoint.setting(self.settings_path(),section,key,[{'present':entry['present'],'value':entry['value']}])
+                      for section,spec in state['settings']['baseline'].items() for key,entry in spec['keys'].items()]
+            checkpoint.begin('uninstall',operations,settings,bool(pc.get('registered')))
         if not state['registered_before']:self.local.register(tool,'removedriver')
         SettingsChange.restore(e,state['settings'])
         for name in state['files']:e.remove_owned(self.local.root/e.relative(name),e.read(self.local.root/e.relative(name)))
@@ -524,6 +557,38 @@ class FrameInstall:
             state=self.system('show','steam.service','--property=ActiveState','--value').strip()
             self.e.require(state in ('inactive','failed'),'Stop Steam on the Frame before removing its loaded launch selector. Recovery files were retained.')
 
+    def checkpoint(self):
+        helper=load_helper(self.e,'steam_link_setup_checkpoint')
+        external={self.home/'.local/share/Steam/config/steamvr.vrsettings',
+                  self.home/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf',
+                  self.home/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json',
+                  self.home/'.config/SteamFrameNativePassthrough/control.json',
+                  self.config/'vulkan/implicit_layer.d'/MANIFEST,
+                  self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf'}
+        names={LIBRARY,'libsfnp_stream_launch.so','coverage.spv','legacy.spv','receiver.conf','launch.conf',
+               'receiver.enable','pairings/active.json','install.json'}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}
+        def allowed(path):
+            if path in external:return True
+            if not path.is_relative_to(self.root):return False
+            name=path.relative_to(self.root).as_posix()
+            return name in names or re.fullmatch('pairings/[0-9a-f]{32}[.]json',name) is not None
+        def current(path):self.tx.owned(path);return helper.read_value(self.e,path)
+        def replace(path,old,new):self.tx.owned(path);return helper.replace_value(self.e,path,old,new)
+        return helper.Checkpoint(self.e,self.root/'setup-restore.json',allowed,current,replace)
+
+    def backup(self,action,operations,settings,transaction_values):
+        helper=load_helper(self.e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint()
+        entries=[]
+        for op in operations:
+            after=op['after']
+            if after and after['kind']=='file':after={**after,'mode':op['mode']}
+            entries.append(checkpoint.operation(Path(op['path']),[after]))
+        entries.append(checkpoint.operation(self.tx.path,transaction_values))
+        entries_settings=[checkpoint.setting(Path(settings['path']),section,key,[{'present':entry['present'],'value':entry['value']}]
+                       if action=='uninstall' else [{'present':True,'value':entry['installed']}])
+                       for section,spec in settings['baseline'].items() for key,entry in spec['keys'].items()]
+        checkpoint.begin(action,entries,entries_settings)
+
     def runtime(self,bundle):
         good=True;original=None
         for role,pin in bundle.frame['runtime_files'].items():
@@ -544,8 +609,9 @@ class FrameInstall:
             except (OSError,ValueError):current=False
         return {'architecture':self.machine(),'runtime_compatible':compatible,
                 'installed':state is not None,'files_current':current,
+                'recovery_pending':(self.root/'setup-restore.json').exists() or (self.root/'lifecycle.json').exists(),
                 'legacy_installed':(self.home/'.config/SteamFrameNativePassthrough/install.json').exists(),
-                'recovery_path':str(self.tx.path),
+                'recovery_path':str(self.root/'setup-restore.json'),
                 'active_pair':state['pair'] if state else None,'automatic_restart':False}
 
     def legacy_operations(self):
@@ -607,11 +673,11 @@ class FrameInstall:
         return ('[Service]\nEnvironment='+self.systemd('LD_PRELOAD='+preload)+'\nEnvironment='+
                 self.systemd('SFNP_STREAM_BRIDGE_CONFIG='+config)+'\n').encode()
 
-    def plan(self,bundle,pair,address,port):
+    def plan(self,bundle,pair,address,port,*,live=False):
         e=self.e;bundle.admit('Windows')
         e.require(self.machine().lower() in ('aarch64','arm64'),'The selected device is not a supported Steam Frame.')
         good,original=self.runtime(bundle);e.require(good and original is not None,'The Frame runtime does not match this package.')
-        self.cold()
+        if not live:self.cold()
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
         address=private_ipv4(address)
         e.require(type(pair)is dict and set(pair)=={'schema','pair_id','key_hex','role','protocol_major'} and
@@ -656,13 +722,13 @@ class FrameInstall:
         # SteamVR file after the player changes unrelated preferences later.
         return operations,{'path':str(settings),'baseline':baseline},(before,after)
 
-    def install(self,bundle,pair,address,port):
+    def install(self,bundle,pair,address,port,*,backup=False,live=False):
         e=self.e;current=self.tx.state()
         if current:
             e.require(current['phase']=='installed' and current['bundle']==bundle.pin and current['pair']==pair['pair_id'],
                       'Repair or remove the previous Frame transaction before replacing it.')
             if self.inventory(bundle)['files_current']:return {'reason':'current','automatic_restart':False}
-            self.cold(steam=True)
+            if not live:self.cold(steam=True)
             missing=[]
             for operation in current['operations']:
                 observed=self.tx.current(Path(operation['path']))
@@ -670,10 +736,19 @@ class FrameInstall:
                 e.require(observed is None and operation['before'] is None and operation['after'] is not None,
                           'Changed Frame files were preserved; only missing owned components can be repaired.')
                 missing.append(operation)
+            if backup:
+                helper=load_helper(e,'steam_link_setup_checkpoint')
+                self.backup('repair',missing,current['settings'],[helper.read_value(e,self.tx.path)])
             for operation in missing:self.tx.replace(operation)
             self.system('daemon-reload')
             return {'reason':'repaired','automatic_restart':False,'manual_restart_required':True}
-        operations,settings,(before,after)=self.plan(bundle,pair,address,port)
+        operations,settings,(before,after)=self.plan(bundle,pair,address,port,live=live)
+        if backup:
+            helper=load_helper(e,'steam_link_setup_checkpoint')
+            transaction={'schema':RECEIPT,'home':str(self.home),'root':str(self.root),'bundle':bundle.pin,
+                         'phase':'pending','operations':operations,'settings':settings,'pair':pair['pair_id']}
+            pending=helper.file_value(e.encoded(transaction));transaction['phase']='installed'
+            self.backup('install',operations,settings,[pending,helper.file_value(e.encoded(transaction)),None])
         self.tx.begin(bundle.pin,operations,settings,pair['pair_id'])
         try:
             settings_path=Path(settings['path']);mode=stat.S_IMODE(settings_path.stat().st_mode) if settings_path.exists() else 0o600
@@ -681,15 +756,18 @@ class FrameInstall:
             os.chmod(settings_path,mode)
             self.system('daemon-reload')
         except BaseException:
-            self.undo()
+            self.undo(live=live)
             raise
         return {'reason':'prepared','pair_id':pair['pair_id'],'automatic_restart':False,
                 'manual_restart_required':True,'coverage_operational':False}
 
-    def undo(self):
+    def undo(self,*,backup=False,live=False):
         state=self.tx.state()
         if state is None:return {'reason':'not_installed','automatic_restart':False}
-        self.cold(steam=True)
+        if not live:self.cold(steam=True)
+        if backup:
+            operations=[{**op,'after':op['before']} for op in state['operations']]
+            self.backup('uninstall',operations,state['settings'],[None])
         # Revoke new activation first; never restore the old layer while the new
         # compositor is still using the same native descriptor path.
         marker=self.root/'receiver.enable'
@@ -759,7 +837,15 @@ def remote_request(engine,request,*,unit=None):
         e.require(len(source)==pin['bytes'] and e.sha(source)==pin['sha256'],'The startup checker changed.')
         observer=StartupHealth(load_module(source,'sfnp_install_health'),unit.home)
         return observer.baseline() if command=='bridge-health-baseline' else observer.check(request['baseline'])
-    if command=='bridge-undo':return unit.undo()
+    if command in ('bridge-runtime-snapshot','bridge-runtime-restart','bridge-runtime-restored'):
+        lifecycle=load_helper(e,'steam_link_setup_frame').FrameLifecycle(e,unit.root)
+        if command=='bridge-runtime-snapshot':return lifecycle.snapshot()
+        if command=='bridge-runtime-restart':return lifecycle.restart()
+        return lifecycle.restored(health_ok=request.get('health_ok') is True)
+    if command=='bridge-restore':
+        result=unit.checkpoint().restore();unit.system('daemon-reload');return result
+    if command=='bridge-checkpoint-finish':unit.checkpoint().finish(restored=request.get('restored') is True);return {'reason':'complete'}
+    if command=='bridge-undo':return unit.undo(backup=request.get('automated') is True,live=request.get('automated') is True)
     if command=='bridge-commit':unit.tx.commit();return {'reason':'committed','automatic_restart':False}
     files=request.get('files',{});e.require(type(files)is dict and 1<=len(files)<=64,'Bounded package inventory required.')
     # RPC payload staging has no service or library side effects. Its complete
@@ -773,7 +859,8 @@ def remote_request(engine,request,*,unit=None):
             e.put(path,raw)
         e.put(root/'stream-bridge-bundle.json',e.encoded(manifest))
         bundle=Bundle(root,e)
-        if command=='bridge-prepare':return unit.install(bundle,request['pairing'],request['address'],request['port'])
+        if command=='bridge-prepare':return unit.install(bundle,request['pairing'],request['address'],request['port'],
+            backup=request.get('automated') is True,live=request.get('automated') is True)
         raise e.SetupError('Unknown fixed Frame operation.')
 
 
@@ -784,7 +871,9 @@ class Remote:
         self.session=None;self.log=None
         self.engine_source=Path(engine.__file__).read_bytes()
         self.bridge_source=Path(__file__).read_bytes()
-        self.checks=fixed_checks(self.engine_source,self.bridge_source)
+        self.helper_sources={name:Path(__file__).with_name(name+'.py').read_bytes() for name in
+                             ('steam_link_setup_checkpoint','steam_link_setup_frame')}
+        self.checks=fixed_checks(self.engine_source,self.bridge_source,*self.helper_sources.values())
 
     def close(self):
         if self.session is not None:self.session.close()
@@ -808,7 +897,13 @@ class Remote:
                     'sys.modules[b.__name__]=b\n'
                     f'bridge_source=base64.b64decode({base64.b64encode(self.bridge_source).decode()!r})\n'
                     'exec(compile(bridge_source,b.__file__,"exec"),b.__dict__)\n'
-                    f'checks=b.fixed_checks(base64.b64decode({base64.b64encode(self.engine_source).decode()!r}),bridge_source)\n'
+                    f'helpers={ {name:base64.b64encode(raw).decode() for name,raw in self.helper_sources.items()}!r}\n'
+                    'helper_sources=[]\n'
+                    'for name,raw in helpers.items():\n'
+                    ' source=base64.b64decode(raw);module=types.ModuleType("sfnp_"+name);module.__file__="<verified-helper>"\n'
+                    ' sys.modules[module.__name__]=module;exec(compile(source,module.__file__,"exec"),module.__dict__)\n'
+                    ' module._sfnp_verified_helper=True;helper_sources.append(source)\n'
+                    f'checks=b.fixed_checks(base64.b64decode({base64.b64encode(self.engine_source).decode()!r}),bridge_source,*helper_sources)\n'
                     'def dispatch(request):\n'
                     ' try:return b.remote_request(e,request)\n'
                     ' except Exception as error:return {"error":True,"failure":b.failure_record(e,error,checks)}\n')
@@ -843,6 +938,93 @@ def request(bundle,command,**values):
     return result
 
 
+class Automation:
+    """Production ports for the confirmed, recoverable setup workflow."""
+    def __init__(self,engine,bundle,local,installed,remote,ui,context,factory,address,login):
+        self.e,self.bundle,self.local,self.installed=engine,bundle,local,installed
+        self.remote,self.ui,self.context=remote,ui,context
+        self.factory,self.address,self.login=factory,address,login
+        pc=local.inventory();self.pc=pc
+        self.runtime=load_helper(engine,'steam_link_setup_pc').Lifecycle(engine,local,pc['steamvr'])
+        self.error=engine.SetupError;self.baseline=None;self.restore_baseline=None
+
+    def phase(self,stage):
+        self.context['stage']=stage
+        log=self.context['log']
+        if log:log.event(stage,'stage',status='started')
+
+    def call(self,command,**values):
+        # Reconnection is confined to a deliberate operation/recovery attempt.
+        # It never blindly resends an uncertain installation request.
+        if getattr(getattr(self.remote,'session',None),'closed',False):
+            self.remote=self.factory(self.address,self.login,interactive=True)
+        with self.ui.suspend():return self.remote.call(request(self.bundle,command,**values))
+
+    def begin(self):
+        self.pc=self.local.inventory();self.runtime.snapshot()
+        self.phase('startup_baseline');self.baseline=self.call('bridge-health-baseline')
+        self.call('bridge-runtime-snapshot')
+        self.local.apply_started=True
+
+    def stop_pc(self):
+        self.phase('runtime_stop');self.runtime.stop()
+
+    def prepare(self,action):
+        if action=='uninstall':
+            self.phase('undo');self.call('bridge-undo',automated=True)
+            self.installed.uninstall(self.local.inventory(),backup=True)
+            return
+        state=self.installed.state()
+        pair=self.local.pairing(state['pair']) if state else {'schema':self.e.PAIR,'pair_id':secrets.token_hex(16),
+              'key_hex':secrets.token_hex(32),'role':'producer','protocol_major':1}
+        address=local_address(self.address)
+        self.phase('frame_prepare')
+        self.call('bridge-prepare',pairing={**pair,'role':'receiver'},address=address,port=47631,automated=True)
+        self.phase('pc_install')
+        self.installed.install(self.bundle,self.local.inventory(),pair,address,47631,backup=True)
+        self.phase('frame_commit');self.call('bridge-commit')
+
+    def restart_prepared(self):
+        self.phase('runtime_start');self.call('bridge-runtime-restart');self.runtime.start()
+
+    def prepared_health(self):
+        self.phase('startup_health');result=self.call('bridge-health',baseline=self.baseline)
+        return result
+
+    def restore_files(self):
+        self.phase('rollback');self.runtime.snapshot();self.runtime.stop()
+        self.call('bridge-restore')
+        checkpoint=self.installed.checkpoint();result=checkpoint.restore()
+        if result['registered'] is not None:
+            pc=self.local.inventory();desired=result['registered']
+            if bool(pc.get('registered'))!=desired:
+                tool=self.local.verify_tool(pc,self.bundle.pc['runtime_files']['vrpathreg'])
+                self.local.register(tool,'adddriver' if desired else 'removedriver')
+            self.e.require(bool(self.local.inventory().get('registered'))==desired,
+                           'The original PC driver registration could not be restored.')
+
+    def restart_original(self):
+        self.phase('runtime_start');self.restore_baseline=self.call('bridge-health-baseline')
+        self.call('bridge-runtime-restart');self.runtime.restore()
+
+    def original_health(self):
+        self.phase('startup_health');result=self.call('bridge-health',baseline=self.restore_baseline)
+        return result
+
+    def finish(self,*,restored):
+        # Never discard original-state authority before the Frame UI passed
+        # health and its two actual service instances are freshly running.
+        self.call('bridge-runtime-restored',health_ok=True)
+        self.call('bridge-checkpoint-finish',restored=restored)
+        self.installed.checkpoint().finish(restored=restored);self.runtime.finish()
+        if not restored:self.e.remember_frame(self.local,self.address,self.login)
+
+    def failure(self,error,*,recovery):
+        record_failure(self.context['log'],self.e,self.context['stage'],error)
+        support_paths(self.local,self.context)
+        if isinstance(error,self.e.SetupError):print(str(error),file=sys.stderr)
+
+
 def support_paths(local,context):
     """Show durable evidence before Undo prompts and again on terminal failures."""
     if context.get('paths_printed'):return
@@ -855,10 +1037,11 @@ def support_paths(local,context):
                     'recovery_frame':'Frame recovery record (if created): '}
             print(labels[key]+str(value),file=sys.stderr)
     if log and log.path:show('setup_log' if log.available else 'setup_log_unavailable',log.path)
-    show('recovery_pc',local.root/'bridge-install.json')
-    show('recovery_frame',context.get('frame_recovery') or '$HOME/.local/share/SteamLinkNativePassthrough/stream-bridge/install.json')
+    show('recovery_pc',local.root/'setup-restore.json')
+    show('recovery_pc',local.root/'lifecycle.json')
+    show('recovery_frame',context.get('frame_recovery') or '$HOME/.local/share/SteamLinkNativePassthrough/stream-bridge/setup-restore.json')
     if log:
-        recovery={'pc':str(local.root/'bridge-install.json')}
+        recovery={'pc':str(local.root/'setup-restore.json')}
         if context.get('frame_recovery'):recovery['frame']=context['frame_recovery']
         log.event(context['stage'],'recovery',reason='recovery_retained',recovery=recovery)
     context['paths_printed']=True
@@ -867,7 +1050,9 @@ def support_paths(local,context):
 def record_failure(log,engine,stage,error):
     if not log:return
     try:
-        checks=fixed_checks(Path(engine.__file__).read_bytes(),Path(__file__).read_bytes())
+        checks=fixed_checks(Path(engine.__file__).read_bytes(),Path(__file__).read_bytes(),
+            *(Path(__file__).with_name(name+'.py').read_bytes() for name in
+              ('steam_link_setup_pc','steam_link_setup_frame','steam_link_setup_checkpoint','steam_link_setup_workflow')))
         reason=failure_record(engine,error,checks)['reason']
         log.record_failure(stage,error,reason=reason if reason in checks else None)
     except (OSError,ValueError,TypeError):log.record_failure(stage,error)
@@ -881,14 +1066,24 @@ def run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=No
     context['log']=log
     try:
         if log:log.event('session','start',status='started')
-        result=_run(args,engine,local,input_fn=input_fn,discover_frame=discover_frame,
-                    remote_factory=remote_factory,context=context)
-        if log:log.event('complete','complete',status='ok')
-        return result
-    except BaseException as error:
-        record_failure(log,engine,context['stage'],error)
-        support_paths(local,context)
-        raise
+        while True:
+            try:
+                result=_run(args,engine,local,input_fn=input_fn,discover_frame=discover_frame,
+                            remote_factory=remote_factory,context=context)
+                if result!=-1:
+                    if log:log.event('complete','complete',status='ok' if result==0 else 'failed')
+                    return result
+            except BaseException as error:
+                record_failure(log,engine,context['stage'],error)
+                support_paths(local,context)
+                if args.check or args.dry_run or not sys.stdin.isatty():raise
+                ui=context.get('ui') or engine.load_presentation().Presenter(input_fn=input_fn,lang=args.lang,input_enabled=True)
+                if isinstance(error,engine.SetupError):print(str(error),file=sys.stderr)
+                ui.say('bridge_retry_question')
+                if ui.choose_action(['retry','exit'],recommended='retry')!='retry':return 130 if isinstance(error,KeyboardInterrupt) else 2
+            # A preflight/discovery retry is still the same setup session.
+            # Keep its admitted live connection instead of asking again.
+            context['paths_printed']=False
     finally:
         for peer in context['peers']:
             close=getattr(peer,'close',None)
@@ -924,6 +1119,17 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         peer=native_factory(*values,**kw);context['peers'].append(peer)
         if isinstance(peer,Remote):peer.log=log
         return peer
+    known=context.get('connection')
+    if known and not getattr(getattr(known[1],'session',None),'closed',False):
+        address,remote=known
+        phase('frame_inventory')
+        try:
+            with ui.suspend() if ui else e.nullcontext():frame=remote.call(request(bundle,'bridge-inventory'))
+        except (OSError,ValueError):
+            context.pop('connection',None)
+            close=getattr(remote,'close',None)
+            if close:close()
+            raise
     phase('frame_discovery')
     if interactive and not address:
         def validate(candidate,*,interactive=False):
@@ -947,8 +1153,10 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         remote=factory(address,args.user,interactive=interactive)
         with ui.suspend() if ui else e.nullcontext():frame=remote.call(request(bundle,'bridge-inventory'))
     if frame is not None:
+        if remote not in context['peers']:context['peers'].append(remote)
+        context['connection']=(address,remote)
         path=frame.get('recovery_path')
-        if type(path)is str and path.startswith('/') and path.endswith('/SteamLinkNativePassthrough/stream-bridge/install.json') and len(path)<=2048 and not any(c in path for c in ('\n','\r','\x00')) and '..' not in path.split('/'):
+        if type(path)is str and path.startswith('/') and path.endswith('/SteamLinkNativePassthrough/stream-bridge/setup-restore.json') and len(path)<=2048 and not any(c in path for c in ('\n','\r','\x00')) and '..' not in path.split('/'):
             context['frame_recovery']=path
     available=bundle.value['readiness']=='release' and bundle.pc['reviewed'] and bundle.frame['reviewed'] and local.system=='Windows'
     state=installed.state()
@@ -959,74 +1167,32 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if ui:
         if frame is not None:ui.status('receiver_ready' if frame.get('runtime_compatible') else 'receiver_changed','info')
         ui.status('bridge_available' if available else 'bridge_unavailable','info')
-    actions=['check','exit']
+    actions=['retry','check','exit']
+    pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
+    if pending and frame is not None:actions.insert(0,'rollback')
     if frame is not None and (state or frame.get('installed')):actions.insert(0,'uninstall')
     if available and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
         if state is None:actions.insert(0,'install')
         elif state['bundle']==bundle.pin:actions.insert(0,'repair')
-    action=args.action or (ui.choose_action(actions,recommended='check') if ui else None)
+    recommended='rollback' if pending else 'install' if 'install' in actions else 'repair' if 'repair' in actions else 'check'
+    action=args.action or (ui.choose_action(actions,recommended=recommended) if ui else None)
     if action in (None,'exit','check'):return 0
     e.require(interactive and action in actions,'That action is not available for this checked package.')
-    if action=='uninstall':
-        phase('undo')
+    if action=='retry':return -1
+    if action=='rollback':
+        ui.say('bridge_recovery_incomplete')
+        if not ui.confirm('bridge_recover_confirm'):return 0
+    elif action=='uninstall':
         ui.say('bridge_remove_plan')
         if not ui.confirm_uninstall():return 0
-        # The native processes must be stopped by the user first. Both sides
-        # retain ownership receipts if an operation cannot finish safely.
-        remote.call({'command':'bridge-undo'});result=installed.uninstall(pc)
-        ui.say('bridge_removed');return 0
-    bundle.admit(local.system)
-    ui.say('bridge_install_plan')
-    if ui.ask('bridge_confirm').strip().lower() not in ('y','yes','j','ja'):return 0
-    pair=local.pairing(state['pair']) if state else {'schema':e.PAIR,'pair_id':secrets.token_hex(16),'key_hex':secrets.token_hex(32),
-          'role':'producer','protocol_major':1}
-    address_to_bind=local_address(address)
-    port=47631
-    # Baseline belongs to the current service invocation. The later gate must
-    # observe a new successful start, rather than reusing these old UI markers.
-    phase('startup_baseline')
-    with ui.suspend():baseline=remote.call(request(bundle,'bridge-health-baseline'))
-    local.apply_started=True
-    try:
-        phase('frame_prepare')
-        with ui.suspend():frame_result=remote.call(request(bundle,'bridge-prepare',pairing={**pair,'role':'receiver'},address=address_to_bind,port=port))
-        phase('pc_install')
-        pc_result=installed.install(bundle,pc,pair,address_to_bind,port)
-        phase('frame_commit')
-        with ui.suspend():remote.call({'command':'bridge-commit'})
-    except BaseException as error:
-        # A failed post-install start never triggers an automatic rollback.
-        # Incomplete atomic file writes retain/restore their own predecessors.
-        # Undo is OFFERED after an uncertain cross-device installation.
-
-        # This includes an uncertain SSH response; receipts remain available.
-        record_failure(log,e,context['stage'],error)
-        ui.say('bridge_partial')
-        support_paths(local,context)
-        if isinstance(error,e.SetupError):print(str(error),file=sys.stderr)
-        if ui.choose_action(['uninstall','exit'],recommended='uninstall')=='uninstall' and ui.confirm_uninstall():
-            phase('undo')
-            with ui.suspend():remote.call({'command':'bridge-undo'})
-            installed.uninstall(pc)
-            ui.say('bridge_removed')
-            return 0
-        raise
-    if frame_result.get('reason')=='current' and pc_result.get('reason')=='current':
-        ui.say('bridge_current');return 0
-    e.remember_frame(local,address,args.user)
-    report_path=e.write_report(local,action,report,{'reason':'installed','coverage_operational':False,'automatic_restart':False})
-    ui.path(report_path)
-    ui.say('bridge_installed')
-    if ui.ask('bridge_started').strip().lower() in ('y','yes','j','ja'):
-        phase('startup_health')
-        with ui.suspend():health=remote.call(request(bundle,'bridge-health',baseline=baseline))
-        ui.say('bridge_health_ok' if health['software_ready'] else 'bridge_health_bad')
-        picture=ui.ask('bridge_picture').strip().lower() in ('y','yes','j','ja')
-        e.write_report(local,action,report,{'startup_health':health,'user_picture_usable':picture,'automatic_restart':False})
-        if offer_undo(health,picture):
-            choice=ui.choose_action(['uninstall','exit'],recommended='uninstall')
-            if choice=='uninstall' and ui.confirm_uninstall():
-                ui.say('bridge_stop_first');ui.ask('bridge_continue')
-                with ui.suspend():remote.call({'command':'bridge-undo'})
-                installed.uninstall(pc);ui.say('bridge_removed')
-    return 0
+    else:
+        bundle.admit(local.system)
+        ui.say('bridge_install_plan')
+        if not ui.confirm('bridge_confirm'):return 0
+    ports=Automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
+    flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
+    if pending or action=='rollback':
+        ui.say('bridge_recovery_incomplete')
+        if not flow.recover():return 2
+        return 0 if action=='rollback' else -1
+    return flow.run(action)

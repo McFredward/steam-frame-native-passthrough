@@ -242,10 +242,10 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
         if ($sfnpInspection) { $sfnpArguments += '--inspect' }
         elseif ($sfnpManage) { $sfnpArguments += '--manage' }
         & $python @sfnpArguments
-        Require-Sfnp ($LASTEXITCODE -eq 0) 'The setup assistant stopped. No automatic restart was performed.'
+        Require-Sfnp ($LASTEXITCODE -eq 0) 'The setup assistant stopped. Check its displayed log and recovery status.'
     } catch {
         Write-Host ('Setup could not finish: ' + $_.Exception.Message) -ForegroundColor Red
-        Write-Host 'No automatic restart was performed. You can safely run the setup command again.'
+        Write-Host 'Run setup again to check its saved state or continue recovery. Device actions require the assistant confirmation.'
     } finally {
         [Net.ServicePointManager]::SecurityProtocol = $sfnpTls
         if ($null -ne $sfnpStage -and [IO.Directory]::Exists($sfnpStage)) {

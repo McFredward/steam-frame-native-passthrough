@@ -1177,11 +1177,11 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discov
             return bridge.run(args, owner, local, input_fn=input_fn, discover_frame=discover_frame,
                               remote_factory=None if remote_factory is Remote else remote_factory)
         except KeyboardInterrupt:
-            print('Setup stopped. No automatic restart was performed.', file=sys.stderr)
+            print('Setup stopped. Check the displayed setup log and retained recovery status.', file=sys.stderr)
             return 130
         except (OSError, ValueError, KeyError, TypeError) as error:
             detail = str(error)[:500] if isinstance(error, SetupError) else 'Check the package and retained recovery records.'
-            print('Setup could not finish: ' + detail + ' No automatic restart was performed.', file=sys.stderr)
+            print('Setup could not finish: ' + detail + ' Check the displayed setup log and recovery status.', file=sys.stderr)
             return 2
     try:
         require(not (args.inspect and args.action), '--inspect cannot be combined with an installation action.')

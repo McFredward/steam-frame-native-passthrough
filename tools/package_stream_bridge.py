@@ -44,6 +44,8 @@ def required_sources(root=ROOT):
     bridge=load('sfnp_bridge_package_contract',root/'setup/stream_bridge_install.py')
     return sorted({'setup/steam_link_setup.py','setup/steam_link_setup_ui.py','setup/stream_bridge_install.py',
                    'setup/steam_link_setup_session.py','setup/steam_link_setup_log.py',
+                   'setup/steam_link_setup_pc.py','setup/steam_link_setup_frame.py',
+                   'setup/steam_link_setup_checkpoint.py','setup/steam_link_setup_workflow.py',
                    'setup/patch-steam-link.cmd','setup/patch-steam-link.sh','LICENSE',
                    'pc/stream-bridge-sender-provider.vrdrivermanifest',
                    'tools/package_stream_bridge.py','tools/package_stream_link_setup.py',
@@ -136,6 +138,10 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
            'setup/stream_bridge_install.py':source_bytes['setup/stream_bridge_install.py'],
            'setup/steam_link_setup_session.py':source_bytes['setup/steam_link_setup_session.py'],
            'setup/steam_link_setup_log.py':source_bytes['setup/steam_link_setup_log.py'],
+           'setup/steam_link_setup_pc.py':source_bytes['setup/steam_link_setup_pc.py'],
+           'setup/steam_link_setup_frame.py':source_bytes['setup/steam_link_setup_frame.py'],
+           'setup/steam_link_setup_checkpoint.py':source_bytes['setup/steam_link_setup_checkpoint.py'],
+           'setup/steam_link_setup_workflow.py':source_bytes['setup/steam_link_setup_workflow.py'],
            'patch-steam-link.cmd':source_bytes['setup/patch-steam-link.cmd'],
            'patch-steam-link.sh':source_bytes['setup/patch-steam-link.sh'],
            'LICENSE':source_bytes['LICENSE']}
@@ -147,14 +153,14 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
     source_manifest={'schema':'sfnp-stream-bridge-package-source-v1','source_revision':profile['source_revision'],
                      'runtime_profile':pin(raw_profile),'source_pins':profile['source_pins'],
                      'native_artifacts':profile['artifacts'],'validation_receipts':receipts,
-                     'hardware_verified':False,'automatic_restart':False}
+                     'hardware_verified':False,'automatic_restart':bool(release)}
     files['stream-bridge-package-source.json']=engine.encoded(source_manifest)
     files['README.txt']=('Steam Link Native Passthrough - '+('reviewed setup' if release else 'prototype setup')+'\n\n'+
-        ('Run patch-steam-link.cmd on Windows. Setup asks before installation and never restarts either device automatically.\n'
+        ('Run patch-steam-link.cmd on Windows. Confirmed setup prepares Frame files while its interface stays running, then coordinates and monitors the required restart.\n'
          if release else 'Checks only: installation and pairing are deliberately blocked in this prototype.\n')+
         'The Linux PC sender is not included. Native-derived shaders are generated locally, never shipped.\n'+
-        'After an agreed manual start, setup checks software health and asks whether the headset picture is usable.\n'+
-        'If startup cannot be confirmed, Undo is offered. Nothing is automatically rolled back or restarted.\n'+
+        'Setup closes only verified PC SteamVR processes, starts the prepared runtimes and checks software health and the headset picture.\n'+
+        'A failed start restores the exact original operation checkpoint and restarts the original Frame interface. Incomplete recovery offers Retry.\n'+
         'Existing online bootstraps require a separate update for this package schema.\n').encode()
     engine.require(len(files)<512 and sum(map(len,files.values()))<=MAX_EXPANDED,'Setup package exceeds its bounded inventory.')
     outer={'schema':BOOTSTRAP,'readiness':bundle['readiness'],'windows_python':'setup/runtime/python/python.exe',

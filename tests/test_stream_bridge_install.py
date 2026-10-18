@@ -274,31 +274,46 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(s.SetupError,'Stop Steam on'):self.unit.undo()
         self.assertEqual(self.unit.tx.path.read_bytes(),before);self.assertTrue((self.froot/b.LIBRARY).exists())
 
-    def test_failed_start_offers_default_undo_without_automatic_action(self):
+    def test_failed_start_automatically_restores_files_and_running_frame(self):
         import types,contextlib
         class UI:
-            def __init__(self):self.offered=[];self.messages=[]
+            def __init__(self):self.messages=[]
             def banner(self,**kw):pass
             def status(self,*a):pass
             def path(self,*a,**kw):pass
             def say(self,key):self.messages.append(key)
             def suspend(self):return contextlib.nullcontext()
-            def ask(self,key):return {'bridge_confirm':'yes','bridge_started':'yes','bridge_picture':'no'}[key]
-            def choose_action(self,actions,recommended=None):self.offered.append((actions,recommended));return 'exit'
-            def confirm_uninstall(self):raise AssertionError('Exit must not confirm removal')
-        ui=UI();commands=[]
+            def confirm(self,key):return True
+            def choose_action(self,*a,**kw):return 'exit'
+        ui=UI();commands=[];health_calls=[];runtime_actions=[]
+        self.active=True;self.system.live=True
+        class Runtime:
+            def __init__(inner,*a):pass
+            def snapshot(inner):runtime_actions.append('snapshot')
+            def stop(inner):runtime_actions.append('stop');self.system.live=False
+            def start(inner):runtime_actions.append('start');self.system.live=True
+            def restore(inner):runtime_actions.append('restore');self.system.live=True
+            def finish(inner):runtime_actions.append('finish')
         class Peer:
             def call(inner,request):
                 commands.append(request['command'])
                 if request['command']=='bridge-health-baseline':return {'baseline':'synthetic','checkpoint':'synthetic'}
-                if request['command']=='bridge-health':return {'software_ready':False,'status':'fault','headset_picture_verified':False,'automatic_restart':False}
+                if request['command']=='bridge-health':
+                    health_calls.append(1);return {'software_ready':len(health_calls)>1,'automatic_restart':False}
+                if request['command'].startswith('bridge-runtime-'):
+                    self.assertTrue(self.active);return {'running':True,'needs_health_check':True}
                 return b.remote_request(s,request,unit=self.unit)
+        real=b.load_helper
+        def helper(engine,name):return types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else real(engine,name)
         args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action='install')
-        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:ui)),mock.patch.object(b,'local_address',return_value='192.168.1.4'),self.fake_generation():
-            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
-        self.assertIn((['uninstall','exit'],'uninstall'),ui.offered);self.assertIn('bridge_health_bad',ui.messages)
-        self.assertNotIn('bridge-undo',commands);self.assertTrue(self.unit.tx.path.exists());self.assertIsNotNone(b.LocalInstall(s,self.local).state())
-        report=s.parse(s.read(self.local.root/'setup-last.log'));self.assertFalse(report['result']['user_picture_usable'])
+        before=s.parse(s.read(self.fsettings))
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:ui)),mock.patch.object(b,'local_address',return_value='192.168.1.4'),mock.patch.object(b,'load_helper',side_effect=helper),self.fake_generation():
+            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),2)
+        self.assertIn('bridge_rolled_back',ui.messages);self.assertIn('bridge-restore',commands)
+        self.assertTrue(self.active);self.assertTrue(self.system.live);self.assertIn('restore',runtime_actions)
+        self.assertIsNone(self.unit.tx.state());self.assertIsNone(b.LocalInstall(s,self.local).state())
+        self.assertEqual(s.parse(s.read(self.fsettings)),before)
+        self.assertFalse(self.unit.checkpoint().path.exists())
 
     def test_health_and_picture_both_required_undo_is_choice(self):
         self.assertTrue(b.offer_undo({'software_ready':False},True));self.assertTrue(b.offer_undo({'software_ready':True},False));self.assertTrue(b.offer_undo({'software_ready':True},None));self.assertFalse(b.offer_undo({'software_ready':True},True))
@@ -326,8 +341,8 @@ class Tests(unittest.TestCase):
         with contextlib.redirect_stderr(error),mock.patch.object(s.sys.stdin,'isatty',return_value=False):
             with self.assertRaises(OSError):b.run(args,s,self.local,remote_factory=lambda *a,**kw:peer)
         text=error.getvalue();self.assertIn(str(self.local.root/'logs'),text)
-        self.assertIn(str(self.local.root/'bridge-install.json'),text)
-        self.assertIn('SteamLinkNativePassthrough/stream-bridge/install.json',text)
+        self.assertIn(str(self.local.root/'setup-restore.json'),text)
+        self.assertIn('SteamLinkNativePassthrough/stream-bridge/setup-restore.json',text)
         logs=list((self.local.root/'logs').glob('*'));self.assertEqual(len(logs),1)
         evidence=logs[0].read_text();self.assertIn('frame_inventory',evidence);self.assertNotIn('fixture secret',evidence)
         self.assertNotIn(self.pair['key_hex'],evidence);self.assertTrue(peer.closed)

@@ -25,7 +25,7 @@ STAGES = frozenset(('session', 'bundle', 'preflight', 'pc_inventory',
                     'frame_discovery', 'frame_inventory', 'pairing',
                     'frame_prepare', 'pc_install', 'frame_commit',
                     'startup_baseline', 'startup_health', 'picture_check',
-                    'undo', 'cleanup', 'complete'))
+                    'undo', 'cleanup', 'complete','runtime_stop','runtime_start','rollback'))
 KINDS = frozenset(('start', 'stage', 'result', 'failure', 'recovery', 'complete'))
 STATUSES = frozenset(('started', 'ok', 'partial', 'failed', 'refused', 'skipped',
                       'pending', 'cancelled', 'unavailable', 'unchanged'))
@@ -33,7 +33,9 @@ COMMANDS = frozenset(('inspect', 'check', 'install', 'update', 'repair',
                       'uninstall', 'undo', 'bridge-inventory',
                       'bridge-health-baseline', 'bridge-health', 'bridge-prepare',
                       'bridge-commit', 'bridge-undo', 'maintenance-plan',
-                      'maintenance-remove', 'inventory', 'inventory-inspect'))
+                      'maintenance-remove', 'inventory', 'inventory-inspect',
+                      'bridge-runtime-snapshot','bridge-runtime-restart','bridge-runtime-restored',
+                      'bridge-restore','bridge-checkpoint-finish'))
 REASONS = frozenset(('unknown_error', 'invalid_input', 'operation_refused',
                      'remote_refused', 'remote_unavailable', 'timeout',
                      'permission_denied', 'sharing_violation', 'missing',
@@ -222,9 +224,11 @@ def _recovery(value):
         if role in ('local', 'pc'):
             _require(len(parts) >= 2 and parts[-2] == ROOT_NAME and
                      parts[-1] in ('bridge-install.json', 'setup-last.log',
-                                   'setup-inspection.json'), 'invalid_event')
+                                   'setup-inspection.json','setup-restore.json','lifecycle.json'), 'invalid_event')
         else:
-            _require(parts[-3:] == ('SteamLinkNativePassthrough', 'stream-bridge', 'install.json') or
+            _require(parts[-3:] in (('SteamLinkNativePassthrough', 'stream-bridge', 'install.json'),
+                                   ('SteamLinkNativePassthrough', 'stream-bridge', 'setup-restore.json'),
+                                   ('SteamLinkNativePassthrough', 'stream-bridge', 'lifecycle.json')) or
                      parts[-2:] == ('SteamFrameNativePassthrough', 'install.json'), 'invalid_event')
         result[role] = text
     return result
