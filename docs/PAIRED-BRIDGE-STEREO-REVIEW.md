@@ -12,8 +12,11 @@ components match the published preview and are loaded in the intended
 compositor/Steam Link processes. Both services are running. Steam Link reports
 2.18.2 and a decoder change from 1152x4608 to 3264x6400 at 20:42:59. That extent
 is consistent with the previous atlas route, but is not by itself proof of an
-application source mode. The PC game logs available at collection were older
-Build707 logs; they must not be treated as this run's sender evidence.
+application source mode. The initially available PC logs were older Build707
+logs. The maintainer subsequently supplied the actual Build708 log: it confirms
+the Frame/Steam Link connection and the retained scene-contribution-atlas-v3
+source. It contains no ordinary-RGBA capability grant. This rules out an outdated
+game build, and agrees with a new route that never completed admission.
 
 A previous Stream Link process crashed while exiting at 20:33:07. The current
 stream uses a later process. The crash stack is retained privately; an allocator
