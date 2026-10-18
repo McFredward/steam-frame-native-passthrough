@@ -59,49 +59,39 @@ rejection or a later opaque local background. Do not allowlist another vertex
 shader or rewrite R1 from those logs alone. The requested result remains live
 game, local menu and camera together.
 
-## Next transport candidate and its limits
+## Public-overlay candidate: delivery is still unproved
 
-The explicit developer helper in
-[`pc/projection-overlay-probe.md`](../../pc/projection-overlay-probe.md) submits
-two static RGBA projection surfaces through public OpenVR. It does not patch
-the PC sender, change stream settings, install a receiver or render the game a
-second time. It tests whether a public route can preserve independently
-delivered alpha without consuming the normal scene video's RGB area.
+Build706 actually executes the public per-eye helper and logs both geometries
+and its local ready token. The maintainer nevertheless sees only the camera,
+with no pattern, and kills the game. The game diagnostic had automatically
+selected zero RGB/coverage after local readiness. That was an invalid readiness
+assumption: API success never established visible delivery to Steam Link.
 
-The reviewed public API and a successful local build do not prove Steam Link
-transports those surfaces independently. An overlay could instead be flattened
-into opaque video on the PC. A matching receiver observation must establish the
-actual known pattern or proven source identity; a new RGBA allocation or visible
-translucency alone is insufficient. The original helper had115 portable
-assertions and a strict Win64 cross-build; those did not establish Windows,
-Proton or headset execution.
+The supplied asymmetric frusta also expose a separate geometry defect. The
+UV-centred[0.4,0.6] charts do not centre the forward viewing direction. The
+forward ray misses the visible pattern interiors in both eyes. No visible image
+therefore does not distinguish an absent route, flattening, clipping or bad
+placement. Earlier core/GPU tests never established that hardware prerequisite.
+Their204 native and257 Unity checks are historical evidence for the specific
+old math/packing, not evidence that its headset picture worked.
 
-The follow-up public alpha witness now uses2048-square static images and
-conservative original-eye chart[0.40,0.60] cropping, wholly inside the v3 RGB
-rectangle before unknown PC pre-warp. Its matching explicit game test uses
-zero contribution AND independent coverage through the unchanged v3 packer.
-Opaque black beside interior transparent black can then distinguish separate
-coverage from flattened RGB. Keep the head still and move a bright real hand
-behind those inner lanes: simple translucency, a colored pattern or darkness
-against a dark room is not a positive result. Opaque fallback/unstable geometry
-makes this witness inconclusive. It does not establish all PC warp bounds.
+The current explicit
+[delivery preview](../../pc/projection-overlay-probe.md) is deliberately smaller:
+one ordinary square RGBA overlay on a common physical plane in front of the
+head, with the same image in both eyes. It changes no game/XR projection,
+resolution, Steam setting, sender binary or Frame installation. The game starts
+it directly on the button, closes options automatically and always retains its
+real source image. Reopening options or explicit Stop ends the owned child;
+there is no automatic expiry or later blanking. A producer flush precedes the
+single texture handoff, and bounded readbacks describe local setup only.
 
-The new helper passes204 core/lifecycle/geometry/pattern checks and strict
-Win64 compilation, with four scoped causal controls across its initial and
-bounded frequency-correction proofs. Seven stripe periods1/2/4/8/16/32/64 avoid
-confusing expected minification of fine lines with a transport defect. The
-actual game packer/shader passes257 focused Unity checks for the constant-zero
-source and unchanged full v3 header/coverage. No independent-alpha headset
-result, delivered4K detail or real-time full-scene transport is claimed yet.
-The explicit game action and later read-only menu observation share one normal
-Debug run; no new Frame diagnostic install or restart is required.
-
-Even a positive transport result still needs current-frame eye/pose/frustum
-registration, sharp edges, native motion, stereo fallback and real-scene proof.
-A separate mask associated only by arrival time, latest image or an application
-frame counter cannot establish those properties. The full-quality repair and
-game-plus-dashboard composition remain open; no new headset test is presented
-as a completed repair.
+This is an overlay-delivery baseline, not an independent-alpha witness or a
+production quality fix. A visible colored/partly transparent quad alone cannot
+prove that Steam Link transports alpha independently of the scene video. That
+must be established separately before building dynamic full-scene output on
+this route. Do not restore automatic source blanking merely on an API receipt.
+Current-frame eye/pose registration, sharp edges, native motion, delivered detail
+and stereo fallback remain additional requirements for a production solution.
 
 ## First dashboard diagnostic activation: measured refusal, not a menu result
 
