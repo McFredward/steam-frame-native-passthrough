@@ -37,6 +37,12 @@ with tempfile.TemporaryDirectory(prefix='sfnp-embedded-acl-') as temporary:
     alias = Path(temporary) / 'public-link.exe'
     import os
     os.link(public, alias)
+    before = public.stat()
+    with public.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
+    fields = ('st_dev','st_ino','st_mode','st_nlink','st_uid','st_gid','st_size','st_mtime_ns','st_ctime_ns')
+    print(json.dumps({'public_hardlink_stat_differences':{key:[getattr(before,key),getattr(opened,key)]
+                     for key in fields if getattr(before,key)!=getattr(opened,key)}}))
     snapshot, metadata = module.read_public_reference(public)
     assert snapshot == b'non-executable public reference fixture'
     assert metadata == {'bytes': len(snapshot), 'hardlinked': True}
