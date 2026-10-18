@@ -66,8 +66,8 @@
     }
   },
   "candidate": {
-    "bytes": 31960,
-    "sha256": "9ad1b56a20db039132ad6ec4557fe8ece3fff277316370bcefc9f70ec7aed367"
+    "bytes": 31384,
+    "sha256": "44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49"
   },
   "vulkan_api_minimum": 4198400,
   "driver_build_id": "b7e5995d0b202f06e81cd5a0f809ec1b744a0cb8",

@@ -75,7 +75,7 @@ class SceneSessionTests(unittest.TestCase):
         self.assertIs(self.session.profile,p);self.assertEqual(before,[(x.stat().st_ino,x.read_bytes()) for x in paths])
 
     def test_real_pin_not_relaxed_by_host_fixture(self):
-        with mock.patch.object(mod,'SCENE_CANDIDATE_SHA256','9ad1b56a20db039132ad6ec4557fe8ece3fff277316370bcefc9f70ec7aed367'):
+        with mock.patch.object(mod,'SCENE_CANDIDATE_SHA256','44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49'):
             with self.assertRaises(mod.SafetyError):self.prepare()
         self.assertFalse(self.session.receipt.exists());self.assertFalse(self.session.enable.exists())
 

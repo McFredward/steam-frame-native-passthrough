@@ -20,7 +20,11 @@ ssa, recovery, require = presenter.ssa, presenter.recovery, presenter.require
 SPEC = Path(__file__).resolve().parents[1] / "docs/protocols/scene-contribution-atlas-v1.json"
 PROFILE_PIN = "2c1ca215715ec7d2d7591eb2a2e8071a15e11fb5f96530927d10ceab7405e30c"
 SPEC_V2 = SPEC.with_name("scene-contribution-atlas-v2.json")
+SPEC_V3 = SPEC.with_name("scene-contribution-atlas-v3.json")
 PROFILE_V2_PIN = "68ad7a14b094729faffb3ff23cc5b42b2605ae9535e28d55071cd76533aecfc5"
+PROFILE_V3_PIN = "7efb2d98cc99d17d9bd920780797b6b647bc4b74441d2b97f8e72dc61f002521"
+MARKER_V3 = "MRMASK/8 current-r1-scene-contribution-atlas-v3-format-only"
+MARKER_ROBUST = "MRMASK/9 current-r1-scene-contribution-atlas-v1-v3-format-only"
 MARKER = "MRMASK/5 current-r1-scene-contribution-atlas-v1-format-only"
 MARKER_V2 = "MRMASK/6 current-r1-scene-contribution-atlas-v2-format-only"
 MARKER_DUAL = "MRMASK/7 current-r1-scene-contribution-atlas-v1-v2-format-only"
@@ -33,19 +37,29 @@ def profile_contract(profile):
                              ensure_ascii=True, allow_nan=False).encode("ascii")
     except (TypeError, ValueError, UnicodeError):
         recovery.fail("exact finite frozen scene atlas profile required")
-    require(hashlib.sha256(encoded).hexdigest() in (PROFILE_PIN, PROFILE_V2_PIN),
+    require(hashlib.sha256(encoded).hexdigest() in (PROFILE_PIN, PROFILE_V2_PIN, PROFILE_V3_PIN),
             "exact frozen scene atlas profile required; no caller geometry or codes")
     # Seal the accepted contract against subsequent caller mutation.
     result = json.loads(encoded)
     guard = result["guard"]
     digest = hashlib.sha256(guard["signature_preimage"].encode("ascii")).digest()
-    require(digest.hex() == guard["signature_sha256"] and list(digest[:12]) == guard["codes"],
+    codes = ([guard["code_levels"][v & 3] for v in digest[:12]]
+             if result["revision"] == 3 else list(digest[:12]))
+    require(digest.hex() == guard["signature_sha256"] and codes == guard["codes"],
             "frozen format signature derivation differs")
     return result
 
 
 def load_profile(path=SPEC):
     return profile_contract(recovery.load_json(Path(path))[0])
+
+
+def guard_center(profile, index):
+    """Frozen per-cell origins for v3; legacy origin/stride stays unchanged."""
+    guard = profile["guard"]
+    origin = (guard["origins"][index] if profile["revision"] == 3 else
+              [guard["origin"][axis] + guard["stride"][axis] * index for axis in (0, 1)])
+    return [origin[axis] + guard["size"][axis] / 2 for axis in (0, 1)]
 
 
 def panel_mapping(profile):
@@ -184,7 +198,7 @@ def _scene_candidate(original, profile, enabled, descriptor_count):
                   coverage_coordinate_policy="four global-halo tiles selected from clamped current q; no CPU eye table",
                   new_ssa_ids={**ids,"scene_contribution_rgb":ids["premultiplied_rgb"],"scene_global_q":global_q,
                                "mask_origin_x":origin_x,"mask_origin_y":origin_y,"mask_tile_base":tile_base,
-                               **({"rotated_pixel_x":rx,"rotated_pixel_y":ry} if profile['revision']==2 else {})},
+                               **({"rotated_pixel_x":rx,"rotated_pixel_y":ry} if profile['revision']>=2 else {})},
                   mask_coordinate_ssa={"qx":qx,"qy":qy,"pixel_x":px,"pixel_y":py,
                                        "above":above,"right":right,"mapped_x":x,"mapped_y":y})
     return binary,record
@@ -285,8 +299,7 @@ def transform(original, profile, enabled=True, descriptor_count=1):
             # OpSampledImage results may only be consumed in their own block.
             # Recombine the same original image/sampler values, never reload.
             remaining_sampled_image = emit(signature, 86, 297, 599, 600)
-        center = [guard["origin"][axis] + guard["stride"][axis] * index + guard["size"][axis] / 2
-                  for axis in (0, 1)]
+        center = guard_center(p, index)
         normalized = [center[0] / width, center[1] / height]
         xy = [emit(target, 129, 8, lo, emit(target, 133, 8, size, constant(position)))
               for lo, size, position in zip(minimum, span, normalized)]
@@ -320,7 +333,7 @@ def transform(original, profile, enabled=True, descriptor_count=1):
     result[function:function] = declarations
     markers = [i for i, item in enumerate(result) if item.opcode == 330]
     require(len(markers) == 1, "one inherited guard marker required")
-    marker = MARKER if p['revision']==1 else MARKER_V2
+    marker = MARKER if p['revision']==1 else MARKER_V2 if p['revision']==2 else MARKER_V3
     encoded = marker.encode("ascii") + b"\0"
     encoded += b"\0" * (-len(encoded) % 4)
     result[markers[0]] = make(330, *struct.unpack("<%dI" % (len(encoded) // 4), encoded))
@@ -343,17 +356,30 @@ def transform(original, profile, enabled=True, descriptor_count=1):
 
 
 def transform_dual(original, enabled=True, descriptor_count=1):
-    """Recognize v2 first, otherwise execute the complete legacy v1 guard/path.
+    """Historical frozen v2/v1 candidate; not the production shipping path."""
+    return _transform_secondary(original, load_profile(SPEC_V2), enabled,
+                                descriptor_count, MARKER_DUAL)
 
-    Both bodies use the original invocation/chart and original image/sampler.
-    No panel fetch is executed before that profile's full signature admission.
+
+def transform_robust(original, enabled=True, descriptor_count=1):
+    """Recognize robust v3, otherwise guarded v1 or exact original output.
+
+    Both paths use the current original invocation/image/chart, never a sticky
+    decision or a cross-eye join. V2 is intentionally not a third guard.
     """
+    return _transform_secondary(original, load_profile(SPEC_V3), enabled,
+                                descriptor_count, MARKER_ROBUST)
+
+
+def _transform_secondary(original, secondary, enabled, descriptor_count, marker_text):
+    """Compose one frozen full-resolution format with complete legacy fallback."""
+    revision = secondary['revision']
     v1, old = transform(original, load_profile(), enabled, descriptor_count)
     if not enabled:
-        return v1, {**old, 'dual_profile_guard': False, 'supported_profiles': [1, 2]}
-    v2, full = transform(original, load_profile(SPEC_V2), True, descriptor_count)
+        return v1, {**old, 'dual_profile_guard': False, 'supported_profiles': [1, revision]}
+    secondary_binary, full = transform(original, secondary, True, descriptor_count)
     header, instructions = parse_module(v1)
-    _, second = parse_module(v2)
+    _, second = parse_module(secondary_binary)
     native_header, _ = ssa.parse_module(original)
     first_function = next(i for i, x in enumerate(instructions) if x.opcode == 54)
     second_function = next(i for i, x in enumerate(second) if x.opcode == 54)
@@ -420,8 +446,7 @@ def transform_dual(original, enabled=True, descriptor_count=1):
     for index, code in enumerate(guard['codes']):
         target = first if index == 0 else remaining
         if index in (0, 1): sampled = emit(target, 86, 297, 599, 600)
-        center = [guard['origin'][axis] + guard['stride'][axis]*index + guard['size'][axis]/2
-                  for axis in (0, 1)]
+        center = guard_center(full['profile'], index)
         xy = [emit(target, 129, 8, lo, emit(target, 133, 8, span, constant(pos/extent)))
               for lo, span, pos, extent in zip(minima, spans, center, canvas)]
         coordinate = emit(target, 80, 39, *xy)
@@ -454,23 +479,23 @@ def transform_dual(original, enabled=True, descriptor_count=1):
             if item == make(248, old['guard_ssa']['first_signature_merge']): merge_next = True
     require(inserted == 1, 'one legacy signature-entry splice required')
     out[first_function:first_function] = declarations
-    marker = MARKER_DUAL.encode('ascii') + b'\0'
+    marker = marker_text.encode('ascii') + b'\0'
     marker += b'\0' * (-len(marker) % 4)
     positions = [i for i, item in enumerate(out) if item.opcode == 330]
     require(len(positions) == 1, 'one dual format marker required')
     out[positions[0]] = make(330, *struct.unpack('<%dI' % (len(marker)//4), marker))
     header[3] = bound
     binary = pack_module(header, out)
-    record = {**old, 'schema': 'native-fragment-scene-presenter-dual-v1-v2',
-              'supported_profiles': [1, 2], 'profile_v2': full['profile'],
-              'coverage_source_contract': 'current same-eye selected frozen v1/v2 numeric G',
-              'dual_profile_guard': True, 'profile_selection': 'valid v2 first, otherwise complete guarded v1, otherwise exact original994',
-              'candidate_marker': MARKER_DUAL, 'output_bytes': len(binary),
+    record = {**old, 'schema': 'native-fragment-scene-presenter-dual-v1-v%d' % revision,
+              'supported_profiles': [1, revision], 'profile_v%d' % revision: full['profile'],
+              'coverage_source_contract': 'current same-eye selected frozen v1/v%d numeric G' % revision,
+              'dual_profile_guard': True, 'profile_selection': 'valid v%d first, otherwise complete guarded v1, otherwise exact original994' % revision,
+              'candidate_marker': marker_text, 'output_bytes': len(binary),
               'output_sha256': hashlib.sha256(binary).hexdigest(),
-              'v2_ssa_ids': {key: names.get(value, value) for key, value in full['new_ssa_ids'].items()},
-              'v2_guard_cells': cells, 'v2_guard_first_valid': first_valid,
-              'v2_guard_valid': accepted, 'dual_merge': final_merge,
-              'guard_sample_budget': {'v2': 12, 'legacy_v1': 13, 'ordinary_first_cells_mismatch': 2},
+              'v%d_ssa_ids' % revision: {key: names.get(value, value) for key, value in full['new_ssa_ids'].items()},
+              'v%d_guard_cells' % revision: cells, 'v%d_guard_first_valid' % revision: first_valid,
+              'v%d_guard_valid' % revision: accepted, 'dual_merge': final_merge,
+              'guard_sample_budget': {'v%d' % revision: 12, 'legacy_v1': 13, 'ordinary_first_cells_mismatch': 2},
               'extra_pixel_planes': False, 'alpha_threshold': False}
     return binary, record
 
@@ -482,16 +507,19 @@ def main(argv=None):
     parser.add_argument("--profile", type=Path, default=SPEC)
     parser.add_argument("--disabled", action="store_true")
     parser.add_argument("--owned-descriptor-count", type=int, choices=(1, 3), default=1)
-    parser.add_argument("--dual-profile", action="store_true")
+    profiles = parser.add_mutually_exclusive_group()
+    profiles.add_argument("--dual-profile", action="store_true", help="Historical v2/v1 executable only")
+    profiles.add_argument("--robust-profile", action="store_true", help="Shipping robust v3/v1 executable")
     args = parser.parse_args(argv)
     try:
         require(len({p.absolute() for p in (args.original, args.profile, args.output, args.record)}) == 4,
                 "distinct original/profile/output/record paths required")
         require(not any(p.exists() or p.is_symlink() for p in (args.output, args.record)), "exclusive outputs required")
-        profile, profile_sha = recovery.load_json(args.profile)
-        binary, record = (transform_dual(recovery.read_owned(args.original, ssa.MAX_BYTES),
-                                         not args.disabled, args.owned_descriptor_count)
-                          if args.dual_profile else transform(recovery.read_owned(args.original, ssa.MAX_BYTES), profile,
+        profile, profile_sha = recovery.load_json(SPEC_V3 if args.robust_profile else args.profile)
+        binary, record = ((transform_robust if args.robust_profile else transform_dual)(
+                              recovery.read_owned(args.original, ssa.MAX_BYTES),
+                              not args.disabled, args.owned_descriptor_count)
+                          if args.robust_profile or args.dual_profile else transform(recovery.read_owned(args.original, ssa.MAX_BYTES), profile,
                                                               not args.disabled, args.owned_descriptor_count))
         with tempfile.TemporaryDirectory(prefix="private-fragment-guard-") as directory:
             path = Path(directory) / "guarded.spv"

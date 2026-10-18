@@ -140,12 +140,13 @@ int main(int argc,char** argv){
     using namespace creation;
     if(argc==3&&std::string(argv[1])=="--scene-pin"){
         auto words=load(argv[2]);n::Fragment scene,synthetic;
-        require(n::SceneFragmentBytes==31960&&scene.prepare(words.data(),words.size()*4,n::Profile::SceneContribution),"exact dual v1/v2 scene artifact admitted");
+        require(n::SceneFragmentBytes==31384&&scene.prepare(words.data(),words.size()*4,n::Profile::SceneContribution),"exact robust v3/v1 scene artifact admitted");
         require(!synthetic.prepare(words.data(),words.size()*4),"scene is not the historical straight-RGB synthetic artifact");
         words.back()^=1;n::Fragment corrupted;
         require(!corrupted.prepare(words.data(),words.size()*4,n::Profile::SceneContribution),"same-size dual mutation never self-authorizes");
         require(scene.ready()&&scene.words()[words.size()-1]!=(words.back()),"prepared scene owns sealed executable copy");
         require(!corrupted.prepare(words.data(),19224,n::Profile::SceneContribution),"legacy single-profile executable length is not the new dual capability");
+        require(!corrupted.prepare(words.data(),31960,n::Profile::SceneContribution),"quarantined v2 executable length is not the robust capability");
         std::cout<<"{\"scope\":\"dual-scene-pin-only\",\"checks\":"<<checks<<",\"runtime_hooked\":false}\n";return 0;
     }
     require(argc==1||argc==4,"optional private VS PS guarded candidate paths");

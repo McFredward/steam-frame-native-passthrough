@@ -29,7 +29,7 @@ COMPATIBILITY = ROOT / 'packaging/compatibility.json'
 if not COMPATIBILITY.is_file():
     COMPATIBILITY = ROOT / 'compatibility.json'
 SCHEMA = 'sfnp-native-package-v1'
-COMPATIBILITY_SHA256 = '51fe70fc3e5c42152ccdb0ede19b3d62f5bda336233c37b978c32a367ed30c77'
+COMPATIBILITY_SHA256 = 'd398e5cc534b981d738bbc22ffced805bb9609e92c11c47cab6d2a062da4c178'
 BUILD_MARKER = b'SFNP_RELEASE_RECEIVER/1\0'
 LIBRARY = 'libVkLayer_frame_pixel_snapshot.so'
 CANDIDATE = 'scene-presenter.spv'
@@ -201,7 +201,7 @@ def source_snapshot():
     for folder in ('layer', 'receiver', 'tools'):
         paths.extend(p for p in (ROOT / folder).rglob('*') if p.suffix in ('.h', '.cpp', '.py'))
     paths.extend(ROOT / p for p in HELPERS if ROOT / p not in paths)
-    paths.extend(ROOT / ('docs/protocols/scene-contribution-atlas-v%d.json' % revision) for revision in (1, 2))
+    paths.extend(ROOT / ('docs/protocols/scene-contribution-atlas-v%d.json' % revision) for revision in (1, 2, 3))
     return {str(p.relative_to(ROOT)): sha(read_regular(p, 2 * 1024 * 1024)) for p in sorted(set(paths))}
 
 
@@ -276,7 +276,7 @@ def prepare(output, steamvr_root=Path('/opt/steamvr')):
         run_command(['cmake', '--build', str(build), '--target', 'VkLayer_frame_pixel_snapshot', '--parallel', '2'], log)
         import native_fragment_scene_presenter as transform
         original = read_regular(Path(files['fragment']).resolve(strict=True), profile['runtime_files']['fragment']['bytes'])
-        candidate, record = transform.transform_dual(original, True, 1)
+        candidate, record = transform.transform_robust(original, True, 1)
         require(len(candidate) == profile['candidate']['bytes'] and sha(candidate) == profile['candidate']['sha256'], 'generated candidate pin differs')
         candidate_path = scratch / CANDIDATE; candidate_path.write_bytes(candidate)
         run_command(['spirv-val', '--target-env', 'vulkan1.1', str(candidate_path)], log, 30)
