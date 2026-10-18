@@ -2,7 +2,7 @@
 # Online entry point: no sudo, service restart, or unverified source execution.
 set -euo pipefail
 command -v python3 >/dev/null 2>&1 || { echo 'Python 3.9 or newer is required.' >&2; exit 2; }
-python3 -I -B - <<'SFNP_BOOTSTRAP_PY'
+python3 -I -B - "$@" <<'SFNP_BOOTSTRAP_PY'
 import hashlib
 import json
 import os
@@ -19,6 +19,8 @@ import zipfile
 
 REPO = 'McFredward/steam-link-native-passthrough'
 ASSET = 'steam-link-native-passthrough-setup.zip'
+INSPECTION_TAG = 'setup-inspection-v1'
+INSPECTION_ASSET = 'steam-link-native-passthrough-inspection.zip'
 MAX_ZIP = 128 * 1024 * 1024
 MAX_FILE = 32 * 1024 * 1024
 MAX_TOTAL = 192 * 1024 * 1024
@@ -69,23 +71,39 @@ def download(url, limit):
     return result
 
 
-def select_asset(release):
-    require(type(release) is dict and release.get('draft') is False and release.get('prerelease') is False,
+def select_asset(release, inspection=False):
+    require(type(release) is dict and release.get('draft') is False and
+            release.get('prerelease') is inspection,
+            'No matching public inspection release is available.' if inspection else
             'No public stable setup release is available.')
+    asset_name = INSPECTION_ASSET if inspection else ASSET
     tag = release.get('tag_name')
     require(type(tag) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,63}', tag), 'Unknown release tag.')
-    candidates = [item for item in release.get('assets', []) if item.get('name') == ASSET]
+    require(not inspection or tag == INSPECTION_TAG, 'Unexpected inspection release tag.')
+    candidates = [item for item in release.get('assets', []) if item.get('name') == asset_name]
     require(len(candidates) == 1, 'This release has no complete PC/Frame setup package. Nothing was installed.')
     asset = candidates[0]
     require(asset.get('state') == 'uploaded' and type(asset.get('size')) is int and
             0 < asset['size'] <= MAX_ZIP and
             type(asset.get('digest')) is str and re.fullmatch('sha256:[0-9a-f]{64}', asset['digest']) and
-            asset.get('browser_download_url') == 'https://github.com/' + REPO + '/releases/download/' + tag + '/' + ASSET,
+            asset.get('browser_download_url') == 'https://github.com/' + REPO + '/releases/download/' + tag + '/' + asset_name,
             'Release asset lacks its exact GitHub URL, size or SHA-256 digest.')
     return asset
 
 
-def extract(archive, target):
+def inspection_file(name):
+    return (name in {'setup-inspection.json', 'setup/steam_link_setup.py',
+                     'README.md', 'README.de.md', 'README.txt', 'LICENSE',
+                     'patch-steam-link.cmd', 'patch-steam-link.sh'} or
+            name.startswith('setup/runtime/python/'))
+
+
+def arguments(args):
+    require(args in ([], ['--inspect']), 'Only the explicit --inspect argument is supported.')
+    return args == ['--inspect']
+
+
+def extract(archive, target, inspection=False):
     with zipfile.ZipFile(archive) as package:
         items = package.infolist()
         require(0 < len(items) <= 512, 'Archive entry bound exceeded.')
@@ -106,10 +124,14 @@ def extract(archive, target):
                 'Bootstrap manifest missing.')
         manifest = parse(package.read(files['bootstrap-package.json']))
         require(type(manifest) is dict and set(manifest) == {'schema', 'readiness', 'windows_python', 'files'} and
-                manifest['schema'] == 'sfnp-bootstrap-package-v1' and manifest['readiness'] == 'release' and
+                manifest['schema'] == ('sfnp-bootstrap-inspection-v1' if inspection else 'sfnp-bootstrap-package-v1') and
+                manifest['readiness'] == ('inspection-only' if inspection else 'release') and
                 type(manifest['files']) is dict and set(manifest['files']) == set(files) - {'bootstrap-package.json'} and
-                {'steam-link-bundle.json', 'setup/steam_link_setup.py'} <= set(manifest['files']),
-                'Incomplete or prototype setup package; nothing was installed.')
+                ({'setup-inspection.json', 'setup/steam_link_setup.py'} if inspection else
+                 {'steam-link-bundle.json', 'setup/steam_link_setup.py'}) <= set(manifest['files']),
+                'Incomplete or mismatched setup package; nothing was installed.')
+        require(not inspection or all(inspection_file(name) for name in manifest['files']),
+                'Inspection package contains an installation payload.')
         for name, pin in manifest['files'].items():
             require(type(pin) is dict and set(pin) == {'bytes', 'sha256'} and
                     type(pin['bytes']) is int and pin['bytes'] == files[name].file_size and
@@ -122,13 +144,19 @@ def extract(archive, target):
             with path.open('xb') as output:
                 output.write(raw)
             path.chmod(0o600)
-    bundle = parse((target / 'steam-link-bundle.json').read_bytes())
-    require(bundle.get('schema') == 'sfnp-steam-link-setup-v1' and bundle.get('readiness') == 'release',
-            'Only complete release bundles may start interactive setup.')
+    if inspection:
+        profile = parse((target / 'setup-inspection.json').read_bytes())
+        require(type(profile) is dict and set(profile) == {'schema', 'expected_pc', 'runtime_files'} and
+                profile['schema'] == 'sfnp-setup-inspection-v1', 'Invalid inspection profile.')
+    else:
+        bundle = parse((target / 'steam-link-bundle.json').read_bytes())
+        require(bundle.get('schema') == 'sfnp-steam-link-setup-v1' and bundle.get('readiness') == 'release',
+                'Only complete release bundles may start interactive setup.')
 
 
 def main():
     require(sys.version_info >= (3, 9), 'Python 3.9 or newer is required.')
+    inspection = arguments(sys.argv[1:])
     # curl | bash owns stdin. The wizard must receive the real terminal so its
     # review, SSH fingerprint/password prompts and Apply confirmation work.
     try:
@@ -137,9 +165,11 @@ def main():
         raise ValueError('Run this command in an interactive terminal.') from error
     stage = None
     try:
-        print('Steam Link Native Passthrough — downloading the guided setup...', flush=True)
-        release = parse(download('https://api.github.com/repos/' + REPO + '/releases/latest', 1024 * 1024))
-        asset = select_asset(release)
+        print('Steam Link Native Passthrough — downloading ' +
+              ('read-only inspection (no installation or restart)...' if inspection else 'the guided setup...'), flush=True)
+        endpoint = '/releases/tags/' + INSPECTION_TAG if inspection else '/releases/latest'
+        release = parse(download('https://api.github.com/repos/' + REPO + endpoint, 1024 * 1024))
+        asset = select_asset(release, inspection)
         stage = Path(tempfile.mkdtemp(prefix='sfnp-setup-'))
         stage.chmod(0o700)
         raw = download(asset['browser_download_url'], asset['size'])
@@ -147,10 +177,13 @@ def main():
                 'Setup download failed its SHA-256 check.')
         archive = stage / 'download.zip'; archive.write_bytes(raw)
         target = stage / 'package'; target.mkdir(mode=0o700)
-        extract(archive, target)
-        print('Package verified. The assistant will check both devices before offering changes.', flush=True)
-        return subprocess.call([sys.executable, '-I', '-B', str(target / 'setup/steam_link_setup.py'),
-                                '--bundle', str(target)], stdin=terminal)
+        extract(archive, target, inspection)
+        print('Inspection package verified. This mode only reads and reports; it cannot apply changes.' if inspection else
+              'Package verified. The assistant will check both devices before offering changes.', flush=True)
+        argv = [sys.executable, '-I', '-B', str(target / 'setup/steam_link_setup.py'), '--bundle', str(target)]
+        if inspection:
+            argv.append('--inspect')
+        return subprocess.call(argv, stdin=terminal)
     finally:
         terminal.close()
         if stage is not None:

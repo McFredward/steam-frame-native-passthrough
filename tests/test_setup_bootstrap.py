@@ -30,9 +30,17 @@ def contents():
             'setup/runtime/python/python.exe': b'FIXTURE ONLY: NOT A REAL EXECUTABLE\n'}
 
 
-def archive(files=None, *, mutate=None, extra=None):
-    files = contents() if files is None else files
-    manifest = {'schema': 'sfnp-bootstrap-package-v1', 'readiness': 'release',
+def inspection_contents():
+    return {'setup-inspection.json': json.dumps({'schema': 'sfnp-setup-inspection-v1',
+            'expected_pc': {}, 'runtime_files': {}}).encode(),
+            'setup/steam_link_setup.py': b'# Non-executable inspection fixture.\n',
+            'setup/runtime/python/python.exe': b'FIXTURE ONLY: NOT A REAL EXECUTABLE\n'}
+
+
+def archive(files=None, *, mutate=None, extra=None, inspection=False):
+    files = (inspection_contents() if inspection else contents()) if files is None else files
+    manifest = {'schema': 'sfnp-bootstrap-inspection-v1' if inspection else 'sfnp-bootstrap-package-v1',
+                'readiness': 'inspection-only' if inspection else 'release',
                 'windows_python': 'setup/runtime/python/python.exe',
                 'files': {name: {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()} for name, raw in files.items()}}
     if mutate:
@@ -55,20 +63,66 @@ class BootstrapTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def release(self):
-        return {'draft': False, 'prerelease': False, 'tag_name': 'v1.0.0',
-                'assets': [{'name': bootstrap.ASSET, 'state': 'uploaded', 'size': 512,
+    def release(self, inspection=False):
+        tag = bootstrap.INSPECTION_TAG if inspection else 'v1.0.0'
+        asset_name = bootstrap.INSPECTION_ASSET if inspection else bootstrap.ASSET
+        return {'draft': False, 'prerelease': inspection, 'tag_name': tag,
+                'assets': [{'name': asset_name, 'state': 'uploaded', 'size': 512,
                             'digest': 'sha256:' + 'a' * 64,
-                            'browser_download_url': 'https://github.com/' + bootstrap.REPO + '/releases/download/v1.0.0/' + bootstrap.ASSET}]}
+                            'browser_download_url': 'https://github.com/' + bootstrap.REPO + '/releases/download/' + tag + '/' + asset_name}]}
 
-    def extract(self, raw):
+    def extract(self, raw, inspection=False):
         target = self.path / 'package'; target.mkdir()
         zipped = self.path / 'download.zip'; zipped.write_bytes(raw)
-        bootstrap.extract(zipped, target)
+        bootstrap.extract(zipped, target, inspection)
         return target
 
     def test_exact_public_asset(self):
         self.assertEqual(bootstrap.select_asset(self.release())['size'], 512)
+
+    def test_explicit_inspection_release_is_separate_from_stable(self):
+        release = self.release(True)
+        self.assertEqual(bootstrap.select_asset(release, True)['name'], bootstrap.INSPECTION_ASSET)
+        for candidate, mode in [(release, False), (self.release(), True)]:
+            with self.assertRaises(ValueError): bootstrap.select_asset(candidate, mode)
+        for field, value in [('draft', True), ('prerelease', False), ('tag_name', 'another-inspection')]:
+            candidate = self.release(True); candidate[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError): bootstrap.select_asset(candidate, True)
+        candidate = self.release(True); candidate['assets'][0]['name'] = bootstrap.ASSET
+        with self.assertRaises(ValueError): bootstrap.select_asset(candidate, True)
+
+    def test_inspection_archive_has_no_installation_payload(self):
+        files = inspection_contents(); files['LICENSE'] = b'MIT attribution fixture'
+        target = self.extract(archive(files, inspection=True), True)
+        self.assertEqual((target / 'LICENSE').read_bytes(), files['LICENSE'])
+        self.assertEqual((target / 'setup-inspection.json').read_bytes(), inspection_contents()['setup-inspection.json'])
+        self.assertFalse((target / 'steam-link-bundle.json').exists())
+
+    def test_modes_cannot_accept_each_others_archives(self):
+        for mode in (False, True):
+            with self.subTest(inspection=mode), tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                target = Path(temporary) / 'target'; target.mkdir()
+                zipped = Path(temporary) / 'archive.zip'; zipped.write_bytes(archive(inspection=not mode))
+                with self.assertRaises(ValueError): bootstrap.extract(zipped, target, mode)
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_inspection_rejects_native_or_release_payload_before_extraction(self):
+        for name in ('steam-link-bundle.json', 'pc-provider/driver.dll', 'receiver/libVkLayer.so', 'shader.spv'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                files = inspection_contents(); files[name] = b'UNEXECUTED PAYLOAD FIXTURE'
+                zipped = Path(temporary) / 'archive.zip'; zipped.write_bytes(archive(files, inspection=True))
+                target = Path(temporary) / 'target'; target.mkdir()
+                with self.assertRaises(ValueError): bootstrap.extract(zipped, target, True)
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_inspection_inner_profile_contract(self):
+        files = inspection_contents(); files['setup-inspection.json'] = b'{"schema":"sfnp-setup-inspection-v1","readiness":"inspection-only"}'
+        with self.assertRaises(ValueError): self.extract(archive(files, inspection=True), True)
+
+    def test_only_explicit_inspection_argument(self):
+        self.assertFalse(bootstrap.arguments([])); self.assertTrue(bootstrap.arguments(['--inspect']))
+        for args in (['--apply'], ['--inspect', '--apply'], ['--inspect', '--inspect'], ['--inspection']):
+            with self.subTest(args=args), self.assertRaises(ValueError): bootstrap.arguments(args)
 
     def test_incomplete_or_unexpected_release_refused(self):
         for field, value in [('draft', True), ('prerelease', True), ('tag_name', '../main'), ('assets', [])]:
@@ -149,27 +203,29 @@ class BootstrapTests(unittest.TestCase):
         del files['LICENSE.txt']; missing = runtime(files)
         with self.assertRaises(ValueError): packaging.windows_python(missing, hashlib.sha256(missing).hexdigest(), url)
 
-    @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
-    def test_piped_bootstrap_gives_wizard_actual_terminal(self):
+    def piped_bootstrap(self, inspection):
         import pty
         import signal
-        import sys
         report = self.path / 'terminal-result.json'
-        files = contents()
+        files = inspection_contents() if inspection else contents()
         files['setup/steam_link_setup.py'] = (
             'import sys,json,pathlib\n'
             f'pathlib.Path({str(report)!r}).write_text(json.dumps({{"tty":sys.stdin.isatty(),"args":sys.argv[1:]}}))\n'
             'assert sys.stdin.isatty()\n').encode()
-        raw = archive(files)
-        release = self.release()
+        raw = archive(files, inspection=inspection)
+        release = self.release(inspection)
         release['assets'][0].update(size=len(raw), digest='sha256:' + hashlib.sha256(raw).hexdigest())
-        zipped = self.path / 'fixture.zip'; zipped.write_bytes(raw)
-        runner = self.path / 'tty-runner.py'
-        runner.write_text('import sys,types,pathlib\n'
-                          f'm=types.ModuleType("fixture_bootstrap");exec(compile({source!r},"get.sh","exec"),m.__dict__)\n'
-                          f'payload=pathlib.Path({str(zipped)!r}).read_bytes()\n'
-                          f'm.download=lambda url,limit: {json.dumps(release).encode()!r} if url.endswith("/latest") else payload\n'
-                          'sys.exit(m.main())\n')
+        endpoint = '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/latest'
+        api_url = 'https://api.github.com/repos/' + bootstrap.REPO + endpoint
+        asset_url = release['assets'][0]['browser_download_url']
+        # Only network I/O is replaced. Execute the actual Bash argv/heredoc,
+        # Python core and a real child through curl|bash-shaped pipe input.
+        injected = ('def fixture_download(url, limit):\n'
+                    f'    if url == {api_url!r}: return {json.dumps(release).encode()!r}\n'
+                    f'    if url == {asset_url!r}: return {raw!r}\n'
+                    '    raise ValueError("Unexpected fixture endpoint")\n'
+                    'download = fixture_download\n')
+        script = (ROOT / 'get.sh').read_text().replace("if __name__ == '__main__':", injected + "if __name__ == '__main__':")
         master, slave = pty.openpty()
         def controlling_terminal():
             import fcntl
@@ -178,26 +234,38 @@ class BootstrapTests(unittest.TestCase):
         child = None
         try:
             with (self.path / 'terminal.log').open('wb') as output:
-                child = subprocess.Popen([sys.executable, '-I', '-B', str(runner)], stdin=slave,
+                child = subprocess.Popen(['bash', '-s', '--'] + (['--inspect'] if inspection else []), stdin=subprocess.PIPE,
                                          stdout=output, stderr=subprocess.STDOUT, preexec_fn=controlling_terminal)
                 try:
-                    code = child.wait(timeout=15)
+                    child.communicate(script.encode(), timeout=15)
                 except BaseException:
                     os.killpg(child.pid, signal.SIGKILL); child.wait(); raise
-            self.assertEqual(code, 0, (self.path / 'terminal.log').read_text())
+            self.assertEqual(child.returncode, 0, (self.path / 'terminal.log').read_text())
             data = json.loads(report.read_text())
             self.assertTrue(data['tty']); self.assertEqual(data['args'][0], '--bundle')
+            self.assertEqual(data['args'][2:], ['--inspect'] if inspection else [])
             self.assertFalse(Path(data['args'][1]).exists(), 'Own download/runtime removed after child exits')
         finally:
             os.close(master); os.close(slave)
+
+    @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
+    def test_piped_bootstrap_gives_wizard_actual_terminal(self):
+        self.piped_bootstrap(False)
+
+    @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
+    def test_piped_inspection_preserves_terminal_and_explicit_mode(self):
+        self.piped_bootstrap(True)
 
     def test_actual_powershell_archive_functions(self):
         if not POWERSHELL: self.skipTest('Pass --pwsh to run actual PowerShell parser/extraction functions')
         valid = self.path / 'valid.zip'; valid.write_bytes(archive())
         bad = self.path / 'bad.zip'; bad.write_bytes(archive(mutate=lambda v: v.update(readiness='prototype')))
+        inspection = self.path / 'inspection.zip'; inspection.write_bytes(archive(inspection=True))
+        files = inspection_contents(); files['pc-provider/driver.dll'] = b'UNEXECUTED NATIVE FIXTURE'
+        payload = self.path / 'payload.zip'; payload.write_bytes(archive(files, inspection=True))
         report = self.path / 'ps-result.json'
         script = self.path / 'check.ps1'
-        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report)
+        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload)
 $ErrorActionPreference='Stop'
 $tokens=$null; $parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$parseErrors)
@@ -211,19 +279,27 @@ $badTarget=Join-Path $Output 'ps-bad'; [void][IO.Directory]::CreateDirectory($ba
 $refused=$false
 try { Expand-SfnpPackage $Bad $badTarget | Out-Null } catch { $refused=$true }
 if (-not $refused -or @(Get-ChildItem $badTarget -Recurse).Count -ne 0) { throw 'Prototype extraction did not stop.' }
-$unsafe=@('../escape','/escape','C:/escape','x\escape','x//escape','x/CON.txt','x/end.','x/end ','x/CONIN$','x/CONOUT$',('x/COM'+[char]0xB9),('x/LPT'+[char]0xB2),'x/a|b','x/a?b')
+$inspectionTarget=Join-Path $Output 'ps-inspection'; [void][IO.Directory]::CreateDirectory($inspectionTarget)
+$inspectionRuntime=Expand-SfnpPackage $Inspection $inspectionTarget $true
+if ($inspectionRuntime -ne 'setup/runtime/python/python.exe' -or -not (Test-Path (Join-Path $inspectionTarget 'setup-inspection.json'))) { throw 'Inspection did not verify.' }
+foreach ($case in @(@($Inspection,$false),@($Valid,$true),@($Payload,$true))) {
+ $caseTarget=Join-Path $Output ([Guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($caseTarget)
+ $blocked=$false;try { Expand-SfnpPackage $case[0] $caseTarget $case[1] | Out-Null } catch { $blocked=$true }
+ if (-not $blocked -or @(Get-ChildItem $caseTarget -Recurse).Count -ne 0) { throw 'Inspection/release or payload gate failed.' }
+}
+$unsafe=@('../escape' ,'/escape','C:/escape','x\escape','x//escape','x/CON.txt','x/end.','x/end ','x/CONIN$','x/CONOUT$',('x/COM'+[char]0xB9),('x/LPT'+[char]0xB2),'x/a|b','x/a?b')
 foreach ($name in $unsafe) {
  $blocked=$false; try { Get-SfnpName $name | Out-Null } catch { $blocked=$true }
  if (-not $blocked) { throw ('Unsafe path accepted: '+$name) }
 }
-@{parsed=$true;exact_runtime=$runtime;prototype_refused=$true;unsafe_paths=$unsafe.Count;scope='ActualPowerShellFunctions_NoNetwork_NoWindowsACL_NoDevice'} | ConvertTo-Json | Set-Content $Report
+@{parsed=$true;exact_runtime=$runtime;prototype_refused=$true;unsafe_paths=$unsafe.Count;inspection_verified=$true;inspection_native_payload_refused=$true;scope='ActualPowerShellFunctions_NoNetwork_NoWindowsACL_NoDevice'} | ConvertTo-Json | Set-Content $Report
 ''')
         result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script),
-                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report)],
+                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
         self.assertEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
         data = json.loads(report.read_text(encoding='utf-8-sig'))
-        self.assertTrue(data['prototype_refused'])
+        self.assertTrue(data['prototype_refused']); self.assertTrue(data['inspection_verified']); self.assertTrue(data['inspection_native_payload_refused'])
 
 
 if __name__ == '__main__':
