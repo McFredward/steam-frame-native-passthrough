@@ -1,5 +1,45 @@
 # Sender bridge: receiver boundary and integration status
 
+## Integrated candidate update
+
+The later development tree now connects the actual PC source/encoder observer,
+authenticated full-AU certificate, early native decoder provider, checked local
+DMA/lease handoff and an independent R8 native-presenter companion. The older
+foundation analysis below records the original missing ports; it is historical,
+not a statement that the integrated sources are still only a policy model.
+
+The full-colour route does not reserve an RGB atlas or change the game's eye
+resolution. The signed, losslessly encoded mask travels in the same native HEVC
+access unit and is matched by the actual native token/content and imported
+kernel allocation. Both original foveated UV contributions remain intact.
+Missing authority preserves opaque original RGB. Full-frame and native decoder
+byte budgets are admitted before any augmented video is submitted.
+
+Native command buffers use ordinary flags=0. Immutable GPU control commands
+revalidate every submission, including legal reuse, instead of modifying a UBO
+that a previous GPU submission might still read. The mask pool retains actual
+upload/submission fences; previously initialized images may schedule their next
+copy before the same queue draws, without a CPU fence wait. Descriptor/view and
+image generations are checked again at submission. Per-eye source admission and
+one whole-frame validity decision prevent a guessed left/right association.
+
+The explicit preview installer stages only owned user files, suspends its old
+activation transactionally, keeps per-key recovery receipts, and does not restart
+Steam or roll back on a timer. After the user starts Steam/SteamVR, it performs a
+fresh read-only compositor/UI startup check and asks whether the picture is
+usable. A failed or uncertain start, or a bad picture, offers explicit Undo.
+A frozen launch selector requires Steam as well as SteamVR stopped before final
+removal. Windows is the first real sender candidate; a Linux shell entry does
+not imply that a Linux encoder/source adapter has been implemented.
+
+Software evidence includes real D3D11 coverage, real Vulkan pixel/fence tests,
+actual production renderer forwarding/lifetime fixtures, authenticated TCP/local
+socket/SCM_RIGHTS/shared-memory tests, both platform links and local shader
+construction. These do not establish the new combined picture on a headset.
+The first paired full-resolution hardware result is still pending. No device
+files or services were changed during this integration.
+
+
 ## Scope
 
 This work introduces a bounded, caller-driven receiver foundation for tiny

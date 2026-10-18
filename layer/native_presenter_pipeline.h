@@ -79,11 +79,11 @@ struct Dispatch {
 // push constants and draw arguments are never rebound or copied into new objects.
 // The caller already has a successfully created original pipeline. Any rejected
 // admission or replacement failure keeps that pipeline and its result untouched.
-inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std::uint32_t negotiatedApiVersion,
-        VkResult originalResult,const VkGraphicsPipelineCreateInfo& original,const VkAllocationCallbacks* allocator,
-        VkPipeline& completed,const definitions::Recipe& currentDefinitions,
-        const Fragment& fragment,const Dispatch& dispatch) noexcept {
-    if(!fragment.ready())return {Reason::Artifact};
+// Shared read-only admission for the exact original native pipeline. This
+// grants no source frame, GPU lifetime, coverage or descriptor authority.
+inline Result inspectCompletedPipeline(VkDevice device,std::uint32_t negotiatedApiVersion,
+        VkResult originalResult,const VkGraphicsPipelineCreateInfo& original,
+        VkPipeline completed,const definitions::Recipe& currentDefinitions) noexcept {
     // The generated marker requires SPIR-V1.1; only the actual negotiated API
     // supplies this core guarantee, never a physical-device maximum or PFN.
     if(VK_API_VERSION_VARIANT(negotiatedApiVersion)||negotiatedApiVersion<VK_API_VERSION_1_1)return {Reason::ApiVersion};
@@ -160,6 +160,16 @@ inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std
     }
     if(!checked.hasMultisample||checked.multisample.alphaToOneEnable||checked.multisample.alphaToCoverageEnable||
        original.pMultisampleState->pNext)return graphicsRefusal(GraphicsGate::Multisample);
+    return {Reason::None};
+}
+
+inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std::uint32_t negotiatedApiVersion,
+        VkResult originalResult,const VkGraphicsPipelineCreateInfo& original,const VkAllocationCallbacks* allocator,
+        VkPipeline& completed,const definitions::Recipe& currentDefinitions,
+        const Fragment& fragment,const Dispatch& dispatch) noexcept {
+    if(!fragment.ready())return {Reason::Artifact};
+    const auto admission=inspectCompletedPipeline(device,negotiatedApiVersion,originalResult,original,completed,currentDefinitions);
+    if(admission.reason!=Reason::None)return admission;
     if(!dispatch.createShader||!dispatch.destroyShader||!dispatch.createPipeline||!dispatch.destroyPipeline)
         return {Reason::Dispatch};
     VkShaderModuleCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -173,7 +183,7 @@ inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std
     std::array<VkPipelineShaderStageCreateInfo,2> stages{{original.pStages[0],original.pStages[1]}};
     unsigned changed=0;
     for(auto& stage:stages)if(stage.stage==VK_SHADER_STAGE_FRAGMENT_BIT){stage.module=owned;++changed;}
-    if(changed!=1){dispatch.destroyShader(device,owned,allocator);return graphicsRefusal(GraphicsGate::Stages);}
+    if(changed!=1){dispatch.destroyShader(device,owned,allocator);return {Reason::Graphics,VK_SUCCESS,false,GraphicsGate::Stages};}
     replacement.pStages=stages.data();
     VkPipeline newPipeline=VK_NULL_HANDLE;
     result=dispatch.createPipeline(device,cache,1,&replacement,allocator,&newPipeline);

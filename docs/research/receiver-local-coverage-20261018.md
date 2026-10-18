@@ -122,3 +122,15 @@ mapping, without receiving another message; it is explicitly reaped. Provider
 fixtures exercise the synchronous sink before original QBUF and actual queried
 buffer capacity. These are local software checks, not Frame installation,
 receiver/compositor compatibility or a mixed-reality hardware result.
+
+## Reconnection and withdrawal
+
+The shared scalar file also carries a monotone nonzero route epoch. Each local
+Decoded reference includes that epoch, and a newly mapped reader freezes it.
+Ordinary disconnect invalidates the epoch without permanently disabling the
+writer. Old mappings and queued references cannot revive on reconnect. Terminal
+revoke and epoch exhaustion remain permanent. Producer idle EOF is checked with
+one nonblocking peek on the cold worker; it need not wait for another frame.
+The compositor withdraws its connection as soon as its last admitted renderer
+is lost. A prepared upload pool alone does not advertise an actual presenter:
+the source route opens only after both exact native companions were created.

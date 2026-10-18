@@ -1,0 +1,7 @@
+{
+    global:
+        framebridge_vkGetInstanceProcAddr;
+        framebridge_vkGetDeviceProcAddr;
+        framebridge_vkNegotiateLoaderLayerInterfaceVersion;
+    local: *;
+};
