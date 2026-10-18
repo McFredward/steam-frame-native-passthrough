@@ -31,7 +31,8 @@ def main():
     a=p.parse_args()
     require(not a.record.exists(),'exclusive evidence required')
     report={'schema':'sfnp-dashboard-transition-local-proof-v1','status':'FAILED','steps':[],
-        'hardware_actions':False,'installation_authorized':False,'shipping_bank_unchanged':True,'suite':a.suite}
+        'hardware_actions':False,'installation_authorized':False,'shipping_bank_unchanged':True,'suite':a.suite,
+        'negative_controls':[]}
     code=1
     def run(args,env=None,expected=0):
         result=subprocess.run([str(s) for s in args],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,timeout=120)
@@ -55,7 +56,9 @@ def main():
         report['original_instruction_subsequence']=len(before)
         altered=bytearray(source);altered[-1]^=1
         try:transform.instrument(altered)
-        except Exception:report['wrong_source_pin_rejected']=True
+        except Exception:
+            report['wrong_source_pin_rejected']=True
+            report['negative_controls'].append('wrong_shipping_pin')
         else:raise ValueError('wrong source admitted')
         with tempfile.TemporaryDirectory(prefix='dashboard-transition-focused-') as temporary:
             private=Path(temporary)
@@ -76,19 +79,26 @@ def main():
                     bad=private/(name+'.cpp');bad.write_text(original.replace(old,new).replace('#include "dashboard_transition_probe.h"','#include "'+str(ROOT/'probe/dashboard_transition_probe.h')+'"').replace('#include "../layer/pixel_snapshot_io.h"','#include "'+str(ROOT/'layer/pixel_snapshot_io.h')+'"'))
                     binary=private/name
                     run(common+[ROOT/'probe/dashboard_transition_probe_tests.cpp',bad,'-o',binary]);run([binary],expected=1)
+                    report['negative_controls'].append(name)
                 prepared=private/'prepared'
                 receipt=session.prepare(prepared,a.library,a.shipping,host_fixture=True)
                 require(receipt['installed'] is False and receipt['restart_performed'] is False,'helper stays preparation-only')
                 require(session.status(prepared)['latest'] is None,'prepared session makes no false live status')
                 try:session.collect(prepared)
-                except ValueError:report['unfenced_collection_rejected']=True
+                except ValueError:
+                    report['unfenced_collection_rejected']=True
+                    report['negative_controls'].append('unfenced_collection')
                 else:raise ValueError('unfenced collection admitted')
                 try:session.phase(prepared,1)
-                except ValueError:report['out_of_order_manual_phase_rejected']=True
+                except ValueError:
+                    report['out_of_order_manual_phase_rejected']=True
+                    report['negative_controls'].append('out_of_order_manual_phase')
                 else:raise ValueError('manual stage skip admitted')
                 session.phase(prepared,0)
                 try:session.phase(prepared,0)
-                except FileExistsError:report['old_phase_rearm_rejected']=True
+                except FileExistsError:
+                    report['old_phase_rearm_rejected']=True
+                    report['negative_controls'].append('old_phase_rearm')
                 else:raise ValueError('old stage rearmed')
                 report['prepared_session_machine']=receipt['machine']
             if a.suite!='core':
@@ -106,6 +116,28 @@ def main():
                 gpu_prepared=private/'gpu-prepared';session.prepare(gpu_prepared,a.library,a.shipping,host_fixture=True)
                 run([gpu,vertex,a.shipping,artifact,gpu_prepared]+(['lifecycle'] if a.suite=='lifecycle' else []),env)
                 if a.suite!='lifecycle':
+                    # Recreate the actual ambiguity in the first headset run:
+                    # all otherwise valid companions compete for route0's slot.
+                    # Only the diagnostic slot arithmetic changes; original
+                    # image reads, guard, native color and tag gates stay intact.
+                    _,route_instructions=transform.parse(instrumented)
+                    route_words=list(struct.unpack('<%uI'%(len(instrumented)//4),instrumented))
+                    ids=set(manifest['companion_slot_index_ssa']);zero=manifest['uint_zero_ssa'];cursor=5;changed=0
+                    for instruction in route_instructions:
+                        if instruction.opcode==128 and len(instruction.operands)==4 and instruction.operands[3] in ids:
+                            # Remove only the route's contribution to its slot,
+                            # retaining the original bounded tag predicate.
+                            route_words[cursor+4]=zero
+                            changed+=1
+                        cursor+=1+len(instruction.operands)
+                    require(changed==len(ids) and changed>0,'all first-winner arithmetic sites changed')
+                    route_mutant=private/'shared-first-winner-mutant.spv'
+                    route_mutant.write_bytes(struct.pack('<%uI'%len(route_words),*route_words))
+                    run(['spirv-val','--target-env','vulkan1.1',route_mutant])
+                    failed=run([gpu,vertex,a.shipping,route_mutant,gpu_prepared],env,expected=1)
+                    require('second route has independent slot despite same phase and selector' in failed['stderr'],
+                            'shared first-winner control fails on the actual simultaneous-route assertion')
+                    report['negative_controls'].append('shared_first_winner_gpu')
                     _,instructions=transform.parse(instrumented);words=list(struct.unpack('<%uI'%(len(instrumented)//4),instrumented));cursor=5;changed=0
                     for instruction in instructions:
                         if instruction.opcode==62 and instruction.operands[0]==504 and instruction.operands[1]!=994:
@@ -114,8 +146,7 @@ def main():
                     require(changed==2,'both decoded output stores mutate to original opaque fallback')
                     mutant=private/'color-output-mutant.spv';mutant.write_bytes(struct.pack('<%uI'%len(words),*words))
                     run(['spirv-val','--target-env','vulkan1.1',mutant]);run([gpu,vertex,a.shipping,mutant,gpu_prepared],env,expected=1)
-                    report['negative_controls']=['wrong_shipping_pin','initial_terminal_collection','missing_pipeline_restore','unfenced_collection',
-                        'out_of_order_manual_phase','old_phase_rearm','changed_color_raster']
+                    report['negative_controls'].append('changed_color_raster')
         report['private_cache_removed']=not private.exists()
         report['status']='PASS';code=0
     except Exception as error:

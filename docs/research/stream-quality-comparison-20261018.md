@@ -1,5 +1,9 @@
 # Direct streamed MR quality comparison, 2026-10-18
 
+The later [completed local-dashboard observation](dashboard-observation-20261018.md)
+records the first full closed/open/closed capture and exact public restoration.
+Its mixed-route first-winner limit remains explicit; it is not a menu/quality fix.
+
 ## Observed behavior
 
 The maintainer compared the same GloomhavenVR session with native mixed reality
