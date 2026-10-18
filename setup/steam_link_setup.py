@@ -89,10 +89,14 @@ def no_links(path):
     return path
 
 
-def file_identity(info):
+def file_identity(info, *, cross_api=False):
     # Reading may update atime; content, ownership and replacement must not change.
-    return tuple(getattr(info, field) for field in ('st_dev', 'st_ino', 'st_mode', 'st_nlink',
-                 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+    fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns')
+    # CPython Windows stat reports creation time as ctime, while fstat reports
+    # change time (cpython#157671). Compare ctime only within the same API below.
+    if not (cross_api and os.name == 'nt'):
+        fields += ('st_ctime_ns',)
+    return tuple(getattr(info, field) for field in fields)
 
 
 def read(path, limit=MAX_FILE, private=False):
@@ -107,8 +111,10 @@ def read(path, limit=MAX_FILE, private=False):
         verify_private_acl(path)
     descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     with os.fdopen(descriptor, 'rb') as stream:
-        require(file_identity(os.fstat(stream.fileno())) == file_identity(before), 'File changed before opening.')
+        opened = os.fstat(stream.fileno())
+        require(file_identity(opened, cross_api=True) == file_identity(before, cross_api=True), 'File changed before opening.')
         raw = stream.read(limit + 1)
+        require(file_identity(os.fstat(stream.fileno())) == file_identity(opened), 'File changed while reading.')
     require(len(raw) == before.st_size and file_identity(path.stat()) == file_identity(before), 'File changed while checking.')
     return raw
 

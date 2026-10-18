@@ -25,6 +25,10 @@ with tempfile.TemporaryDirectory(prefix='sfnp-embedded-acl-') as temporary:
     path = Path(temporary) / 'owned-dummy.json'
     module.put(path, b'{"dummy":"not-a-credential"}\n')
     assert module.read(path, private=True) == b'{"dummy":"not-a-credential"}\n'
+    # A later modification makes Windows creation/change timestamps differ.
+    # Exercise the actual read after replacement and actual DACL application.
+    module.put(path, b'{"dummy":"updated"}\n', b'{"dummy":"not-a-credential"}\n')
+    assert module.read(path, private=True) == b'{"dummy":"updated"}\n'
 print(json.dumps({'actual_bundled_python': sys.version, 'inspection_cli': 'passed',
                   'actual_windows_private_acl': sys.platform == 'win32', 'dummy_file_read': 'passed',
                   'frame_contact': False, 'native_patch_install': False}))

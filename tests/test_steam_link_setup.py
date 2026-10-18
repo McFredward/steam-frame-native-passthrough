@@ -201,6 +201,17 @@ class WizardTests(unittest.TestCase):
                     with mock.patch.object(os,'fstat',side_effect=changed):
                         with self.assertRaises(ValueError):reader(path)
 
+    def test_windows_cross_api_ctime_keeps_same_api_change_guards(self):
+        fields=('st_dev','st_ino','st_mode','st_nlink','st_uid','st_gid','st_size','st_mtime_ns','st_ctime_ns')
+        before=types.SimpleNamespace(**dict.fromkeys(fields,1))
+        opened=types.SimpleNamespace(**{**vars(before),'st_ctime_ns':2})
+        with mock.patch.object(os,'name','nt'):
+            self.assertEqual(s.file_identity(before,cross_api=True),s.file_identity(opened,cross_api=True))
+            self.assertNotEqual(s.file_identity(before),s.file_identity(opened))
+            for field in fields[:-1]:
+                changed=types.SimpleNamespace(**{**vars(opened),field:3})
+                self.assertNotEqual(s.file_identity(before,cross_api=True),s.file_identity(changed,cross_api=True))
+
     def test_combined_platform_inventory_shares_only_identical_producer_files(self):
         linux=copy.deepcopy(self.manifest['platforms']['windows-x86_64'])
         linux['reviewed']=False;linux['native_bridge']=False
