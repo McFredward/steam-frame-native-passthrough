@@ -72,8 +72,29 @@ The reviewed public API and a successful local build do not prove Steam Link
 transports those surfaces independently. An overlay could instead be flattened
 into opaque video on the PC. A matching receiver observation must establish the
 actual known pattern or proven source identity; a new RGBA allocation or visible
-translucency alone is insufficient. The helper has 115 portable assertions and a
-strict Win64 cross-build, but no Windows, Proton or headset execution evidence.
+translucency alone is insufficient. The original helper had115 portable
+assertions and a strict Win64 cross-build; those did not establish Windows,
+Proton or headset execution.
+
+The follow-up public alpha witness now uses2048-square static images and
+conservative original-eye chart[0.40,0.60] cropping, wholly inside the v3 RGB
+rectangle before unknown PC pre-warp. Its matching explicit game test uses
+zero contribution AND independent coverage through the unchanged v3 packer.
+Opaque black beside interior transparent black can then distinguish separate
+coverage from flattened RGB. Keep the head still and move a bright real hand
+behind those inner lanes: simple translucency, a colored pattern or darkness
+against a dark room is not a positive result. Opaque fallback/unstable geometry
+makes this witness inconclusive. It does not establish all PC warp bounds.
+
+The new helper passes204 core/lifecycle/geometry/pattern checks and strict
+Win64 compilation, with four scoped causal controls across its initial and
+bounded frequency-correction proofs. Seven stripe periods1/2/4/8/16/32/64 avoid
+confusing expected minification of fine lines with a transport defect. The
+actual game packer/shader passes257 focused Unity checks for the constant-zero
+source and unchanged full v3 header/coverage. No independent-alpha headset
+result, delivered4K detail or real-time full-scene transport is claimed yet.
+The explicit game action and later read-only menu observation share one normal
+Debug run; no new Frame diagnostic install or restart is required.
 
 Even a positive transport result still needs current-frame eye/pose/frustum
 registration, sharp edges, native motion, stereo fallback and real-scene proof.
