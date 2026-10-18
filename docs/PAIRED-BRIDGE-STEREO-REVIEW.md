@@ -41,6 +41,15 @@ Collection changed no Frame files, services, shaders or running stream state.
    identity checks remain unchanged. Microsoft documents
    [separate resource objects](https://learn.microsoft.com/en-us/windows/win32/api/d3d11_1/nf-d3d11_1-id3d11device1-opensharedresource1)
    and the [legacy shared handle/lifetime contract](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiresource-getsharedhandle).
+4. The source-format grant was coupled to transient encoder/mask readiness.
+   Releasing the old uniform stream lease can reconfigure the encoder, revoke
+   that readiness and make the game request the old format again. Source-format
+   permission now belongs to the admitted local pipe connection after its first
+   compatible/prepared grant. Reconfiguration does not revoke this format choice;
+   disconnect/cancel does. No image or transparency authority is retained.
+   Successful typed HEVC reconfiguration also readmits the current native source
+   with a fresh generation and resource/map identities. Original callbacks may
+   unregister resources; their changes are never overwritten by a saved snapshot.
 
 These form a consistent failure chain: no admitted receiver image route, no
 complete new-route negotiation, and no reliable decoding of the retained legacy
