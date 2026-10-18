@@ -22,6 +22,12 @@ NVENCSTATUS NVENCAPI factory(NV_ENCODE_API_FUNCTION_LIST* table){
     table->nvEncUnlockBitstream=unlock;table->nvEncDestroyEncoder=destroy;
     return NV_ENC_SUCCESS;
 }
+void diagnostic(const char* phase,const CoverageGateStats& stats,bool sameCreated){
+    std::printf("context diagnostic %s: draws=%llu, other=%llu, same-created=%u, readable=%u, stable=%u, native-device-same=%u, slots=%u\n",
+        phase,static_cast<unsigned long long>(stats.hookDraws),static_cast<unsigned long long>(stats.otherDraws),unsigned(sameCreated),
+        unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextHookSlots);
+    std::fflush(stdout);
+}
 // This is deliberately a real native context, not a fake COM object. The
 // public CreateDevice output is retained on the rendering thread while the
 // production observer obtains GetImmediateContext and installs on its worker.
@@ -44,19 +50,19 @@ void run(){
     check(api.nvEncOpenEncodeSessionEx(&parameters,&encoder)==NV_ENC_SUCCESS,"production observer receives actual native D3D11 device");
     std::thread worker([&]{coverage.tick();});worker.join();
     check(coverage.gateStats().deviceOpened==1&&coverage.gateStats().contextsReady==1,"actual production context hook installation completed on worker");
+    diagnostic("after installation",coverage.gateStats(),true);
     auto** const installed=*reinterpret_cast<void***>(submittedContext.p);
     check(installed[13]!=drawBefore&&installed[14]!=mapBefore&&installed[15]!=unmapBefore&&installed[47]!=copyBefore,"all four actual CreateDevice-context dispatch slots intercepted");
     submittedContext->Draw(0,0);
     auto stats=coverage.gateStats();
+    diagnostic("after first Draw",stats,true);
     check(stats.contextTableReadable&&stats.contextTableStable&&stats.contextHookSlots==15,"cold production snapshot verifies actual current dispatch without publishing addresses");
     check(stats.hookDraws==1&&stats.otherDraws==1&&stats.nativeDraws==0,"CreateDevice output Draw reaches production hook on rendering thread");
     check(stats.sourceFrames==0&&stats.certifiedMasks==0,"fixture call cannot authorize a fabricated native source");
     Com<ID3D11DeviceContext> queried;std::thread queryWorker([&]{device->GetImmediateContext(queried.out());});queryWorker.join();
     queried->Draw(0,0);
     stats=coverage.gateStats();
-    std::printf("context diagnostic after queried Draw: draws=%llu, other=%llu, same-created=%u, readable=%u, stable=%u, native-device-same=%u, slots=%u\n",
-        static_cast<unsigned long long>(stats.hookDraws),static_cast<unsigned long long>(stats.otherDraws),unsigned(queried.p==submittedContext.p),
-        unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextHookSlots);
+    diagnostic("after queried Draw",stats,queried.p==submittedContext.p);
     check(stats.hookDraws==2,"cold GetImmediateContext alias reaches the same production observer");
     Com<ID3D11DeviceContext1> extended;
     check(SUCCEEDED(submittedContext->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(extended.out()))),"native versioned context interface");
