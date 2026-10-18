@@ -1,4 +1,4 @@
-// Explicit static public-overlay alpha witness; never changes Steam/Frame settings.
+// Explicit static mono world-quad delivery preview; no Steam/Frame settings changes.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -83,13 +83,13 @@ public:
         overlay_ = static_cast<VR_IVROverlay_FnTable*>(get_("FnTable:IVROverlay_028",&error));
         if (error || !overlay_) return fail("overlay028",error);
         if (!system_->GetDeviceToAbsoluteTrackingPose || !system_->GetDXGIOutputInfo
-            || !system_->GetEyeToHeadTransform || !system_->GetProjectionRaw || !system_->GetRecommendedRenderTargetSize
+            || !system_->GetRecommendedRenderTargetSize
             || !system_->PollNextEvent || !overlay_->CreateOverlay || !overlay_->DestroyOverlay
-            || !overlay_->SetOverlayTransformProjection || !overlay_->SetOverlayInputMethod || !overlay_->SetOverlayFlag
+            || !overlay_->SetOverlayTransformAbsolute || !overlay_->SetOverlayWidthInMeters || !overlay_->SetOverlayTexelAspect
+            || !overlay_->GetOverlayWidthInMeters || !overlay_->GetOverlayTexelAspect || !overlay_->SetOverlayInputMethod || !overlay_->SetOverlayFlag
             || !overlay_->SetOverlayColor || !overlay_->SetOverlayAlpha || !overlay_->SetOverlayTextureColorSpace
             || !overlay_->SetOverlayTexture || !overlay_->ClearOverlayTexture || !overlay_->ShowOverlay
-            || !overlay_->HideOverlay || !overlay_->IsDashboardVisible) return fail("required-getters-or-overlay-functions");
-        if (overlay_->IsDashboardVisible()) return fail("close-dashboard-hold-head-still");
+            || !overlay_->HideOverlay || !overlay_->IsDashboardVisible || !overlay_->IsOverlayVisible || !overlay_->GetOverlayTextureSize) return fail("required-getters-or-overlay-functions");
         TrackedDevicePose_t pose{};
         system_->GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin_TrackingUniverseStanding,0,&pose,1);
         if (!pose.bDeviceIsConnected || !pose.bPoseIsValid) return fail("hmd-pose");
@@ -110,36 +110,29 @@ public:
             D3D11_SDK_VERSION,&device_,nullptr,&context_);
         release(adapter);
         if (FAILED(hr)) return fail("d3d11-device",hr);
-        return line("SFNP_PROJECTION_META_V2 system=026 overlay=028 application=Background recommended_eye=%u,%u pattern=%u adapter=%d chart_min=0.40 chart_max=0.60 hold_head_still=1\n",
-            width,height,projection_probe::PatternSize,adapterIndex);
+        return line("SFNP_PROJECTION_META_V2 system=026 overlay=028 application=Background recommended_eye=%u,%u pattern=%u texture=%u,%u adapter=%d geometry=common_world_mono_quad distance_m=1.2 width_m=0.6 hold_head_still=1 local_only=1\n",
+            width,height,projection_probe::PatternSize,projection_probe::PatternSize,projection_probe::PatternSize,adapterIndex);
     }
-    bool create(unsigned eye, projection_probe::Handle& handle) override {
-        char key[100], title[80];
-        std::snprintf(key,sizeof(key),"native-passthrough.projection-probe.%lu.%u",GetCurrentProcessId(),eye);
-        std::snprintf(title,sizeof(title),"Independent alpha witness %s",eye == 0 ? "LEFT" : "RIGHT");
+    bool create(projection_probe::Handle& handle) override {
+        char key[100], title[]="Mono quad delivery preview";
+        std::snprintf(key,sizeof(key),"native-passthrough.quad-preview.%lu",GetCurrentProcessId());
         VROverlayHandle_t native = 0;
         const auto error = overlay_->CreateOverlay(key,title,&native); handle = native;
         return check(error,"create-overlay");
     }
-    bool configure(unsigned eye, projection_probe::Handle handle) override {
-        if (eye > 1) return fail("eye-range");
-        const auto nativeEye = eye == 0 ? EVREye_Eye_Left : EVREye_Eye_Right;
-        const auto relative = system_->GetEyeToHeadTransform(nativeEye);
-        projection_probe::Matrix eyeToHead{};
-        for (unsigned r=0; r<3; ++r) for (unsigned c=0; c<4; ++c) eyeToHead.m[r][c]=relative.m[r][c];
-        const auto absolute = projection_probe::compose(head_,eyeToHead);
-        if (!projection_probe::finite(absolute)) return fail("finite-eye-pose");
-        projection_probe::Frustum full{}, cropped{};
-        system_->GetProjectionRaw(nativeEye,&full.left,&full.right,&full.top,&full.bottom);
-        if (!projection_probe::central(full,cropped)) return fail("central-frustum");
-        HmdMatrix34_t pose{}; std::memcpy(&pose,&absolute,sizeof(pose));
-        VROverlayProjection_t projection{cropped.left,cropped.right,cropped.top,cropped.bottom};
-        if (!line("SFNP_PROJECTION_GEOMETRY_V2 eye=%u full=%g,%g,%g,%g central=%g,%g,%g,%g pose=%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g\n",
-            eye,full.left,full.right,full.top,full.bottom,cropped.left,cropped.right,cropped.top,cropped.bottom,
-            absolute.m[0][0],absolute.m[0][1],absolute.m[0][2],absolute.m[0][3],
-            absolute.m[1][0],absolute.m[1][1],absolute.m[1][2],absolute.m[1][3],
-            absolute.m[2][0],absolute.m[2][1],absolute.m[2][2],absolute.m[2][3])) return false;
-        return check(overlay_->SetOverlayTransformProjection(handle,ETrackingUniverseOrigin_TrackingUniverseStanding,&pose,&projection,nativeEye),"projection-transform")
+    bool configure(projection_probe::Handle handle) override {
+        const auto pose=projection_probe::quadPose(head_);
+        if (!projection_probe::finite(pose)) return fail("finite-common-quad-pose");
+        HmdMatrix34_t nativePose{}; std::memcpy(&nativePose,&pose,sizeof(nativePose));
+        if (!line("SFNP_PROJECTION_GEOMETRY_V2 mode=common_world_mono_quad intended_width_m=0.6 intended_height_m=0.6 distance_m=1.2 frozen_pose=%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g local_only=1\n",
+            pose.m[0][0],pose.m[0][1],pose.m[0][2],pose.m[0][3],
+            pose.m[1][0],pose.m[1][1],pose.m[1][2],pose.m[1][3],
+            pose.m[2][0],pose.m[2][1],pose.m[2][2],pose.m[2][3])) return false;
+        return check(overlay_->SetOverlayTransformAbsolute(handle,ETrackingUniverseOrigin_TrackingUniverseStanding,&nativePose),"absolute-common-quad")
+            && check(overlay_->SetOverlayWidthInMeters(handle,projection_probe::QuadWidth),"quad-width")
+            && check(overlay_->SetOverlayTexelAspect(handle,1),"initial-texel-aspect")
+            && check(overlay_->SetOverlayFlag(handle,VROverlayFlags_SideBySide_Parallel,false),"mono-not-stereo-parallel")
+            && check(overlay_->SetOverlayFlag(handle,VROverlayFlags_SideBySide_Crossed,false),"not-stereo-crossed")
             && check(overlay_->SetOverlayInputMethod(handle,VROverlayInputMethod_None),"input-none")
             && check(overlay_->SetOverlayFlag(handle,VROverlayFlags_IsPremultiplied,true),"premultiplied")
             && check(overlay_->SetOverlayFlag(handle,VROverlayFlags_IgnoreTextureAlpha,false),"preserve-alpha")
@@ -148,26 +141,46 @@ public:
             && check(overlay_->SetOverlayAlpha(handle,0),"prepare-alpha-zero")
             && check(overlay_->SetOverlayTextureColorSpace(handle,EColorSpace_ColorSpace_Gamma),"texture-gamma");
     }
-    bool texture(unsigned eye, projection_probe::Handle handle) override {
-        if (eye > 1) return fail("eye-range");
-        const auto pixels = projection_probe::pattern(eye);
+    bool texture(projection_probe::Handle) override {
+        pixels_ = projection_probe::pattern(0);
         D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = desc.Height = projection_probe::PatternSize; desc.MipLevels = desc.ArraySize = 1;
+        desc.Width = projection_probe::PatternSize; desc.Height = projection_probe::PatternSize;
+        desc.MipLevels = desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA data{}; data.pSysMem = pixels.data();
-        data.SysMemPitch = projection_probe::PatternSize * sizeof(projection_probe::Pixel);
-        const HRESULT hr = device_->CreateTexture2D(&desc,&data,&textures_[eye]);
-        if (FAILED(hr)) return fail("immutable-rgba8",hr);
-        Texture_t texture{textures_[eye],ETextureType_TextureType_DirectX,EColorSpace_ColorSpace_Gamma};
+        D3D11_SUBRESOURCE_DATA data{}; data.pSysMem = pixels_.data();
+        data.SysMemPitch = projection_probe::PatternSize*sizeof(projection_probe::Pixel);
+        const HRESULT hr = device_->CreateTexture2D(&desc,&data,&texture_);
+        return !FAILED(hr) || fail("immutable-mono-rgba8",hr);
+    }
+    bool submit(projection_probe::Handle handle) override {
+        Texture_t texture{texture_,ETextureType_TextureType_DirectX,EColorSpace_ColorSpace_Gamma};
         return check(overlay_->SetOverlayTexture(handle,&texture),"submit-overlay-texture");
+    }
+
+    bool flush() override {
+        // No swapchain/Present exists in this one-upload helper. Explicitly send
+        // queued producer upload BEFORE handing the texture to the compositor.
+        // Flush is asynchronous: this is not GPU completion or remote delivery.
+        context_->Flush();
+        const HRESULT hr=device_->GetDeviceRemovedReason();
+        return !FAILED(hr) || fail("producer-device-removed",hr);
     }
     bool show(projection_probe::Handle h) override { return check(overlay_->ShowOverlay(h),"show-overlay"); }
     bool reveal(projection_probe::Handle h) override { return check(overlay_->SetOverlayAlpha(h,1),"reveal-alpha-one"); }
-    bool ready() override {
-        if (overlay_->IsDashboardVisible()) return fail("dashboard-open-before-ready");
-        return log_.emit(projection_probe::ReadyLine);
+    bool verify(projection_probe::Handle h) override {
+        std::uint32_t width=0,height=0; float meters=0,aspect=0;
+        if (!check(overlay_->GetOverlayTextureSize(h,&width,&height),"local-texture-extent")
+            || !check(overlay_->GetOverlayWidthInMeters(h,&meters),"local-width")
+            || !check(overlay_->GetOverlayTexelAspect(h,&aspect),"local-texel-aspect")) return false;
+        if (!std::isfinite(meters) || !std::isfinite(aspect)) return fail("nonfinite-local-geometry");
+        const bool visible=overlay_->IsOverlayVisible(h), dashboard=overlay_->IsDashboardVisible();
+        if (!line("SFNP_PROJECTION_LOCAL_V2 overlay_visible=%u dashboard_visible=%u texture_width=%u texture_height=%u width_m=%g texel_aspect=%g producer_flushed=1 gpu_completion_proven=0 remote_visibility_proven=0\n",
+            visible?1u:0u,dashboard?1u:0u,width,height,meters,aspect)) return false;
+        return (width==projection_probe::PatternSize && height==projection_probe::PatternSize
+            && std::abs(meters-projection_probe::QuadWidth)<.002f && std::abs(aspect-1)<.002f) || fail("local-mono-extent-or-geometry-mismatch");
     }
+    bool ready() override { return log_.emit(projection_probe::ReadyLine); }
     void stopped(bool clean) override {
         if (clean) log_.emit(projection_probe::StoppedLine);
         else fail("overlay-cleanup");
@@ -183,7 +196,7 @@ public:
     }
     void shutdown() override {
         if (initialized_ && shutdown_) { initialized_ = false; shutdown_(); }
-        for (auto& texture : textures_) release(texture);
+        release(texture_); std::vector<projection_probe::Pixel>().swap(pixels_);
         release(context_); release(device_); system_ = nullptr; overlay_ = nullptr;
         init_ = nullptr; get_ = nullptr; shutdown_ = nullptr;
         if (module_) { FreeLibrary(module_); module_ = nullptr; }
@@ -208,7 +221,7 @@ private:
     HMODULE module_ = nullptr; Init init_ = nullptr; Get get_ = nullptr; Shutdown shutdown_ = nullptr;
     bool initialized_ = false; VR_IVRSystem_FnTable* system_ = nullptr; VR_IVROverlay_FnTable* overlay_ = nullptr;
     projection_probe::Matrix head_{}; ID3D11Device* device_ = nullptr; ID3D11DeviceContext* context_ = nullptr;
-    std::array<ID3D11Texture2D*,2> textures_{};
+    ID3D11Texture2D* texture_ = nullptr; std::vector<projection_probe::Pixel> pixels_;
 };
 bool pipeStop(HANDLE input) {
     DWORD available = 0;

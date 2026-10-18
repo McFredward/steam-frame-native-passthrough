@@ -12,88 +12,64 @@ void require(bool condition,const char* what) {
     if (!condition) { std::fprintf(stderr,"FAIL %s\n",what); std::exit(1); }
 }
 struct Fake final : Api {
-    unsigned stage = 0, failAt = 0;
-    bool failCleanup = false, duplicate = false;
+    unsigned stage=0, failAt=0; bool failCleanup=false, zeroHandle=false;
     std::vector<std::string> events;
-    bool step(const std::string& event) { events.push_back(event); return ++stage != failAt; }
+    bool step(const std::string& e) { events.push_back(e); return ++stage!=failAt; }
     bool initialize() override { return step("initialize"); }
-    bool create(unsigned eye,Handle& out) override {
-        out = duplicate ? 11 : 11 + eye;
-        return step("create"+std::to_string(eye));
-    }
-    bool configure(unsigned eye,Handle) override { return step("configure"+std::to_string(eye)); }
-    bool texture(unsigned eye,Handle) override { return step("texture"+std::to_string(eye)); }
-    bool show(Handle h) override { return step("show"+std::to_string(h)); }
-    bool reveal(Handle h) override { return step("reveal"+std::to_string(h)); }
+    bool create(Handle& out) override { out=zeroHandle?0:11; return step("create"); }
+    bool configure(Handle) override { return step("configure"); }
+    bool texture(Handle) override { return step("texture"); }
+    bool flush() override { return step("flush"); }
+    bool submit(Handle) override { return step("submit"); }
+    bool show(Handle) override { return step("show"); }
+    bool reveal(Handle) override { return step("reveal"); }
+    bool verify(Handle) override { return step("verify"); }
     bool ready() override { return step("ready"); }
-    void stopped(bool clean) override { events.push_back(clean ? "stopped" : "cleanup-failed"); }
-    bool cleanup(const char* name,Handle h) {
-        events.push_back(std::string(name)+std::to_string(h)); return !failCleanup;
-    }
-    bool hide(Handle h) override { return cleanup("hide",h); }
-    bool clear(Handle h) override { return cleanup("clear",h); }
-    bool destroy(Handle h) override { return cleanup("destroy",h); }
+    void stopped(bool clean) override { events.push_back(clean?"stopped":"cleanup-failed"); }
+    bool cleanup(const char* e) { events.push_back(e); return !failCleanup; }
+    bool hide(Handle) override { return cleanup("hide"); }
+    bool clear(Handle) override { return cleanup("clear"); }
+    bool destroy(Handle) override { return cleanup("destroy"); }
     void shutdown() override { events.push_back("shutdown"); }
-    unsigned count(const std::string& event) const {
-        return static_cast<unsigned>(std::count(events.begin(),events.end(),event));
-    }
-    std::size_t index(const std::string& event) const {
-        return static_cast<std::size_t>(std::find(events.begin(),events.end(),event)-events.begin());
-    }
+    unsigned count(const std::string& e) const { return static_cast<unsigned>(std::count(events.begin(),events.end(),e)); }
+    std::size_t index(const std::string& e) const { return static_cast<std::size_t>(std::find(events.begin(),events.end(),e)-events.begin()); }
 };
 int main() {
     {
         Fake f; Session s(f);
-        require(!s.start(false),"no implicit opt-in");
-        require(f.events.empty(),"opt-out makes no API call");
-        require(s.start(true),"explicit start");
-        require(s.active(),"both eyes active");
-        require(!s.start(true),"duplicate active start refused");
-        require(f.index("texture1") < f.index("show11"),"all eye textures prepared before publication");
-        require(f.index("configure1") < f.index("texture0"),"both frusta prepared before texture submission");
-        require(s.stop(),"manual stop");
-        require(!s.active(),"no active eye after stop");
-        require(f.index("hide12") < f.index("clear11"),"hide both before clearing");
-        require(f.index("clear12") < f.index("destroy11"),"clear both before destroying");
-        require(f.index("destroy12") < f.index("shutdown"),"destroy before API/device lifetime ends");
-        require(f.index("show12") < f.index("reveal11"),"both alpha-zero eyes shown before revealing either");
-        require(f.index("reveal12") < f.index("ready"),"ready waits for both alpha-one reveals");
-        require(f.index("shutdown") < f.index("stopped"),"stopped waits for clean resource release");
-        const auto count = f.events.size();
-        require(s.stop() && f.events.size() == count,"manual stop idempotent");
+        require(!s.start(false)&&f.events.empty(),"opt-out makes no API call");
+        require(s.start(true)&&s.active(),"explicit single mono overlay starts");
+        require(!s.start(true)&&f.count("create")==1,"one owned overlay never duplicated");
+        require(f.index("texture")<f.index("flush")&&f.index("flush")<f.index("submit"),"producer flush precedes compositor texture handoff");
+        require(f.index("submit")<f.index("show")&&f.index("show")<f.index("reveal"),"complete mono texture prepared before visibility");
+        require(f.index("reveal")<f.index("verify")&&f.index("verify")<f.index("ready"),"ready waits for local state checks");
+        require(s.stop()&&!s.active(),"manual stop removes mono overlay");
+        require(f.index("hide")<f.index("clear")&&f.index("clear")<f.index("destroy"),"hide clear destroy order");
+        require(f.index("destroy")<f.index("shutdown")&&f.index("shutdown")<f.index("stopped"),"clean stopped waits for complete resource release");
+        const auto n=f.events.size(); require(s.stop()&&f.events.size()==n,"manual stop idempotent");
         require(!s.start(true),"completed client cannot silently restart");
     }
-    for (unsigned failure = 1; failure <= 12; ++failure) {
-        Fake f; f.failAt = failure;
-        {
-            Session s(f);
-            require(!s.start(true),"each startup stage can refuse");
-            require(!s.active(),"partial startup never reported active");
-            require(f.count("shutdown") == 1,"partial initialization always shuts down once");
-            if (failure >= 2) require(f.count("destroy11") == 1,"partial create handle reclaimed");
-            if (failure >= 3) require(f.count("destroy12") == 1,"right handle reclaimed even on failure");
-            require(f.index("shutdown") == f.events.size()-1,"shutdown last on refusal");
-            require(f.count("stopped") == 0,"refusal never reports a ready clean stop");
-        }
-        require(f.count("shutdown") == 1,"destructor does not repeat completed rollback");
+    for (unsigned failure=1; failure<=10; ++failure) {
+        Fake f; f.failAt=failure;
+        { Session s(f); require(!s.start(true)&&!s.active(),"every startup stage can refuse");
+          require(f.count("shutdown")==1,"partial init always cleaned immediately");
+          require(f.count("destroy")==(failure>=2?1u:0u),"returned partial handle reclaimed exactly once");
+          require(f.count("stopped")==0,"refusal never emits ready clean stopped"); }
+        require(f.count("shutdown")==1,"destructor never repeats completed rollback");
     }
     {
-        Fake f; f.duplicate = true; Session s(f);
-        require(!s.start(true),"duplicate overlay handles refused");
-        require(f.count("destroy11") == 1,"aliased handle destroyed once");
+        Fake f; f.zeroHandle=true; Session s(f);
+        require(!s.start(true)&&f.count("configure")==0&&f.count("destroy")==0,"invalid handle refused before native use");
     }
     {
-        Fake f; f.failCleanup = true;
-        { Session s(f); require(s.start(true),"cleanup-failure setup");
-          require(!s.stop(),"cleanup failure reported"); }
-        require(f.count("hide11") == 1 && f.count("hide12") == 1,"cleanup attempts both hides");
-        require(f.count("clear11") == 1 && f.count("clear12") == 1,"cleanup attempts both clears");
-        require(f.count("destroy11") == 1 && f.count("destroy12") == 1,"cleanup attempts both destroys");
-        require(f.count("shutdown") == 1,"cleanup errors still release API lifetime");
+        Fake f; f.failCleanup=true;
+        { Session s(f); require(s.start(true),"cleanup-failure setup"); require(!s.stop(),"cleanup failure reported"); }
+        require(f.count("hide")==1&&f.count("clear")==1&&f.count("destroy")==1,"all cleanup attempted despite errors");
+        require(f.count("shutdown")==1&&f.count("stopped")==0&&f.count("cleanup-failed")==1,"failed cleanup never reports clean end");
     }
     {
-        Fake f; { Session s(f); require(s.start(true),"destructor cleanup setup"); }
-        require(f.count("destroy11") == 1 && f.count("destroy12") == 1,"scope exit reclaims both eyes");
+        Fake f; { Session s(f); require(s.start(true),"RAII setup"); }
+        require(f.count("destroy")==1&&f.count("shutdown")==1,"scope exit ends only owned mono overlay");
     }
     require(PatternSize == 2048,"explicit 2048-square static input");
     require(pattern(2).empty(),"invalid eye rejected");
@@ -101,6 +77,7 @@ int main() {
         const auto p = pattern(eye);
         require(p.size() == PatternSize*PatternSize,"bounded pattern extent");
         const auto at = [&](unsigned x,unsigned y) { return p[y*PatternSize+x]; };
+        require(at(1024,1024).a==255&&at(1024,1024).r==192&&at(1024,1024).g==192&&at(1024,1024).b==192,"common center has a binocular opaque neutral witness");
         require(at(0,0).a == 0 && at(0,0).r == 0 && at(0,0).g == 0 && at(0,0).b == 0,"transparent border");
         constexpr std::array<unsigned,8> alpha{{0,64,128,255,64,128,192,255}};
         for (unsigned band = 0; band < 8; ++band) {
@@ -122,15 +99,6 @@ int main() {
         require(at(256,1935).a == 255 && at(256,1936).a == 0,"seven detail bands stay inside transparent border");
         require(at(322,150).a == (eye == 1 ? 255 : 0),"different interior eye IDs");
     }
-    Frustum full{-1.2f,.9f,-1.1f,1.3f}, cropped{};
-    require(central(full,cropped),"valid asymmetric full frustum accepted");
-    require(std::abs((cropped.left-full.left)/(full.right-full.left)-.40f)<1e-6f
-        && std::abs((cropped.right-full.left)/(full.right-full.left)-.60f)<1e-6f,"horizontal placement uses original chart center");
-    require(std::abs((cropped.top-full.top)/(full.bottom-full.top)-.40f)<1e-6f
-        && std::abs((cropped.bottom-full.top)/(full.bottom-full.top)-.60f)<1e-6f,"vertical placement uses original chart center");
-    require(ChartMin > 560.f/3168 && ChartMax < 2608.f/3168,"entire overlay stays strictly inside v3 RGB tile, away from mask and guards");
-    full.right=full.left; require(!central(full,cropped),"degenerate frustum refused");
-    full.right=std::numeric_limits<float>::infinity(); require(!central(full,cropped),"nonfinite frustum refused");
     struct Capture final : LogSink { std::string text; bool failing = false;
         bool write(const std::string& line) override { if (failing) return false; text+=line; return true; }
     } sink;
@@ -152,5 +120,22 @@ int main() {
     require(absolute.m[0][3] == 1 && absolute.m[1][3] == 2 && std::abs(absolute.m[2][3]-3.032f) < 1e-6f,"eye offset rotates in head space");
     head.m[2][2] = std::numeric_limits<float>::quiet_NaN();
     require(!finite(head),"nonfinite pose refused");
+    Matrix forward{}; forward.m[0][0]=forward.m[1][1]=forward.m[2][2]=1;
+    const auto common=quadPose(forward);
+    require(common.m[0][3]==0&&common.m[1][3]==0&&common.m[2][3]==-QuadDistance,"common plane centered on positive viewing ray");
+    for (float eyeX : {-.032f,.032f}) {
+        const float convergingRayX=-eyeX/QuadDistance;
+        const float hitX=eyeX+QuadDistance*convergingRayX;
+        require(std::abs(hitX)<1e-6f,"both eyes converge on same physical plane center");
+        const float parallelU=.5f+eyeX/QuadWidth;
+        require(parallelU>.125f&&parallelU<.875f,"both straight viewing rays hit visible interior instead of transparent edge");
+    }
+    const auto mono=pattern(0);
+    require(mono.size()==PatternSize*PatternSize,"ordinary mono texture is square without stereo aspect interpretation");
+    require(mono[1024*PatternSize+1024].a==255,"straight viewing axis intersects opaque neutral center witness");
+    Matrix rotated{};rotated.m[0][0]=-1;rotated.m[1][1]=1;rotated.m[2][2]=-1;
+    rotated.m[0][3]=2;rotated.m[1][3]=3;rotated.m[2][3]=4;
+    const auto rotatedPlane=quadPose(rotated);
+    require(rotatedPlane.m[0][3]==2&&rotatedPlane.m[1][3]==3&&std::abs(rotatedPlane.m[2][3]-5.2f)<1e-6f,"rotated translated head places common quad on its actual forward axis");
     std::printf("projection overlay lifecycle/pattern: %u checks passed; no Windows or Steam Link execution\n",checks);
 }
