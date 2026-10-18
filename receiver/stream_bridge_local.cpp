@@ -254,6 +254,12 @@ void Channel::tick() noexcept {
             if(!verifyPeer(impl_->socket,impl_->pin)){impl_->close(State::Refused);return;}impl_->state=State::Connected;}
         if(impl_->state!=State::Connected)return;
         if(impl_->endpoint==Endpoint::VrlinkProducer){
+            // This channel is intentionally one-way. Check peer teardown even
+            // with no queued frame, without consuming bytes or ever waiting.
+            std::uint8_t unexpected=0;const auto probed=recv(impl_->socket,&unexpected,1,MSG_PEEK|MSG_DONTWAIT);
+            if(probed==0){impl_->close(State::Lost);return;}
+            if(probed>0){impl_->close(State::Refused);return;}
+            if(errno!=EINTR&&errno!=EAGAIN&&errno!=EWOULDBLOCK){impl_->close(State::Lost);return;}
             for(unsigned attempt=0;attempt<8&&impl_->count;++attempt){auto& q=impl_->outgoing[impl_->head];
                 const bool header=q.at<HeaderBytes;const auto at=header?q.at:q.at-HeaderBytes;
                 const auto* data=header?q.header.data():q.payload.data();const auto size=header?HeaderBytes:q.payload.size();

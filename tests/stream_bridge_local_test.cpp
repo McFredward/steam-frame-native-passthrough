@@ -107,6 +107,25 @@ void epochExhaustion(){
     check(!writer.invalidateCurrentEpoch()&&writer.duplicateReadOnly()<0,"exhausted writer stays terminal");
     munmap(map,4096);close(owned);close(fd);
 }
+void idleProducerLiveness(){
+    Directory dir;const auto path=dir.path/"idle.sock";const auto pin=selfPin();local::Channel producer,consumer;
+    check(consumer.preparePinned(local::Endpoint::CompositorConsumer,path,pin)&&producer.preparePinned(local::Endpoint::VrlinkProducer,path,pin),"idle producer endpoints prepared");pump(producer,consumer);
+    check(producer.state()==local::State::Connected&&consumer.state()==local::State::Connected,"idle producer has genuine checked peer");
+    for(unsigned n=0;n<100;++n)producer.tick();
+    check(producer.state()==local::State::Connected,"healthy idle producer never blocks or invents peer loss");
+    consumer.stop();producer.tick();
+    check(producer.state()==local::State::Lost,"idle producer detects peer EOF on its next worker tick without sending metadata");
+    producer.tick();check(producer.state()==local::State::Lost,"lost idle transport stays refused until explicit prepare");producer.stop();
+    const int listener=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);check(listener>=0,"actual reverse-byte listener");
+    sockaddr_un address{};address.sun_family=AF_UNIX;std::strcpy(address.sun_path,path.c_str());
+    check(bind(listener,reinterpret_cast<const sockaddr*>(&address),sizeof address)==0&&chmod(path.c_str(),0600)==0&&listen(listener,1)==0,"owned reverse-byte listener configured");
+    check(producer.preparePinned(local::Endpoint::VrlinkProducer,path,pin),"producer verifies actual reverse-byte fixture peer");
+    const int accepted=accept4(listener,nullptr,nullptr,SOCK_CLOEXEC|SOCK_NONBLOCK);check(accepted>=0,"actual fixture consumer accepted");producer.tick();
+    check(producer.state()==local::State::Connected,"reverse-byte fixture reached connected state");
+    check(send(accepted,"x",1,MSG_NOSIGNAL)==1,"unexpected reverse-direction byte sent");producer.tick();
+    check(producer.state()==local::State::Refused,"unidirectional bridge refuses unexpected reverse bytes instead of ignoring them");
+    producer.stop();close(accepted);close(listener);
+}
 void peerAndPathRefusals(){Directory dir;const auto path=dir.path/"receiver.sock";local::Channel server,client;const auto pin=selfPin();
     check(server.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"refusal listener");
     check(client.prepare(local::Endpoint::VrlinkProducer,path),"production client transport starts but waits for actual compositor identity");pump(client,server);
@@ -138,4 +157,6 @@ void malformedAndForeignLifetime(){Directory dir;const auto path=dir.path/"recei
     check(std::filesystem::is_regular_file(path)&&std::filesystem::file_size(path)==6,"shutdown never deletes another actor's replacement file");
 }
 }
-int main(){try{sharedLeases();separateProcessLease();localFramingAndRights();reconnectEpochs();epochExhaustion();peerAndPathRefusals();malformedAndForeignLifetime();std::printf("actual local transport/shared leases: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&!std::strcmp(argv[1],"--producer-liveness")){idleProducerLiveness();}else{
+    check(argc==1,"unknown local-test subset");sharedLeases();separateProcessLease();localFramingAndRights();reconnectEpochs();epochExhaustion();peerAndPathRefusals();malformedAndForeignLifetime();idleProducerLiveness();
+    }std::printf("actual local transport/shared leases: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
