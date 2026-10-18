@@ -125,9 +125,15 @@ void run(){
     check(SUCCEEDED(submittedContext->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(extended.out()))),"native versioned context interface");
     extended->Draw(0,0);
     check(coverage.gateStats().hookDraws==3,"versioned interface dispatch reaches production hook");
-    submittedContext->ClearState();threading->SetMultithreadProtected(FALSE);threading->SetMultithreadProtected(TRUE);
-    submittedContext->Draw(0,0);
-    check(coverage.gateStats().hookDraws==4,"native ClearState and protection changes retain dispatch hooks");
+    submittedContext->ClearState();diagnostic("after ClearState",coverage.gateStats(),true);
+    submittedContext->Draw(0,0);diagnostic("after ClearState Draw",coverage.gateStats(),true);
+    check(coverage.gateStats().hookDraws==4,"native ClearState retains dispatch hooks");
+    threading->SetMultithreadProtected(FALSE);diagnostic("after protection FALSE",coverage.gateStats(),true);
+    submittedContext->Draw(0,0);diagnostic("after protection FALSE Draw",coverage.gateStats(),true);
+    check(coverage.gateStats().hookDraws==5,"native unprotected mode retains dispatch hooks");
+    threading->SetMultithreadProtected(TRUE);diagnostic("after protection TRUE",coverage.gateStats(),true);
+    submittedContext->Draw(0,0);diagnostic("after protection TRUE Draw",coverage.gateStats(),true);
+    check(coverage.gateStats().hookDraws==6,"native protection re-enable retains dispatch hooks");
     pipeline(device.p,submittedContext.p,threading.p,coverage);
     // Native CopyResource/Map/Unmap still execute through the real installed
     // table and preserve bytes; no fake return-address proof is introduced.
