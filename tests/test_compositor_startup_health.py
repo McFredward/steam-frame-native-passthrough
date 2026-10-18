@@ -188,6 +188,99 @@ class BoundedCommandTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    def test_real_forking_unit_materializes_main_identity_without_restart(self):
+        invocation = "6db652c4220148b8bcee29555cab6245"
+        early = sample(); early["unit"].update(InvocationID=invocation, MainPID="0",
+            ExecMainStartTimestampMonotonic="0", ActiveState="activating", SubState="start")
+        early["main_process"] = None; early["processes"] = early["processes"][:1]
+        gate = M.StartupGate(baseline())
+        self.assertEqual(gate.consume(early, stable_seconds=0)["status"], "not-ready")
+        self.assertEqual(set(gate.pinned), {"compositor"})
+        # Exact unit values from the retained startup/recheck, with injected
+        # process start ticks and UI logs; this does not inspect the device.
+        final = sample(3); final["unit"].update(InvocationID=invocation, MainPID="1028030",
+            ExecMainStartTimestampMonotonic="34789695511")
+        final["main_process"]["pid"] = 1028030
+        result = gate.consume(final, stable_seconds=0)
+        self.assertTrue(result["ready"])
+        self.assertEqual(gate.unit_identity, (invocation, "1028030", "34789695511", "0"))
+        self.assertFalse(result["automatic_restart"])
+
+    def test_forking_identity_fields_can_materialize_in_either_order(self):
+        sequences = ((("0","0"),("100","0"),("100","1000000")),
+                     (("0","0"),("0","1000000"),("100","1000000")),
+                     (("100","0"),("100","1000000")),
+                     (("0","1000000"),("100","1000000")))
+        for sequence in sequences:
+            gate = M.StartupGate(baseline())
+            for index, (pid, start) in enumerate(sequence):
+                current = sample(2+index)
+                current["unit"].update(MainPID=pid, ExecMainStartTimestampMonotonic=start)
+                if pid == "0": current["main_process"] = None
+                with self.subTest(sequence=sequence, index=index):
+                    self.assertEqual(gate.consume(current)["status"], "not-ready")
+                    if pid == "0" or start == "0": self.assertIsNone(gate.ready_since)
+            # Stable timing begins only when both actual fields and roles exist;
+            # no new grace period or sleep is added for zero-field publication.
+            final = sample(2+len(sequence)+.1); final["logs"] = {}
+            self.assertTrue(gate.consume(final)["ready"])
+
+    def test_zero_startstamp_never_proves_ready_even_with_complete_live_roles(self):
+        current = sample(); current["unit"]["ExecMainStartTimestampMonotonic"] = "0"
+        gate = M.StartupGate(baseline())
+        self.assertEqual(gate.consume(current, stable_seconds=0)["status"], "not-ready")
+        self.assertIsNone(gate.ready_since)
+        self.assertEqual(set(gate.pinned), {"service_main","compositor","ui_browser","system_ui","ui_renderer"})
+
+    def test_unknown_forking_identity_roundtrips_checkpoint_without_losing_pins(self):
+        for pid, start in (("0","0"),("100","0"),("0","1000000")):
+            early = sample(); early["unit"].update(MainPID=pid, ExecMainStartTimestampMonotonic=start)
+            if pid == "0": early["main_process"] = None
+            gate = M.StartupGate(baseline()); gate.consume(early, stable_seconds=0)
+            before = copy.deepcopy(gate.pinned)
+            resumed = M.StartupGate.resume(json.loads(json.dumps(gate.checkpoint())))
+            result = resumed.consume(sample(3), stable_seconds=0)
+            with self.subTest(pid=pid, start=start):
+                self.assertTrue(result["ready"])
+                for role, pin in before.items(): self.assertEqual(resumed.pinned[role], pin)
+
+    def test_materialization_does_not_admit_unit_restart_or_known_field_change(self):
+        cases = (("0","0", {"InvocationID":"c"*32}),
+                 ("0","0", {"NRestarts":"1"}),
+                 ("100","0", {"MainPID":"200"}),
+                 ("100","0", {"MainPID":"0"}),
+                 ("0","1000000", {"ExecMainStartTimestampMonotonic":"2000000"}),
+                 ("0","1000000", {"ExecMainStartTimestampMonotonic":"0"}))
+        for pid, start, change in cases:
+            early = sample(); early["unit"].update(MainPID=pid, ExecMainStartTimestampMonotonic=start)
+            if pid == "0": early["main_process"] = None
+            gate = M.StartupGate(baseline()); self.assertEqual(gate.consume(early)["status"],"not-ready")
+            later = sample(3); later["unit"].update(change)
+            if "MainPID" in change: later["main_process"] = None if change["MainPID"] == "0" else {"pid":200,"start_ticks":20000,"state":"S"}
+            with self.subTest(pid=pid, start=start, change=change):
+                result = gate.consume(later, stable_seconds=0)
+                self.assertEqual(result["status"], "fault")
+                self.assertIn("restarted", result["reason"])
+                self.assertEqual(gate.consume(sample(4), stable_seconds=0)["status"], "fault")
+
+    def test_materialization_never_replaces_or_discards_pinned_compositor(self):
+        for change in ("exit", "replace"):
+            early = sample(); early["unit"].update(MainPID="0", ExecMainStartTimestampMonotonic="0")
+            early["main_process"] = None
+            gate = M.StartupGate(baseline()); self.assertEqual(gate.consume(early)["status"], "not-ready")
+            later = sample(3)
+            if change == "exit": later["processes"].pop(0)
+            else: later["processes"][0]["start_ticks"] += 1
+            with self.subTest(change=change):
+                self.assertEqual(gate.consume(later, stable_seconds=0)["status"], "fault")
+
+    def test_ready_checkpoint_cannot_contain_unknown_or_untyped_unit_identity(self):
+        gate = M.StartupGate(baseline()); self.assertTrue(gate.consume(sample(), stable_seconds=0)["ready"])
+        for index, value in ((1,"0"),(2,"0"),(1,100),(2,None),(3,False),(3,"unknown")):
+            saved = copy.deepcopy(gate.checkpoint()); identity = list(saved["unit_identity"])
+            identity[index] = value; saved["unit_identity"] = identity
+            with self.subTest(index=index, value=value), self.assertRaises(RuntimeError): M.StartupGate.resume(saved)
+
     def test_missing_actual_main_process_cannot_pass_service_active(self):
         s = sample(); s["main_process"] = None
         self.assertFalse(M.StartupGate(baseline()).consume(s, stable_seconds=0)["ready"])

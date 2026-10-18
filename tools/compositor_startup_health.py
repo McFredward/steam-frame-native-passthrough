@@ -923,7 +923,15 @@ class StartupGate:
             return self.result("not-ready", "Waiting for a fresh service invocation")
         current_unit = tuple(unit[key] for key in ("InvocationID", "MainPID", "ExecMainStartTimestampMonotonic", "NRestarts"))
         if self.unit_identity is not None and self.unit_identity != current_unit:
-            raise RuntimeError("SteamVR invocation/process restarted during observation")
+            # Type=forking may publish this same invocation before its main PID
+            # and start timestamp are known. Seal each field as soon as it is
+            # positive; a restart, replacement or regression is never a retry.
+            previous = self.unit_identity
+            materializing = (not self.ready and previous[0] == current_unit[0] and
+                previous[3] == current_unit[3] and all(old == new or old == "0" and int(new) > 0
+                    for old, new in zip(previous[1:3], current_unit[1:3])))
+            if not materializing:
+                raise RuntimeError("SteamVR invocation/process restarted during observation")
         self.invocation, self.unit_identity = unit["InvocationID"], current_unit
         if unit["ActiveState"] in ("failed", "inactive") or unit["SubState"] in ("failed", "dead"):
             raise RuntimeError("SteamVR service exited or failed during startup")
@@ -1080,7 +1088,8 @@ class StartupGate:
             renderer = current[self.pinned["ui_renderer"]["pid"]]
             complete = complete and (renderer["kind"] == "renderer" or forked_renderer is not None and
                 identity(renderer) == identity(forked_renderer))
-        if unit["ActiveState"] != "active" or unit["SubState"] != "running" or int(unit["MainPID"]) <= 0 or sample["errors"]:
+        if (unit["ActiveState"] != "active" or unit["SubState"] != "running" or int(unit["MainPID"]) <= 0 or
+                int(unit["ExecMainStartTimestampMonotonic"]) <= 0 or sample["errors"]):
             complete = False
         if self.isolation_descriptor is not None and (self.isolation_result is None or self.isolation_result["status"] != "isolated"):
             complete = False
@@ -1146,8 +1155,16 @@ class StartupGate:
         for role, marker in (("compositor", "compositor_startup"), ("ui_browser", "ui_browser_connected"), ("system_ui", "system_ui_connected")):
             if role in checkpoint["pinned"] and checkpoint["pinned"][role]["pid"] != checkpoint["markers"].get(marker):
                 raise RuntimeError("Startup checkpoint marker/process disagreement")
-        if checkpoint["unit_identity"] is not None and (not isinstance(checkpoint["unit_identity"], (list, tuple)) or len(checkpoint["unit_identity"]) != 4 or checkpoint["unit_identity"][0] != checkpoint["invocation"] or not re.fullmatch(r"[0-9a-f]{32}", checkpoint["invocation"] or "")):
-            raise RuntimeError("Invalid startup checkpoint unit identity")
+        if checkpoint["unit_identity"] is not None:
+            unit_identity = checkpoint["unit_identity"]
+            if (not isinstance(unit_identity, (list, tuple)) or len(unit_identity) != 4 or
+                    unit_identity[0] != checkpoint["invocation"] or
+                    not re.fullmatch(r"[0-9a-f]{32}", checkpoint["invocation"] or "") or
+                    any(not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,20}", value)
+                        for value in unit_identity[1:])):
+                raise RuntimeError("Invalid startup checkpoint unit identity")
+            if checkpoint["ready"] and any(int(value) <= 0 for value in unit_identity[1:3]):
+                raise RuntimeError("Ready startup checkpoint has unknown main identity")
         if checkpoint["isolation"] is not None:
             if gate.isolation_descriptor is None or checkpoint["unit_identity"] is None:
                 raise RuntimeError("Unscoped startup isolation checkpoint")
