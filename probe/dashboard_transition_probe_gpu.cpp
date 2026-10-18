@@ -177,5 +177,5 @@ int main(int argc,char** argv){try{
     require(terminal,"completed terminal receipt remains available after32 cold route revisions");
     live.release(VK_SUCCESS);
     require(validationErrors.load()==0,"actual GPU validation stays clean");
-    std::cout<<"{\"checks\":"<<checks<<",\"raster_bit_identical\":true,\"actual_reused_cb_phase_updates\":true,\"slots\":6,\"validation_errors\":"<<validationErrors.load()<<",\"native_frame_or_eye_proven\":false}\n";return 0;
+    std::cout<<"{\"checks\":"<<checks<<",\"raster_bit_identical\":"<<(lifecycleOnly?"null":"true")<<",\"lifecycle_only\":"<<(lifecycleOnly?"true":"false")<<",\"actual_reused_cb_phase_updates\":true,\"slots\":6,\"validation_errors\":"<<validationErrors.load()<<",\"native_frame_or_eye_proven\":false}\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
