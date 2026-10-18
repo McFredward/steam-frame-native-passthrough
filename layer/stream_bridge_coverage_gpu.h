@@ -43,6 +43,11 @@ public:
     // Draw/recording: try-lock only, no allocation/wait/API. Ready immutable data
     // only. One successful acquire owns one recording reference until release.
     Lease acquire(const FrameIdentity&) noexcept;
+    // Renderer-only recording preview. Pending/Copying is allowed solely for
+    // an already initialized same-extent image. It is NOT submit permission:
+    // drainUploads must enqueue the new copy on the exact admitted queue, then
+    // prepareSubmit must succeed before the caller enables mask coverage.
+    Lease acquireScheduled(const FrameIdentity&) noexcept;
     void releaseRecorded(const Lease&) noexcept;
     // Caller holds its admitted queue owner across original submission. Failure
     // to reserve/submit a tail fence quarantines immutable data; never free or

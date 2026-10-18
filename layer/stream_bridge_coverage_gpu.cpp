@@ -40,7 +40,7 @@ struct Pool::Impl {
         std::atomic<std::uint64_t> refs{0};std::atomic<bool> quarantine{false};
         std::uint32_t gpuRefs=0;VkImage image{};VkDeviceMemory imageMemory{};
         VkImageView view{};VkBuffer staging{};VkDeviceMemory stagingMemory{};
-        void* mapped=nullptr;std::size_t bytes=0;VkDescriptorSet set{};
+        void* mapped=nullptr;std::size_t bytes=0;std::uint32_t width=0,height=0;bool coherent=false,initializedShaderReadLayout=false;VkDescriptorSet set{};
         VkCommandBuffer copy{};VkFence uploaded{};
     };
     enum class TicketState { Free,Reserved,Submitted,Quarantined };
@@ -72,7 +72,7 @@ struct Pool::Impl {
         if(s.imageMemory)FreeMemory(device,s.imageMemory,nullptr);
         if(s.staging)DestroyBuffer(device,s.staging,nullptr);
         if(s.stagingMemory)FreeMemory(device,s.stagingMemory,nullptr);
-        s.mapped=nullptr;s.view={};s.image={};s.imageMemory={};s.staging={};s.stagingMemory={};s.bytes=0;
+        s.mapped=nullptr;s.view={};s.image={};s.imageMemory={};s.staging={};s.stagingMemory={};s.bytes=0;s.width=s.height=0;s.coherent=false;s.initializedShaderReadLayout=false;
     }
     void destroyIdle() noexcept {
         if(!device)return;
@@ -93,14 +93,20 @@ struct Pool::Impl {
     bool leases(const Lease*ls,std::size_t n,std::uint32_t&mask,std::array<std::uint64_t,MaximumSlots>&gs)const noexcept {
         mask=0;gs.fill(0);if(!ls||!n||n>MaximumSlots)return false;
         for(std::size_t i=0;i<n;++i){const auto&l=ls[i];if(!l)return false;const auto&s=slots[l.slot];
-            if(s.state!=State::Ready||s.generation!=l.generation||s.set!=l.set||
+            // Copying means our own prior queue submit returned VK_SUCCESS.
+            // It is usable before CPU reap only on that same ordered queue,
+            // and only when a previous completed upload initialized this image.
+            const bool usable=s.state==State::Ready||(s.state==State::Copying&&s.initializedShaderReadLayout);
+            if(!usable||s.generation!=l.generation||s.set!=l.set||
                 s.quarantine.load(std::memory_order_acquire)||!(s.refs.load(std::memory_order_acquire)&RefMask))return false;
             mask|=1u<<l.slot;gs[l.slot]=l.generation;
         }return true;
     }
     bool makeResource(Slot&s,std::uint32_t w,std::uint32_t h,stream_bridge::Bytes bytes) noexcept {
-        releaseResource(s);
+        const bool reuse=s.image&&s.view&&s.staging&&s.mapped&&s.width==w&&s.height==h&&s.bytes==bytes.size;
+        if(!reuse)releaseResource(s);
         if(ResetCommandBuffer(s.copy,0)!=VK_SUCCESS||ResetFences(device,1,&s.uploaded)!=VK_SUCCESS)return false;
+        if(!reuse){
         VkImageCreateInfo image{};image.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;image.imageType=VK_IMAGE_TYPE_2D;
         image.format=VK_FORMAT_R8_UNORM;image.extent={w,h,1};image.mipLevels=1;image.arrayLayers=1;
         image.samples=VK_SAMPLE_COUNT_1_BIT;image.tiling=VK_IMAGE_TILING_OPTIMAL;
@@ -121,21 +127,27 @@ struct Pool::Impl {
         allocation.allocationSize=req.size;allocation.memoryTypeIndex=type;
         if(AllocateMemory(device,&allocation,nullptr,&s.stagingMemory)!=VK_SUCCESS||BindBufferMemory(device,s.staging,s.stagingMemory,0)!=VK_SUCCESS||
             MapMemory(device,s.stagingMemory,0,VK_WHOLE_SIZE,0,&s.mapped)!=VK_SUCCESS)return false;
-        std::memcpy(s.mapped,bytes.data,bytes.size);s.bytes=bytes.size;
-        if(!(memory.memoryTypes[type].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)){
+        s.bytes=bytes.size;s.width=w;s.height=h;
+        s.coherent=(memory.memoryTypes[type].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)!=0;
+        }
+        std::memcpy(s.mapped,bytes.data,bytes.size);
+        if(!s.coherent){
             VkMappedMemoryRange range{};range.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;range.memory=s.stagingMemory;range.size=VK_WHOLE_SIZE;
             if(FlushMappedMemoryRanges(device,1,&range)!=VK_SUCCESS)return false;
         }
+        if(!reuse){
         VkDescriptorImageInfo imageInfo{sampler,s.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet write{};write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;write.dstSet=s.set;write.descriptorCount=1;
         write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;write.pImageInfo=&imageInfo;
         UpdateDescriptorSets(device,1,&write,0,nullptr);
+        }
         VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if(BeginCommandBuffer(s.copy,&begin)!=VK_SUCCESS)return false;
-        VkImageMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;barrier.oldLayout=reuse?VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.srcAccessMask=reuse?VK_ACCESS_SHADER_READ_BIT:0;
         barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
         barrier.image=s.image;barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};barrier.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
-        CmdPipelineBarrier(s.copy,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+        CmdPipelineBarrier(s.copy,reuse?VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
         VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={w,h,1};
         CmdCopyBufferToImage(s.copy,s.staging,s.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
         barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -214,7 +226,7 @@ void Pool::drainUploads(VkQueue q) noexcept {
 void Pool::reapCold() noexcept {
     auto&p=*impl_;std::lock_guard<std::mutex> cold(p.cold);std::lock_guard<std::mutex> lock(p.gate);if(!p.prepared)return;
     for(auto&s:p.slots)if(s.state==Impl::State::Copying){auto r=p.GetFenceStatus(p.device,s.uploaded);
-        if(r==VK_SUCCESS)s.state=Impl::State::Ready;else if(r!=VK_NOT_READY){s.quarantine.store(true,std::memory_order_release);++p.refusals;}}
+        if(r==VK_SUCCESS){s.initializedShaderReadLayout=true;s.state=Impl::State::Ready;}else if(r!=VK_NOT_READY){s.quarantine.store(true,std::memory_order_release);++p.refusals;}}
     for(auto&t:p.tickets)if(t.state==Impl::TicketState::Submitted){auto r=p.GetFenceStatus(p.device,t.fence);
         if(r==VK_SUCCESS){for(std::size_t i=0;i<MaximumSlots;++i)if(t.mask&(1u<<i))--p.slots[i].gpuRefs;
             if(p.ResetFences(p.device,1,&t.fence)==VK_SUCCESS){t.state=Impl::TicketState::Free;t.mask=0;}
@@ -225,6 +237,16 @@ void Pool::reapCold() noexcept {
 Lease Pool::acquire(const FrameIdentity&f) noexcept {
     auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared)return {};
     for(std::uint32_t i=0;i<MaximumSlots;++i){auto&s=p.slots[i];if(s.state!=Impl::State::Ready||!same(s.frame,f)||s.quarantine.load(std::memory_order_acquire))continue;
+        auto refs=s.refs.load(std::memory_order_acquire);if((refs&RefMask)==RefMask){++p.refusals;return {};}
+        s.refs.fetch_add(1,std::memory_order_acq_rel);return {i,s.generation,s.set};
+    }return {};
+}
+Lease Pool::acquireScheduled(const FrameIdentity&f) noexcept {
+    auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared)return {};
+    for(std::uint32_t i=0;i<MaximumSlots;++i){auto&s=p.slots[i];
+        const bool eligible=s.state==Impl::State::Ready||
+            ((s.state==Impl::State::Pending||s.state==Impl::State::Copying)&&s.initializedShaderReadLayout);
+        if(!eligible||!same(s.frame,f)||s.quarantine.load(std::memory_order_acquire))continue;
         auto refs=s.refs.load(std::memory_order_acquire);if((refs&RefMask)==RefMask){++p.refusals;return {};}
         s.refs.fetch_add(1,std::memory_order_acq_rel);return {i,s.generation,s.set};
     }return {};
@@ -266,7 +288,7 @@ void Pool::abandonAfterDeviceDestroy() noexcept {
     // Retain the nonthrowing object itself and discard only its raw handles.
     auto&p=*impl_;std::lock_guard<std::mutex> cold(p.cold);std::lock_guard<std::mutex> lock(p.gate);
     p.prepared=false;p.device={};p.queue={};p.layout={};p.descriptors={};p.sampler={};p.commands={};
-    for(auto&s:p.slots){s.image={};s.imageMemory={};s.view={};s.staging={};s.stagingMemory={};s.mapped=nullptr;s.uploaded={};s.copy={};s.set={};
+    for(auto&s:p.slots){s.image={};s.imageMemory={};s.view={};s.staging={};s.stagingMemory={};s.mapped=nullptr;s.uploaded={};s.copy={};s.set={};s.initializedShaderReadLayout=false;
         s.state=Impl::State::Free;s.frame={};s.generation=0;s.refs.store(0);s.gpuRefs=0;s.quarantine.store(false);}
     for(auto&t:p.tickets){t.state=Impl::TicketState::Free;t.mask=0;t.generations.fill(0);}
     for(auto&t:p.tickets)t.fence={};

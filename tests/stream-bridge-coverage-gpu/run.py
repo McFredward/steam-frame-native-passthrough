@@ -23,7 +23,7 @@ FLAGS = ['-std=c++17', '-Wall', '-Wextra', '-Wpedantic', '-Werror', '-pthread']
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--suite', choices=['all', 'core', 'gpu'], default='all')
+    parser.add_argument('--suite', choices=['all', 'core', 'gpu', 'scheduled-controls'], default='all')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     commands = []
@@ -75,6 +75,28 @@ def main():
                     run(name + '-build', ['g++', *FLAGS, '-I' + str(ROOT / 'layer'), core, mutation, '-o', mutant])
                     run(name, [mutant], expected=1, message=intended)
                     result['negative_controls'].append({'name': name, 'assertion': intended, 'rejected': True})
+            if args.suite in ('all', 'core', 'scheduled-controls'):
+                scheduled_mutants = [
+                    ('scheduled-first-uninitialized',
+                     '((s.state==Impl::State::Pending||s.state==Impl::State::Copying)&&s.initializedShaderReadLayout)',
+                     '(s.state==Impl::State::Pending||s.state==Impl::State::Copying)',
+                     'scheduled never exposes first uninitialized image'),
+                    ('scheduled-before-copy-submit',
+                     's.state==State::Ready||(s.state==State::Copying&&s.initializedShaderReadLayout)',
+                     's.state==State::Ready||((s.state==State::Copying||s.state==State::Pending)&&s.initializedShaderReadLayout)',
+                     'scheduled pending image cannot submit before actual copy acceptance'),
+                ]
+                result.setdefault('negative_controls', [])
+                for name, old, new, intended in scheduled_mutants:
+                    text = source.read_text()
+                    if text.count(old) != 1:
+                        raise RuntimeError('scheduled source selector changed: ' + name)
+                    mutation = work / (name + '.cpp')
+                    mutation.write_text(text.replace(old, new))
+                    mutant = work / name
+                    run(name + '-build', ['g++', *FLAGS, '-I' + str(ROOT / 'layer'), core, mutation, '-o', mutant])
+                    run(name, [mutant], expected=1, message=intended)
+                    result['negative_controls'].append({'name': name, 'assertion': intended, 'rejected': True})
             if args.suite in ('all', 'gpu'):
                 vertex, fragment = work / 'fixture.vert.spv', work / 'fixture.frag.spv'
                 for suffix, target in [('vert', vertex), ('frag', fragment)]:
@@ -82,7 +104,8 @@ def main():
                     run('validate-' + suffix, ['spirv-val', '--target-env', 'vulkan1.0', target])
                 gpu = work / 'gpu-fixture'
                 run('strict-gpu-build', ['g++', *FLAGS, ROOT / 'tests/stream-bridge-coverage-gpu/gpu_fixture.cpp', source, '-lvulkan', '-o', gpu])
-                result['gpu'] = json.loads(run('gpu', [gpu, vertex, fragment]))
+                gpu_env = dict(os.environ, MESA_SHADER_CACHE_DISABLE='true', XDG_CACHE_HOME=str(work / 'gpu-cache'))
+                result['gpu'] = json.loads(run('gpu', [gpu, vertex, fragment], env=gpu_env))
             result['result'] = 'PASS'
     except BaseException as error:
         result['result'] = 'FAIL'
