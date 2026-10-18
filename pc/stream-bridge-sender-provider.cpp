@@ -270,6 +270,11 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[2])),static_cast<unsigned long long>(stats.refusals[top[2]]),
                 stats.lastConstantBytes,stats.lastSourceWidth,stats.lastSourceHeight,stats.lastSourceFormat,stats.lastOutputWidth,stats.lastOutputHeight,stats.lastOutputFormat,
                 static_cast<unsigned long long>(stats.nativeMaps),static_cast<unsigned long long>(stats.inventoryRefreshes));report(text);
+            // Public COM table metadata only; never query a new immediate
+            // context here, since even a diagnostic getter may change dispatch.
+            std::snprintf(text,sizeof text,
+                "coverage context: hook-slots=0x%x, table-readable=%u, table-stable=%u, native-device-pointer=%u",
+                stats.contextHookSlots,unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame));report(text);
         };
         std::uint32_t reportedFailures=0;
         const auto reportFailure=[&]{
