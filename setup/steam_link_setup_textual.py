@@ -45,9 +45,10 @@ WORDS = {
         "choose": "Use ↑ ↓ to explore, then Enter to select. Nothing changes before confirmation.",
         "cancel": "Cancel", "continue": "Continue", "close": "Close setup", "confirm": "Before we continue",
         "finished": "Setup finished", "failed": "Setup needs your attention", "finish_help": "You can now close this window. Your log and recovery paths remain available below.",
-        "stop_pending": "Stop requested. The current safe step will finish first; any required recovery stays under setup control.",
-        "stop_help": "Setup is still working. It will not close while a device operation or recovery is running.",
-        "select": "Select", "stop": "Stop / back", "detail_key": "Details", "paths_key": "Log paths",
+        "cancelled": "Setup cancelled", "cancelled_help": "Setup was cancelled. Changes were not automatically undone. Any recovery records are kept for a later restore.",
+        "stop_pending": "Stopping setup. No automatic undo will run; any recovery records are kept. Waiting for the current operation to stop safely.",
+        "stop_help": "Setup is stopping without automatically undoing changes. Any recovery records are kept; this window stays open until the current operation ends.",
+        "select": "Select", "stop": "Abort setup", "detail_key": "Details", "paths_key": "Log paths",
         "ssh": "Connect to your Steam Frame", "ssh_help": "Sign in below to connect securely. Your password is hidden and is never written to the setup log.",
         "ssh_secret_help": "Your input stays hidden and is never written to the setup log.",
         "ssh_confirm_help": "Check this device identity before continuing. Cancel leaves this connection unapproved.",
@@ -73,9 +74,10 @@ WORDS = {
         "choose": "Mit ↑ ↓ auswählen und mit Enter öffnen. Änderungen werden erst nach deiner Bestätigung vorgenommen.",
         "cancel": "Abbrechen", "continue": "Weiter", "close": "Einrichtung schließen", "confirm": "Bevor es weitergeht",
         "finished": "Einrichtung abgeschlossen", "failed": "Die Einrichtung benötigt deine Hilfe", "finish_help": "Du kannst dieses Fenster jetzt schließen. Log und Wiederherstellungspfade bleiben unten verfügbar.",
-        "stop_pending": "Abbruch angefordert. Der aktuelle sichere Schritt wird zuerst beendet; eine nötige Wiederherstellung wird weiter überwacht.",
-        "stop_help": "Die Einrichtung arbeitet noch. Während einer Geräteaktion oder Wiederherstellung wird sie nicht geschlossen.",
-        "select": "Auswählen", "stop": "Stopp / zurück", "detail_key": "Details", "paths_key": "Log-Pfade",
+        "cancelled": "Einrichtung abgebrochen", "cancelled_help": "Die Einrichtung wurde abgebrochen. Änderungen wurden nicht automatisch zurückgenommen. Vorhandene Wiederherstellungsdateien bleiben für später erhalten.",
+        "stop_pending": "Die Einrichtung wird abgebrochen. Änderungen werden nicht automatisch zurückgenommen; vorhandene Wiederherstellungsdateien bleiben erhalten. Die laufende Aktion wird sicher beendet.",
+        "stop_help": "Die Einrichtung endet ohne automatisches Zurücknehmen der Änderungen. Vorhandene Wiederherstellungsdateien bleiben erhalten; das Fenster bleibt bis zum Ende der laufenden Aktion offen.",
+        "select": "Auswählen", "stop": "Einrichtung abbrechen", "detail_key": "Details", "paths_key": "Log-Pfade",
         "ssh": "Mit deiner Steam Frame verbinden", "ssh_help": "Melde dich unten sicher an. Dein Passwort bleibt verborgen und wird niemals in das Setup-Log geschrieben.",
         "ssh_secret_help": "Deine Eingabe bleibt verborgen und wird niemals in das Setup-Log geschrieben.",
         "ssh_confirm_help": "Prüfe diese Gerätekennung, bevor du fortfährst. Abbrechen lässt diese Verbindung unbestätigt.",
@@ -312,6 +314,10 @@ class TextualPresenter:
             raise ValueError("unknown status state")
         self._call(self.app.show_notice, self.text(key), key, state)
 
+    def problem(self, message):
+        """Show only caller-vetted, public connection-failure context."""
+        self._call(self.app.show_notice, _plain(message, 500), state="warning")
+
     def path(self, value, key="report"):
         self._call(self.app.add_path, self.text(key).strip(), _plain(value, 4096))
 
@@ -393,7 +399,7 @@ class TextualPresenter:
         return self.app.stop_requested or not self.app.ui_available
 
     def allow_recovery(self):
-        """The backend calls this only when authorized recovery begins."""
+        """Clear an earlier abort only for a separately requested recovery."""
         self._call(self.app.allow_recovery)
 
     def ask(self, key):
@@ -439,7 +445,7 @@ class SetupApp(App[int]):
     """One main UI thread and one joined backend thread, with safe prompt handoff."""
     TITLE = "Steam Link Native Passthrough"
     ENABLE_COMMAND_PALETTE = False
-    BINDINGS = [Binding("ctrl+c,ctrl+q", "request_stop", "Stop / back", priority=True),
+    BINDINGS = [Binding("ctrl+c,ctrl+q", "abort_setup", "Abort setup", priority=True),
                 Binding("q,escape", "request_stop", show=False),
                 Binding("f2", "details", "Details"), Binding("f3", "paths", "Log paths")]
     CSS = """
@@ -521,7 +527,7 @@ class SetupApp(App[int]):
     def set_bindings(self):
         # App.bind() recreates bindings with priority=False. Preserve priority
         # for stop keys even when a focused widget consumes ordinary keys.
-        self._bindings.bind("ctrl+c,ctrl+q", "request_stop", description=self.words["stop"], show=True, priority=True)
+        self._bindings.bind("ctrl+c,ctrl+q", "abort_setup", description=self.words["stop"], show=True, priority=True)
         self.bind("q,escape", "request_stop", show=False)
         self.bind("f2", "details", description=self.words["detail_key"], show=True)
         self.bind("f3", "paths", description=self.words["paths_key"], show=True)
@@ -732,7 +738,10 @@ class SetupApp(App[int]):
         self.set_stage("complete")
         outcome = {"bridge_installed": "connection_installed", "bridge_removed": "removed",
                    "bridge_rolled_back": "restored", "bridge_current": "current", "check_finish": "check_done"}.get(self.outcome)
-        self.query_one("#complete-title", Static).update(self.words[outcome or ("finished" if code == 0 else "failed")])
+        heading = "cancelled" if code == 130 else outcome or ("finished" if code == 0 else "failed")
+        self.query_one("#complete-title", Static).update(self.words[heading])
+        if code == 130:
+            self.show_notice(self.words["cancelled_help"], state="warning")
         if code != 0:
             self.query_one("#files", Collapsible).collapsed = False
             self.query_one("#details", Collapsible).collapsed = False
@@ -757,9 +766,26 @@ class SetupApp(App[int]):
         self.stop_requested = True
         self.show_notice(self.words["stop_pending"], state="warning")
 
+    def action_abort_setup(self):
+        """Ctrl+C aborts the whole setup, including an outstanding prompt.
+
+        Publish cancellation before unblocking the backend so a cancelled
+        picture confirmation cannot be mistaken for a request to roll back.
+        The engine retains its recovery records and owns ending active work.
+        """
+        if self.backend_finished:
+            self.exit(self.backend_result)
+            return
+        self.stop_requested = True
+        prompt = self.prompt
+        if isinstance(self.screen, (ConfirmScreen, InputScreen, SSHInputScreen)):
+            self.screen.action_cancel()
+        if prompt is not None:
+            self.resolve_prompt(prompt.cancel, expected=prompt)
+        self.show_notice(self.words["stop_pending"], state="warning")
+
     def action_quit(self):
-        # Textual's inherited Ctrl+Q must obey the same backend cleanup contract.
-        self.action_request_stop()
+        self.action_abort_setup()
 
     def action_details(self):
         details = self.query_one("#details", Collapsible)

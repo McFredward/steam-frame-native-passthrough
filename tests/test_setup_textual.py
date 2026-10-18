@@ -99,7 +99,8 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 running.set()
                 release.wait()
             self.assertFalse(p.confirm("bridge_picture"))
-            # Models the existing engine's mandatory recovery before return.
+            # Ending a worker and closing its records is not a rollback.
+            self.assertTrue(p.cancelled())
             cleaned.set()
             return 130
 
@@ -119,6 +120,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(cleaned.is_set())
                 self.assertEqual(app.backend_result, 130)
                 self.assertFalse(app.query_one("#work").display)
+                self.assertIn("Setup cancelled", str(app.query_one("#complete-title", Static).render()))
         finally:
             release.set()
             app.backend.join()
@@ -258,15 +260,17 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
         def backend():
             p = UI.active_presenter()
             observed.append(p.confirm("bridge_confirm"))
+            observed.append(p.cancelled())
             observed.append("engine cleanup")
-            return 2
+            return 130
 
         app = UI.SetupApp(backend)
         async with app.run_test(size=(80, 24)) as pilot:
             await until(pilot, lambda: isinstance(app.screen, UI.ConfirmScreen))
             await pilot.press("ctrl+c")
             await until(pilot, lambda: app.backend_finished)
-            self.assertEqual(observed, [False, "engine cleanup"])
+            self.assertEqual(observed, [False, True, "engine cleanup"])
+            self.assertIn("Setup cancelled", str(app.query_one("#complete-title", Static).render()))
         app.backend.join()
 
     async def test_legacy_only_and_recovery_do_not_claim_new_connection_success(self):
@@ -376,7 +380,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.stop_requested)
         app.backend.join()
 
-    async def test_inline_ssh_ctrl_c_clears_secret_without_disabling_recovery_prompts(self):
+    async def test_inline_ssh_escape_clears_secret_without_disabling_recovery_prompts(self):
         observed = []
 
         def backend():
@@ -393,7 +397,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             first = app.screen
             field = first.query_one(Input)
             field.value = "fixture-cancelled"
-            await pilot.press("ctrl+c")
+            await pilot.press("escape")
             await until(pilot, lambda: len(observed) == 2 and isinstance(app.screen, UI.SSHInputScreen) and app.screen is not first)
             await pilot.pause()
             self.assertEqual(field.value, "")
@@ -404,8 +408,8 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("fixture-cancelled", "\n".join(app.detail_history))
         app.backend.join()
 
-    async def test_busy_cancel_is_observable_and_authorized_recovery_clears_it(self):
-        running = threading.Event()
+    async def test_only_separately_requested_recovery_clears_prior_abort(self):
+        running, observed_abort, explicit_restore_request = threading.Event(), threading.Event(), threading.Event()
         observed = []
 
         def backend():
@@ -416,6 +420,11 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             while not p.cancelled() and time.monotonic() < deadline:
                 tick.wait(.01)
             observed.append(p.cancelled())
+            observed_abort.set()
+            # Models a separate, explicitly selected restoration. Ctrl+C
+            # alone must never call allow_recovery or start a sign-in.
+            if not explicit_restore_request.wait(5):
+                return 130
             p.allow_recovery()
             observed.append(p.cancelled())
             observed.append(p.ssh_prompt("Recovery password:", secret=True))
@@ -426,6 +435,10 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(80, 24)) as pilot:
             await until(pilot, running.is_set)
             await pilot.press("ctrl+c")
+            await until(pilot, observed_abort.is_set)
+            self.assertEqual(observed, [True])
+            self.assertFalse(isinstance(app.screen, UI.SSHInputScreen))
+            explicit_restore_request.set()
             await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
             await pilot.pause()
             self.assertEqual(observed[:2], [True, False])
@@ -434,6 +447,106 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             await until(pilot, lambda: app.backend_finished)
             self.assertEqual(observed, [True, False, None, "safe cleanup finished"])
+        app.backend.join()
+
+    async def test_ctrl_q_aborts_password_prompt_and_keeps_recovery_records(self):
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            p.path("C:/Setup/recovery.json", "recovery_pc")
+            observed.append(p.ssh_prompt("Password:", secret=True))
+            observed.append(p.cancelled())
+            # A cancelled run cannot silently prompt for recovery credentials.
+            observed.append(p.ssh_prompt("Not opened:", secret=True))
+            return 130
+
+        app = UI.SetupApp(backend)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+            await pilot.pause()
+            field = app.screen.query_one(Input)
+            field.value = "fixture-aborted"
+            await pilot.press("ctrl+q")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [None, True, None])
+            self.assertTrue(app.stop_requested)
+            self.assertEqual(field.value, "")
+            self.assertIn("Setup cancelled", str(app.query_one("#complete-title", Static).render()))
+            self.assertIn("not automatically undone", str(app.query_one("#notice", Static).render()))
+            self.assertIn("recovery.json", str(app.query_one("#path-list", Static).render()))
+            self.assertNotIn("fixture-aborted", "\n".join(app.detail_history))
+        app.backend.join()
+
+    async def test_ctrl_c_at_picture_confirmation_publishes_abort_before_answer(self):
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            p.say("bridge_health_ok")
+            observed.append(p.confirm("bridge_picture"))
+            observed.append(p.cancelled())
+            return 130
+
+        app = UI.SetupApp(backend, "de")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.ConfirmScreen))
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [False, True])
+            self.assertIn("Einrichtung abgebrochen", str(app.query_one("#complete-title", Static).render()))
+            self.assertIn("nicht automatisch zurückgenommen", str(app.query_one("#notice", Static).render()))
+            self.assertNotIn(app.words["recovering"], app.detail_history)
+        app.backend.join()
+
+    async def test_ctrl_c_aborts_action_menu_instead_of_selecting_recovery(self):
+        observed = []
+
+        def backend():
+            p = UI.active_presenter()
+            observed.append(p.choose_action(["retry", "rollback", "exit"], recommended="retry"))
+            observed.append(p.cancelled())
+            return 130
+
+        app = UI.SetupApp(backend)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: app.prompt is not None)
+            await pilot.press("ctrl+c")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(observed, [None, True])
+            self.assertEqual(app.backend_result, 130)
+            self.assertNotIn(app.words["recovering"], app.detail_history)
+        app.backend.join()
+
+    async def test_cancelled_result_overrides_earlier_success_outcome(self):
+        def backend():
+            UI.active_presenter().say("bridge_installed")
+            return 130
+
+        app = UI.SetupApp(backend, "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: app.backend_finished)
+            title = str(app.query_one("#complete-title", Static).render())
+            self.assertIn("Setup cancelled", title)
+            self.assertNotIn("New connection installed", title)
+        app.backend.join()
+
+    async def test_public_connection_problem_is_bounded_and_redacted(self):
+        def backend():
+            UI.active_presenter().problem("Own connection helper unavailable. token=fixture-never-display\x1b[31m " + "x" * 800)
+            return 2
+
+        app = UI.SetupApp(backend)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: app.backend_finished)
+            notice = app.query_one("#notice", Static)
+            self.assertTrue(notice.has_class("warning"))
+            self.assertIn("Own connection helper unavailable", str(notice.render()))
+            self.assertIn("[redacted]", str(notice.render()))
+            self.assertNotIn("fixture-never-display", str(notice.render()))
+            self.assertNotIn("fixture-never-display", "\n".join(app.detail_history))
+            self.assertLessEqual(len(app.detail_history[-1]), 500)
         app.backend.join()
 
     async def test_transport_close_cancels_only_its_ssh_prompt(self):
