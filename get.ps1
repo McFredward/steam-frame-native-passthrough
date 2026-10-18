@@ -1,7 +1,7 @@
-param([switch] $InspectionOnly)
+param([switch] $InspectionOnly, [switch] $Manage)
 # Online entry point. Runs from Invoke-RestMethod | Invoke-Expression too.
 & {
-    param([bool] $sfnpInspection)
+    param([bool] $sfnpInspection, [bool] $sfnpManage)
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version 2
     $sfnpStage = $null
@@ -12,6 +12,11 @@ param([switch] $InspectionOnly)
     if ($sfnpInspection) {
         $sfnpAsset = 'steam-link-native-passthrough-inspection.zip'
         $sfnpEndpoint = '/releases/tags/setup-inspection-v2'
+    }
+
+    if ($sfnpManage) {
+        $sfnpAsset = 'steam-link-native-passthrough-manager.zip'
+        $sfnpEndpoint = '/releases/tags/setup-manager-v1'
     }
 
     function Require-Sfnp($Condition, [string] $Message) {
@@ -96,7 +101,11 @@ param([switch] $InspectionOnly)
             $Name.StartsWith('setup/runtime/python/', [StringComparison]::Ordinal) -or
             $Name.StartsWith('setup/runtime/openssh/', [StringComparison]::Ordinal))
     }
-    function Expand-SfnpPackage([string] $Archive, [string] $Target, [bool] $InspectionOnly = $false) {
+    function Test-SfnpManagerFile([string] $Name) {
+        return ((Test-SfnpInspectionFile $Name) -or $Name -cin @('setup-maintenance.json','setup/frame_native_uninstall.py'))
+    }
+    function Expand-SfnpPackage([string] $Archive, [string] $Target, [bool] $InspectionOnly = $false, [bool] $Maintenance = $false) {
+        Require-Sfnp (-not ($InspectionOnly -and $Maintenance)) 'Choose one setup mode.'
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $package = [IO.Compression.ZipFile]::OpenRead($Archive)
         try {
@@ -124,6 +133,7 @@ param([switch] $InspectionOnly)
             $keys = @($manifest.PSObject.Properties.Name | Sort-Object)
             $schema = 'sfnp-bootstrap-package-v1'; $readiness = 'release'; $profileName = 'steam-link-bundle.json'
             if ($InspectionOnly) { $schema = 'sfnp-bootstrap-inspection-v1'; $readiness = 'inspection-only'; $profileName = 'setup-inspection.json' }
+            if ($Maintenance) { $schema = 'sfnp-bootstrap-manager-v1'; $readiness = 'maintenance'; $profileName = 'setup-maintenance.json' }
             Require-Sfnp (($keys -join ',') -eq 'files,readiness,schema,windows_python' -and
                 $manifest.schema -eq $schema -and $manifest.readiness -eq $readiness) 'Incomplete or mismatched setup package.'
             $pins = @($manifest.files.PSObject.Properties)
@@ -132,6 +142,12 @@ param([switch] $InspectionOnly)
             if ($InspectionOnly) {
                 foreach ($property in $pins) {
                     Require-Sfnp (Test-SfnpInspectionFile $property.Name) 'Inspection package contains an installation payload.'
+                }
+            }
+            if ($Maintenance) {
+                Require-Sfnp ($files.ContainsKey('setup-inspection.json') -and $files.ContainsKey('setup/frame_native_uninstall.py')) 'Maintenance helper/profile missing.'
+                foreach ($property in $pins) {
+                    Require-Sfnp (Test-SfnpManagerFile $property.Name) 'Manager package contains an installation payload.'
                 }
             }
             foreach ($property in $pins) {
@@ -148,7 +164,7 @@ param([switch] $InspectionOnly)
                 $output = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
                 try { $output.Write($bytes, 0, $bytes.Length) } finally { $output.Dispose() }
             }
-            if ($InspectionOnly) {
+            if ($InspectionOnly -or $Maintenance) {
                 $profile = [IO.File]::ReadAllText((Join-Path $Target 'setup-inspection.json')) | ConvertFrom-Json
                 Require-Sfnp ($profile.schema -eq 'sfnp-setup-inspection-v1' -and
                     ((@($profile.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'expected_pc,runtime_files,schema')) 'Invalid inspection profile.'
@@ -164,15 +180,18 @@ param([switch] $InspectionOnly)
     }
 
     try {
+        Require-Sfnp (-not ($sfnpInspection -and $sfnpManage)) 'Choose only -InspectionOnly or -Manage.'
         Require-Sfnp ($env:OS -eq 'Windows_NT') 'Use the Bash setup command on Linux.'
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        if ($sfnpInspection) { Write-Host 'Steam Link Native Passthrough - downloading read-only inspection (no installation or restart)...' }
+        if ($sfnpManage) { Write-Host 'Steam Link Native Passthrough - downloading the check/removal assistant...' }
+        elseif ($sfnpInspection) { Write-Host 'Steam Link Native Passthrough - downloading read-only inspection (no installation or restart)...' }
         else { Write-Host 'Steam Link Native Passthrough - downloading the guided setup...' }
         $releaseBytes = Receive-Sfnp ('https://api.github.com/repos/' + $sfnpRepo + $sfnpEndpoint) 1048576
         $release = [Text.Encoding]::UTF8.GetString($releaseBytes) | ConvertFrom-Json
-        Require-Sfnp ($release.draft -eq $false -and $release.prerelease -eq $sfnpInspection -and
+        Require-Sfnp ($release.draft -eq $false -and $release.prerelease -eq ($sfnpInspection -or $sfnpManage) -and
             $release.tag_name -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') 'No matching public setup release is available.'
         Require-Sfnp (-not $sfnpInspection -or $release.tag_name -ceq 'setup-inspection-v2') 'Unexpected inspection release tag.'
+        Require-Sfnp (-not $sfnpManage -or $release.tag_name -ceq 'setup-manager-v1') 'Unexpected manager release tag.'
         $assets = @($release.assets | Where-Object { $_.name -ceq $sfnpAsset })
         Require-Sfnp ($assets.Count -eq 1) 'This release has no complete PC/Frame setup package. Nothing was installed.'
         $asset = $assets[0]
@@ -196,11 +215,13 @@ param([switch] $InspectionOnly)
             (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $asset.digest.Substring(7)) 'Setup download failed its SHA-256 check.'
         $target = Join-Path $sfnpStage 'package'
         [void] [IO.Directory]::CreateDirectory($target)
-        $python = Join-Path $target (Expand-SfnpPackage $archive $target $sfnpInspection)
-        if ($sfnpInspection) { Write-Host 'Inspection package verified. This mode only reads and reports; it cannot apply changes.' }
+        $python = Join-Path $target (Expand-SfnpPackage $archive $target $sfnpInspection $sfnpManage)
+        if ($sfnpManage) { Write-Host 'Manager verified. Removal requires your confirmation; the new bridge is not yet installable.' }
+        elseif ($sfnpInspection) { Write-Host 'Inspection package verified. This mode only reads and reports; it cannot apply changes.' }
         else { Write-Host 'Package verified. The assistant will check both devices before offering changes.' }
         $sfnpArguments = @('-I', '-B', (Join-Path $target 'setup/steam_link_setup.py'), '--bundle', $target)
         if ($sfnpInspection) { $sfnpArguments += '--inspect' }
+        elseif ($sfnpManage) { $sfnpArguments += '--manage' }
         & $python @sfnpArguments
         Require-Sfnp ($LASTEXITCODE -eq 0) 'The setup assistant stopped. No automatic restart was performed.'
     } catch {
@@ -212,4 +233,4 @@ param([switch] $InspectionOnly)
             Remove-Item -LiteralPath $sfnpStage -Recurse -Force
         }
     }
-} ([bool] $InspectionOnly)
+} ([bool] $InspectionOnly) ([bool] $Manage)

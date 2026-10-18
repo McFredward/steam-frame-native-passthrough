@@ -10,9 +10,10 @@ import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--package', type=Path, required=True)
+parser.add_argument('--manager', action='store_true')
 args = parser.parse_args()
 engine = args.package.resolve() / 'setup/steam_link_setup.py'
-result = subprocess.run([sys.executable, '-I', '-B', str(engine), '--inspect', '--check',
+result = subprocess.run([sys.executable, '-I', '-B', str(engine), '--manage' if args.manager else '--inspect', '--check',
                          '--bundle', str(args.package.resolve())], stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, timeout=30, check=False)
 assert result.returncode == 0, result.stderr.decode(errors='replace')
@@ -21,6 +22,9 @@ report = json.loads(result.stdout)
 assert 'pc' in report and report.get('frame') is None
 spec = importlib.util.spec_from_file_location('sfnp_actual_embedded_engine', engine)
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+if args.manager:
+    maintenance = module.Maintenance(args.package.resolve())
+    assert maintenance is not None
 ui = module.load_presentation()
 assert ui.language('de') == 'de' and ui.language('en') == 'en'
 with tempfile.TemporaryDirectory(prefix='sfnp-embedded-acl-') as temporary:

@@ -37,10 +37,17 @@ def inspection_contents():
             'setup/runtime/python/python.exe': b'FIXTURE ONLY: NOT A REAL EXECUTABLE\n'}
 
 
-def archive(files=None, *, mutate=None, extra=None, inspection=False):
-    files = (inspection_contents() if inspection else contents()) if files is None else files
-    manifest = {'schema': 'sfnp-bootstrap-inspection-v1' if inspection else 'sfnp-bootstrap-package-v1',
-                'readiness': 'inspection-only' if inspection else 'release',
+def manager_contents():
+    files = inspection_contents()
+    files['setup/frame_native_uninstall.py'] = b'# Non-executable removal helper fixture.\n'
+    files['setup-maintenance.json'] = json.dumps({'schema':'sfnp-setup-maintenance-v1', 'helpers':{}}).encode()
+    return files
+
+
+def archive(files=None, *, mutate=None, extra=None, inspection=False, maintenance=False):
+    files = (manager_contents() if maintenance else inspection_contents() if inspection else contents()) if files is None else files
+    manifest = {'schema': 'sfnp-bootstrap-manager-v1' if maintenance else 'sfnp-bootstrap-inspection-v1' if inspection else 'sfnp-bootstrap-package-v1',
+                'readiness': 'maintenance' if maintenance else 'inspection-only' if inspection else 'release',
                 'windows_python': 'setup/runtime/python/python.exe',
                 'files': {name: {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()} for name, raw in files.items()}}
     if mutate:
@@ -63,30 +70,31 @@ class BootstrapTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def release(self, inspection=False):
-        tag = bootstrap.INSPECTION_TAG if inspection else 'v1.0.0'
-        asset_name = bootstrap.INSPECTION_ASSET if inspection else bootstrap.ASSET
-        return {'draft': False, 'prerelease': inspection, 'tag_name': tag,
+    def release(self, inspection=False, maintenance=False):
+        tag = bootstrap.MANAGER_TAG if maintenance else bootstrap.INSPECTION_TAG if inspection else 'v1.0.0'
+        asset_name = bootstrap.MANAGER_ASSET if maintenance else bootstrap.INSPECTION_ASSET if inspection else bootstrap.ASSET
+        return {'draft': False, 'prerelease': inspection or maintenance, 'tag_name': tag,
                 'assets': [{'name': asset_name, 'state': 'uploaded', 'size': 512,
                             'digest': 'sha256:' + 'a' * 64,
                             'browser_download_url': 'https://github.com/' + bootstrap.REPO + '/releases/download/' + tag + '/' + asset_name}]}
 
-    def extract(self, raw, inspection=False):
+    def extract(self, raw, inspection=False, maintenance=False):
         target = self.path / 'package'; target.mkdir()
         zipped = self.path / 'download.zip'; zipped.write_bytes(raw)
-        bootstrap.extract(zipped, target, inspection)
+        bootstrap.extract(zipped, target, inspection, maintenance)
         return target
 
     def test_exact_public_asset(self):
         self.assertEqual(bootstrap.select_asset(self.release())['size'], 512)
 
-    def test_preview_wrappers_pin_reviewed_core_and_force_inspection(self):
-        for name, source, flag in [('get-preview.ps1', 'get.ps1', '-InspectionOnly'),
-                                   ('get-preview.sh', 'get.sh', '--inspect')]:
+    def test_preview_wrappers_pin_reviewed_core_and_select_manager(self):
+        for name, source, flag in [('get-preview.ps1', 'get.ps1', '-Manage'),
+                                   ('get-preview.sh', 'get.sh', '--manage')]:
             text = (ROOT / name).read_text()
             digest = hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
             self.assertIn(digest, text)
-            self.assertIn('/2c2fdeeef5ce623c55b2c8489872531f8226a238/' + source, text)
+            import re
+            self.assertRegex(text, r'/[0-9a-f]{40}/' + re.escape(source))
             self.assertIn(flag, text)
 
     def test_explicit_inspection_release_is_separate_from_stable(self):
@@ -129,8 +137,9 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.extract(archive(files, inspection=True), True)
 
     def test_only_explicit_inspection_argument(self):
-        self.assertFalse(bootstrap.arguments([])); self.assertTrue(bootstrap.arguments(['--inspect']))
-        for args in (['--apply'], ['--inspect', '--apply'], ['--inspect', '--inspect'], ['--inspection']):
+        self.assertFalse(bootstrap.arguments([])); self.assertIs(bootstrap.arguments(['--inspect']), True)
+        self.assertEqual(bootstrap.arguments(['--manage']), 'manage')
+        for args in (['--apply'], ['--inspect', '--apply'], ['--inspect', '--inspect'], ['--inspection'], ['--inspect','--manage'], ['--manage','--action','uninstall']):
             with self.subTest(args=args), self.assertRaises(ValueError): bootstrap.arguments(args)
 
     def test_incomplete_or_unexpected_release_refused(self):
@@ -212,19 +221,19 @@ class BootstrapTests(unittest.TestCase):
         del files['LICENSE.txt']; missing = runtime(files)
         with self.assertRaises(ValueError): packaging.windows_python(missing, hashlib.sha256(missing).hexdigest(), url)
 
-    def piped_bootstrap(self, inspection):
+    def piped_bootstrap(self, inspection, maintenance=False):
         import pty
         import signal
         report = self.path / 'terminal-result.json'
-        files = inspection_contents() if inspection else contents()
+        files = manager_contents() if maintenance else inspection_contents() if inspection else contents()
         files['setup/steam_link_setup.py'] = (
             'import sys,json,pathlib\n'
             f'pathlib.Path({str(report)!r}).write_text(json.dumps({{"tty":sys.stdin.isatty(),"args":sys.argv[1:]}}))\n'
             'assert sys.stdin.isatty()\n').encode()
-        raw = archive(files, inspection=inspection)
-        release = self.release(inspection)
+        raw = archive(files, inspection=inspection, maintenance=maintenance)
+        release = self.release(inspection, maintenance)
         release['assets'][0].update(size=len(raw), digest='sha256:' + hashlib.sha256(raw).hexdigest())
-        endpoint = '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/latest'
+        endpoint = '/releases/tags/' + bootstrap.MANAGER_TAG if maintenance else '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/latest'
         api_url = 'https://api.github.com/repos/' + bootstrap.REPO + endpoint
         asset_url = release['assets'][0]['browser_download_url']
         # Only network I/O is replaced. Execute the actual Bash argv/heredoc,
@@ -243,7 +252,7 @@ class BootstrapTests(unittest.TestCase):
         child = None
         try:
             with (self.path / 'terminal.log').open('wb') as output:
-                child = subprocess.Popen(['bash', '-s', '--'] + (['--inspect'] if inspection else []), stdin=subprocess.PIPE,
+                child = subprocess.Popen(['bash', '-s', '--'] + (['--manage'] if maintenance else ['--inspect'] if inspection else []), stdin=subprocess.PIPE,
                                          stdout=output, stderr=subprocess.STDOUT, preexec_fn=controlling_terminal)
                 try:
                     child.communicate(script.encode(), timeout=15)
@@ -252,7 +261,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(child.returncode, 0, (self.path / 'terminal.log').read_text())
             data = json.loads(report.read_text())
             self.assertTrue(data['tty']); self.assertEqual(data['args'][0], '--bundle')
-            self.assertEqual(data['args'][2:], ['--inspect'] if inspection else [])
+            self.assertEqual(data['args'][2:], ['--manage'] if maintenance else ['--inspect'] if inspection else [])
             self.assertFalse(Path(data['args'][1]).exists(), 'Own download/runtime removed after child exits')
         finally:
             os.close(master); os.close(slave)
@@ -265,6 +274,35 @@ class BootstrapTests(unittest.TestCase):
     def test_piped_inspection_preserves_terminal_and_explicit_mode(self):
         self.piped_bootstrap(True)
 
+    def test_manager_only_selects_its_own_pinned_release(self):
+        self.assertEqual(bootstrap.select_asset(self.release(maintenance=True), maintenance=True)['name'], bootstrap.MANAGER_ASSET)
+        for release, inspection, maintenance in ((self.release(True),False,True), (self.release(maintenance=True),True,False),
+                                                 (self.release(),False,True), (self.release(maintenance=True),False,False)):
+            with self.subTest(release=release['tag_name']), self.assertRaises(ValueError):
+                bootstrap.select_asset(release,inspection,maintenance)
+
+    def test_manager_archive_preserves_mode_separation(self):
+        target = self.extract(archive(maintenance=True), maintenance=True)
+        self.assertTrue((target / 'setup/frame_native_uninstall.py').is_file())
+        self.assertFalse((target / 'steam-link-bundle.json').exists())
+        for inspection in (False,True):
+            with tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                root=Path(temporary); zipped=root/'a.zip'; zipped.write_bytes(archive(maintenance=True)); out=root/'out';out.mkdir()
+                with self.assertRaises(ValueError): bootstrap.extract(zipped,out,inspection)
+                self.assertEqual(list(out.iterdir()),[])
+
+    def test_manager_rejects_install_payload_before_extraction(self):
+        for name in ('steam-link-bundle.json','pc-provider/driver.dll','receiver/lib.so','setup/unknown.py'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                files=manager_contents();files[name]=b'NOT EXECUTED'
+                root=Path(temporary);zipped=root/'a.zip';zipped.write_bytes(archive(files,maintenance=True));out=root/'out';out.mkdir()
+                with self.assertRaises(ValueError): bootstrap.extract(zipped,out,maintenance=True)
+                self.assertEqual(list(out.iterdir()),[])
+
+    @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
+    def test_manager_uses_real_terminal_and_never_install_argument(self):
+        self.piped_bootstrap(False, maintenance=True)
+
     def test_actual_powershell_archive_functions(self):
         if not POWERSHELL: self.skipTest('Pass --pwsh to run actual PowerShell parser/extraction functions')
         valid = self.path / 'valid.zip'; valid.write_bytes(archive())
@@ -272,9 +310,12 @@ class BootstrapTests(unittest.TestCase):
         inspection = self.path / 'inspection.zip'; inspection.write_bytes(archive(inspection=True))
         files = inspection_contents(); files['pc-provider/driver.dll'] = b'UNEXECUTED NATIVE FIXTURE'
         payload = self.path / 'payload.zip'; payload.write_bytes(archive(files, inspection=True))
+        manager = self.path / 'manager.zip'; manager.write_bytes(archive(maintenance=True))
+        files = manager_contents(); files['pc-provider/driver.dll'] = b'UNEXECUTED NATIVE FIXTURE'
+        manager_payload = self.path / 'manager-payload.zip'; manager_payload.write_bytes(archive(files, maintenance=True))
         report = self.path / 'ps-result.json'
         script = self.path / 'check.ps1'
-        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload)
+        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload, $Manager, $ManagerPayload)
 $ErrorActionPreference='Stop'
 $tokens=$null; $parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$parseErrors)
@@ -296,6 +337,14 @@ foreach ($case in @(@($Inspection,$false),@($Valid,$true),@($Payload,$true))) {
  $blocked=$false;try { Expand-SfnpPackage $case[0] $caseTarget $case[1] | Out-Null } catch { $blocked=$true }
  if (-not $blocked -or @(Get-ChildItem $caseTarget -Recurse).Count -ne 0) { throw 'Inspection/release or payload gate failed.' }
 }
+$managerTarget=Join-Path $Output 'ps-manager';[void][IO.Directory]::CreateDirectory($managerTarget)
+$managerRuntime=Expand-SfnpPackage $Manager $managerTarget $false $true
+if ($managerRuntime -ne 'setup/runtime/python/python.exe' -or -not (Test-Path (Join-Path $managerTarget 'setup/frame_native_uninstall.py'))) { throw 'Manager did not verify.' }
+foreach ($case in @(@($Manager,$false,$false),@($Manager,$true,$false),@($Valid,$false,$true),@($Inspection,$false,$true),@($ManagerPayload,$false,$true))) {
+ $caseTarget=Join-Path $Output ([Guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($caseTarget)
+ $blocked=$false;try { Expand-SfnpPackage $case[0] $caseTarget $case[1] $case[2] | Out-Null } catch { $blocked=$true }
+ if (-not $blocked -or @(Get-ChildItem $caseTarget -Recurse).Count -ne 0) { throw 'Manager mode/payload gate failed.' }
+}
 $unsafe=@('../escape' ,'/escape','C:/escape','x\escape','x//escape','x/CON.txt','x/end.','x/end ','x/CONIN$','x/CONOUT$',('x/COM'+[char]0xB9),('x/LPT'+[char]0xB2),'x/a|b','x/a?b')
 foreach ($name in $unsafe) {
  $blocked=$false; try { Get-SfnpName $name | Out-Null } catch { $blocked=$true }
@@ -304,7 +353,7 @@ foreach ($name in $unsafe) {
 @{parsed=$true;exact_runtime=$runtime;prototype_refused=$true;unsafe_paths=$unsafe.Count;inspection_verified=$true;inspection_native_payload_refused=$true;scope='ActualPowerShellFunctions_NoNetwork_NoWindowsACL_NoDevice'} | ConvertTo-Json | Set-Content $Report
 ''')
         result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script),
-                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload)],
+                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload), str(manager), str(manager_payload)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
         self.assertEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
         data = json.loads(report.read_text(encoding='utf-8-sig'))

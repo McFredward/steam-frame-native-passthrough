@@ -9,6 +9,8 @@ on:
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_manager.py'
+      - 'tools/native_passthrough_setup.py'
       - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
@@ -25,6 +27,8 @@ on:
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_manager.py'
+      - 'tools/native_passthrough_setup.py'
       - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
@@ -109,3 +113,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup runtime failed.' }
           & (Join-Path $target $runtime) -I -B tests/test_setup_ui.py
           if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup presentation failed.' }
+
+      - name: Actual packaged management mode (no Frame contact or removal)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'python-embed.zip'
+          $sshArchive = Join-Path $env:RUNNER_TEMP 'openssh-portable.zip'
+          $package = Join-Path $env:RUNNER_TEMP 'setup-manager.zip'
+          python -B tools/package_setup_manager.py --python-zip $archive --openssh-zip $sshArchive --output $package
+          if ($LASTEXITCODE -ne 0) { throw 'Management packaging failed.' }
+          $target = Join-Path $env:RUNNER_TEMP 'actual-manager-package'
+          [void][IO.Directory]::CreateDirectory($target)
+          $tokens=$null; $parseErrors=$null
+          $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get.ps1'),[ref]$tokens,[ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { throw 'Bootstrap syntax error.' }
+          foreach ($fn in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)) { Invoke-Expression $fn.Extent.Text }
+          $runtime = Expand-SfnpPackage $package $target $false $true
+          & (Join-Path $target $runtime) -I -B tests/test_embedded_setup_runtime.py --package $target --manager
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded management runtime failed.' }

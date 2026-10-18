@@ -5,6 +5,11 @@ The new sender/receiver bridge is still a prototype, so current prototype bundle
 cannot install components or create pairings. An existing public Frame
 scene-atlas patch is reported separately; it is not a negotiated receiver.
 
+The [guided maintenance command](SETUP-INSPECTION.md) is available now for
+**Check / Uninstall / Exit**, including removal of the old public Frame patch.
+That separate maintenance archive cannot install or activate an unfinished
+bridge. Stop SteamVR manually and repeat removal if it reports pending.
+
 ## Online entry points
 
 The repository contains `get.ps1` and `get.sh` for the planned public one-line
@@ -39,7 +44,7 @@ bootstrap manifest is `sfnp-bootstrap-package-v1` with exact `schema`,
 `files` fields. `files` pins every archive file except the manifest itself by
 length and SHA-256. The pinned `steam-link-bundle.json` and assistant engine are
 mandatory; the inner bundle must independently be a complete admitted release.
-Bash uses system Python 3.9+ and gives the wizard `/dev/tty` as stdin so piping
+Bash uses Python3.9+ (existing or privately prepared) and gives the wizard `/dev/tty` as stdin so piping
 the bootstrap into Bash does not swallow interactive review/SSH prompts.
 
 Release engineering uses `tools/package_stream_link_setup.py` to assemble the
@@ -56,18 +61,20 @@ Extract the complete dedicated setup archive. On Windows, open
 `patch-steam-link.cmd`; on Linux, run `bash patch-steam-link.sh`.
 Keep its `setup` folder and supplied payloads alongside the launcher.
 
-Windows uses a bundled, release-verified Python runtime when provided, otherwise
-an installed Python 3.9+ launcher/interpreter. Missing Python produces an explicit
-instruction; nothing is downloaded automatically. Both platforms need an OpenSSH
-client. The native Linux sender is not yet reviewed: Linux can check/plan, but
+The online Windows command prepares a bundled, release-verified Python runtime
+and portable OpenSSH fallback without installing either system-wide. The Bash
+command uses Python3.9+ or downloads an exact pinned private interpreter if
+needed; Linux currently uses the OS OpenSSH client. The source-checkout launchers
+can also reuse an existing interpreter. The native Linux sender is not yet reviewed: Linux can check/plan, but
 the assistant refuses to install a Windows DLL there. A Windows game running
 under Proton does not turn a Linux SteamVR process into a Windows driver host.
 
 The assistant first inventories the PC and Frame without installing anything.
-It tries a previously selected address and the `frame.local`, `steamframe.local`
-and `steam-frame.local` names, then offers an optional small private-network search
-and manual address entry. The scan checks port 22 only on one private IPv4 /24
-or smaller. It never scans automatically. Enable Frame SSH beforehand using the
+It automatically tries a confirmed previous address, local Frame names, nearby
+devices and one bounded private-network search. Only if these fail does it ask
+for an IP address; users never need to specify a subnet. The search checks port22
+on at most one proven physical private IPv4 /24 and validates actual Frame
+inventory before accepting a device. Enable Frame SSH beforehand using the
 [existing Frame instructions](INSTALL.md); the assistant does not change its
 SSH service or system image.
 
