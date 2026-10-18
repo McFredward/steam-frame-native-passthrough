@@ -920,7 +920,7 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
             if cached:
                 require(set(cached) == {'schema','host','user'} and cached['schema'] == 'sfnp-frame-address-v1',
                         'Unknown cached-address file preserved.')
-            candidates = [cached.get('host'), 'steamframe.local', 'steam-frame.local']
+            candidates = [cached.get('host'), 'frame.local', 'steamframe.local', 'steam-frame.local']
             for candidate in dict.fromkeys(value for value in candidates if value):
                 try:
                     probe = remote_factory(candidate, args.user)

@@ -64,8 +64,8 @@ the assistant refuses to install a Windows DLL there. A Windows game running
 under Proton does not turn a Linux SteamVR process into a Windows driver host.
 
 The assistant first inventories the PC and Frame without installing anything.
-It tries a previously selected address and the `steamframe.local` /
-`steam-frame.local` names, then offers an optional small private-network search
+It tries a previously selected address and the `frame.local`, `steamframe.local`
+and `steam-frame.local` names, then offers an optional small private-network search
 and manual address entry. The scan checks port 22 only on one private IPv4 /24
 or smaller. It never scans automatically. Enable Frame SSH beforehand using the
 [existing Frame instructions](INSTALL.md); the assistant does not change its
