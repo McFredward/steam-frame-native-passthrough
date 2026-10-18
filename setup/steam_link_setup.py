@@ -1161,6 +1161,28 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discov
     local = local or Local(steamvr=args.steamvr)
     local.apply_started = False
     ui = None
+    if not args.inspect and (args.bundle / 'stream-bridge-bundle.json').is_file():
+        # The bootstrap verifies this sibling alongside the entry point. A
+        # prototype bundle may check, but never gains installation permission.
+        try:
+            helper = no_links(Path(__file__).with_name('stream_bridge_install.py'))
+            spec = importlib.util.spec_from_file_location('sfnp_full_resolution_setup', helper)
+            bridge = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = bridge
+            spec.loader.exec_module(bridge)
+            owner = sys.modules.get(__name__)
+            if owner is None:
+                owner = type(sys)(__name__)
+                owner.__dict__.update(globals())
+            return bridge.run(args, owner, local, input_fn=input_fn, discover_frame=discover_frame,
+                              remote_factory=None if remote_factory is Remote else remote_factory)
+        except KeyboardInterrupt:
+            print('Setup stopped. No automatic restart was performed.', file=sys.stderr)
+            return 130
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            detail = str(error)[:500] if isinstance(error, SetupError) else 'Check the package and retained recovery records.'
+            print('Setup could not finish: ' + detail + ' No automatic restart was performed.', file=sys.stderr)
+            return 2
     try:
         require(not (args.inspect and args.action), '--inspect cannot be combined with an installation action.')
         require(not (args.inspect and args.manage), 'Choose either --inspect or --manage.')
