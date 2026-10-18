@@ -59,14 +59,54 @@ own scene background has not sampled the headset's camera.
 
 ## Frozen scene profiles
 
-The receiver recognizes both frozen formats. **V1 is the current production
-recommendation. V2 is quarantined after a failed stereo headset test:** lossy
+The current receiver recognizes **v3 and legacy v1**. V3 retains equal-resolution
+colour/coverage and replaces the fragile format header. It requires a matching
+updated producer and receiver; its headset result remains unverified.
+**V2 is quarantined after a failed stereo headset test:** lossy
 transport can independently reject its small corner signature for one eye,
 displaying the packed image at a different scale with opaque output. The exact
 guard values from that hardware run were not recorded; a controlled codec plus
 actual-fragment reproduction establishes the failure mechanism, not the real
 encoder's parameters. See [the regression review](research/eye-divergence-20261018.md).
 Do not use the idealized v2 GPU results as an end-to-end quality claim.
+
+### Equal-resolution v3
+
+The frozen contract is
+[`scene-contribution-atlas-v3.json`](protocols/scene-contribution-atlas-v3.json).
+Its canonical SHA256 is
+`7efb2d98cc99d17d9bd920780797b6b647bc4b74441d2b97f8e72dc61f002521`;
+its file SHA256 is
+`cf5f71fb00877573a9d2aa8b69405ec7af03523563e216b4e07738605a11863a`.
+Canvas, scene, coverage, windmill origins/rotations, global halos, contribution
+and transfer are identical to v2 below. Only the format header changes:
+
+| Field | Profile v3 |
+|---|---|
+| Schema / profile | `ghvr-steamlink-scene-atlas-v3` / `scene-contribution-atlas-v3`, revision 3. |
+| Cells | Twelve128×128 neutral-grey squares, with32-pixel gaps, outside scene and all coverage halos. |
+| First six origins | Row-major `(48,64)`, `(208,64)`, `(368,64)`, `(48,224)`, `(208,224)`, `(368,224)`. |
+| Last six origins | Row-major `(2672,2704)`, `(2832,2704)`, `(2992,2704)`, `(2672,2864)`, `(2832,2864)`, `(2992,2864)`. |
+| Levels / codes | Levels `32,96,160,224`; ordered codes `32,224,224,96,96,160,96,224,160,224,96,96`. |
+| Admission | All twelve raw-G values within inclusive ±16 codes; no opacity threshold. |
+| Derivation | First twelve SHA256-preimage bytes, each masked with3, index the four levels. |
+| Guard signature | `681763eda11a55db2e43d18d52bf791a9c41720840471c0f9e473f71934786b9`. |
+
+For signature derivation remove `signature_preimage`, `signature_sha256` and
+`codes` from the guard of a complete copied profile. Canonicalize the remaining
+JSON with sorted keys and compact separators, prepend
+`GloomhavenVR/SteamLink/scene-contribution-atlas-v3\n`, append `\n`, and hash.
+These deterministic codes recognize the format, not an authenticated scene.
+Large flat cells intentionally cannot prove exact atlas registration: small
+translations can leave every sampled center inside its square. Correct original
+R1/image/eye binding remains a separate obligation.
+
+`transform_robust()` and the public package generator recognize v3 first, then
+the complete frozen v1 guard. Accepted v3, legacy v1 and ordinary first-mismatch
+paths retain the twelve/thirteen/two guard-fetch budget. There is no third guard,
+cached verdict, cross-eye decision or extra frame queue. Historical
+`transform_dual()` continues to generate its original v1/v2 bytes for regression
+controls; it is no longer the package generator's selection.
 
 The retained experimental contract is
 [`scene-contribution-atlas-v2.json`](protocols/scene-contribution-atlas-v2.json),
@@ -98,9 +138,10 @@ classification or opacity threshold is introduced. Desktop raster and native GPU
 evidence is recorded in the [focused v2 report](research/full-resolution-native-coverage-20261018.md);
 headset/codec quality and performance remain separate verification boundaries.
 
-`transform_dual()` and the public package generator test the complete v2 guard
-first, then the complete v1 guard. If neither matches, they retain the exact
-original output. Single-profile `transform()` still defaults to unchanged v1.
+Historical `transform_dual()` tests the complete v2 guard first, then the
+complete v1 guard. If neither matches, it retains the exact original output.
+Single-profile `transform()` still defaults to unchanged v1. Neither historical
+entry point is permission to select the quarantined v2 producer.
 
 ### Legacy v1
 
@@ -226,7 +267,7 @@ current actual eye callback:
     if source is disabled or current coverage is not established:
         submit ordinary current-eye output
     else:
-        pack current-eye contribution E and coverage A into the exact v1 atlas
+        pack current-eye contribution E and coverage A into the exact v3 atlas
         submit that image through the ordinary game/SteamVR path
 ```
 

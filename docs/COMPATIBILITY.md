@@ -46,18 +46,22 @@ their respective evidence and limits.
   current eye. A texture with an alpha channel is not enough on its own.
 - Fractional opacity is supported. Arbitrary refractive glass, effects that sample
   a different background and all transparent shader families are not certified.
-- Use the **legacy v1 format** for production integrations. Its 1024² opacity
-  versus 2048² colour, source antialiasing and video filtering/compression can
-  soften boundaries. Genuine partial transparency must remain intact.
-- The receiver also recognizes experimental v2 with equal 2048² grids, but its
-  first real stereo test failed: apparent scale and passthrough differed between
+- The updated receiver recognizes **v3 and legacy v1**. V3 uses equal2048² colour
+  and opacity with a larger, codec-resistant format header. It removes the
+  dedicated half-resolution coverage filter, without erasing genuine partial
+  transparency. Its real streamed headset picture is not yet established.
+  Legacy v1 retains1024² opacity versus2048² colour and remains compatible.
+- Historical experimental v2 also uses equal2048² grids, but its first real
+  stereo test failed: apparent scale and passthrough differed between
   eyes. Controlled lossy-codec inputs reproduce asymmetric guard rejection and
   that exact output split in the actual native fragment. The failing hardware
   guard samples were not logged, so the real triggering cell/codec settings are
   unproven. V2 is quarantined; its desktop sharpness results are insufficient.
-  See the [regression review](research/eye-divergence-20261018.md). Keeping the
-  current receiver installed does not require using v2 or another restart;
-  restored v1 producers remain compatible.
+  See the [regression review](research/eye-divergence-20261018.md). V3 changes
+  the header, leaving v2's scene/mask geometry unchanged. Both producer and
+  receiver must be updated together for v3. A new producer with an old receiver
+  can show a packed picture instead of the scene; disable native streaming in
+  the game until the receiver update is complete. Legacy v1 does not require v3.
 - Motion latency and the cost of extra image packing/sampling remain relevant.
   Host GPU measurements are not a Frame performance guarantee. There is no extra
   previous-eye/pair queue in the GloomhavenVR source helper, but the ordinary
