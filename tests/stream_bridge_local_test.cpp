@@ -1,6 +1,7 @@
 #include "receiver/stream_bridge_local.h"
 #include "receiver/sha256.h"
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 #include <stdexcept>
@@ -64,6 +65,48 @@ void localFramingAndRights(){Directory dir;local::Channel source,target;const au
     close(got.dmabuf);close(got.readOnlyLeases);source.stop();pump(source,target);check(target.state()==local::State::Lost,"actual socket EOF revokes local channel");
     target.stop();check(!std::filesystem::exists(path),"only owned unchanged socket removed on stop");
 }
+void reconnectEpochs(){
+    Directory dir;local::Channel source,target;const auto pin=selfPin();const auto path=dir.path/"epochs.sock";
+    check(target.preparePinned(local::Endpoint::CompositorConsumer,path,pin)&&source.preparePinned(local::Endpoint::VrlinkProducer,path,pin),"epoch endpoints prepared");pump(source,target);
+    File image;local::LeaseWriter writer;check(writer.prepareCold()&&writer.associateResourceFd(image.fd),"reconnect source prepared");
+    const auto c=capture(image.fd);writer.captureEvent(c);local::LeaseReference oldRef;
+    check(writer.reference(c,oldRef)&&oldRef.epoch==1,"first source epoch is explicit and nonzero");
+    const int fd=writer.duplicateReadOnly();local::LeaseReader oldReader;check(oldReader.mapReadOnly(fd)&&oldReader.current(oldRef),"first reader freezes first source epoch");
+    local::Message queued=certified();queued.kind=local::Kind::Decoded;queued.certifiedMetadata.clear();queued.lease=oldRef;queued.dmabuf=image.fd;queued.readOnlyLeases=fd;
+    check(source.enqueue(queued),"old decoded packet retained in actual transport before disconnect");
+    check(writer.invalidateCurrentEpoch()&&!oldReader.current(oldRef),"nonterminal source loss immediately invalidates existing reader");
+    local::LeaseReference sameFacts;check(writer.reference(c,sameFacts)&&sameFacts.epoch==2&&sameFacts.sequence==oldRef.sequence,"epoch advance never mutates capture slots or sequence");
+    check(!oldReader.current(sameFacts),"old reader cannot adopt newer reference epoch");
+    pump(source,target);local::Message got;check(target.receive(got)&&got.lease.epoch==1,"queued old epoch survives exact wire framing");
+    local::LeaseReader currentReader;check(currentReader.mapReadOnly(got.readOnlyLeases)&&!currentReader.current(got.lease),"new mapping cannot authorize queued pre-disconnect reference");
+    close(got.dmabuf);close(got.readOnlyLeases);
+    const auto next=capture(image.fd,2);writer.captureEvent(next);local::LeaseReference fresh;
+    check(writer.reference(next,fresh)&&fresh.epoch==2&&fresh.sequence!=oldRef.sequence,"new actual capture acquires current epoch");
+    check(currentReader.current(fresh)&&!oldReader.current(fresh)&&!oldReader.current(oldRef),"fresh reader succeeds while every old reader/reference stays false");
+    queued.lease=fresh;check(source.enqueue(queued),"new decoded packet queued after reconnect");pump(source,target);
+    check(target.receive(got)&&got.lease.epoch==2&&currentReader.current(got.lease),"new epoch serialized at fixed header offset and accepted with exact current lease");
+    close(got.dmabuf);close(got.readOnlyLeases);
+    auto missing=fresh;missing.epoch=0;queued.lease=missing;check(!source.enqueue(queued),"zero epoch never enters decoded transport");
+    auto wrong=fresh;++wrong.epoch;check(!currentReader.current(wrong),"unrelated nonzero epoch cannot authorize current capture");
+    writer.revoke();check(!writer.invalidateCurrentEpoch()&&!currentReader.current(fresh)&&writer.duplicateReadOnly()<0,"terminal revocation cannot be revived as another reconnect");
+    local::LeaseReader afterTerminal;check(!afterTerminal.mapReadOnly(fd),"terminal backing cannot authorize a fresh reader");close(fd);
+}
+void epochExhaustion(){
+    // This fixture owns the writer. Its independent writable descriptor is used
+    // only to exercise the UINT64_MAX boundary without trillions of reconnects.
+    File image;local::LeaseWriter writer;check(writer.prepareCold()&&writer.associateResourceFd(image.fd),"epoch exhaustion source prepared");
+    const auto c=capture(image.fd);writer.captureEvent(c);const int fd=writer.duplicateReadOnly();
+    char path[64];std::snprintf(path,sizeof path,"/proc/self/fd/%d",fd);const int owned=open(path,O_RDWR|O_CLOEXEC);
+    check(owned>=0,"fixture retains access to its own writable backing");void* map=mmap(nullptr,4096,PROT_READ|PROT_WRITE,MAP_SHARED,owned,0);
+    check(map!=MAP_FAILED,"fixture maps its own atomic header");
+    auto* epoch=reinterpret_cast<std::atomic<std::uint64_t>*>(static_cast<char*>(map)+sizeof(std::atomic<std::uint64_t>));
+    epoch->store(~std::uint64_t(0),std::memory_order_release);local::LeaseReference last;
+    check(writer.reference(c,last)&&last.epoch==~std::uint64_t(0),"last nonzero epoch remains representable");
+    local::LeaseReader reader;check(reader.mapReadOnly(fd)&&reader.current(last),"last-epoch reader is valid before exhaustion");
+    check(!writer.invalidateCurrentEpoch()&&epoch->load(std::memory_order_acquire)==0&&!reader.current(last),"epoch exhaustion terminates instead of wrapping into old session");
+    check(!writer.invalidateCurrentEpoch()&&writer.duplicateReadOnly()<0,"exhausted writer stays terminal");
+    munmap(map,4096);close(owned);close(fd);
+}
 void peerAndPathRefusals(){Directory dir;const auto path=dir.path/"receiver.sock";local::Channel server,client;const auto pin=selfPin();
     check(server.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"refusal listener");
     check(client.prepare(local::Endpoint::VrlinkProducer,path),"production client transport starts but waits for actual compositor identity");pump(client,server);
@@ -95,4 +138,4 @@ void malformedAndForeignLifetime(){Directory dir;const auto path=dir.path/"recei
     check(std::filesystem::is_regular_file(path)&&std::filesystem::file_size(path)==6,"shutdown never deletes another actor's replacement file");
 }
 }
-int main(){try{sharedLeases();separateProcessLease();localFramingAndRights();peerAndPathRefusals();malformedAndForeignLifetime();std::printf("actual local transport/shared leases: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+int main(){try{sharedLeases();separateProcessLease();localFramingAndRights();reconnectEpochs();epochExhaustion();peerAndPathRefusals();malformedAndForeignLifetime();std::printf("actual local transport/shared leases: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}

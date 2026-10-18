@@ -28,11 +28,11 @@ static_assert(sizeof(Shared)<=SharedBytes&&std::atomic<std::uint64_t>::is_always
 using Words=std::array<std::uint64_t,10>;
 Words words(const nd::CaptureObservation& c,KernelIdentity kernel){return {{static_cast<std::uint64_t>(c.fd),c.index,c.nativeTimestampToken,c.sourcePoolGeneration,c.capturePoolGeneration,c.contentGeneration,kernel[0],kernel[1],static_cast<std::uint64_t>(c.dmabufFd),1}};}
 bool identity(int fd,KernelIdentity& out){struct stat st{};if(fd<0||fstat(fd,&st)||!st.st_ino)return false;out={{static_cast<std::uint64_t>(st.st_dev),static_cast<std::uint64_t>(st.st_ino)}};return true;}
-bool snapshot(const Shared* shared,std::uint32_t index,std::uint64_t& sequence,Words& out){
-    if(!shared||index>=SlotCount||shared->magic.load(std::memory_order_acquire)!=Magic||shared->active.load(std::memory_order_acquire)!=1)return false;
+bool snapshot(const Shared* shared,std::uint32_t index,std::uint64_t epoch,std::uint64_t& sequence,Words& out){
+    if(!shared||!epoch||index>=SlotCount||shared->magic.load(std::memory_order_acquire)!=Magic||shared->active.load(std::memory_order_acquire)!=epoch)return false;
     const auto& slot=shared->slots[index];const auto before=slot.sequence.load(std::memory_order_acquire);if(!before||(before&1))return false;
     for(std::size_t i=0;i<out.size();++i)out[i]=slot.fields[i].load(std::memory_order_acquire);
-    if(slot.sequence.load(std::memory_order_acquire)!=before||shared->active.load(std::memory_order_acquire)!=1||out[9]!=1)return false;
+    if(slot.sequence.load(std::memory_order_acquire)!=before||shared->active.load(std::memory_order_acquire)!=epoch||out[9]!=1)return false;
     sequence=before;return true;
 }
 void store(Slot& slot,const Words& values){const auto sequence=slot.sequence.load(std::memory_order_relaxed);if(sequence>~std::uint64_t(0)-2){slot.sequence.store(~std::uint64_t(0),std::memory_order_release);return;}
@@ -99,28 +99,42 @@ void LeaseWriter::captureEvent(const nd::CaptureObservation& event) noexcept {
 void LeaseWriter::sink(const nd::CaptureObservation& event,void* context) noexcept {if(context)static_cast<LeaseWriter*>(context)->captureEvent(event);}
 bool LeaseWriter::reference(const nd::CaptureObservation& expected,LeaseReference& output) const noexcept {
     if(expected.kind!=nd::CaptureKind::Decoded)return false;
+    if(!impl_->shared)return false;
+    const auto epoch=impl_->shared->active.load(std::memory_order_acquire);if(!epoch)return false;
     LeaseReference result{};unsigned count=0;
-    for(std::size_t i=0;i<SlotCount;++i){Words values{};std::uint64_t sequence=0;if(!snapshot(impl_->shared,static_cast<std::uint32_t>(i),sequence,values))continue;
-        const KernelIdentity kernel{{values[6],values[7]}};if(values==words(expected,kernel)){result={static_cast<std::uint32_t>(i),sequence,kernel,expected};++count;}}
-    if(count!=1)return false;
+    for(std::size_t i=0;i<SlotCount;++i){Words values{};std::uint64_t sequence=0;if(!snapshot(impl_->shared,static_cast<std::uint32_t>(i),epoch,sequence,values))continue;
+        const KernelIdentity kernel{{values[6],values[7]}};if(values==words(expected,kernel)){result={static_cast<std::uint32_t>(i),sequence,epoch,kernel,expected};++count;}}
+    if(count!=1||impl_->shared->active.load(std::memory_order_acquire)!=epoch)return false;
     output=result;return true;
 }
 int LeaseWriter::duplicateReadOnly() const noexcept {return impl_->shared&&impl_->shared->active.load(std::memory_order_acquire)?duplicate(impl_->readonly):-1;}
+bool LeaseWriter::invalidateCurrentEpoch() noexcept {
+    if(!impl_->shared)return false;
+    auto& active=impl_->shared->active;auto epoch=active.load(std::memory_order_acquire);
+    for(unsigned attempt=0;attempt<8;++attempt){
+        if(!epoch)return false;
+        const auto next=epoch==~std::uint64_t(0)?0:epoch+1;
+        if(active.compare_exchange_strong(epoch,next,std::memory_order_acq_rel,std::memory_order_acquire))return next!=0;
+    }
+    // Contention/exhaustion can only close the route, never wrap or resurrect it.
+    active.store(0,std::memory_order_release);return false;
+}
 void LeaseWriter::revoke() noexcept {impl_->revoke();}
-struct LeaseReader::Impl {const Shared* shared=nullptr;};
+struct LeaseReader::Impl {const Shared* shared=nullptr;std::uint64_t epoch=0;};
 LeaseReader::LeaseReader():impl_(new Impl){}LeaseReader::~LeaseReader(){reset();}
-void LeaseReader::reset() noexcept {if(impl_->shared)munmap(const_cast<Shared*>(impl_->shared),SharedBytes);impl_->shared=nullptr;}
+void LeaseReader::reset() noexcept {if(impl_->shared)munmap(const_cast<Shared*>(impl_->shared),SharedBytes);impl_->shared=nullptr;impl_->epoch=0;}
 bool LeaseReader::mapReadOnly(int fd) noexcept {
     struct stat st{};const int flags=fcntl(fd,F_GETFL),seals=fcntl(fd,F_GET_SEALS);
     if(fd<0||flags<0||(flags&O_ACCMODE)!=O_RDONLY||seals<0||(seals&(F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL))!=(F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL)
         ||fstat(fd,&st)||st.st_uid!=geteuid()||st.st_size!=SharedBytes)return false;
     auto* mapped=mmap(nullptr,SharedBytes,PROT_READ,MAP_SHARED,fd,0);if(mapped==MAP_FAILED)return false;
     const auto* shared=static_cast<const Shared*>(mapped);
-    if(shared->magic.load(std::memory_order_acquire)!=Magic||shared->active.load(std::memory_order_acquire)!=1){munmap(mapped,SharedBytes);return false;}
-    reset();impl_->shared=shared;return true;
+    const auto epoch=shared->active.load(std::memory_order_acquire);
+    if(!epoch||shared->magic.load(std::memory_order_acquire)!=Magic||shared->active.load(std::memory_order_acquire)!=epoch){munmap(mapped,SharedBytes);return false;}
+    reset();impl_->shared=shared;impl_->epoch=epoch;return true;
 }
 bool LeaseReader::current(const LeaseReference& ref) const noexcept {
-    Words values{};std::uint64_t sequence=0;return ref.capture.kind==nd::CaptureKind::Decoded&&snapshot(impl_->shared,ref.slot,sequence,values)
+    Words values{};std::uint64_t sequence=0;return ref.capture.kind==nd::CaptureKind::Decoded&&ref.epoch==impl_->epoch&&snapshot(impl_->shared,ref.slot,impl_->epoch,sequence,values)
         &&sequence==ref.sequence&&values==words(ref.capture,ref.kernel);
 }
 PeerPin vrlinkPin() noexcept{return {2425024,nd::ExpectedVrlinkHash};}
@@ -150,7 +164,7 @@ bool validMessage(const Message& m){
         ||!nonzero(m.binding)||!m.descriptor.sourceFrame||!m.descriptor.encoderGeneration||!m.descriptor.codedWidth||!m.descriptor.codedHeight
         ||m.descriptor.codedWidth>8192||m.descriptor.codedHeight>8192||m.nativeTimestampToken>0xffff||!m.submittedContent)return false;
     if(m.kind==Kind::Certified)return !m.certifiedMetadata.empty()&&m.certifiedMetadata.size()<=Channel::MaximumPayload&&m.dmabuf<0&&m.readOnlyLeases<0;
-    if(m.kind!=Kind::Decoded||!m.certifiedMetadata.empty()||m.dmabuf<0||m.readOnlyLeases<0||m.lease.slot>=SlotCount||!m.lease.sequence||(m.lease.sequence&1))return false;
+    if(m.kind!=Kind::Decoded||!m.certifiedMetadata.empty()||m.dmabuf<0||m.readOnlyLeases<0||m.lease.slot>=SlotCount||!m.lease.epoch||!m.lease.sequence||(m.lease.sequence&1))return false;
     const auto& c=m.lease.capture;return c.kind==nd::CaptureKind::Decoded&&c.sourcePoolGeneration==m.source.outputPoolGeneration
         &&c.nativeTimestampToken==m.nativeTimestampToken&&c.fd>=0&&c.dmabufFd>=0&&c.index<nd::MaxBuffers
         &&c.capturePoolGeneration&&c.contentGeneration&&m.lease.kernel[1];
@@ -162,7 +176,7 @@ std::array<std::uint8_t,HeaderBytes> encode(const Message& m){
     put(h.data()+56,m.descriptor.codedWidth,2);put(h.data()+58,m.descriptor.codedHeight,2);put(h.data()+60,m.nativeTimestampToken,4);put(h.data()+64,m.submittedContent,8);
     std::copy(m.binding.begin(),m.binding.end(),h.begin()+72);
     put(h.data()+144,m.source.stream.generation,8);
-    if(m.kind==Kind::Decoded){put(h.data()+88,m.lease.slot,4);put(h.data()+92,m.lease.capture.index,4);put(h.data()+96,m.lease.sequence,8);
+    if(m.kind==Kind::Decoded){put(h.data()+152,m.lease.epoch,8);put(h.data()+88,m.lease.slot,4);put(h.data()+92,m.lease.capture.index,4);put(h.data()+96,m.lease.sequence,8);
         put(h.data()+104,m.lease.capture.capturePoolGeneration,8);put(h.data()+112,m.lease.capture.contentGeneration,8);
         put(h.data()+120,m.lease.kernel[0],8);put(h.data()+128,m.lease.kernel[1],8);
         put(h.data()+136,static_cast<std::uint64_t>(m.lease.capture.fd),4);put(h.data()+140,static_cast<std::uint64_t>(m.lease.capture.dmabufFd),4);}
@@ -171,15 +185,15 @@ std::array<std::uint8_t,HeaderBytes> encode(const Message& m){
 bool decode(const std::array<std::uint8_t,HeaderBytes>& h,Message& m){
     if(std::memcmp(h.data(),"SFL1",4)||h[4]!=1||(h[5]!=1&&h[5]!=2)||h[6]>1||h[7])return false;
     for(unsigned i=12;i<16;++i)if(h[i])return false;
-    for(unsigned i=152;i<HeaderBytes;++i)if(h[i])return false;
+    for(unsigned i=160;i<HeaderBytes;++i)if(h[i])return false;
     const auto payload=get(h.data()+8,4);if(payload>Channel::MaximumPayload)return false;
     m.kind=static_cast<Kind>(h[5]);m.peerConfirmed=h[6]!=0;std::copy_n(h.begin()+16,16,m.source.stream.connection.begin());
     m.source.outputPoolGeneration=get(h.data()+32,8);m.source.stream.generation=get(h.data()+144,8);m.descriptor={get(h.data()+40,8),get(h.data()+48,8),static_cast<std::uint16_t>(get(h.data()+56,2)),static_cast<std::uint16_t>(get(h.data()+58,2))};
     m.nativeTimestampToken=static_cast<std::uint32_t>(get(h.data()+60,4));m.submittedContent=get(h.data()+64,8);std::copy_n(h.begin()+72,16,m.binding.begin());
-    if(m.kind==Kind::Decoded){m.lease.slot=static_cast<std::uint32_t>(get(h.data()+88,4));m.lease.sequence=get(h.data()+96,8);m.lease.kernel={{get(h.data()+120,8),get(h.data()+128,8)}};
+    if(m.kind==Kind::Decoded){m.lease.epoch=get(h.data()+152,8);m.lease.slot=static_cast<std::uint32_t>(get(h.data()+88,4));m.lease.sequence=get(h.data()+96,8);m.lease.kernel={{get(h.data()+120,8),get(h.data()+128,8)}};
         m.lease.capture={nd::CaptureKind::Decoded,static_cast<int>(get(h.data()+136,4)),static_cast<int>(get(h.data()+140,4)),static_cast<std::uint32_t>(get(h.data()+92,4)),m.nativeTimestampToken,m.source.outputPoolGeneration,get(h.data()+104,8),get(h.data()+112,8)};
         if(payload)return false;
-    }else {for(unsigned i=88;i<144;++i)if(h[i])return false;if(!payload)return false;}
+    }else {for(unsigned i=88;i<144;++i)if(h[i])return false;for(unsigned i=152;i<160;++i)if(h[i])return false;if(!payload)return false;}
     m.certifiedMetadata.resize(payload);return true;
 }
 }

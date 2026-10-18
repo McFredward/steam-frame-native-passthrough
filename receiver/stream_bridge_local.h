@@ -5,7 +5,7 @@ namespace stream_bridge_local {
 using KernelIdentity=std::array<std::uint64_t,2>;
 struct LeaseReference {
     std::uint32_t slot=0;
-    std::uint64_t sequence=0;
+    std::uint64_t sequence=0,epoch=0;
     KernelIdentity kernel{};
     stream_bridge_native::CaptureObservation capture{};
 };
@@ -22,6 +22,11 @@ public:
     static void sink(const stream_bridge_native::CaptureObservation&,void*) noexcept;
     bool reference(const stream_bridge_native::CaptureObservation&,LeaseReference&) const noexcept;
     int duplicateReadOnly() const noexcept;
+    // Nonterminal connection/source loss. Old references and already mapped
+    // readers remain invalid forever; only a fresh reader can bind the new epoch.
+    // Atomic only: never writes the capture sink's slots or native inventory.
+    bool invalidateCurrentEpoch() noexcept;
+    // Terminal teardown/exhaustion. A terminal writer can never be revived.
     void revoke() noexcept;
 private:
     struct Impl;std::unique_ptr<Impl> impl_;
