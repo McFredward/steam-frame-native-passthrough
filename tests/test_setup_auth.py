@@ -307,9 +307,13 @@ class ActualWizardEntry(unittest.IsolatedAsyncioTestCase):
                     await until(pilot,lambda:isinstance(app.screen,ui.SSHInputScreen))
                     self.assertTrue(app.screen.query_one(Input).password)
                     await pilot.press('ctrl+c')
-                    for _ in range(150):
-                        if app.backend_finished:break
-                        await pilot.pause(.01)
+                    # SSH shutdown has bounded process/reader joins. Let those
+                    # finish before unmounting the UI; a 1.5s polling budget
+                    # raced legitimate Windows cleanup and could carry its
+                    # backend into the next case. This is not a network retry.
+                    deadline=time.monotonic()+12
+                    while not app.backend_finished and time.monotonic()<deadline:
+                        await pilot.pause(.02)
                     self.assertTrue(app.backend_finished);self.assertEqual(app.backend_result,130)
                     self.assertNotIn('bridge_rolled_back',app.detail_history)
                     await pilot.press('enter')
