@@ -310,7 +310,11 @@ class _ArrowTerminal:
             if not get_mode(handle, ctypes.byref(original)) or not set_mode(handle, original.value | 4):
                 raise OSError('terminal mode unavailable')
             self._restore = lambda: bool(set_mode(handle, original.value))
-            self.reader = _WindowsKeyReader()
+            try:
+                self.reader = _WindowsKeyReader()
+            except BaseException:
+                self.__exit__()
+                raise
         else:
             import termios
             descriptor = self.source.fileno()

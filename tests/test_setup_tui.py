@@ -74,6 +74,28 @@ class Keys(unittest.TestCase):
         self.assertTrue(terminal.restored)
         self.assertEqual(calls, [(99, 7), (99, 3)])
 
+    def test_windows_reader_initialization_failure_restores_already_set_mode(self):
+        class Function:
+            def __init__(self, callback):
+                self.callback = callback
+            def __call__(self, *args):
+                return self.callback(*args)
+        calls = []
+        def query(_handle, value):
+            value._obj.value = 3
+            return 1
+        kernel = types.SimpleNamespace(GetConsoleMode=Function(query),
+                                       SetConsoleMode=Function(lambda h, mode: calls.append(mode) or 1))
+        stream = io.StringIO()
+        stream.fileno = lambda: 41
+        with mock.patch.dict(sys.modules, {'msvcrt': types.SimpleNamespace(get_osfhandle=lambda fd: 99)}), \
+                mock.patch.object(ui.os, 'name', 'nt'), \
+                mock.patch.object(ui.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                mock.patch.object(ui, '_WindowsKeyReader', side_effect=OSError('reader unavailable')):
+            with self.assertRaises(OSError):
+                ui._ArrowTerminal(None, stream).__enter__()
+        self.assertEqual(calls, [7, 3])
+
     def test_windows_console_mode_refusal_never_changes_input_or_outputs_ansi(self):
         class Function:
             def __init__(self, result):
