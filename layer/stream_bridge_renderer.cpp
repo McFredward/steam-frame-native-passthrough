@@ -2,9 +2,11 @@
 #include "stream_bridge_process.h"
 #include "stream_bridge_coverage_gpu.h"
 #include "native_presenter_pipeline.h"
+#include "pixel_ssbo_profile_transform.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdio>
 #include <mutex>
 #include <unistd.h>
 #include <fcntl.h>
@@ -22,6 +24,11 @@ template<class T,std::size_t N>T* find(std::array<T,N>& list,std::uint64_t value
 template<class T,std::size_t N>T* add(std::array<T,N>& list,std::uint64_t value){if(!value||find(list,value))return nullptr;for(auto& entry:list)if(!entry.id){entry.id=value;return &entry;}return nullptr;}
 bool current(const LocalPicture& picture){return picture.leases&&picture.connection&&picture.connection->load(std::memory_order_acquire)&&picture.leases->current(picture.metadata.lease);}
 bool same(const sb::FrameDescriptor&a,const sb::FrameDescriptor&b){return a.sourceFrame==b.sourceFrame&&a.encoderGeneration==b.encoderGeneration&&a.codedWidth==b.codedWidth&&a.codedHeight==b.codedHeight;}
+void coldNote(const char* message) noexcept{
+    static std::atomic<unsigned> budget{0};
+    if(budget.fetch_add(1,std::memory_order_relaxed)<24)
+        std::fprintf(stderr,"[Steam Link Native Passthrough] %s\n",message);
+}
 }
 struct Renderer::Impl {
     struct Memory{std::uint64_t id=0,generation=0,device=0,inode=0;int duplicate=-1;};
@@ -38,7 +45,7 @@ struct Renderer::Impl {
     };
     std::atomic<std::uint64_t> observationEpoch{1};std::atomic<bool> lost{false};std::atomic<unsigned> admittedPipelines{0};
     mutable std::mutex gate;VkDevice device{};PFN_vkGetDeviceProcAddr gdpa{};VkPhysicalDeviceMemoryProperties memory{};
-    std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,registered=false;
+    std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,registered=false,count1Authorized=false;
     gpu::Pool pool;journal::Journal definitions{1,{},journal::PendingCount1::RetainFacts};
     std::vector<std::uint32_t> coverageWords,legacyWords;
     VkDescriptorSetLayout controlLayout{};VkDescriptorPool controlPool{};VkCommandPool guardPool{};
@@ -162,6 +169,20 @@ struct Renderer::Impl {
 Renderer::Renderer():impl_(new Impl){}
 Renderer::~Renderer()=default;
 frame_pixel_ssbo_journal::Journal& Renderer::definitions() noexcept{return impl_->definitions;}
+void Renderer::shaderCreated(VkShaderModule value,const VkShaderModuleCreateInfo& info) noexcept{
+    auto&p=*impl_;try{
+        if(!p.definitions.createShader(value,info,VK_SUCCESS)||!p.prepared||info.codeSize!=6620)return;
+        std::lock_guard<std::mutex> lock(p.gate);if(p.count1Authorized)return;
+        auto original=std::make_unique<frame_pixel_ssbo_clone::ShaderDefinition>();
+        auto proof=std::make_unique<frame_pixel_ssbo_profile::Artifact>();
+        frame_pixel_ssbo_clone::Refusal why;
+        if(frame_pixel_ssbo_clone::captureShader(info,frame_pixel_ssbo_clone::ShaderRole::Fragment,*original,why)&&
+           frame_pixel_ssbo_profile::transform(*original,false,*proof,why)&&
+           p.definitions.authorizeProbeInterface(proof->profile)){
+            p.count1Authorized=true;coldNote("native count1 image interface verified");
+        }else coldNote("native count1 image interface refused; native pipeline retained");
+    }catch(...){coldNote("native shader admission unavailable; native pipeline retained");}
+}
 bool Renderer::prepareCold(VkDevice device,VkPhysicalDeviceMemoryProperties memory,PFN_vkGetDeviceProcAddr get,const VkDeviceCreateInfo& create,std::uint32_t api,std::uint32_t family) noexcept{
     auto&p=*impl_;try{
         if(p.device)return false;
@@ -189,7 +210,10 @@ bool Renderer::prepareCold(VkDevice device,VkPhysicalDeviceMemoryProperties memo
 void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCreateInfo& info,const VkAllocationCallbacks* allocator,VkPipeline original) noexcept{
     auto&p=*impl_;if(!p.prepared)return;
     (void)allocator;
-    try{journal::Event event;if(!p.definitions.createPipeline(original,info,VK_SUCCESS,&event))return;auto ready=std::make_unique<journal::Ready>();if(!p.definitions.lookupPipeline({handle(p.device),event.value,event.generation},*ready))return;
+    try{journal::Event event;if(!p.definitions.createPipeline(original,info,VK_SUCCESS,&event)){
+            if(event.contract.reason==frame_pixel_ssbo_clone::Reason::Image9Extent)coldNote("native pipeline refused: image interface not verified");
+            return;
+        }auto ready=std::make_unique<journal::Ready>();if(!p.definitions.lookupPipeline({handle(p.device),event.value,event.generation},*ready))return;
         if(frame_native_presenter::inspectCompletedPipeline(p.device,p.api,VK_SUCCESS,info,original,ready->recipe).reason!=frame_native_presenter::Reason::None)return;
         std::lock_guard<std::mutex> lock(p.gate);auto* entry=add(p.pipelines,handle(original));if(!entry)return;
         VkDescriptorSetLayout layouts[3]{from<VkDescriptorSetLayout>(ready->recipe.provenance[0].value),p.pool.descriptorLayout(),p.controlLayout};
@@ -204,7 +228,8 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
         if(entry->coverage&&entry->legacy){
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
             if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted});
-        }
+            coldNote("native legacy and exact-coverage pipelines prepared");
+        }else coldNote("native companion creation refused; native pipeline retained");
     }catch(...){/* Native original has already succeeded and remains untouched. */}
 }
 void Renderer::pipelineDestroyed(VkPipeline original) noexcept{

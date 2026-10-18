@@ -34,6 +34,7 @@ public:
     Renderer(){if(wrapper_fixture::state.throwConstructor)throw std::bad_alloc();}
     bool prepareCold(VkDevice d,VkPhysicalDeviceMemoryProperties,PFN_vkGetDeviceProcAddr get,const VkDeviceCreateInfo&,std::uint32_t,std::uint32_t) noexcept {device=d;gdpa=get;++wrapper_fixture::state.prepared;return true;}
     Journal& definitions() noexcept{return journal;}
+    void shaderCreated(VkShaderModule value,const VkShaderModuleCreateInfo& info){journal.createShader(value,info,VK_SUCCESS);}
     void stopCold() noexcept{++wrapper_fixture::state.stopped;}
     void trackingLost() noexcept{valid=false;++wrapper_fixture::state.lost;}
     void commandAllocated(VkCommandBuffer cb,VkCommandBufferLevel level,std::uint32_t family) noexcept {

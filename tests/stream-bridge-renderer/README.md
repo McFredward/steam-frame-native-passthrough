@@ -15,6 +15,15 @@ independent shared-UBO offsets, and both core and KHR submit dispatch. A batch o
 on the final bounded chunk. Two semantic controls remove current-lease checking
 or the leading zero command; both must fail a positive/negative assertion.
 
+The documented native 29-binding scalar Set0 is replayed with the exact private
+original shaders. The production successful-shader callback must prove the
+original fragment's constant-zero image accesses and promote pending count1
+definitions before either companion can register a route. A control removes
+that authorization and must fail. Merely observing count1, or supplying a
+mutated original fragment, cannot promote it. The older count3 integration cases
+remain unchanged. The generated coverage module defaults to an independently
+specialized count1 interface, also usable with a larger count3 layout.
+
 External process admission, authenticated picture callbacks and lease validity
 are explicitly supplied fixture observations. A regular temporary fd tests the
 renderer's kernel-object join, not an actual DMA_BUF export. This is not a

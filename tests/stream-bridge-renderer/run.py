@@ -36,6 +36,7 @@ def main():
   mutations={
    'stale-lease-admitted':('valid=valid&&current(use.picture);','valid=valid&&true;'),
    'missing-zero-on-reuse':('submits[0].pCommandBuffers=&p.zero;','submits[0].pCommandBuffers=&p.zero;submits[0].commandBufferCount=0;'),
+   'missing-native-count1-proof':('p.definitions.authorizeProbeInterface(proof->profile)','false'),
   }
   for name,(old,new) in mutations.items():
    if old not in text:raise AssertionError('semantic control anchor missing: '+name)

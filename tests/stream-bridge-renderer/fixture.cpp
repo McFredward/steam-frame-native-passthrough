@@ -95,15 +95,27 @@ bool NativeImages::created(DeviceHandle,ImageHandle,const ImageDescription&)noex
 namespace {
 struct Integration {
  Driver vk;sr::Renderer renderer;CloneFixture native;
+ std::array<VkDescriptorSetLayoutBinding,29> observedBindings{};
  VkDevice device=handle<VkDevice>(1);VkCommandBuffer cb=handle<VkCommandBuffer>(0x71000);VkImage image=handle<VkImage>(0x72000);VkImageView view=handle<VkImageView>(0x73000);VkDescriptorSet set=handle<VkDescriptorSet>(0x74000);VkDeviceMemory imported=handle<VkDeviceMemory>(0x75000);
  std::shared_ptr<std::atomic<bool>> connection=std::make_shared<std::atomic<bool>>(true);int file=-1;sr::LocalPicture picture;VkBuffer guard=VK_NULL_HANDLE;
- Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true){
   leaseCurrent=true;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
   VkPhysicalDeviceMemoryProperties m{};m.memoryTypeCount=1;m.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   check(renderer.prepareCold(device,m,Driver::get,native.device,VK_API_VERSION_1_1,0),"actual renderer cold prepare registers process consumer");check(!consumer.owner,"pool preparation alone cannot advertise actual selected-image renderer");
+  if(imageCount==1){
+   // The retained native archive has ALL-stage scalar bindings 0..28, not
+   // the old convenient seven-binding array3 fixture.
+   for(unsigned n=0;n<observedBindings.size();++n)observedBindings[n]={n,n<8?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:n==8?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:n<25?VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:VK_DESCRIPTOR_TYPE_SAMPLER,1,VK_SHADER_STAGE_ALL,nullptr};
+   native.set0.bindingCount=observedBindings.size();native.set0.pBindings=observedBindings.data();
+  }
   auto& definitions=renderer.definitions();check(definitions.createSet(native.nativeSet,native.set0,VK_SUCCESS),"actual native set definitions");check(definitions.createLayout(native.graphics.layout,native.layout,VK_SUCCESS),"actual native layout definitions");check(definitions.createRenderPass(native.graphics.renderPass,native.pass,VK_SUCCESS),"actual native renderpass definitions");
-  VkShaderModuleCreateInfo shader{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};shader.codeSize=vs.size()*4;shader.pCode=vs.data();check(definitions.createShader(native.stages[1].module,shader,VK_SUCCESS),"exact private native VS recorded");shader.codeSize=ps.size()*4;shader.pCode=ps.data();check(definitions.createShader(native.stages[0].module,shader,VK_SUCCESS),"exact private native FS recorded");native.colorBlend.blendEnable=VK_FALSE;
-  renderer.graphicsCreated(VK_NULL_HANDLE,native.graphics,nullptr,handle<VkPipeline>(0x60));check(consumer.owner&&consumer.coverage&&consumer.picture&&consumer.tick,"only both actual native companion pipelines register receiver route");
+  VkShaderModuleCreateInfo shader{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};shader.codeSize=vs.size()*4;shader.pCode=vs.data();renderer.shaderCreated(native.stages[1].module,shader);shader.codeSize=ps.size()*4;shader.pCode=ps.data();
+  if(useColdProof)renderer.shaderCreated(native.stages[0].module,shader);
+  else check(definitions.createShader(native.stages[0].module,shader,VK_SUCCESS),"unpromoted exact native FS recorded without interface authority");
+  native.colorBlend.blendEnable=VK_FALSE;
+  renderer.graphicsCreated(VK_NULL_HANDLE,native.graphics,nullptr,handle<VkPipeline>(0x60));
+  if(!expectReady){check(!consumer.owner,"pending or unpinned native count1 stays unadmitted");return;}
+  check(consumer.owner&&consumer.coverage&&consumer.picture&&consumer.tick,"only both actual native companion pipelines register receiver route");
   VkExternalMemoryImageCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};external.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};info.pNext=&external;info.imageType=VK_IMAGE_TYPE_2D;info.extent={16,2,1};info.mipLevels=info.arrayLayers=1;info.samples=VK_SAMPLE_COUNT_1_BIT;info.format=VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;renderer.imageCreated(image,info);
   char path[]="/tmp/sfnp-renderer-fixture-XXXXXX";file=mkstemp(path);check(file>=0,"owned kernel-object fixture fd");unlink(path);struct stat st{};check(!fstat(file,&st),"exact kernel object observed");VkImportMemoryFdInfoKHR fd{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};fd.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;fd.fd=file;VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocate.pNext=&fd;allocate.allocationSize=32;auto preparation=renderer.memoryPreparing(allocate);check(preparation.duplicate>=0,"fd duplicated BEFORE original consumes it");renderer.memoryAllocated(imported,allocate,preparation,VK_SUCCESS);renderer.imageBound(image,imported,0);
   VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};ci.image=image;ci.viewType=VK_IMAGE_VIEW_TYPE_2D;ci.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};renderer.viewCreated(view,ci);writeView(view);
@@ -120,6 +132,9 @@ struct Integration {
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
 void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ {Integration f(vs,ps,1);auto draw=f.record();check(draw.ready&&draw.coverage&&draw.control,"documented native 29-binding count1 gets both companion pipelines");check(f.submit()==VK_SUCCESS&&f.vk.reads.back()==1,"native count1 current exact mask reaches original draw");}
+ {Integration f(vs,ps,1,false,false);check(!f.record().ready,"pending count1 cannot be admitted by observed layout alone");}
+ {auto wrong=ps;wrong.back()^=1;Integration f(vs,wrong,1,true,false);check(!f.record().ready,"mutated native fragment cannot authorize count1");}
  {Integration f(vs,ps);auto draw=f.record();check(draw.ready&&draw.coverage&&draw.control&&draw.original==handle<VkPipeline>(0x60),"actual source import/descriptor/current uploaded mask selects coverage route");check(f.submit()==VK_SUCCESS&&f.vk.reads.back()==1,"zero then exact one guard reaches original native CB");check(f.vk.originalFences.back()==f.vk.appFence&&f.vk.waitPreserved==1&&f.vk.signalPreserved==1,"original fence and semaphore contract forwarded");
   check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"legal flags0 re-submit gets fresh immutable GPU guard without host UBO writes");leaseCurrent=false;check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"previously successful reused recording turns opaque once actual selected lease expires");
  }

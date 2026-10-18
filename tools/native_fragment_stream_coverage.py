@@ -14,13 +14,20 @@ import subprocess
 import tempfile
 
 import native_fragment_ssa_probe as ssa
+import native_fragment_packed_output as packed_output
 
 
-def transform(original):
+def transform(original, descriptor_count=1):
+    ssa.require(type(descriptor_count) is int and descriptor_count in (1, 3),
+                'explicit owned descriptor count1 or3 required')
     ssa.require(len(original) == ssa.ORIGINAL_BYTES and
                 hashlib.sha256(original).hexdigest() == ssa.ORIGINAL_SHA256,
                 "unsupported native fragment")
-    native_header, instructions = ssa.parse_module(original)
+    # Reuse the established original-only constant-zero B9 proof before adding
+    # our explicit-LOD mask reads. No native layout or executed access changes.
+    owned_original = (packed_output.specialize_owned_binding9_count1(original, original)
+                      if descriptor_count == 1 else original)
+    native_header, instructions = ssa.parse_module(owned_original)
     header = list(native_header)
     _, store_index = ssa.profile_structure(header, instructions)
     ssa.require(instructions[store_index].operands == (504, 994), "native output changed")
@@ -77,6 +84,7 @@ def transform(original):
         'original_sha256': hashlib.sha256(original).hexdigest(),
         'output_sha256': hashlib.sha256(binary).hexdigest(),
         'output_bytes': len(binary), 'mask_set': 1, 'mask_binding': 0,
+        'owned_binding9_descriptor_count': descriptor_count,
         'mask_type': 'combined-image-sampler R8_UNORM',
         'recording_control_set': 2, 'recording_control_binding': 0,
         'recording_control': 'owned coherent float: 0 exact-original alpha, 1 current mask',

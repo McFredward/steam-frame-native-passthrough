@@ -23,6 +23,9 @@ public:
         const VkDeviceCreateInfo&,std::uint32_t api,std::uint32_t graphicsFamily) noexcept;
     // Existing bounded cold definition recorder, not a GPU/frame authority.
     frame_pixel_ssbo_journal::Journal& definitions() noexcept;
+    // Successful original cold shader creation; count1 admission requires the
+    // exact original fragment's independently verified constant-zero profile.
+    void shaderCreated(VkShaderModule,const VkShaderModuleCreateInfo&) noexcept;
     void graphicsCreated(VkPipelineCache,const VkGraphicsPipelineCreateInfo&,
         const VkAllocationCallbacks*,VkPipeline) noexcept;
     void pipelineDestroyed(VkPipeline) noexcept;

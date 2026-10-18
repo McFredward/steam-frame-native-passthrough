@@ -49,8 +49,10 @@ struct CoverageGpu:OutputGpu {
 };
 }
 int main(int argc,char** argv){try{
-    require(argc==4,"usage: stream-coverage-fixture VERTEX ORIGINAL COVERAGE");
-    CoverageGpu gpu;gpu.init();require(gpu.validationEnabled,"real validation enabled");gpu.singleResources(3);gpu.prepareMask();gpu.pipelinesSingle(argv[1],argv[2],argv[3]);
+    require(argc==4||argc==5,"usage: stream-coverage-fixture VERTEX ORIGINAL COVERAGE [1|3]");
+    const unsigned descriptorCount=argc==5?unsigned(std::stoul(argv[4])):3;
+    require(descriptorCount==1||descriptorCount==3,"explicit count1/count3 layout required");
+    CoverageGpu gpu;gpu.init();require(gpu.validationEnabled,"real validation enabled");gpu.singleResources(descriptorCount);gpu.prepareMask();gpu.pipelinesSingle(argv[1],argv[2],argv[3]);
     unsigned count=0,zeroEmission=0;
     for(auto c:cases())for(unsigned band=0;band<4;++band){
         c.u[0]=(band*4+2.5f)/16.f;c.u[1]=.5f;c.r1={0,0,1,1};
