@@ -453,6 +453,169 @@ class WizardTests(unittest.TestCase):
         frame['host']='-oProxyCommand=evil'
         with self.assertRaises(s.SetupError):s.inspection_report(self.local,pc,frame,profile)
 
+    def maintenance_fixture(self, live=False, camera=False):
+        self.inspection_profile();self.apply()
+        # Reproduce the reported user state: no PC provider, owned old Frame patch.
+        self.local.uninstall(self.local.inventory())
+        receipt_path=self.framehome/'.config/SteamFrameNativePassthrough/install.json'
+        receipt=s.parse(s.read(receipt_path));component=self.framehome/'.local/share/SteamFrameNativePassthrough/package/bridge-component.json'
+        component.unlink();receipt['files'].pop(str(component));s.put(receipt_path,s.encoded(receipt),s.read(receipt_path))
+        source=(ROOT/'tools/native_passthrough_setup.py').read_bytes()
+        self.assertEqual(s.sha(source),s.MAINTENANCE_PIN['sha256'])
+        s.put(self.bundle_root/s.MAINTENANCE_HELPER,source)
+        s.put(self.bundle_root/'setup-maintenance.json',s.encoded({'schema':s.MAINTENANCE,'helpers':{s.MAINTENANCE_HELPER:s.MAINTENANCE_PIN}}))
+        env=mock.patch.dict(os.environ,{'VR_CONFIG_PATH':'','VR_PATHREG_OVERRIDE':'','XDG_CONFIG_HOME':''});env.start();self.addCleanup(env.stop)
+        owner=self
+        class NativeSystem:
+            reloads=0;native_calls=0;engine_calls=0
+            def running(self):return self.live
+            def reload(self):self.reloads+=1;return True
+            def camera(self,*_):self.native_calls+=1;raise AssertionError('no native camera API')
+        system=NativeSystem();system.live=live;original=self.frame.namespace['module']
+        def checked_module(path,name):
+            module=original(path,name)
+            if name=='sfnp_checked_legacy_removal':
+                module.UserSystem=lambda:system
+                real_exists=module.exists
+                module.exists=lambda path:real_exists(path) if Path(path).is_relative_to(owner.framehome) else False
+                def no_engine(self):system.engine_calls+=1;raise AssertionError('no installed-script import')
+                module.Setup._engine=no_engine
+            return module
+        self.frame.namespace['module']=checked_module
+        if camera:
+            config=self.framehome/'.config/openvr/config';config.mkdir(parents=True,mode=0o700)
+            s.put(config/'steamvr.vrsettings',s.encoded({'camera':{'forceSceneAlphaBlending':True,'other':'keep'}}))
+            s.put(self.framehome/'.config/openvr/openvrpaths.vrpath',s.encoded({'config':[str(config)]}))
+            s.put(self.framehome/'.config/SteamFrameNativePassthrough/camera-before.json',s.encoded({
+                'schema':'sfnp-camera-key-v1','settings':str(config/'steamvr.vrsettings'),
+                'previous':{'present':True,'value':False},'write_intent':True}))
+        return system
+
+    def manager_ui(self, answers):
+        owner=self;calls=[];answers=iter(answers)
+        class Presenter:
+            def __init__(self,**kwargs):self.input=kwargs['input_fn']
+            def banner(self,**_):pass
+            def progress(self,*_):return contextlib.nullcontext()
+            def suspend(self):return contextlib.nullcontext()
+            def say(self,key):calls.append(('say',key))
+            def status(self,*args):calls.append(('status',*args))
+            def path(self,path):calls.append(('path',str(path)))
+            def choose_action(self,actions,recommended=None):
+                calls.append(('actions',tuple(actions),recommended));return self.input('choose')
+            def confirm_uninstall(self):return self.input('confirm').strip().upper()=='REMOVE'
+            def ask(self,_):return self.input('finish')
+        return types.SimpleNamespace(Presenter=Presenter),lambda _:next(answers),calls
+
+    def run_manager(self, answers=(), extra=()):
+        ui,input_fn,calls=self.manager_ui(answers);output=io.StringIO();error=io.StringIO()
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(error),mock.patch('sys.stdin.isatty',return_value=True), \
+             mock.patch.object(s,'load_presentation',return_value=ui):
+            code=s.main(['--manage','--bundle',str(self.bundle_root),'--frame','steamframe.local',*extra],local=self.local,
+                        remote_factory=lambda *_,**__:self.frame,input_fn=input_fn)
+        return code,calls,output.getvalue(),error.getvalue()
+
+    def test_manager_removes_actual_legacy_helper_without_pc_provider_or_runtime_grant(self):
+        system=self.maintenance_fixture();before_calls=len(self.system.calls)
+        self.assertFalse(self.local.inventory(inspection=True)['installed'])
+        runtime=self.framehome/'runtime.bin';s.put(runtime,b'updated runtime',s.read(runtime))
+        code,calls,_,error=self.run_manager(['uninstall','REMOVE',''])
+        self.assertEqual(code,0,error);self.assertIn(('actions',('check','uninstall','exit'),'check'),calls)
+        self.assertIn(('say','remove_done'),calls);self.assertNotIn(('say','remove_pending'),calls)
+        self.assertFalse((self.framehome/'.config/SteamFrameNativePassthrough/install.json').exists())
+        self.assertFalse((self.framehome/'.local/share/SteamFrameNativePassthrough/package/libVkLayer_frame_pixel_snapshot.so').exists())
+        self.assertEqual((system.reloads,system.native_calls,system.engine_calls),(1,0,0))
+        self.assertEqual(len(self.system.calls),before_calls)
+        self.assertEqual(list((self.framehome/'.local/share/steam-link-native-passthrough/maintenance').rglob('*')),[])
+        self.assertEqual(runtime.read_bytes(),b'updated runtime')
+
+    def test_manager_live_camera_restore_is_pending_without_native_or_installed_import(self):
+        system=self.maintenance_fixture(live=True,camera=True)
+        code,calls,_,error=self.run_manager(['uninstall','REMOVE',''])
+        self.assertEqual(code,0,error);self.assertIn(('say','remove_pending'),calls)
+        self.assertNotIn(('say','remove_done'),calls)
+        self.assertTrue((self.framehome/'.config/SteamFrameNativePassthrough/install.json').exists())
+        self.assertFalse(s.parse(s.read(self.framehome/'.config/SteamFrameNativePassthrough/control.json'))['enabled'])
+        self.assertEqual((system.reloads,system.native_calls,system.engine_calls),(0,0,0))
+        log=s.parse(s.read(self.local.root/'setup-last.log'))
+        self.assertEqual(log['result']['reason'],'uninstall_pending')
+        self.assertTrue(log['result']['current_process_may_remain_loaded']);self.assertFalse(log['result']['camera_restored'])
+        system.live=False
+        code,calls,_,error=self.run_manager(['uninstall','REMOVE',''])
+        self.assertEqual(code,0,error);self.assertIn(('say','remove_done'),calls)
+        restored=s.parse(s.read(self.framehome/'.config/openvr/config/steamvr.vrsettings'))
+        self.assertEqual(restored['camera'],{'forceSceneAlphaBlending':False,'other':'keep'})
+        self.assertFalse((self.framehome/'.config/SteamFrameNativePassthrough/install.json').exists())
+        self.assertEqual((system.reloads,system.native_calls,system.engine_calls),(1,0,0))
+
+    def test_manager_declined_confirmation_is_readonly_and_inspect_stays_readonly(self):
+        self.maintenance_fixture();before=self.snapshot()
+        code,_,_,error=self.run_manager(['uninstall','no'])
+        self.assertEqual(code,0,error);self.assertEqual(before,self.snapshot())
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code=s.main(['--inspect','--check','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=lambda *_,**__:self.frame)
+        self.assertEqual(code,0);self.assertEqual(before,self.snapshot())
+
+    def test_manager_check_requires_no_removal_helper_and_never_stages(self):
+        self.inspection_profile();before=self.snapshot();output=io.StringIO()
+        with contextlib.redirect_stdout(output),mock.patch.object(s,'Maintenance',side_effect=AssertionError('no removal load')):
+            code=s.main(['--manage','--check','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=lambda *_,**__:self.frame)
+        self.assertEqual(code,0);self.assertEqual(before,self.snapshot());self.assertTrue(json.loads(output.getvalue())['inspection_only'])
+
+    def test_manager_foreign_changed_receipt_or_payload_refuses_before_staging(self):
+        self.maintenance_fixture();library=self.framehome/'.local/share/SteamFrameNativePassthrough/package/libVkLayer_frame_pixel_snapshot.so'
+        s.put(library,b'changed unknown bytes',s.read(library));before=self.snapshot()
+        code,_,_,_=self.run_manager(['uninstall','REMOVE',''])
+        self.assertEqual(code,2);self.assertEqual(before,self.snapshot())
+        self.assertNotIn('maintenance-remove',self.frame.commands)
+        self.assertFalse((self.framehome/'.local/share/steam-link-native-passthrough/maintenance').exists())
+        receipt=self.framehome/'.config/SteamFrameNativePassthrough/install.json'
+        s.put(receipt,b'{"schema":"foreign"}\n',s.read(receipt));before=self.snapshot()
+        code,_,_,_=self.run_manager([],['--action','uninstall'])
+        self.assertEqual(code,2);self.assertEqual(before,self.snapshot())
+
+    def test_manager_helper_pin_and_explicit_mode_actions_are_guarded(self):
+        self.maintenance_fixture();helper=self.bundle_root/s.MAINTENANCE_HELPER
+        s.put(helper,b'raise RuntimeError("untrusted helper")',s.read(helper));before=self.snapshot()
+        code,_,_,_=self.run_manager([],['--action','uninstall'])
+        self.assertEqual(code,2);self.assertEqual(before,self.snapshot())
+        self.assertNotIn('maintenance-remove',self.frame.commands)
+        error=io.StringIO()
+        with contextlib.redirect_stderr(error):
+            code=s.main(['--manage','--action','install'],local=self.local)
+        self.assertEqual(code,2);self.assertIn('Check or Uninstall only',error.getvalue())
+
+    def test_manager_revalidates_receipt_after_acquiring_native_lock(self):
+        system=self.maintenance_fixture()
+        config=self.framehome/'.config/SteamFrameNativePassthrough';s.put(config/'setup.lock',b'')
+        receipt_path=config/'install.json';original=self.frame.namespace['module']
+        actor_file=self.framehome/'.local/share/SteamFrameNativePassthrough/package/actor-owned.bin'
+        def changing_module(path,name):
+            module=original(path,name)
+            if name=='sfnp_checked_legacy_removal':
+                locked=module.Setup.locked
+                @contextlib.contextmanager
+                def changed(unit):
+                    with locked(unit):
+                        receipt=s.parse(s.read(receipt_path));s.put(actor_file,b'new actor state')
+                        receipt['files'][str(actor_file)]=s.sha(b'new actor state')
+                        s.put(receipt_path,s.encoded(receipt),s.read(receipt_path))
+                        yield
+                module.Setup.locked=changed
+            return module
+        self.frame.namespace['module']=changing_module
+        library=self.framehome/'.local/share/SteamFrameNativePassthrough/package/libVkLayer_frame_pixel_snapshot.so'
+        before_library=s.read(library)
+        code,_,_,_=self.run_manager(['uninstall','REMOVE',''])
+        self.assertEqual(code,2);self.assertEqual(actor_file.read_bytes(),b'new actor state')
+        self.assertEqual(library.read_bytes(),before_library);self.assertTrue(receipt_path.exists())
+        self.assertFalse((config/'control.json').exists())
+        self.assertEqual((system.reloads,system.native_calls,system.engine_calls),(0,0,0))
+        self.assertEqual(list((self.framehome/'.local/share/steam-link-native-passthrough/maintenance').rglob('*')),[])
+
     def test_remote_generated_data_is_real_json(self):
         raw=self.frame.namespace['data']({'test':1})
         self.assertTrue(raw.endswith(b'\n'));self.assertFalse(raw.endswith(b'\\n'))

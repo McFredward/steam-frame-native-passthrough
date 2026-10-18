@@ -31,6 +31,9 @@ STATE = 'sfnp-steam-link-install-v1'
 PAIR = 'sfnp-pairing-v1'
 ACTIVE = 'sfnp-active-pairing-v1'
 INSPECTION = 'sfnp-setup-inspection-v1'
+MAINTENANCE = 'sfnp-setup-maintenance-v1'
+MAINTENANCE_HELPER = 'setup/frame_native_uninstall.py'
+MAINTENANCE_PIN = {'bytes':42169,'sha256':'396b26b1bdeea0f64eb235b0cf6fb91bddd8685d8b0a27ee425a174f7e9f18c1'}
 MAX_FILE = 32 * 1024 * 1024
 MAX_TOTAL = 64 * 1024 * 1024
 MAX_OUTPUT = 128 * 1024
@@ -434,6 +437,31 @@ def save_inspection(local, report):
     return path
 
 
+class Maintenance:
+    """Only the checked legacy uninstaller, never a runtime or install grant."""
+    def __init__(self, root):
+        root = no_links(root)
+        value = parse(read(root / 'setup-maintenance.json', 4096))
+        require(value == {'schema':MAINTENANCE,'helpers':{MAINTENANCE_HELPER:MAINTENANCE_PIN}},
+                'The checked Frame removal helper is unavailable. Existing files are preserved.')
+        self.helper = read(root / MAINTENANCE_HELPER, MAINTENANCE_PIN['bytes'])
+        require(len(self.helper) == MAINTENANCE_PIN['bytes'] and sha(self.helper) == MAINTENANCE_PIN['sha256'],
+                'The Frame removal helper differs from the reviewed source. Existing files are preserved.')
+
+    def remove(self, remote, plan):
+        require(plan.get('schema') == 'sfnp-maintenance-plan-v1' and plan.get('can_remove') is True and
+                type(plan.get('receipt_sha256')) is str and re.fullmatch('[0-9a-f]{64}',plan['receipt_sha256']),
+                'Frame ownership or unchanged installed files could not be confirmed; nothing was staged.')
+        result = remote.call({'command':'maintenance-remove','receipt_sha256':plan['receipt_sha256'],
+                              'helper':{**MAINTENANCE_PIN,'data':base64.b64encode(self.helper).decode()}})
+        require(result.get('schema') == 'sfnp-maintenance-result-v1' and
+                result.get('reason') in ('uninstalled','uninstall_pending','not_installed') and
+                result.get('automatic_restart') is False and result.get('scope') == 'frame_legacy_patch',
+                'Frame removal was not confirmed. It may be disabled or partially removed; no complete removal is claimed.')
+        return {key:result.get(key) for key in ('schema','reason','scope','automatic_restart','enabled',
+                                               'camera_restored','current_process_may_remain_loaded')}
+
+
 def inventory_request(bundle, challenge):
     return {'command':'inventory','challenge':challenge,
             'runtime_files':bundle.frame['runtime_files'] if bundle else {},
@@ -700,6 +728,49 @@ def apply(request):
     except OSError:pass
   try:stage.rmdir()
   except OSError:pass
+def maintenance_plan(request):
+ receipt=owned_receipt()
+ if receipt is None:return {'schema':'sfnp-maintenance-plan-v1','installed':False,'can_remove':False,'receipt_sha256':None}
+ component=HOME/'.local/share/SteamFrameNativePassthrough/package/bridge-component.json'
+ config=HOME/'.config/SteamFrameNativePassthrough'
+ for filename,schema in (('control.json','sfnp-user-control-v1'),('status.json','sfnp-user-status-v1')):
+  path=config/filename
+  if os.path.lexists(path):
+   value=load(path);need(value.get('schema')==schema,'unknown mutable setup file preserved')
+   if filename=='control.json':need(set(value)=={'schema','enabled'} and type(value['enabled'])is bool,'unknown control preserved')
+   else:need(type(value.get('reason'))is str and len(value['reason'])<=128 and value.get('automatic_restart')is False,'unknown status preserved')
+ total=0;missing=0
+ for name,pin in receipt['files'].items():
+  path=P(name);safe(path.parent,HOME)
+  if not os.path.lexists(path):missing+=1;continue
+  b=raw(path,16777216);total+=len(b);need(total<=134217728 and digest(b)==pin,'changed owned artifact preserved')
+ receipt_path=HOME/'.config/SteamFrameNativePassthrough/install.json'
+ return {'schema':'sfnp-maintenance-plan-v1','installed':True,'can_remove':not component.exists(),
+         'receipt_sha256':digest(raw(receipt_path)),'missing_files':missing,'scope':'frame_legacy_patch'}
+def maintenance_remove(request):
+ plan=maintenance_plan(request)
+ need(plan.get('can_remove') is True and plan['receipt_sha256']==request['receipt_sha256'],'changed removal plan')
+ item=request['helper'];need(set(item)=={'bytes','sha256','data'} and item['bytes']==42169 and item['sha256']=='396b26b1bdeea0f64eb235b0cf6fb91bddd8685d8b0a27ee425a174f7e9f18c1','unknown removal helper')
+ payload=base64.b64decode(item['data'],validate=True)
+ need(len(payload)==item['bytes'] and digest(payload)==item['sha256'],'removal helper pin')
+ base=HOME/'.local/share/steam-link-native-passthrough/maintenance';safe(base,HOME,True)
+ stage=base/secrets.token_hex(16);stage.mkdir(mode=0o700);path=stage/'frame_native_uninstall.py'
+ try:
+  put(path,payload);setup=module(path,'sfnp_checked_legacy_removal')
+  def offline_only(*args):raise setup.SafetyError('Stop SteamVR manually before restoring camera settings; no native runtime was admitted.')
+  unit=setup.Setup(HOME,verifier=offline_only,runtime_factory=lambda:{})
+  with unit.locked():
+   current=maintenance_plan(request)
+   need(current.get('can_remove') is True and current['receipt_sha256']==request['receipt_sha256'],'changed locked removal plan')
+   result=unit.uninstall()
+  reason=result.get('reason');need(reason in ('uninstalled','uninstall_pending','not_installed'),'unknown removal result')
+  return {'schema':'sfnp-maintenance-result-v1','reason':reason,'scope':'frame_legacy_patch','enabled':False,
+          'camera_restored':result.get('camera',{}).get('restored',reason in ('uninstalled','not_installed')),
+          'current_process_may_remain_loaded':reason=='uninstall_pending','automatic_restart':False}
+ finally:
+  if path.exists() and raw(path)==payload:path.unlink()
+  try:stage.rmdir()
+  except OSError:pass
 def pairing_finish(request):
  d=HOME/'.config/steam-link-native-passthrough/pairings';safe(d,HOME)
  journal=d/'transaction.json'
@@ -721,6 +792,8 @@ def run(request,home=None):
  HOME=home if home is not None else P.home()
  if request['command'] in ('inventory','inventory-inspect'):return inventory(request)
  if request['command']=='apply':return apply(request)
+ if request['command']=='maintenance-plan':return maintenance_plan(request)
+ if request['command']=='maintenance-remove':return maintenance_remove(request)
  if request['command'] in ('commit-pair','rollback-pair'):return pairing_finish(request)
  raise ValueError('unknown operation')
 if __name__=='__main__':
@@ -740,7 +813,7 @@ class Remote:
         args += ['python3 -B -c ' + shlex.quote(REMOTE_AGENT)]
         code, raw = self.runner.run(args, encoded(request), interactive=self.interactive,
                                     timeout=20 if request['command'] in ('inventory','inventory-inspect') else 120)
-        removing = request.get('action') == 'uninstall'
+        removing = request.get('action') == 'uninstall' or request['command']=='maintenance-remove'
         recovery = 'Frame removal refused. Use the checked Frame setup emergency-off, stop SteamVR manually, then retry Uninstall; no complete removal is claimed.'
         require(code == 0, recovery if removing else 'Frame operation refused or SSH unavailable. No automatic restart was attempted.')
         result = parse(raw)
@@ -1074,6 +1147,7 @@ def remembered_frame_hosts(local):
 
 def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discover_frame=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--manage', action='store_true', help='Check setup or explicitly remove an owned existing Frame patch; no new bridge installation.')
     parser.add_argument('--inspect', action='store_true', help='Check PC/Frame setup only; no installation, pairing or restart.')
     parser.add_argument('--check', action='store_true', help='Read-only JSON inventory; no credential or log writes.')
     parser.add_argument('--dry-run', action='store_true', help='Display the plan without staging, pairing or installing.')
@@ -1089,16 +1163,18 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discov
     ui = None
     try:
         require(not (args.inspect and args.action), '--inspect cannot be combined with an installation action.')
+        require(not (args.inspect and args.manage), 'Choose either --inspect or --manage.')
+        require(not (args.manage and args.action not in (None,'uninstall')), 'Management currently offers Check or Uninstall only; the new bridge is unavailable.')
         interactive = not args.check and sys.stdin.isatty()
         presentation = load_presentation() if interactive else None
         if presentation is not None:
             ui = presentation.Presenter(input_fn=input_fn, lang=args.lang, input_enabled=True)
             ui.banner(inspection=args.inspect)
         with ui.progress('pc_check') if ui else nullcontext():
-            pc = local.inventory(inspection=True) if args.inspect else local.inventory()
-        inspection = Inspection(args.bundle) if args.inspect else None
+            pc = local.inventory(inspection=True) if args.inspect or args.manage else local.inventory()
+        inspection = Inspection(args.bundle) if args.inspect or args.manage else None
         bundle = None
-        if not args.inspect:
+        if not (args.inspect or args.manage):
             try:
                 bundle = Bundle(args.bundle)
             except (OSError, SetupError, KeyError, TypeError):
@@ -1133,6 +1209,51 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input, discov
                 frame = remote.call(request)
         if frame is not None and address:
             frame = {**frame, 'host':host(address)}
+        if args.manage:
+            report = inspection_report(local, pc, frame, inspection)
+            if args.check or args.dry_run:
+                print(json.dumps(report, sort_keys=True)); return 0
+            if ui:
+                files = report['pc']['files']
+                matching = bool(files) and all(item['status']=='match' for item in files.values())
+                ui.status('pc_ready' if matching else 'pc_partial','ok' if matching else 'warning')
+                if frame is not None:
+                    ready = frame.get('runtime_compatible') is True
+                    ui.status('receiver_ready' if ready else 'receiver_changed','ok' if ready else 'warning')
+                ui.status('bridge_unavailable','info')
+            maintenance = None
+            try:
+                maintenance = Maintenance(args.bundle)
+            except (OSError, SetupError, KeyError, TypeError):
+                pass
+            actions = ['check','exit']
+            if maintenance is not None and remote is not None and frame.get('owned_receipt_valid') and frame.get('legacy_installed'):
+                actions.insert(1,'uninstall')
+            action = args.action
+            if action is None and interactive:
+                action = ui.choose_action(actions,recommended='check')
+            if action == 'uninstall':
+                require('uninstall' in actions, 'No checked, receipt-owned legacy Frame installation is available for removal.')
+                require(interactive, 'Uninstall requires an interactive review and explicit confirmation.')
+                with ui.suspend():
+                    removal_plan = remote.call({'command':'maintenance-plan'})
+                require(removal_plan.get('can_remove') is True, 'Frame removal ownership could not be confirmed; no changes were made.')
+                ui.say('remove_plan')
+                if not ui.confirm_uninstall():
+                    print('No changes made.'); return 0
+                local.apply_started = True
+                with ui.suspend():
+                    result = maintenance.remove(remote,removal_plan)
+                log = write_report(local,'uninstall',report,result)
+                ui.say('remove_pending' if result['reason']=='uninstall_pending' else 'remove_done')
+                ui.path(log)
+                ui.ask('done_prompt')
+                return 0
+            if action == 'check':
+                report_path = save_inspection(local,report)
+                if ui:ui.path(report_path);ui.say('check_finish');ui.ask('done_prompt')
+                else:print('Inspection report: ' + str(report_path))
+            return 0
         if args.inspect:
             report = inspection_report(local, pc, frame, inspection)
             if args.check:
