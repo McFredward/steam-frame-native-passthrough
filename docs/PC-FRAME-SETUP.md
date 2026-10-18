@@ -8,15 +8,27 @@ sender and Frame runtime, and GloomhavenVR Build708 or newer. The stable entry
 points and historical bundle contract below remain separate. A software-validated
 preview is not a verified combined headset result.
 
-The bridge wizard uses arrow-key menus (Up/Down, Home/End, Enter and Escape) on
-Windows/POSIX terminals. Redirected or unsupported terminals retain a plain
-numbered fallback. Failures and missing devices offer Retry; an uncertain write
-is reconciled through its owned checkpoint rather than blindly repeated.
+The interactive wizard uses [Textual](https://textual.textualize.io/), with a
+persistent PC/Frame overview, a focused action list, explicit confirmations and
+progress. Arrow keys, Tab, Enter and mouse input are supported; the layout adapts
+to the terminal size. Paths and technical output stay in a separate Details
+area. Redirected input/output retains the plain interface, and `--check` remains
+JSON-only. Failures and missing devices offer Retry; an uncertain write is
+reconciled through its owned checkpoint rather than blindly repeated.
+
+The synchronous workflow runs in one owned backend thread. Only the UI thread
+updates widgets; modal answers return to the backend without blocking rendering.
+Cancellation never kills a running installation/recovery thread. Completion
+stays visible until the user closes it. Textual and its pinned pure-Python
+dependencies are included privately with their licenses, requiring no user pip
+installation or system-wide Python packages.
 
 The bridge wizard keeps one authenticated OpenSSH connection for its lifetime.
 Check, install, health checks and explicit Undo reuse that connection on Windows
 and Linux. OpenSSH alone owns password/fingerprint prompts; no password is
-stored and no key is added. A broken connection can be reopened for a deliberate
+stored and no key is added. The terminal app temporarily yields the console only
+for interactive SSH authentication; established-session operations retain its
+progress display. A broken connection can be reopened for a deliberate
 retry or recovery; it never silently repeats an uncertain installation request.
 Failed discovery candidates and the final wizard exit close their processes.
 
@@ -59,6 +71,17 @@ Recovery is never marked complete until original files/settings are verified,
 both Frame services are running and native startup health passes. Unknown changed
 files remain untouched. An interrupted/incomplete recovery offers Retry and stays
 available as a menu action on the next run, even if new installation is unavailable.
+If a confirmed Update first needs to recover an unfinished operation, it then
+continues installing the same checked package after refreshing both inventories.
+Recovery does not consume or silently discard that confirmed update. Explicit
+Restore remains a separate action. The completion overview refreshes the actual
+installed state, and the bounded log records action selection and confirmation.
+
+Release engineering prepares the pinned UI dependencies with
+`python3 -B tools/package_setup_textual.py --cache PATH --download`, then supplies
+`--textual-wheels PATH` to the package generator. This is a build input, not an
+end-user installation step. Dependency licenses and exact wheel provenance are
+kept in the private runtime.
 
 The remainder describes the separate older stable/inspection bundle contracts.
 

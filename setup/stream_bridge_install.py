@@ -1296,15 +1296,27 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
             'pc':{'compatible':installed.check(bundle,pc),'installed':state is not None},'frame':frame}
     if args.check or args.dry_run:
         print(json.dumps(report,sort_keys=True));return 0
+    def display_inventory(current_pc,current_frame):
+        if not hasattr(ui,'inventory'):return
+        ui.inventory(pc={'steamvr':str(current_pc.get('steamvr') or ''),'platform':current_pc.get('platform'),
+                         'compatible':installed.check(bundle,current_pc),'installed':installed.state() is not None},
+                     frame=None if current_frame is None else {key:current_frame.get(key) for key in
+                         ('installed','legacy_installed','runtime_compatible','enabled','recovery_pending')}|{'host':str(address)},
+                     report={'bridge_available':available,'automatic_restart':False})
+    def refresh_inventory():
+        # Presentation after a committed operation cannot turn a successful
+        # installation into rollback. A lost read-only refresh leaves an honest
+        # status notice; the exact completed operation and logs stay intact.
+        if not hasattr(ui,'inventory'):return
+        try:
+            current_pc=local.inventory()
+            with terminal_scope(e,ui,remote):current_frame=remote.call(request(bundle,'bridge-inventory'))
+            display_inventory(current_pc,current_frame)
+        except (OSError,ValueError):ui.say('bridge_inventory_refresh_failed')
     if ui:
         if frame is not None:ui.status('receiver_ready' if frame.get('runtime_compatible') else 'receiver_changed','info')
         ui.status('bridge_available' if available else 'bridge_unavailable','info')
-        if hasattr(ui,'inventory'):
-            ui.inventory(pc={'steamvr':str(pc.get('steamvr') or ''),'platform':pc.get('platform'),
-                             **report['pc']},
-                         frame=None if frame is None else {key:frame.get(key) for key in
-                             ('installed','runtime_compatible','enabled','recovery_pending')}|{'host':str(address)},
-                         report={'bridge_available':available,'automatic_restart':False})
+        display_inventory(pc,frame)
     actions=['retry','check','exit']
     pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
     if pending and frame is not None:actions.insert(0,'rollback')
@@ -1314,24 +1326,47 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         elif state['bundle']==bundle.pin:actions.insert(0,'repair')
         else:actions.insert(0,'update')
     recommended='rollback' if pending else 'install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'check'
-    action=args.action or (ui.choose_action(actions,recommended=recommended) if ui else None)
+    resumed=context.pop('confirmed_apply',None)
+    if resumed is not None:
+        e.require(type(resumed)is dict and set(resumed)=={'bundle','intent'} and resumed['bundle']==bundle.pin and
+                  resumed['intent'] in ('install','update','repair'),
+                  'The recovered operation does not match this checked package.')
+        # Recovery can restore the original legacy-only baseline. An update
+        # then becomes a fresh installation of the SAME already-confirmed
+        # package, rather than silently dropping the user's requested update.
+        action=next((candidate for candidate in (resumed['intent'],'install','update','repair') if candidate in actions),None)
+        e.require(action is not None,'The confirmed update is no longer available after recovery; check the reported PC and Frame state.')
+        if ui:ui.say('bridge_resuming_update')
+    else:
+        action=args.action or (ui.choose_action(actions,recommended=recommended) if ui else None)
+    if log and action in actions:log.event('preflight','result',action=action,status='pending')
     if action in (None,'exit','check'):return 0
     e.require(interactive and action in actions,'That action is not available for this checked package.')
     if action=='retry':return -1
+    def confirm(key,*,remove=False):
+        if resumed is not None:return True
+        accepted=ui.confirm_uninstall() if remove else ui.confirm(key)
+        if log:log.event('preflight','result',action=action,status='ok' if accepted else 'cancelled')
+        return accepted
     if action=='rollback':
         ui.say('bridge_recovery_incomplete')
-        if not ui.confirm('bridge_recover_confirm'):return 0
+        if not confirm('bridge_recover_confirm'):return 0
     elif action=='uninstall':
         ui.say('bridge_remove_plan')
-        if not ui.confirm_uninstall():return 0
+        if not confirm('confirm_uninstall',remove=True):return 0
     else:
         bundle.admit(local.system)
         ui.say('bridge_install_plan')
-        if not ui.confirm('bridge_confirm'):return 0
+        if not confirm('bridge_confirm'):return 0
     ports=Automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
     flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
     if pending or action=='rollback':
         ui.say('bridge_recovery_incomplete')
         if not flow.recover():return 2
+        if action in ('install','update','repair'):
+            context['confirmed_apply']={'bundle':bundle.pin,'intent':action}
+        if action=='rollback':refresh_inventory()
         return 0 if action=='rollback' else -1
-    return flow.run(action)
+    result=flow.run(action)
+    if result==0:refresh_inventory()
+    return result

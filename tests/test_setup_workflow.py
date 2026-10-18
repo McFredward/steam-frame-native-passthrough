@@ -24,6 +24,50 @@ class Files(fixtures.Tests):
         path=self.bundle_root/'stream-bridge-bundle.json';s.put(path,s.encoded(self.manifest),s.read(path))
         return b.Bundle(self.bundle_root,s)
 
+    def test_confirmed_update_survives_recovery_and_installs_the_new_package(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit();updated=self.newer_bundle();choices=[];confirmations=[];commands=[];inventories=[]
+        class Screen:
+            def banner(inner,**kw):pass
+            def status(inner,*a):pass
+            def path(inner,*a,**kw):pass
+            def say(inner,key):pass
+            def suspend(inner):return contextlib.nullcontext()
+            def inventory(inner,**kw):inventories.append(kw)
+            def choose_action(inner,actions,**kw):
+                choices.append(actions)
+                if len(choices)>1:raise AssertionError('Confirmed Update must continue after recovery without asking again')
+                return 'update'
+            def confirm(inner,key):confirmations.append(key);return True
+        class Runtime:
+            def __init__(inner,*a):pass
+            def snapshot(inner):pass
+            def stop(inner):self.system.live=False
+            def restore(inner):pass
+            def finish(inner):pass
+        class Peer:
+            def call(inner,request):
+                command=request['command'];commands.append(command)
+                if command=='bridge-health-baseline':return {}
+                if command=='bridge-health':return {'software_ready':True}
+                if command.startswith('bridge-runtime-'):return {'running':True}
+                return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        real=b.load_helper
+        def helper(engine,name):return types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else real(engine,name)
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())),mock.patch.object(b,'local_address',return_value='192.168.1.4'),mock.patch.object(b,'load_helper',side_effect=helper),self.fake_generation():
+            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        self.assertEqual(len(choices),1)
+        self.assertEqual(confirmations,['bridge_confirm','bridge_picture'])
+        self.assertLess(commands.index('bridge-restore'),commands.index('bridge-prepare'))
+        self.assertEqual(installer.state()['bundle'],updated.pin)
+        self.assertEqual(self.unit.tx.state()['bundle'],updated.pin)
+        self.assertTrue(inventories[-1]['pc']['installed']);self.assertTrue(inventories[-1]['frame']['installed'])
+        self.assertFalse(installer.checkpoint().path.exists());self.assertFalse(self.unit.checkpoint().path.exists())
+
     def test_pc_update_retains_initial_uninstall_baseline_and_pairing(self):
         installer=b.LocalInstall(s,self.local);initial=s.parse(s.read(self.settings))
         installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)

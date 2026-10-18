@@ -27,6 +27,8 @@ STAGES = frozenset(('session', 'bundle', 'preflight', 'pc_inventory',
                     'startup_baseline', 'startup_health', 'picture_check',
                     'undo', 'cleanup', 'complete','runtime_stop','runtime_start','rollback'))
 KINDS = frozenset(('start', 'stage', 'result', 'failure', 'recovery', 'complete'))
+ACTIONS = frozenset(('install','update','repair','uninstall','check','exit',
+                     'retry','back','rollback','continue'))
 STATUSES = frozenset(('started', 'ok', 'partial', 'failed', 'refused', 'skipped',
                       'pending', 'cancelled', 'unavailable', 'unchanged'))
 COMMANDS = frozenset(('inspect', 'check', 'install', 'update', 'repair',
@@ -309,7 +311,7 @@ class SessionLog:
         os.fsync(self._fd)
 
     def event(self, stage, kind, *, status=None, command=None, reason=None,
-              error_type=None, errno=None, winerror=None, recovery=None):
+              error_type=None, errno=None, winerror=None, recovery=None, action=None):
         with self._lock:
             self.last_event_error = None
             if not self.available or self._closed or self._limited:
@@ -323,6 +325,7 @@ class SessionLog:
                          'stage': stage, 'kind': kind}
                 for key, candidate, allowed in (('status', status, STATUSES),
                                                  ('command', command, COMMANDS),
+                                                 ('action', action, ACTIONS),
                                                  ('error_type', error_type, ERROR_TYPES)):
                     if candidate is not None:
                         _require(type(candidate) is str and candidate in allowed, 'invalid_event')

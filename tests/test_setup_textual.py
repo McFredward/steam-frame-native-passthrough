@@ -193,7 +193,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
 
         def backend():
             p = UI.active_presenter()
-            p.inventory(report={"pc": {"files": {"driver": {"status": "match"}}, "installed": True},
+            p.inventory(report={"pc": {"compatible": True, "installed": True},
                                 "frame": {"runtime_compatible": True, "host": "192.168.0.25", "installed": True}})
             p.stage("startup_health")
             observed.append(p.choose_action(["update", "uninstall", "check", "exit"], recommended="update"))
@@ -203,6 +203,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 32)) as pilot:
             await until(pilot, lambda: app.prompt is not None)
             self.assertIn("New connection installed", str(app.query_one("#pc-status", Static).render()))
+            self.assertIn("Supported version", str(app.query_one("#pc-status", Static).render()))
             self.assertIn("192.168.0.25", str(app.query_one("#frame-status", Static).render()))
             for width, height in ((80, 24), (42, 16), (120, 40)):
                 await pilot.resize_terminal(width, height)

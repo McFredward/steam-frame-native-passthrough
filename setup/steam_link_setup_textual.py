@@ -530,7 +530,7 @@ class SetupApp(App[int]):
             if not isinstance(value, dict):
                 continue
             files = value.get("files")
-            ready = value.get("runtime_compatible") is True
+            ready = value.get("runtime_compatible", value.get("compatible")) is True
             if isinstance(files, dict) and files:
                 ready = all(isinstance(item, dict) and item.get("status") == "match" for item in files.values())
             state = self.words["ready"] if ready else self.words["attention"]

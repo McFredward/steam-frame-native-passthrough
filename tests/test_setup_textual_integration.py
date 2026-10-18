@@ -25,6 +25,7 @@ engine = load('textual_integration_engine', 'steam_link_setup.py')
 bridge = load('textual_integration_bridge', 'stream_bridge_install.py')
 vendor = load('textual_integration_vendor', 'steam_link_setup_vendor.py')
 presentation = load('textual_integration_presentation', 'steam_link_setup_ui.py')
+session_log = load('textual_integration_log', 'steam_link_setup_log.py')
 
 
 class EntryPoint(unittest.TestCase):
@@ -84,6 +85,19 @@ class ConsoleOwnership(unittest.TestCase):
             with bridge.terminal_scope(e, ui, types.SimpleNamespace(needs_terminal=needs)):
                 events.append('rpc')
         self.assertEqual(events, ['rpc', 'suspend', 'rpc', 'resume', 'rpc'])
+
+    def test_choice_and_confirmation_are_recorded_without_arbitrary_input(self):
+        with tempfile.TemporaryDirectory(prefix='sfnp-textual-action-log-') as temporary:
+            log = session_log.SessionLog.open(Path(temporary) / 'private', system='Linux')
+            self.assertTrue(log.event('preflight', 'result', action='update', status='pending'))
+            self.assertTrue(log.event('preflight', 'result', action='update', status='cancelled'))
+            self.assertFalse(log.event('preflight', 'result', action='untrusted-password-input', status='ok'))
+            path = log.path
+            log.close()
+            raw = path.read_text()
+        self.assertNotIn('untrusted-password-input', raw)
+        actions = [event for event in map(json.loads, raw.splitlines()) if 'action' in event]
+        self.assertEqual([(e['action'], e['status']) for e in actions], [('update', 'pending'), ('update', 'cancelled')])
 
 
 class Vendor(unittest.TestCase):
