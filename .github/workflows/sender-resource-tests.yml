@@ -1,3 +1,4 @@
+# Exercise the Windows API directly; Wine capability refusals are not GPU proof.
 name: Native Windows sender resource checks
 on:
   push:

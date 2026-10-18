@@ -241,8 +241,8 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
             if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted});
             coldNote("native legacy and exact-coverage pipelines prepared");
-        }else coldNote("native companion creation refused; native pipeline retained");
-    }catch(...){/* Native original has already succeeded and remains untouched. */}
+        }else coldNote("native legacy decoder active; exact coverage unavailable");
+    }catch(...){/* A valid native or legacy baseline has already succeeded. */}
 }
 void Renderer::pipelineDestroyed(VkPipeline original) noexcept{
     auto&p=*impl_;try{std::lock_guard<std::mutex> lock(p.gate);if(auto* entry=find(p.pipelines,handle(original))){
