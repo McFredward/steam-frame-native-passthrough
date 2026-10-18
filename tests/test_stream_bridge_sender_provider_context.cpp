@@ -53,7 +53,11 @@ void run(){
     check(stats.sourceFrames==0&&stats.certifiedMasks==0,"fixture call cannot authorize a fabricated native source");
     Com<ID3D11DeviceContext> queried;std::thread queryWorker([&]{device->GetImmediateContext(queried.out());});queryWorker.join();
     queried->Draw(0,0);
-    check(coverage.gateStats().hookDraws==2,"cold GetImmediateContext alias reaches the same production observer");
+    stats=coverage.gateStats();
+    std::printf("context diagnostic after queried Draw: draws=%llu, other=%llu, same-created=%u, readable=%u, stable=%u, immediate-same=%u, native-device-same=%u, slots=%u\n",
+        static_cast<unsigned long long>(stats.hookDraws),static_cast<unsigned long long>(stats.otherDraws),unsigned(queried.p==submittedContext.p),
+        unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.immediateContextSame),unsigned(stats.nativeDeviceSame),stats.contextHookSlots);
+    check(stats.hookDraws==2,"cold GetImmediateContext alias reaches the same production observer");
     Com<ID3D11DeviceContext1> extended;
     check(SUCCEEDED(submittedContext->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(extended.out()))),"native versioned context interface");
     extended->Draw(0,0);
