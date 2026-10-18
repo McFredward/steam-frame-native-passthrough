@@ -205,7 +205,7 @@ def extract(archive, target, inspection=False, maintenance=False, bridge_preview
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with path.open('xb') as output:
                 output.write(raw)
-            path.chmod(0o600)
+            path.chmod(0o700 if name == 'setup/steam-link-askpass.sh' else 0o600)
     if inspection or maintenance:
         profile = parse((target / 'setup-inspection.json').read_bytes())
         require(type(profile) is dict and set(profile) == {'schema', 'expected_pc', 'runtime_files'} and
