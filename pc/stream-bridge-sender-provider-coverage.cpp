@@ -111,7 +111,7 @@ struct SenderCoverage::Impl {
         // lazily on the first rendering call. Finish that zero-work transition
         // before saving or publishing hooks, under the same public protection.
         // Zero vertices preserve every binding and produce no scene pixels.
-        MultithreadScope protect(multithread);context->Draw(0,0);
+        MultithreadScope protect(multithread);context->Flush();context->Draw(0,0);
         table=*reinterpret_cast<void***>(context);originalDraw=bits<NativeDraw>(table[13]);originalMap=bits<Map>(table[14]);originalUnmap=bits<Unmap>(table[15]);originalCopy=bits<Copy>(table[47]);
         if(!originalDraw||!originalMap||!originalUnmap||!originalCopy)return false;
         Impl* expected=nullptr;if(!instance.compare_exchange_strong(expected,this)&&expected!=this)return false;

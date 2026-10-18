@@ -104,9 +104,9 @@ jobs:
         shell: pwsh
         run: |
           $source = Get-Content pc/stream-bridge-sender-provider-coverage.cpp -Raw
-          $needle = 'MultithreadScope protect(multithread);context->Draw(0,0);'
+          $needle = 'context->Draw(0,0);'
           if ([regex]::Matches($source, [regex]::Escape($needle)).Count -ne 1) { throw 'Cold initialization control must change exactly one production operation' }
-          $source.Replace($needle, 'MultithreadScope protect(multithread);') | Set-Content build/coverage-no-warmup.cpp -Encoding utf8NoBOM
+          $source.Replace($needle, '/* causal control: omit cold Draw only */') | Set-Content build/coverage-no-warmup.cpp -Encoding utf8NoBOM
       - name: Compile the identical production fixture with only cold Draw removed
         shell: cmd
         run: |

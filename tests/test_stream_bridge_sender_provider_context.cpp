@@ -73,15 +73,22 @@ float4 ps_main():SV_Target { return color; }
         std::memcpy(mapped.pData,color,sizeof color);context->Unmap(cb.p,0);context->PSSetConstantBuffers(0,1,&cb.p);context->PSSetSamplers(0,1,&sample.p);
         if(frame==0)diagnostic("after native-like pipeline bindings",coverage.gateStats(),true);
         context->Draw(4,0);auto stats=coverage.gateStats();
-        if(stats.hookDraws!=before+frame+1||stats.contextHookSlots!=15)diagnostic("lost after native-like Draw",stats,true);
-        check(stats.hookDraws==before+frame+1&&stats.contextHookSlots==15,"all real rendering frames retain production hooks after native state changes");
+        if(stats.hookDraws!=before+2*frame+1||stats.contextHookSlots!=15)diagnostic("lost after native-like Draw",stats,true);
+        check(stats.hookDraws==before+2*frame+1&&stats.contextHookSlots==15,"all real rendering frames retain production hooks after native state changes");
         context->CopyResource(staging.p,target.p);check(SUCCEEDED(context->Map(staging.p,0,D3D11_MAP_READ,0,&mapped)),"real native rendered pixels mapped");
         const auto* pixel=static_cast<const unsigned char*>(mapped.pData);
         check(pixel&&pixel[0]==17&&pixel[1]==29&&pixel[2]==43&&pixel[3]==101,"ordinary native RGB and fractional alpha unchanged by observer");context->Unmap(staging.p,0);
         // The real pinned native PostPresent path queries its device's public
         // immediate context, flushes and releases it before encoder Copy.
-        Com<ID3D11DeviceContext> post;device->GetImmediateContext(post.out());post->Flush();
-        stats=coverage.gateStats();check(stats.contextHookSlots==15,"native PostPresent getter and Flush preserve dispatch");
+        Com<ID3D11DeviceContext> post;
+        if(frame==0)diagnostic("before native PostPresent getter",coverage.gateStats(),true);
+        device->GetImmediateContext(post.out());
+        if(frame==0)diagnostic("after native PostPresent getter",coverage.gateStats(),post.p==context);
+        post->Flush();stats=coverage.gateStats();
+        if(frame==0||stats.contextHookSlots!=15)diagnostic("after native PostPresent Flush",stats,post.p==context);
+        post->Draw(0,0);stats=coverage.gateStats();
+        if(frame==0||stats.contextHookSlots!=15)diagnostic("after native PostPresent next Draw",stats,post.p==context);
+        check(stats.contextHookSlots==15&&stats.hookDraws==before+2*frame+2,"native PostPresent getter, Flush and following Draw preserve dispatch");
     }
     check(coverage.gateStats().sourceFrames==0&&coverage.gateStats().certifiedMasks==0,"ordinary native-like frames never fabricate attested source coverage");
 }
