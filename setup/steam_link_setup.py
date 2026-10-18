@@ -119,6 +119,47 @@ def read(path, limit=MAX_FILE, private=False):
     return raw
 
 
+class ReferenceReadError(SetupError):
+    """Public inventory reasons contain no raw OS errors or environment details."""
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def read_public_reference(path, limit=MAX_FILE):
+    """Read-only public snapshot; hardlinks grant no private/write admission."""
+    def check(value, reason):
+        if not value:
+            raise ReferenceReadError(reason)
+    try:
+        try:
+            path = no_links(path)
+        except SetupError:
+            raise ReferenceReadError('redirected_path') from None
+        before = path.stat()
+        check(stat.S_ISREG(before.st_mode), 'not_regular')
+        check(before.st_nlink >= 1, 'invalid_metadata')
+        check(0 <= before.st_size <= limit, 'size_limit')
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(descriptor, 'rb') as stream:
+            opened = os.fstat(stream.fileno())
+            check(file_identity(opened, cross_api=True) == file_identity(before, cross_api=True),
+                  'metadata_changed')
+            payload = stream.read(limit + 1)
+            check(file_identity(os.fstat(stream.fileno())) == file_identity(opened), 'metadata_changed')
+        check(len(payload) == before.st_size and file_identity(path.stat()) == file_identity(before),
+              'metadata_changed')
+        return payload, {'bytes':len(payload),'hardlinked':before.st_nlink > 1}
+    except ReferenceReadError:
+        raise
+    except OSError as error:
+        # Only bounded categories leave the inspector, never filenames or error text.
+        reason = ('sharing_violation' if getattr(error, 'winerror', None) in (32, 33) else
+                  'missing' if isinstance(error, FileNotFoundError) else
+                  'permission_denied' if isinstance(error, PermissionError) else 'io_error')
+        raise ReferenceReadError(reason) from None
+
+
 def private_acl(path):
     """Apply Windows owner/system-only DACL before secret bytes are written."""
     if os.name != 'nt':
@@ -349,26 +390,30 @@ class Inspection:
         expected = self.expected_pc.get(info['platform'], {})
         result = {}
         for name, pin in expected.items():
-            status, actual = 'missing', None
+            status, actual, reason = 'missing', None, 'steamvr_not_found'
+            metadata = {'bytes':None,'hardlinked':None}
             if info.get('steamvr'):
                 try:
-                    payload = read(Path(info['steamvr']) / relative(name))
+                    payload, metadata = read_public_reference(Path(info['steamvr']) / relative(name))
                     actual = sha(payload)
                     status = 'match' if len(payload) == pin['bytes'] and actual == pin['sha256'] else 'different'
-                except FileNotFoundError:
-                    pass
-                except (OSError, SetupError):
-                    status = 'unreadable'
-            result[name] = {'status':status,'sha256':actual}
+                    reason = 'reference_match' if status == 'match' else 'hash_or_size_mismatch'
+                except ReferenceReadError as error:
+                    reason = error.reason
+                    status = 'missing' if reason == 'missing' else 'unreadable'
+            result[name] = {'status':status,'reason':reason,'sha256':actual,**metadata}
         return result
 
 
 def inspection_report(local, pc, frame, profile):
+    observed = None if frame is None else {key:frame.get(key) for key in
+               ('architecture','installed','legacy_installed','enabled','runtime_compatible')}
+    if observed is not None and 'host' in frame:
+        observed['host'] = host(frame['host'])
     return {'schema':INSPECTION,'inspection_only':True,'bridge_available':False,'automatic_restart':False,
             'pc':{'platform':pc['platform'],'steamvr':pc.get('steamvr'),
                   'installed':pc.get('installed'),'registered':pc.get('registered'),'files':profile.pc_files(pc)},
-            'frame':None if frame is None else {key:frame.get(key) for key in
-                     ('architecture','installed','legacy_installed','enabled','runtime_compatible')}}
+            'frame':observed}
 
 
 def save_inspection(local, report):

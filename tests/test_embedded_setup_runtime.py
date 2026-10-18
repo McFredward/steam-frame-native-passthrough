@@ -29,6 +29,24 @@ with tempfile.TemporaryDirectory(prefix='sfnp-embedded-acl-') as temporary:
     # Exercise the actual read after replacement and actual DACL application.
     module.put(path, b'{"dummy":"updated"}\n', b'{"dummy":"not-a-credential"}\n')
     assert module.read(path, private=True) == b'{"dummy":"updated"}\n'
+    # Actual NTFS hardlinks are valid public references, never private admission.
+    public = Path(temporary) / 'public-vrpathreg.exe'
+    public.write_bytes(b'non-executable public reference fixture')
+    alias = Path(temporary) / 'public-link.exe'
+    import os
+    os.link(public, alias)
+    snapshot, metadata = module.read_public_reference(public)
+    assert snapshot == b'non-executable public reference fixture'
+    assert metadata == {'bytes': len(snapshot), 'hardlinked': True}
+    try:
+        module.read(public, private=True)
+    except module.SetupError:
+        pass
+    else:
+        raise AssertionError('public hardlink must not relax private admission')
+    public.write_bytes(b'updated public reference fixture')
+    assert module.read_public_reference(alias)[0] == b'updated public reference fixture'
 print(json.dumps({'actual_bundled_python': sys.version, 'inspection_cli': 'passed',
                   'actual_windows_private_acl': sys.platform == 'win32', 'dummy_file_read': 'passed',
+                  'actual_windows_public_hardlink': sys.platform == 'win32', 'public_hardlink_snapshot': 'passed',
                   'frame_contact': False, 'native_patch_install': False}))

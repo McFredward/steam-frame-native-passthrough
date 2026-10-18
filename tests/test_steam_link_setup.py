@@ -346,6 +346,71 @@ class WizardTests(unittest.TestCase):
                         local=self.local,remote_factory=lambda *_,**__:Failure())
         self.assertEqual(code,2);self.assertNotIn('secret password',error.getvalue());self.assertEqual(before,self.snapshot())
 
+    def test_public_reference_hardlinks_match_without_private_admission(self):
+        self.inspection_profile()
+        alias=self.base/'second public executable link';os.link(self.tool,alias)
+        profile=s.Inspection(self.bundle_root);before=self.snapshot()
+        result=profile.pc_files(self.local.inventory(inspection=True))['bin/win64/vrpathreg.exe']
+        self.assertEqual(result,{'status':'match','reason':'reference_match','sha256':s.sha(alias.read_bytes()),
+                                 'bytes':alias.stat().st_size,'hardlinked':True})
+        self.assertEqual(before,self.snapshot());self.assertEqual(self.system.calls,[])
+        for private in (False,True):
+            with self.subTest(private=private),self.assertRaisesRegex(s.SetupError,'ordinary'):
+                s.read(self.tool,private=private)
+
+    def test_public_reference_failures_have_fixed_safe_reasons(self):
+        path=self.framehome/'public.bin';path.write_bytes(b'public reference')
+        errors=[(PermissionError(13,'secret path or password'),'permission_denied'),
+                (OSError(5,'secret remote output'),'io_error')]
+        locked=PermissionError(13,'private Windows message');locked.winerror=32
+        errors.append((locked,'sharing_violation'))
+        for error,reason in errors:
+            with self.subTest(reason=reason),mock.patch.object(os,'open',side_effect=error):
+                with self.assertRaises(s.ReferenceReadError) as refusal:s.read_public_reference(path)
+                self.assertEqual(refusal.exception.reason,reason);self.assertNotIn('secret',str(refusal.exception))
+        for target,limit,reason in ((self.framehome/'absent',32,'missing'),(self.framehome,32,'not_regular'),
+                                    (path,1,'size_limit')):
+            with self.subTest(reason=reason),self.assertRaises(s.ReferenceReadError) as refusal:
+                s.read_public_reference(target,limit)
+            self.assertEqual(refusal.exception.reason,reason)
+        alias=self.framehome/'redirected';alias.symlink_to(path)
+        with self.assertRaises(s.ReferenceReadError) as refusal:s.read_public_reference(alias)
+        self.assertEqual(refusal.exception.reason,'redirected_path')
+
+    def test_public_reference_snapshot_refuses_actual_modification(self):
+        path=self.framehome/'public-changing';path.write_bytes(b'original public bytes')
+        actual_fstat=os.fstat;calls=[]
+        def changed(descriptor):
+            info=actual_fstat(descriptor);calls.append(descriptor)
+            if len(calls)==1:os.utime(path,ns=(info.st_atime_ns,info.st_mtime_ns+1000000000))
+            return info
+        with mock.patch.object(os,'fstat',side_effect=changed):
+            with self.assertRaises(s.ReferenceReadError) as refusal:s.read_public_reference(path)
+        self.assertEqual(refusal.exception.reason,'metadata_changed')
+
+    def test_public_inspection_report_uses_reason_codes_not_raw_errors(self):
+        self.inspection_profile();profile=s.Inspection(self.bundle_root)
+        info=self.local.inventory(inspection=True)
+        with mock.patch.object(os,'open',side_effect=PermissionError(13,'secret local path')):
+            report=profile.pc_files(info)
+        self.assertEqual({item['reason']for item in report.values()},{'permission_denied'})
+        self.assertEqual({item['status']for item in report.values()},{'unreadable'})
+        self.assertTrue(all(item['sha256'] is None and item['bytes'] is None for item in report.values()))
+        self.assertNotIn('secret local path',json.dumps(report))
+        missing=profile.pc_files({**info,'steamvr':None})
+        self.assertEqual({item['reason']for item in missing.values()},{'steamvr_not_found'})
+
+    def test_inspection_report_retains_only_validated_nonsecret_host(self):
+        self.inspection_profile();pc,frame,_=self.inventory();profile=s.Inspection(self.bundle_root)
+        original=s.inspection_report(self.local,pc,frame,profile)
+        self.assertNotIn('host',original['frame'])
+        frame.update(host='192.168.1.5',untrusted='secret raw SSH output')
+        report=s.inspection_report(self.local,pc,frame,profile)
+        self.assertEqual(set(report),set(original));self.assertEqual(report['frame']['host'],'192.168.1.5')
+        self.assertNotIn('untrusted',report['frame']);self.assertNotIn('secret',json.dumps(report))
+        frame['host']='-oProxyCommand=evil'
+        with self.assertRaises(s.SetupError):s.inspection_report(self.local,pc,frame,profile)
+
     def test_remote_generated_data_is_real_json(self):
         raw=self.frame.namespace['data']({'test':1})
         self.assertTrue(raw.endswith(b'\n'));self.assertFalse(raw.endswith(b'\\n'))

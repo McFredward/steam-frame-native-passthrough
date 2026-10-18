@@ -35,6 +35,21 @@ files. A Frame runtime match only identifies the checked reference revision; it
 is not proof that the new bridge is installed or working. Existing legacy Frame
 patches are shown separately.
 
+Each PC file also has a fixed `reason` code. A successful comparison is
+`reference_match`; changed bytes are `hash_or_size_mismatch`. Failed reads
+identify `missing`, `permission_denied`, `sharing_violation`, `redirected_path`,
+`not_regular`, `size_limit`, `invalid_metadata`, `metadata_changed` or `io_error`.
+`steamvr_not_found` means no SteamVR directory was available. No raw OS error
+text is copied into the report.
+
+Public executable files may have multiple hardlinks; inspection now accepts
+these only after a bounded, unchanged file snapshot. The report includes
+`bytes` and `hardlinked` when that snapshot succeeds. Private credentials,
+installation writes and activation checks retain their stricter existing rules.
+An older report containing only `unreadable` does not establish which failure
+occurred. In particular, a hardlink rejection is a source-proven possibility,
+not a confirmed explanation of that user's executable.
+
 Inspection can save only its own non-secret PC report:
 
 - Windows: `%LOCALAPPDATA%\steam-link-native-passthrough\setup-inspection.json`
