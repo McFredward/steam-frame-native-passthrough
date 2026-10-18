@@ -11,6 +11,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -71,6 +72,8 @@ class Frame:
     def __init__(self, home):
         self.home=home;self.commands=[];self.namespace={'__name__':'sfnp_fixture_agent'}
         exec(compile(s.REMOTE_AGENT,'<actual-remote-agent>','exec'),self.namespace)
+        # Isolate the remote CPU identity; never mutate the PC's platform module.
+        self.namespace['platform']=types.SimpleNamespace(machine=lambda:'aarch64')
     def call(self, request):
         self.commands.append(request['command'])
         return self.namespace['run'](request,self.home)
@@ -291,6 +294,54 @@ class WizardTests(unittest.TestCase):
         with self.assertRaises(s.SetupError):s.Bundle(self.bundle_root)
         s.put(self.local.root/'install.json',b'{"schema":"foreign"}\n')
         with self.assertRaises(s.SetupError):self.local.inventory()
+    def test_unknown_log_is_preserved(self):
+        foreign=b'{"schema":"foreign-log","action":"keep"}\n'
+        path=self.local.root/'setup-last.log';s.put(path,foreign)
+        with self.assertRaises(s.SetupError):s.write_report(self.local,'repair',{},failed=True)
+        self.assertEqual(path.read_bytes(),foreign)
+    def test_address_cache_requires_owned_schema(self):
+        foreign=b'{"host":"unrelated.local","user":"steamos"}\n'
+        path=self.local.root/'frame-address.json';s.put(path,foreign)
+        with self.assertRaises(s.SetupError):s.remember_frame(self.local,'steamframe.local','steamos')
+        self.assertEqual(path.read_bytes(),foreign)
+        path.unlink();s.remember_frame(self.local,'steamframe.local','steamos')
+        before=path.stat();s.remember_frame(self.local,'steamframe.local','steamos')
+        self.assertEqual(before,path.stat())
+    def test_partial_apply_failure_has_redacted_log_after_admission(self):
+        self.system.fail_add=True
+        def factory(*_,**__):return self.frame
+        output,error=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(error), \
+             mock.patch('sys.stdin.isatty',return_value=True), \
+             mock.patch.object(self.frame.namespace['platform'],'machine',return_value='aarch64'):
+            code=s.main(['--action','install','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=factory,input_fn=lambda _:'y')
+        self.assertEqual(code,2)
+        raw=s.read(self.local.root/'setup-last.log');value=s.parse(raw)
+        self.assertEqual(value['schema'],'sfnp-wizard-log-v1');self.assertTrue(value['failed'])
+        self.assertIn('may already be installed',value['recovery'])
+        self.assertNotIn(b'key_hex',raw);self.assertNotIn(b'pair_proofs',raw)
+    def test_safe_actionable_linux_refusal_is_visible(self):
+        self.local.system='Linux'
+        def factory(*_,**__):return self.frame
+        output,error=io.StringIO(),io.StringIO();before=self.snapshot()
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(error), \
+             mock.patch('sys.stdin.isatty',return_value=True), \
+             mock.patch.object(self.frame.namespace['platform'],'machine',return_value='aarch64'):
+            code=s.main(['--action','install','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=factory,input_fn=lambda _:'y')
+        self.assertEqual(code,2);self.assertIn('Native Linux sender provider is not reviewed',error.getvalue())
+        self.assertEqual(before,self.snapshot())
+    def test_untrusted_system_error_is_not_printed_or_logged_during_check(self):
+        class Failure:
+            def call(self,_):raise OSError('fixture secret password must not be logged')
+        output,error=io.StringIO(),io.StringIO();before=self.snapshot()
+        self.local.apply_started=True # A reused caller cannot make --check write.
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(error):
+            code=s.main(['--check','--bundle',str(self.bundle_root),'--frame','steamframe.local'],
+                        local=self.local,remote_factory=lambda *_,**__:Failure())
+        self.assertEqual(code,2);self.assertNotIn('secret password',error.getvalue()+output.getvalue())
+        self.assertEqual(before,self.snapshot())
 
 
 if __name__=='__main__':unittest.main()

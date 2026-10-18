@@ -702,6 +702,37 @@ def public_report(pc, frame, bundle):
             'automatic_restart': False}
 
 
+def remember_frame(local, address, login):
+    path = local.root / 'frame-address.json'
+    before = read(path, 4096, private=True) if path.exists() else None
+    if before is not None:
+        prior = parse(before)
+        require(set(prior) == {'schema','host','user'} and prior['schema'] == 'sfnp-frame-address-v1',
+                'Unknown cached-address file preserved.')
+        host(prior['host']); user(prior['user'])
+    raw = encoded({'schema':'sfnp-frame-address-v1','host':host(address),'user':user(login)})
+    if before != raw:
+        put(path, raw, before)
+
+
+def write_report(local, action, inventory, result=None, failed=False):
+    path = local.root / 'setup-last.log'
+    before = read(path, 128 * 1024, private=True) if path.exists() else None
+    if before is not None:
+        prior = parse(before)
+        fields = {'schema','action','inventory','result','failed','automatic_restart'}
+        require(prior.get('schema') == 'sfnp-wizard-log-v1' and set(prior) in (fields, fields | {'recovery'}),
+                'Unknown setup-log file preserved.')
+    value = {'schema':'sfnp-wizard-log-v1','action':action,'inventory':inventory,
+             'result':result,'failed':failed,'automatic_restart':False}
+    if failed:
+        value['recovery'] = 'Pairing rollback was attempted. A component may already be installed; run Check, then Repair. No automatic restart occurred.'
+    raw = encoded(value)
+    if before != raw:
+        put(path, raw, before)
+    return path
+
+
 def plan(pc, frame, bundle):
     if bundle is None:
         return 'A complete reviewed release bundle is missing. Inventory is available; installation and pairing are blocked.'
@@ -747,6 +778,7 @@ def apply(action, bundle, local, remote, pc, frame, challenge):
                'pairing': {**pair, 'role': 'receiver'}, 'files': {name: {
                    **bundle.frame['files'][name], 'data': base64.b64encode(bundle.files[name]).decode()}
                    for name in bundle.frame['files']}}
+    local.apply_started = True  # Only after all release/payload/capability checks.
     # Staging+real Frame verifier precede activation, PC registration and pairing.
     try:
         result = remote.call(request)
@@ -796,6 +828,7 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
     parser.add_argument('--steamvr', type=Path)
     args = parser.parse_args(argv)
     local = local or Local(steamvr=args.steamvr)
+    local.apply_started = False
     try:
         pc = local.inventory()
         try:
@@ -810,7 +843,10 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
             print('Steam Link Native Passthrough — PC and Frame setup')
             print('First we check your PC and Frame. Nothing is installed during this check.')
             cache = local.root / 'frame-address.json'
-            cached = parse(read(cache, 4096)) if cache.exists() else {}
+            cached = parse(read(cache, 4096, private=True)) if cache.exists() else {}
+            if cached:
+                require(set(cached) == {'schema','host','user'} and cached['schema'] == 'sfnp-frame-address-v1',
+                        'Unknown cached-address file preserved.')
             candidates = [cached.get('host'), 'steamframe.local', 'steam-frame.local']
             for candidate in dict.fromkeys(value for value in candidates if value):
                 try:
@@ -850,15 +886,19 @@ def main(argv=None, *, local=None, remote_factory=Remote, input_fn=input):
             print('No changes made.'); return 0
         result = apply(action, bundle, local, remote, pc, frame, challenge)
         # This explicit action may now persist its non-secret address and log.
-        put(local.root / 'frame-address.json', encoded({'host':host(address),'user':user(args.user)}),
-            read(local.root / 'frame-address.json') if (local.root / 'frame-address.json').exists() else None)
-        log = local.root / 'setup-last.log'
-        put(log, encoded({'action':action,'result':result,'inventory':report}), read(log) if log.exists() else None)
+        remember_frame(local, address, args.user)
+        log = write_report(local, action, report, result)
         print('Finished. Setup log: ' + str(log))
         print('Rollback: run this assistant again and choose Uninstall. Existing older pairing keys are retained for explicit repair.')
         input_fn('All writes are finished. Close and start SteamVR yourself when convenient; press Enter to exit. ')
         return 0
     except (OSError, SetupError, KeyError, TypeError, ValueError) as error:
+        if getattr(local, 'apply_started', False):
+            try:
+                path = write_report(local, action, report, failed=True)
+                print('Setup report: ' + str(path), file=sys.stderr)
+            except (OSError, SetupError, KeyError, TypeError, ValueError):
+                print('Existing log could not be replaced safely; it was preserved.', file=sys.stderr)
         detail = str(error)[:500] if isinstance(error, SetupError) else 'Check the bundle, SSH access and retained install receipts.'
         print('Setup refused the operation: ' + detail + ' No automatic restart was attempted; unknown files are preserved.', file=sys.stderr)
         return 2

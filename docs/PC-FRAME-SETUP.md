@@ -107,6 +107,9 @@ After an applied action, the non-secret log is `setup-last.log` under the user's
 XDG data / `~/.local/share` on Linux. The same directory contains the checked
 PC installation receipt. Frame credentials are under
 `~/.config/steam-link-native-passthrough/pairings/`.
+Failures after release admission also retain a redacted report describing the
+possible partial installation. Unknown existing log/address-cache files are
+preserved rather than adopted. Read-only and prototype refusals create no log.
 
 Use **Uninstall** with a valid setup bundle to unregister the exact owned PC
 provider and invoke the existing transactional Frame uninstaller. Changed or
