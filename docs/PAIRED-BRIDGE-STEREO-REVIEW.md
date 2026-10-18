@@ -53,6 +53,15 @@ Collection changed no Frame files, services, shaders or running stream state.
    Successful typed HEVC reconfiguration also readmits the current native source
    with a fresh generation and resource/map identities. Original callbacks may
    unregister resources; their changes are never overwritten by a saved snapshot.
+5. The second corrected-package headset run really loaded the new bridge, but
+   its production cold loader still expected the old 7140-byte coverage output
+   while the installer correctly generated the scalar-interface 7188-byte file.
+   This refused renderer preparation before either decoder could be created.
+   Owned native artifact pins now share one C++ contract and are checked against
+   the Python installer in public CI. The actual production file loader is also
+   exercised with private installed outputs, including old, missing and changed
+   files. Verified legacy decoding now survives optional coverage preparation
+   failure instead of exposing the packed atlas.
 
 These form a consistent failure chain: no admitted receiver image route, no
 complete new-route negotiation, and no reliable decoding of the retained legacy
@@ -67,6 +76,10 @@ the production renderer's pending native count1 layout admission. Earlier sender
 fixtures reused a resource wrapper and therefore missed allocation sharing
 through separate COM objects. Directly testing a shader or the handshake cannot
 substitute for this complete interface/ownership chain.
+The subsequent file-loader failure escaped because the renderer fixture
+substituted a successful shader read. The new cold-loader regression executes
+the production reader with real files; restoring its old size/hash makes that
+test fail. Public pin-parity checks also run without private shader inputs.
 
 The added regressions use the real production renderer with private pinned native
 shader inputs and the documented count1 layout. Removing its required proof must
