@@ -94,11 +94,17 @@ jobs:
           if not defined SFNP_VS exit /b 1
           call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
           if errorlevel 1 exit /b 1
-          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_provider_context.cpp pc/stream-bridge-sender-provider-coverage.cpp pc/stream-bridge-sender-provider-coverage-render.cpp pc/stream-bridge-sender-provider-directmode.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_capacity.cpp bridge/stream_bridge_credentials.cpp bridge/stream_bridge_control.cpp receiver/stream_bridge_receiver.cpp bridge/hevc_bridge_sei.cpp /Fe:build\native-context.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib bcrypt.lib ws2_32.lib advapi32.lib
+          cl /nologo /TC /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /c tests/test_stream_bridge_sender_context_layout.c /Fobuild\context-layout.obj
           if errorlevel 1 exit /b 1
-      - name: Exercise real context dispatch from a separate rendering thread
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_provider_context.cpp build\context-layout.obj pc/stream-bridge-sender-provider-coverage.cpp pc/stream-bridge-sender-provider-coverage-render.cpp pc/stream-bridge-sender-provider-directmode.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_capacity.cpp bridge/stream_bridge_credentials.cpp bridge/stream_bridge_control.cpp receiver/stream_bridge_receiver.cpp bridge/hevc_bridge_sei.cpp /Fe:build\native-context.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib bcrypt.lib ws2_32.lib advapi32.lib
+          if errorlevel 1 exit /b 1
+      - name: Exercise actual facade API and production observer from cold context
         shell: cmd
         run: |
+          build\native-context.exe --facade >build\native-context-facade.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\native-context-facade.log
+          if not "%SFNP_RESULT%"=="0" exit /b %SFNP_RESULT%
           build\native-context.exe >build\native-context.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\native-context.log
@@ -107,30 +113,30 @@ jobs:
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\native-context-protection-change.log
           exit /b %SFNP_RESULT%
-      - name: Prepare the single causal control without cold initialization
+      - name: Prepare causal control using stale original native dispatch
         shell: pwsh
         run: |
           $source = Get-Content pc/stream-bridge-sender-provider-coverage.cpp -Raw
-          $needle = 'context->Draw(0,0);'
-          if ([regex]::Matches($source, [regex]::Escape($needle)).Count -ne 1) { throw 'Cold initialization control must change exactly one production operation' }
-          $source.Replace($needle, '/* causal control: omit cold Draw only */') | Set-Content build/coverage-no-warmup.cpp -Encoding utf8NoBOM
-      - name: Compile the identical production fixture with only cold Draw removed
+          $needle = 'return reinterpret_cast<const volatile std::uintptr_t*>(s.original)[slot];'
+          if ([regex]::Matches($source, [regex]::Escape($needle)).Count -ne 1) { throw 'Fresh-target control must replace exactly one production getter' }
+          $source.Replace($needle, 'return reinterpret_cast<std::uintptr_t>(s.nativeInitial[slot]);') | Set-Content build/coverage-stale-native.cpp -Encoding utf8NoBOM
+      - name: Compile identical production facade with only fresh lookup removed
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
           if not defined SFNP_VS exit /b 1
           call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
           if errorlevel 1 exit /b 1
-          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /Ipc /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_provider_context.cpp build/coverage-no-warmup.cpp pc/stream-bridge-sender-provider-coverage-render.cpp pc/stream-bridge-sender-provider-directmode.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_capacity.cpp bridge/stream_bridge_credentials.cpp bridge/stream_bridge_control.cpp receiver/stream_bridge_receiver.cpp bridge/hevc_bridge_sei.cpp /Fe:build\native-context-no-warmup.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib bcrypt.lib ws2_32.lib advapi32.lib
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /Ipc /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_provider_context.cpp build\context-layout.obj build/coverage-stale-native.cpp pc/stream-bridge-sender-provider-coverage-render.cpp pc/stream-bridge-sender-provider-directmode.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_capacity.cpp bridge/stream_bridge_credentials.cpp bridge/stream_bridge_control.cpp receiver/stream_bridge_receiver.cpp bridge/hevc_bridge_sei.cpp /Fe:build\native-context-stale-native.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib bcrypt.lib ws2_32.lib advapi32.lib
           if errorlevel 1 exit /b 1
-      - name: Prove the control loses hooks on the first native Draw
+      - name: Prove real native dispatch changes reject the stale-target control
         shell: pwsh
         run: |
-          & build/native-context-no-warmup.exe *>build/native-context-no-warmup.log
+          & build/native-context-stale-native.exe --facade *>build/native-context-stale-native.log
           $result = $LASTEXITCODE
-          $log = Get-Content build/native-context-no-warmup.log -Raw
+          $log = Get-Content build/native-context-stale-native.log -Raw
           Write-Host $log
-          if ($result -ne 1 -or $log -notmatch 'cold production snapshot verifies actual current dispatch' -or $log -notmatch 'after first Draw:[^\r\n]*slots=0') { throw 'Causal control did not reproduce the exact pre-fix dispatch loss' }
+          if ($result -ne 1 -or $log -notmatch 'STALE NATIVE TARGET after' -or $log -notmatch 'production getter follows current mutable native table') { throw 'Causal control did not reject the actual stale native target' }
           exit 0
       - uses: actions/upload-artifact@v4
         if: always()
