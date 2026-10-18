@@ -49,7 +49,10 @@ their respective evidence and limits.
 - The updated receiver recognizes **v3 and legacy v1**. V3 uses equal2048² colour
   and opacity with a larger, codec-resistant format header. It removes the
   dedicated half-resolution coverage filter, without erasing genuine partial
-  transparency. Its real streamed headset picture is not yet established.
+  transparency. Both-eye presentation and corrected edges have been confirmed,
+  but the latest direct comparison finds substantial detail loss with MR on.
+  Preserving the normal stream's quality remains open; see the
+  [current investigation](research/stream-quality-comparison-20261018.md).
   Legacy v1 retains1024² opacity versus2048² colour and remains compatible.
 - Historical experimental v2 also uses equal2048² grids, but its first real
   stereo test failed: apparent scale and passthrough differed between

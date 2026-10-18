@@ -61,7 +61,10 @@ own scene background has not sampled the headset's camera.
 
 The current receiver recognizes **v3 and legacy v1**. V3 retains equal-resolution
 colour/coverage and replaces the fragile format header. It requires a matching
-updated producer and receiver; its headset result remains unverified.
+updated producer and receiver. Both-eye presentation and corrected edges have
+been confirmed on the headset, but a later direct comparison finds substantial
+detail loss with MR enabled. See the [current quality investigation](research/stream-quality-comparison-20261018.md)
+before treating the equal source allocations as preserved stream quality.
 **V2 is quarantined after a failed stereo headset test:** lossy
 transport can independently reject its small corner signature for one eye,
 displaying the packed image at a different scale with opaque output. The exact
