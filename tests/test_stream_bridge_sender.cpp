@@ -27,6 +27,10 @@ void exchange(SenderAdapter& sender,Handshake& receiver){
  check(sender.mutualConfirmed()&&receiver.confirmed(),"both commits confirmed");
 }
 void notify(SenderStatus,void* p){++*static_cast<unsigned*>(p);}
+bool seal(Bytes plain,std::vector<std::uint8_t>& output,void* context){
+ if(!*static_cast<bool*>(context))return false;
+ output.assign(16,0x5a);output.insert(output.end(),plain.data,plain.data+plain.size);return true;
+}
 void tests(){
  SenderAdapter sender;auto p=sender.prepareDiscovery(bytes(au),source());
  check(!p.appended&&p.output.data==au.data()&&p.output.size==au.size(),"inactive exact original bytes and pointer");
@@ -46,7 +50,7 @@ void tests(){
  check(sender.complete(p.ticket+1,true,channel())==Status::SessionMismatch,"wrong ticket cannot free lease");
  check(std::memcmp(copy.data(),p.output.data,copy.size())==0,"pending unchanged");
  check(sender.complete(p.ticket,false,channel())==Status::Ok,"canceled constructed AU");
- auto retry=sender.prepareDiscovery(bytes(au),source());check(unpack(retry.output).kind==Kind::Hello,"canceled HELLO unsent");
+ auto retry=sender.prepareDiscovery(bytes(au),source());check(retry.appended&&unpack(retry.output).kind==Kind::Hello,"canceled HELLO unsent");
  sender.stop();check(!sender.requested(),"stop revokes authority");
  check(std::memcmp(copy.data(),retry.output.data,copy.size())==0,"stop retains borrowed bytes");
  check(sender.complete(retry.ticket,true,channel())==Status::OutOfOrder,"late completion not handshake advancement");
@@ -71,6 +75,14 @@ void tests(){
  check(sender.receiveEcho({wire.data(),wire.size()},channel())==Status::Ok&&sender.probeObserved(),"authenticated exact roundtrip");
  check(!sender.coveragePermitted(),"transport observed never MR proof");
  p=sender.prepareProbe(bytes(au),source(),1,nonce(21));check(!p.appended,"duplicate sequence refused");
+ bool permitSeal=true;SenderAdapter sealed;
+ check(sealed.request(config(Role::Producer,12),channel(),source(),{seal,&permitSeal})==SenderStatus::WaitingPeer,"explicit payload sealer port");
+ p=sealed.prepareDiscovery(bytes(au),source());check(p.appended,"sealed discovery appended");
+ payload.clear();check(inspectOwned(p.output,payload)==SeiStatus::Ok&&payload.size()==96&&payload[0]==0x5a,"SEI carries envelope rather than raw message");
+ check(decode({payload.data()+16,payload.size()-16},hello)==Status::Ok&&hello.kind==Kind::Hello,"sealed payload retains raw handshake");
+ check(sealed.complete(p.ticket,false,channel())==Status::Ok,"canceled sealed payload retains unsent state");
+ permitSeal=false;p=sealed.prepareDiscovery(bytes(au),source());
+ check(!p.appended&&p.output.data==au.data()&&p.output.size==au.size(),"sealer failure exact original AU");
  unsigned notifications=0;SenderAdapter bounded(notify,&notifications);
  check(bounded.request(config(Role::Producer,7),channel(),source())==SenderStatus::WaitingPeer,"bounded notifications start");
  for(unsigned i=0;i<200;++i){bounded.prepareDiscovery(bytes(malformed),source());bounded.prepareProbe(bytes(au),source(),1,token);}

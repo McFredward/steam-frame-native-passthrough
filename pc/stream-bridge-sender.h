@@ -21,6 +21,10 @@ enum class SenderStatus { Off, WaitingPeer, Negotiating, MutualConfirmed,
     ControlRejected, MalformedAccessUnit, PendingSubmission, NothingToSend,
     SubmissionRejected, TokenMismatch, StaleSubmission, OutOfOrder, LimitExceeded };
 using Notify = void(*)(SenderStatus,void*);
+// Optional authenticated envelope port. Raw mode is fixture/backwards-compatible
+// plumbing only, never an authorization for a shipping live provider.
+using SealPayload = bool(*)(Bytes plain,std::vector<std::uint8_t>& sealed,void*);
+struct PayloadSealer { SealPayload seal=nullptr;void* context=nullptr; };
 struct PreparedAccessUnit {
     Bytes output{}; // ORIGINAL borrowed span on every refusal/passthrough.
     std::uint64_t ticket=0; // Nonzero only for one owned pending augmented AU.
@@ -33,7 +37,7 @@ struct PreparedAccessUnit {
 class SenderAdapter {
 public:
     explicit SenderAdapter(Notify notify=nullptr,void* context=nullptr);
-    SenderStatus request(const LocalConfig&,const VerifiedChannel&,const VerifiedSource&);
+    SenderStatus request(const LocalConfig&,const VerifiedChannel&,const VerifiedSource&,PayloadSealer sealer={});
     void stop(); // Revoke future writes, retain an outstanding borrowed lease.
     Status receiveControl(Bytes,const VerifiedChannel&);
     PreparedAccessUnit prepareDiscovery(Bytes,const VerifiedSource&);
@@ -63,6 +67,7 @@ private:
     std::uint64_t nextTicket_=0,pendingTicket_=0,epoch_=0,pendingEpoch_=0;
     bool requested_=false,pendingIsProbe_=false,probeSent_=false;
     Message pendingMessage_{};
+    PayloadSealer sealer_{};
     std::vector<std::uint8_t> owned_{};
 };
 } // namespace stream_bridge::sender

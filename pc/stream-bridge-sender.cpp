@@ -27,7 +27,7 @@ bool SenderAdapter::sameSource(const VerifiedSource& v)const {
         v.apiVersion==source_.apiVersion&&v.encoderGeneration==source_.encoderGeneration;
 }
 SenderStatus SenderAdapter::request(const LocalConfig& c,const VerifiedChannel& channel,
-                                   const VerifiedSource& source) {
+                                   const VerifiedSource& source,PayloadSealer sealer) {
     if(pendingTicket_){publish(SenderStatus::PendingSubmission);return status_;}
     stop();events_=0;
     // This first prototype cannot truthfully offer source/coverage capabilities.
@@ -35,11 +35,11 @@ SenderStatus SenderAdapter::request(const LocalConfig& c,const VerifiedChannel& 
        c.required!=RequiredCapabilities){publish(SenderStatus::InvalidRequest);return status_;}
     if(!admissible(source)){publish(SenderStatus::SourceUnverified);return status_;}
     if(handshake_.begin(c,channel)!=Status::Ok){publish(SenderStatus::ControlRejected);return status_;}
-    source_=source;requested_=true;++epoch_;publish(SenderStatus::WaitingPeer);return status_;
+    source_=source;sealer_=sealer;requested_=true;++epoch_;publish(SenderStatus::WaitingPeer);return status_;
 }
 void SenderAdapter::stop() {
     requested_=false;++epoch_;handshake_.reset();probe_.reset();pendingProbe_.reset();
-    probeSent_=false;publish(SenderStatus::Off);
+    probeSent_=false;sealer_={};publish(SenderStatus::Off);
     // A consumer may still borrow owned_: only matching complete() releases it.
 }
 Status SenderAdapter::receiveControl(Bytes data,const VerifiedChannel& channel) {
@@ -62,7 +62,15 @@ PreparedAccessUnit SenderAdapter::append(Bytes input,const VerifiedSource& sourc
     if(nextTicket_==std::numeric_limits<std::uint64_t>::max())
         return unchanged(input,SenderStatus::LimitExceeded);
     SeiStatus result;
-    try {result=appendOwned(input,payload,owned_);}catch(...){result=SeiStatus::LimitExceeded;}
+    try {
+        std::vector<std::uint8_t> sealed;
+        if(sealer_.seal){
+            if(!sealer_.seal(payload,sealed,sealer_.context)||sealed.empty()||sealed.size()>MaximumOwnedPayloadBytes)
+                return unchanged(input,SenderStatus::ControlRejected);
+            payload={sealed.data(),sealed.size()};
+        }
+        result=appendOwned(input,payload,owned_);
+    }catch(...){result=SeiStatus::LimitExceeded;}
     if(result!=SeiStatus::Ok)
         return unchanged(input,result==SeiStatus::LimitExceeded?SenderStatus::LimitExceeded:
                          SenderStatus::MalformedAccessUnit);
