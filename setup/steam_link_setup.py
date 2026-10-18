@@ -185,10 +185,15 @@ def put(path, raw, expected=None):
             stream.write(raw)
             stream.flush()
             os.fsync(descriptor)
+        # Windows denies renaming a file while this CRT descriptor is open.
+        # The private file is fully flushed before the checked atomic publish.
+        os.close(descriptor)
+        descriptor = None
         require((read(path) if os.path.lexists(path) else None) == expected, 'Setup file changed before publication.')
         os.replace(temporary, path)
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
         if temporary.exists():
             temporary.unlink()
 
