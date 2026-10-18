@@ -114,6 +114,12 @@ int main() {
         for (auto v : p) premultiplied &= v.r <= v.a && v.g <= v.a && v.b <= v.a;
         require(premultiplied,"all RGB valid premultiplied contributions");
         require(at(257,1610).r == 255 && at(256,1610).r == 0 && at(256,1610).a == 255,"real one-pixel black-white detail bars");
+        for (unsigned band = 0; band < 7; ++band) {
+            const unsigned period = 1u << band, y = 1624 + band * 48;
+            require(at(256,y).r == 0 && at(256,y).a == 255 && at(256+period,y).r == 255,
+                "distinct 1/2/4/8/16/32/64-texel detail periods");
+        }
+        require(at(256,1935).a == 255 && at(256,1936).a == 0,"seven detail bands stay inside transparent border");
         require(at(322,150).a == (eye == 1 ? 255 : 0),"different interior eye IDs");
     }
     Frustum full{-1.2f,.9f,-1.1f,1.3f}, cropped{};

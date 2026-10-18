@@ -33,8 +33,11 @@ The host must also rule out any other independently delivered UI/background.
   original/cropped frusta and frozen standing eye poses. Recommended dimensions
   are not proof of actual game allocation or delivered encoder resolution.
 - Interior opaque black, transparent/fractional black, neutral gray, yellow/cyan
-  bands, one/two white eye-ID blocks and genuine 1/2/4-pixel detail bars are distinct
-  witnesses. This static 2048-square input does not establish 4K transport quality.
+  bands, one/two white eye-ID blocks and genuine 1/2/4/8/16/32/64-texel detail
+  periods are distinct witnesses. Seven 48-row detail bands begin at texture
+  row1600. The coarse periods allow angular-frequency comparison even when this
+  small overlay minifies; losing 1-texel stripes alone is not evidence of transport
+  blur. This static 2048-square input does not establish 4K transport quality.
 
 ## Build without activating anything
 

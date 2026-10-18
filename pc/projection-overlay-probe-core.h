@@ -31,8 +31,9 @@ inline std::vector<Pixel> pattern(unsigned eye) {
         }
         // Left has one white block, right two; IDs occupy the interior chart.
         if (y >= 128 && y < 192 && x >= 256 && x < 256 + 64 * (eye + 1)) p = {255,255,255,255};
-        if (y >= 1600 && y < 1792 && x >= 256 && x < 1792) {
-            const unsigned period = y < 1664 ? 1 : y < 1728 ? 2 : 4;
+        if (y >= 1600 && y < 1936 && x >= 256 && x < 1792) {
+            // Coarse witnesses remain readable when this 20%-FOV overlay minifies.
+            const unsigned period = 1u << ((y - 1600) / 48);
             p = (x / period) % 2 ? Pixel{255,255,255,255} : Pixel{0,0,0,255};
         }
         result[y * PatternSize + x] = p;
