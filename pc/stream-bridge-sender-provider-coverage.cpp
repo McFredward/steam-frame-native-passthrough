@@ -123,6 +123,23 @@ struct SenderCoverage::Impl {
         if(count!=4||!protectedAgain){DWORD rollback=0;if(VirtualProtect(table,48*sizeof(void*),PAGE_READWRITE,&rollback)){for(unsigned i=0;i<count;++i)InterlockedCompareExchangePointer(table+positions[i],before[i],after[i]);VirtualProtect(table,48*sizeof(void*),old,&ignored);}return false;}
         enabled=true;gates.signal(CoverageSignal::ContextsReady);return true;
     }
+    bool dispatchOwned()const noexcept{
+        if(!context||!table||!multithread||!multithread->GetMultithreadProtected())return false;
+        void** current=nullptr;SIZE_T bytes=0;std::array<void*,48> entries{};
+        if(!ReadProcessMemory(GetCurrentProcess(),context,&current,sizeof current,&bytes)||bytes!=sizeof current||current!=table||
+           !ReadProcessMemory(GetCurrentProcess(),current,entries.data(),sizeof entries,&bytes)||bytes!=sizeof entries)return false;
+        return entries[13]==bits<void*>(&draw)&&entries[14]==bits<void*>(&map)&&
+            entries[15]==bits<void*>(&unmap)&&entries[47]==bits<void*>(&copy);
+    }
+    void loseDispatch()noexcept{
+        // Public runtime mode changes can replace dispatch legitimately. Never
+        // reinstall over those new/native/third-party entries or keep granting
+        // coverage from receipts captured before the changed context contract.
+        enabled=false;prepared=false;lastPid=0;preparedPid=0;stopped=true;state=9;
+        for(auto& constant:constants){constant.valid=false;constant.pointer=nullptr;}
+        for(auto& slot:stages){release(slot.input);slot.present=slot.submission=slot.encoderGeneration=0;slot.encoder=nullptr;}
+        gates.refuse(CoverageGate::Context);
+    }
     bool allocate(std::uint32_t w,std::uint32_t h){
         if(!w||!h||w>8192||h>8192||std::size_t(w)*h>MaximumCoverageBytes)return false;
         // No in-flight readback is reused at another size. Retiring submitted
@@ -253,6 +270,7 @@ void SenderCoverage::tick()noexcept{
     try{
         if(!s.device&&s.pendingDevice){s.device=s.pendingDevice;s.pendingDevice=nullptr;if(!s.installContext()){s.gates.refuse(CoverageGate::Context);s.stopped=true;s.state=3;return;}s.state=4;}
         if(!s.enabled)return;
+        if(!s.dispatchOwned()){s.loseDispatch();return;}
         if(s.retirePending.exchange(false)){for(auto& slot:s.stages){release(slot.input);slot.present=slot.submission=slot.encoderGeneration=0;slot.encoder=nullptr;}}
         EncoderState actual{};unsigned count=0;for(const auto& e:encoders)if(e.encoder&&e.hevc){actual=e;++count;}
         if(count!=1){s.gates.refuse(CoverageGate::Encoder);s.prepared=false;s.preparedPid=0;s.state=4;return;}
@@ -289,6 +307,6 @@ CoverageGateStats SenderCoverage::gateStats()const noexcept{
     result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;return result;
 }
 const char* SenderCoverage::stateName()const noexcept{
-    switch(impl_->state.load()){case 0:return "coverage-waiting-native-device";case 1:return "coverage-unsupported-device";case 2:return "coverage-device-observed";case 3:return "coverage-context-or-hook-refused";case 4:return "coverage-waiting-supported-encoder-or-source";case 5:return "coverage-pool-preparation-refused";case 6:return "coverage-source-pair-prepared-waiting-raw-receipt";case 7:return "coverage-native-receipt-certified-not-selected-proof";default:return "coverage-stopped";}
+    switch(impl_->state.load()){case 0:return "coverage-waiting-native-device";case 1:return "coverage-unsupported-device";case 2:return "coverage-device-observed";case 3:return "coverage-context-or-hook-refused";case 4:return "coverage-waiting-supported-encoder-or-source";case 5:return "coverage-pool-preparation-refused";case 6:return "coverage-source-pair-prepared-waiting-raw-receipt";case 7:return "coverage-native-receipt-certified-not-selected-proof";case 9:return "coverage-public-context-dispatch-changed";default:return "coverage-stopped";}
 }
 } // namespace stream_bridge::sender

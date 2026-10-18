@@ -38,7 +38,7 @@ void diagnostic(const char* phase,const CoverageGateStats& stats,bool sameCreate
         unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextHookSlots,stats.contextOriginalSlots);
     std::fflush(stdout);
 }
-void pipeline(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Multithread* threading,SenderCoverage& coverage){
+void pipeline(ID3D11Device* device,ID3D11DeviceContext* context,SenderCoverage& coverage){
     static const char shader[]=R"(
 cbuffer Color : register(b0) { float4 color; };
 float4 vs_main(uint id:SV_VertexID):SV_Position { return float4(float2(float(id&1u),float(id>>1u))*2.0-1.0,0.0,1.0); }
@@ -65,7 +65,7 @@ float4 ps_main():SV_Target { return color; }
     check(SUCCEEDED(device->CreateSamplerState(&sampler,sample.out())),"real native sampler state");
     const auto before=coverage.gateStats().hookDraws;const float color[4]{17.0f/255,29.0f/255,43.0f/255,101.0f/255};
     for(unsigned frame=0;frame<32;++frame){
-        context->ClearState();if(frame%8==0){threading->SetMultithreadProtected(FALSE);threading->SetMultithreadProtected(TRUE);}
+        context->ClearState();
         context->VSSetShader(vs.p,nullptr,0);context->PSSetShader(ps.p,nullptr,0);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context->RSSetState(rs.p);
         const D3D11_VIEWPORT viewport{0,0,4,4,0,1};context->RSSetViewports(1,&viewport);context->OMSetRenderTargets(1,&view.p,nullptr);
@@ -88,7 +88,7 @@ float4 ps_main():SV_Target { return color; }
 // This is deliberately a real native context, not a fake COM object. The
 // public CreateDevice output is retained on the rendering thread while the
 // production observer obtains GetImmediateContext and installs on its worker.
-void run(){
+void run(bool changeProtection){
     Com<ID3D11Device> device;Com<ID3D11DeviceContext> submittedContext;D3D_FEATURE_LEVEL level{};
     const auto result=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,device.out(),&level,submittedContext.out());
     check(SUCCEEDED(result)&&level>=D3D_FEATURE_LEVEL_11_0,"actual native D3D11 WARP context created");
@@ -128,13 +128,16 @@ void run(){
     submittedContext->ClearState();diagnostic("after ClearState",coverage.gateStats(),true);
     submittedContext->Draw(0,0);diagnostic("after ClearState Draw",coverage.gateStats(),true);
     check(coverage.gateStats().hookDraws==4,"native ClearState retains dispatch hooks");
-    threading->SetMultithreadProtected(FALSE);diagnostic("after protection FALSE",coverage.gateStats(),true);
-    submittedContext->Draw(0,0);diagnostic("after protection FALSE Draw",coverage.gateStats(),true);
-    check(coverage.gateStats().hookDraws==5,"native unprotected mode retains dispatch hooks");
-    threading->SetMultithreadProtected(TRUE);diagnostic("after protection TRUE",coverage.gateStats(),true);
-    submittedContext->Draw(0,0);diagnostic("after protection TRUE Draw",coverage.gateStats(),true);
-    check(coverage.gateStats().hookDraws==6,"native protection re-enable retains dispatch hooks");
-    pipeline(device.p,submittedContext.p,threading.p,coverage);
+    pipeline(device.p,submittedContext.p,coverage);
+    if(changeProtection){
+        check(threading->SetMultithreadProtected(FALSE)==TRUE&&!threading->GetMultithreadProtected(),"native protection disable keeps original return value and mode");
+        diagnostic("after protection FALSE",coverage.gateStats(),true);coverage.tick();
+        check(std::strcmp(coverage.stateName(),"coverage-public-context-dispatch-changed")==0,"cold production tick explicitly rejects changed public dispatch");
+        check(!coverage.ready(1)&&!coverage.operational(1),"changed dispatch revokes source grant and presentation readiness");
+        check(threading->SetMultithreadProtected(TRUE)==FALSE&&threading->GetMultithreadProtected(),"native protection enable keeps original return value and mode");
+        submittedContext->Draw(0,0);coverage.tick();diagnostic("after protection TRUE Draw",coverage.gateStats(),true);
+        check(std::strcmp(coverage.stateName(),"coverage-public-context-dispatch-changed")==0&&!coverage.ready(1)&&!coverage.operational(1),"later mode changes never silently reinstall or restore prior grants");
+    }
     // Native CopyResource/Map/Unmap still execute through the real installed
     // table and preserve bytes; no fake return-address proof is introduced.
     D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=4;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
@@ -148,6 +151,14 @@ void run(){
     check(SUCCEEDED(submittedContext->Map(staging.p,0,D3D11_MAP_READ,0,&mapped)),"actual intercepted native Map succeeds");
     check(mapped.pData&&std::memcmp(mapped.pData,bytes.data(),16)==0,"ordinary native RGB bytes preserved through production hooks");
     submittedContext->Unmap(staging.p,0);
+    if(changeProtection){
+        void** live=*reinterpret_cast<void***>(submittedContext.p);
+        const std::array<void*,4> native{{live[13],live[14],live[15],live[47]}};
+        coverage.stop();
+        check(live[13]==native[0]&&live[14]==native[1]&&live[15]==native[2]&&live[47]==native[3],"stop never overwrites native dispatch after a protection-mode change");
+        check(coverage.gateStats().sourceFrames==0&&coverage.gateStats().certifiedMasks==0,"unsupported protection transition never fabricates frame authority");
+        return;
+    }
     // A later independent observer owns its replacement. Cleanup must not
     // overwrite it even while restoring the other three original slots.
     void** const live=*reinterpret_cast<void***>(submittedContext.p);void* const installedUnmap=live[15];
@@ -160,5 +171,7 @@ void run(){
     check(stats.contextTableReadable&&stats.contextTableStable&&stats.contextHookSlots==0&&stats.contextOriginalSlots==15,"production stop restores the exact native slots recorded after public initialization");
 }
 }
-int main(){try{run();std::printf("production native D3D11 context observer: %u checks PASS\n",checks);return 0;}
+int main(int argc,char** argv){try{
+const bool changed=argc==2&&std::strcmp(argv[1],"--protection-change")==0;
+check(argc==1||changed,"fixture arguments are explicit");run(changed);std::printf("production native D3D11 context observer: %u checks PASS\n",checks);return 0;}
 catch(const std::exception& e){std::fprintf(stderr,"native context observer failed after %u: %s\n",checks,e.what());return 1;}}

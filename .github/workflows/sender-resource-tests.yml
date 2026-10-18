@@ -95,9 +95,38 @@ jobs:
           build\native-context.exe >build\native-context.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\native-context.log
+          if not "%SFNP_RESULT%"=="0" exit /b %SFNP_RESULT%
+          build\native-context.exe --protection-change >build\native-context-protection-change.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\native-context-protection-change.log
           exit /b %SFNP_RESULT%
+      - name: Prepare the single causal control without cold initialization
+        shell: pwsh
+        run: |
+          $source = Get-Content pc/stream-bridge-sender-provider-coverage.cpp -Raw
+          $needle = 'MultithreadScope protect(multithread);context->Draw(0,0);'
+          if ([regex]::Matches($source, [regex]::Escape($needle)).Count -ne 1) { throw 'Cold initialization control must change exactly one production operation' }
+          $source.Replace($needle, 'MultithreadScope protect(multithread);') | Set-Content build/coverage-no-warmup.cpp -Encoding utf8NoBOM
+      - name: Compile the identical production fixture with only cold Draw removed
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /Ipc /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_provider_context.cpp build/coverage-no-warmup.cpp pc/stream-bridge-sender-provider-coverage-render.cpp pc/stream-bridge-sender-provider-directmode.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_capacity.cpp bridge/stream_bridge_credentials.cpp bridge/stream_bridge_control.cpp receiver/stream_bridge_receiver.cpp bridge/hevc_bridge_sei.cpp /Fe:build\native-context-no-warmup.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib bcrypt.lib ws2_32.lib advapi32.lib
+          if errorlevel 1 exit /b 1
+      - name: Prove the control loses hooks on the first native Draw
+        shell: pwsh
+        run: |
+          & build/native-context-no-warmup.exe *>build/native-context-no-warmup.log
+          $result = $LASTEXITCODE
+          $log = Get-Content build/native-context-no-warmup.log -Raw
+          Write-Host $log
+          if ($result -ne 1 -or $log -notmatch 'cold production snapshot verifies actual current dispatch' -or $log -notmatch 'after first Draw:[^\r\n]*slots=0') { throw 'Causal control did not reproduce the exact pre-fix dispatch loss' }
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows-native-context-evidence
-          path: build/native-context.log
+          path: build/native-context*.log
