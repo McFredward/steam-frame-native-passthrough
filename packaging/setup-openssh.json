@@ -1,0 +1,27 @@
+{
+  "schema": "sfnp-portable-openssh-pin-v1",
+  "architecture": "x86_64",
+  "source_url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64.zip",
+  "release_notes": "https://github.com/PowerShell/Win32-OpenSSH/releases/tag/10.0.0.0p2-Preview",
+  "upstream_status": "preview",
+  "bytes": 5704583,
+  "sha256": "23f50f3458c4c5d0b12217c6a5ddfde0137210a30fa870e98b29827f7b43aba5",
+  "files": {
+    "OpenSSH-Win64/ssh.exe": {
+      "bytes": 1352760,
+      "sha256": "6890c128c86cc2c38aad9fcb32a82b851ff3d38c714a1f656b8e445d7cd5e1c6"
+    },
+    "OpenSSH-Win64/libcrypto.dll": {
+      "bytes": 1769032,
+      "sha256": "4652e861c0335ee80a51306ceab75aa35c8865b235f97ce7dd5a0fd9dab44b5d"
+    },
+    "OpenSSH-Win64/LICENSE.txt": {
+      "bytes": 21552,
+      "sha256": "568c41f330a50a7d2d2eba9d3f7807caaaf4e091705ab6652ec26a3f9d1acfdb"
+    },
+    "OpenSSH-Win64/NOTICE.txt": {
+      "bytes": 36008,
+      "sha256": "2cd5f5d0064bc909dfe0f0fc8f4787882c7c379f2730d89e5faa0c2bc57c620b"
+    }
+  }
+}
