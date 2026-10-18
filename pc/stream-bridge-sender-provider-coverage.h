@@ -46,7 +46,7 @@ struct CoverageGateStats {
     // Cold dispatch-integrity metadata. Bits 0..3 name Draw, Map, Unmap,
     // CopyResource on the retained context's currently published vtable.
     // Approximate diagnostics only; these fields never authorize a frame.
-    std::uint32_t contextHookSlots=0;
+    std::uint32_t contextHookSlots=0,contextOriginalSlots=0;
     bool contextTableReadable=false,contextTableStable=false,nativeDeviceSame=false;
 };
 class CoverageGateCounters {

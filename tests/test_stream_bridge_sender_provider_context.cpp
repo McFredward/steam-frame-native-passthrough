@@ -23,9 +23,9 @@ NVENCSTATUS NVENCAPI factory(NV_ENCODE_API_FUNCTION_LIST* table){
     return NV_ENC_SUCCESS;
 }
 void diagnostic(const char* phase,const CoverageGateStats& stats,bool sameCreated){
-    std::printf("context diagnostic %s: draws=%llu, other=%llu, same-created=%u, readable=%u, stable=%u, native-device-same=%u, slots=%u\n",
+    std::printf("context diagnostic %s: draws=%llu, other=%llu, same-created=%u, readable=%u, stable=%u, native-device-same=%u, slots=%u, originals=%u\n",
         phase,static_cast<unsigned long long>(stats.hookDraws),static_cast<unsigned long long>(stats.otherDraws),unsigned(sameCreated),
-        unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextHookSlots);
+        unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextHookSlots,stats.contextOriginalSlots);
     std::fflush(stdout);
 }
 // This is deliberately a real native context, not a fake COM object. The
@@ -85,8 +85,8 @@ void run(){
     check(mapped.pData&&std::memcmp(mapped.pData,bytes.data(),16)==0,"ordinary native RGB bytes preserved through production hooks");
     submittedContext->Unmap(staging.p,0);
     coverage.stop();
-    auto** const restored=*reinterpret_cast<void***>(submittedContext.p);
-    check(restored[13]==drawBefore&&restored[14]==mapBefore&&restored[15]==unmapBefore&&restored[47]==copyBefore,"production stop restores only the original owned dispatch slots");
+    stats=coverage.gateStats();diagnostic("after stop",stats,true);
+    check(stats.contextTableReadable&&stats.contextTableStable&&stats.contextHookSlots==0&&stats.contextOriginalSlots==15,"production stop restores the exact native slots recorded after public initialization");
 }
 }
 int main(){try{run();std::printf("production native D3D11 context observer: %u checks PASS\n",checks);return 0;}

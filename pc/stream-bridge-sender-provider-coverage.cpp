@@ -107,6 +107,11 @@ struct SenderCoverage::Impl {
         // work. It remains enabled for this device's process lifetime.
         if(!multithread->GetMultithreadProtected())multithread->SetMultithreadProtected(TRUE);
         if(!multithread->GetMultithreadProtected())return false;
+        // The native runtime initializes/refreshes its public dispatch table
+        // lazily on the first rendering call. Finish that zero-work transition
+        // before saving or publishing hooks, under the same public protection.
+        // Zero vertices preserve every binding and produce no scene pixels.
+        {MultithreadScope protect(multithread);context->Draw(0,0);}
         table=*reinterpret_cast<void***>(context);originalDraw=bits<NativeDraw>(table[13]);originalMap=bits<Map>(table[14]);originalUnmap=bits<Unmap>(table[15]);originalCopy=bits<Copy>(table[47]);
         if(!originalDraw||!originalMap||!originalUnmap||!originalCopy)return false;
         Impl* expected=nullptr;if(!instance.compare_exchange_strong(expected,this)&&expected!=this)return false;
@@ -276,7 +281,9 @@ CoverageGateStats SenderCoverage::gateStats()const noexcept{
         result.contextTableReadable=true;result.contextTableStable=current==s.table;
         const std::array<unsigned,4> indices{{13,14,15,47}};
         const std::array<void*,4> expected{{bits<void*>(&Impl::draw),bits<void*>(&Impl::map),bits<void*>(&Impl::unmap),bits<void*>(&Impl::copy)}};
-        for(unsigned i=0;i<indices.size();++i)if(entries[indices[i]]==expected[i])result.contextHookSlots|=1u<<i;
+        const std::array<void*,4> original{{bits<void*>(s.originalDraw),bits<void*>(s.originalMap),bits<void*>(s.originalUnmap),bits<void*>(s.originalCopy)}};
+        for(unsigned i=0;i<indices.size();++i){if(entries[indices[i]]==expected[i])result.contextHookSlots|=1u<<i;
+            if(entries[indices[i]]==original[i])result.contextOriginalSlots|=1u<<i;}
     }
     result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;return result;
 }
