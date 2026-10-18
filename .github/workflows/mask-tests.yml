@@ -2,9 +2,25 @@ name: Native passthrough checks
 on:
   push:
     branches: [dev]
-    paths-ignore: ['**/*.md']
+    paths-ignore:
+      - '**/*.md'
+      - 'get.ps1'
+      - 'get.sh'
+      - 'setup/**'
+      - 'tools/package_stream_link_setup.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - '.github/workflows/setup-tests.yml'
   pull_request:
-    paths-ignore: ['**/*.md']
+    paths-ignore:
+      - '**/*.md'
+      - 'get.ps1'
+      - 'get.sh'
+      - 'setup/**'
+      - 'tools/package_stream_link_setup.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - '.github/workflows/setup-tests.yml'
   workflow_dispatch:
 
 permissions:

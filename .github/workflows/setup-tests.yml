@@ -1,0 +1,55 @@
+name: PC and Frame setup checks
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'get.ps1'
+      - 'get.sh'
+      - 'setup/**'
+      - 'tools/package_stream_link_setup.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - '.github/workflows/setup-tests.yml'
+  pull_request:
+    paths:
+      - 'get.ps1'
+      - 'get.sh'
+      - 'setup/**'
+      - 'tools/package_stream_link_setup.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - '.github/workflows/setup-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Actual wizard, temporary remote agent, and bootstrap fixtures
+        run: |
+          bash -n get.sh setup/patch-steam-link.sh
+          python -B tests/test_steam_link_setup.py
+          python -B tests/test_setup_bootstrap.py
+  windows-bootstrap:
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Actual Windows PowerShell archive parser and bootstrap fixtures
+        shell: powershell
+        run: python -B tests/test_setup_bootstrap.py --pwsh "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
