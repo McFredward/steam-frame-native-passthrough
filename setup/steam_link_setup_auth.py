@@ -25,6 +25,8 @@ CANCEL = struct.pack('!I', 0xffffffff)
 class Credentials:
     def __init__(self, presenter, setup_dir=None):
         self.presenter = presenter
+        if setup_dir is None and not Path(__file__).is_absolute():
+            raise ValueError('The verified sign-in loader must supply its physical setup directory.')
         self.setup_dir = Path(setup_dir or Path(__file__).parent).resolve()
         self._values = {}
         self._brokers = []

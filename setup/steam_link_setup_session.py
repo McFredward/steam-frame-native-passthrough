@@ -33,7 +33,7 @@ class SessionError(ValueError):
 
 
 class SessionCancelled(KeyboardInterrupt):
-    """Explicit user cancellation; mutation callers must reconcile/restore."""
+    """Explicit abort; retain uncertain-operation records without automatic undo."""
 
 
 # The command is fixed, independently of the agent, requests, host and secrets.
@@ -237,7 +237,10 @@ class Session:
                     raise SessionError('The SSH session is closed; no automatic reconnect was attempted.')
                 if self._process is None:
                     try:
-                        environment = self._auth.environment() if self._auth is not None else None
+                        try:
+                            environment = self._auth.environment() if self._auth is not None else None
+                        except ValueError:
+                            raise SessionError('The included sign-in helper is unavailable. Download the complete setup again.',reason='missing') from None
                         self._process = subprocess.Popen(self._args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE if self._auth is not None else None if self._interactive else subprocess.DEVNULL,
                             **({'env':environment, 'creationflags':subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0,

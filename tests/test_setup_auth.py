@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[1]
 def load(name,file):
@@ -47,7 +48,7 @@ class LocalServer:
         self.key=paramiko.RSAKey.generate(2048)
         self.socket=socket.socket();self.socket.bind(('127.0.0.1',0));self.socket.listen(8);self.socket.settimeout(.1)
         self.port=self.socket.getsockname()[1];self.stopped=threading.Event();self.connections=[];self.workers=[]
-        self.passwords=0;self.requests=0;self.stall=False
+        self.passwords=0;self.authenticated=0;self.requests=0;self.stall=False
         self.worker=threading.Thread(target=self._accept);self.worker.start()
     def _accept(self):
         while not self.stopped.is_set():
@@ -63,7 +64,9 @@ class LocalServer:
             def get_allowed_auths(self,user):return 'password'
             def check_auth_password(self,user,password):
                 outer.passwords+=1
-                return paramiko.AUTH_SUCCESSFUL if user=='fixture' and password=='synthetic quiet password' else paramiko.AUTH_FAILED
+                accepted=user=='fixture' and password=='synthetic quiet password'
+                if accepted:outer.authenticated+=1
+                return paramiko.AUTH_SUCCESSFUL if accepted else paramiko.AUTH_FAILED
             def check_channel_request(self,kind,channelid):
                 return paramiko.OPEN_SUCCEEDED if kind=='session' else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
             def check_channel_exec_request(self,channel,command):
@@ -146,11 +149,13 @@ class ActualSSH(unittest.TestCase):
         self.connections=[];self.addCleanup(self.close_sessions)
     def close_sessions(self):
         for connection in self.connections:connection.close()
-    def connection(self,*,cancelled=None,timeout=5,source=None):
-        args=[self.ssh,'-F','none','-p',str(self.server.port),'-o','StrictHostKeyChecking=ask',
+    def arguments(self, interactive=True):
+        return [self.ssh,'-F','none','-p',str(self.server.port),'-o','StrictHostKeyChecking='+('ask' if interactive else 'yes'),
               '-o','UserKnownHostsFile="'+(self.root/'known_hosts').as_posix()+'"','-o','GlobalKnownHostsFile=none',
-              '-o','BatchMode=no','-o','PubkeyAuthentication=no','-o','PreferredAuthentications=password',
+              '-o','BatchMode='+('no' if interactive else 'yes'),'-o','PubkeyAuthentication=no','-o','PreferredAuthentications=password',
               '-o','NumberOfPasswordPrompts=2','-o','ConnectTimeout=2','fixture@127.0.0.1']
+    def connection(self,*,cancelled=None,timeout=5,source=None):
+        args=self.arguments()
         value=session.Session(args,source or 'def dispatch(request):return {"ok":True,"value":request.get("value")}\n',
               interactive=True,auth=self.credentials.open('127.0.0.1','fixture'),cancelled=cancelled,timeout=timeout)
         self.connections.append(value);return value
@@ -251,6 +256,69 @@ class ActualTextualSSH(unittest.IsolatedAsyncioTestCase):
                 await pilot.press('enter')
             app.backend.join(3);self.assertFalse(app.backend.is_alive())
         finally:fixture.doCleanups()
+
+@unittest.skipUnless(paramiko is not None and textual is not None,'actual wizard test dependencies absent')
+class ActualWizardEntry(unittest.IsolatedAsyncioTestCase):
+    async def test_automatic_discovery_uses_actual_loader_and_shows_password_outside_cwd(self):
+        await self.exercise(manual=False)
+    async def test_manual_ip_uses_actual_loader_and_shows_password_with_log_already_created(self):
+        await self.exercise(manual=True)
+    async def exercise(self, manual):
+        # Use the production main -> bridge.run -> factory -> load_helper ->
+        # Credentials path, not the direct class imports of lower-level tests.
+        fixture=ActualSSH('test_real_openssh_password_rpc_and_same_invocation_cache');fixture.setUp()
+        spec=importlib.util.spec_from_file_location('actual_entry_files',ROOT/'tests/test_stream_bridge_install.py')
+        files=importlib.util.module_from_spec(spec);spec.loader.exec_module(files)
+        data=files.Tests();data.setUp()
+        source_dir=SETUP_DIR if (SETUP_DIR/'steam_link_setup.py').is_file() else ROOT/'setup'
+        spec=importlib.util.spec_from_file_location('actual_wizard_engine',source_dir/'steam_link_setup.py')
+        engine=importlib.util.module_from_spec(spec);sys.modules[spec.name]=engine;spec.loader.exec_module(engine)
+        old_cwd=Path.cwd();unrelated=fixture.root/'unrelated current directory';unrelated.mkdir();os.chdir(unrelated)
+        calls=[]
+        def ssh_args(address,login,*,interactive=False,inline_auth=False):
+            calls.append((interactive,inline_auth));return fixture.arguments(interactive)
+        def finder(validate,**kwargs):
+            presentation=engine.load_presentation()
+            sources=type('Hints',(),{'resolve':lambda *a:[], 'named':lambda *a:[] if manual else ['192.168.0.25'], 'lan':lambda *a:None})()
+            return presentation.find_frame(validate,cached_hosts=(),sources=sources,presenter=kwargs['presenter'],connector=lambda *a:True)
+        def backend():
+            return engine.main(['--bundle',str(data.bundle_root),'--lang','en'],local=data.local,
+                discover_frame=finder,_textual_session=True)
+        ui=engine.load_textual();app=ui.SetupApp(backend,'en')
+        async def until(pilot,predicate):
+            for _ in range(200):
+                if predicate():return
+                if app.backend_finished:self.fail('The real wizard exited before its SSH prompt: '+repr(app.detail_history[-3:]))
+                await pilot.pause(.01)
+            self.fail('The real wizard did not show its SSH prompt: '+repr(app.detail_history[-3:]))
+        try:
+            with mock.patch.object(engine.sys.stdin,'isatty',return_value=True),mock.patch.object(engine,'ssh_args',side_effect=ssh_args):
+                async with app.run_test(size=(100,36)) as pilot:
+                    if manual:
+                        await until(pilot,lambda:app.action_names==['retry','manual','check','exit'])
+                        await pilot.press('down','enter')
+                        await until(pilot,lambda:isinstance(app.screen,ui.InputScreen))
+                        await pilot.pause();await pilot.press(*'192.168.0.25','enter')
+                    await until(pilot,lambda:isinstance(app.screen,ui.ConfirmScreen))
+                    self.assertTrue(list((data.local.root/'logs').glob('setup-*.jsonl')))
+                    self.assertTrue(any('Setup log:' in label for label,path in app.paths))
+                    await pilot.press('tab','enter')
+                    await until(pilot,lambda:isinstance(app.screen,ui.SSHInputScreen))
+                    self.assertTrue(app.screen.query_one(Input).password)
+                    await pilot.press('ctrl+c')
+                    for _ in range(150):
+                        if app.backend_finished:break
+                        await pilot.pause(.01)
+                    self.assertTrue(app.backend_finished);self.assertEqual(app.backend_result,130)
+                    self.assertNotIn('bridge_rolled_back',app.detail_history)
+                    await pilot.press('enter')
+                app.backend.join(3);self.assertFalse(app.backend.is_alive())
+            self.assertIn((True,True),calls)
+            self.assertEqual(fixture.server.authenticated,0)
+            self.assertEqual(data.commands,[])
+            self.assertFalse((data.local.root/'setup-restore.json').exists())
+        finally:
+            os.chdir(old_cwd);fixture.doCleanups();data.doCleanups()
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--ssh');parser.add_argument('--setup-dir',type=Path);parser.add_argument('--require-real-ssh',action='store_true')

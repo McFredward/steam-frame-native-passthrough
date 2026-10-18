@@ -26,6 +26,11 @@
   Failed discovery/operations offer an explicit retry; uncertain writes are
   reconciled through exact owned checkpoints, never blindly replayed. This
   authorizes installer behavior, not uncoordinated developer device testing.
+- The maintainer's latest 2026-10-18 cancellation ruling makes Ctrl+C an
+  immediate setup abort without automatic rollback. Retain pending recovery
+  records; do not restore files, start another restart or retry after that
+  explicit abort. This exception does not remove ordinary failed-start recovery
+  or the requirement to restore a running original Frame when Undo is selected.
 - A mask belongs to one source session, video frame, eye and extent. A compositor
   submit counter, approximate timestamp or latest received mask is not proof of
   that association. Missing/invalid associations must retain opaque rendering.

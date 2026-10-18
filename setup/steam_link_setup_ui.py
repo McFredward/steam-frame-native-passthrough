@@ -42,6 +42,8 @@ TEXT = {
         'bridge_pc_stopped': 'SteamVR on this PC stays closed. Start your game normally when you are ready.',
         'bridge_rolled_back': 'The previous setup has been restored and its startup checks passed. The log and recovery paths are kept below.',
         'bridge_retry_question': 'Would you like to try again?',
+        'bridge_connection_failed': 'The connection or sign-in failed. Details and the setup log show the reason; you can try again.',
+        'bridge_cancelled_retained': 'Setup cancelled. No automatic rollback was started. Any pending recovery records were kept for your next setup run.',
         'bridge_reconnect': 'Reconnecting to your Frame after the restart',
         'bridge_retry_ambiguous': 'The last operation could not be confirmed. Setup will check what changed before offering a safe retry.',
         'bridge_resuming_update': 'The previous setup is restored. Continuing with the update you already confirmed.',
@@ -142,6 +144,8 @@ TEXT = {
         'bridge_pc_stopped': 'SteamVR auf diesem PC bleibt geschlossen. Starte dein Spiel wie gewohnt, sobald du bereit bist.',
         'bridge_rolled_back': 'Der vorherige Zustand ist wiederhergestellt und hat die Startprüfungen bestanden. Das Log und die Wiederherstellungspfade bleiben unten erhalten.',
         'bridge_retry_question': 'Möchtest du es erneut versuchen?',
+        'bridge_connection_failed': 'Die Verbindung oder Anmeldung ist fehlgeschlagen. Details und Setup-Log zeigen den Grund; du kannst es erneut versuchen.',
+        'bridge_cancelled_retained': 'Einrichtung abgebrochen. Es wurde keine automatische Rücknahme gestartet. Ausstehende Wiederherstellungsdaten bleiben für den nächsten Lauf erhalten.',
         'bridge_reconnect': 'Nach dem Neustart wieder mit der Frame verbinden',
         'bridge_retry_ambiguous': 'Die letzte Aktion konnte nicht bestätigt werden. Die Einrichtung prüft zunächst die Änderungen und bietet dann einen sicheren neuen Versuch an.',
         'bridge_resuming_update': 'Der Ausgangszustand ist wiederhergestellt. Die bereits bestätigte Aktualisierung wird jetzt fortgesetzt.',
@@ -441,6 +445,13 @@ class Presenter:
         with self._lock:
             self._clear()
             self._paragraph(self.text(key))
+            self._write('\n')
+
+    def problem(self, message):
+        """Display only the caller's tagged, authored public diagnostic."""
+        with self._lock:
+            self._clear()
+            self._paragraph(str(message)[:500])
             self._write('\n')
 
     def section(self, key):

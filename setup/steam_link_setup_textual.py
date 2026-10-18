@@ -584,7 +584,9 @@ class SetupApp(App[int]):
                 result = self.callback()
                 stdout.flush()
                 stderr.flush()
-            code = int(result or 0)
+            # A dismissed prompt may legitimately return None/False before
+            # the engine sees the abort flag. Never report that as success.
+            code = 130 if self.stop_requested else int(result or 0)
         except BaseException as error:
             # The engine owns recovery. Never force-cancel or kill its thread.
             code = 130 if isinstance(error, KeyboardInterrupt) else 2

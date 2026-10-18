@@ -38,8 +38,8 @@ keyboard/mouse navigation, visible progress and private password entry inside
 the interface. Failed discovery offers another search before manual IP entry.
 Passwords are reused only during that setup invocation and never written to a
 log or file. OpenSSH still verifies the Frame identity; accepting a fingerprint
-may update your PC's normal known-hosts file. Ctrl+C cancels waiting connections;
-any already-started changes are reconciled and restored before setup exits.
+may update your PC's normal known-hosts file. Ctrl+C aborts setup without automatic rollback. Pending recovery records remain
+available; choose Restore previous setup explicitly when you want to undo them.
 
 The report identifies matching, different, missing or unreadable reference PC
 files. A Frame runtime match only identifies the checked reference revision; it

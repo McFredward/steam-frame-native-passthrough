@@ -1021,7 +1021,9 @@ class Remote:
         except (OSError,ValueError,TimeoutError) as error:
             if self.log:self.log.record_failure(stage,error,command=command,
                 reason=error.reason if isinstance(error,getattr(self,'_session_errors',())) else None)
-            if isinstance(error,getattr(self,'_session_errors',())):raise e.SetupError(str(error)) from None
+            if isinstance(error,getattr(self,'_session_errors',())):
+                failure=e.SetupError(str(error));failure._sfnp_public_connection_failure=True
+                raise failure from None
             raise e.SetupError('The SSH session ended or timed out. The operation was not retried; run setup again to check its recovery records.') from None
         if result.get('error'):
             failure=result.get('failure',{})
@@ -1033,7 +1035,8 @@ class Remote:
             message=self.checks.get(reason,'The Frame refused this operation. Check the setup log and recovery paths shown below.')
             number=failure.get('errno')
             if reason=='os_error' and type(number)is int and 0<number<4096:message+=' OS error '+str(number)+'.'
-            raise e.SetupError(message)
+            failure=e.SetupError(message);failure._sfnp_public_connection_failure=True
+            raise failure
         if self.log:self.log.event(stage,'result',command=command,status='ok')
         return result
 
@@ -1248,7 +1251,10 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     interactive=not args.check and sys.stdin.isatty()
     ui=e.load_presentation().Presenter(input_fn=input_fn,lang=args.lang,input_enabled=True) if interactive else None
     context['ui']=ui
-    if ui:ui.banner(inspection=False)
+    if ui:
+        ui.banner(inspection=False)
+        if log and log.path:
+            ui.path(log.path,key='setup_log' if log.available else 'setup_log_unavailable')
     phase('bundle');bundle=Bundle(args.bundle,e)
     phase('pc_inventory');pc=local.inventory();installed=LocalInstall(e,local)
     phase('preflight')
@@ -1261,7 +1267,11 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
             peer.log=log
             if ui and getattr(ui,'inline_ssh',False):
                 if context.get('ssh_auth') is None:
-                    context['ssh_auth']=load_helper(e,'steam_link_setup_auth').Credentials(ui)
+                    # load_helper intentionally executes reviewed modules with
+                    # a virtual __file__. Relative resources must be supplied
+                    # by the physical entry point, never inferred from cwd.
+                    setup_dir=e.no_links(Path(e.__file__)).parent
+                    context['ssh_auth']=load_helper(e,'steam_link_setup_auth').Credentials(ui,setup_dir=setup_dir)
                 peer.auth=context['ssh_auth']
                 peer.cancelled=ui.cancelled
         return peer
@@ -1286,7 +1296,11 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
                 if observed.get('architecture') in ('aarch64','arm64') and (observed.get('runtime_compatible') or observed.get('installed') or observed.get('legacy_installed')):
                     selected=True
                     return peer,observed
-            except (OSError,ValueError):pass
+            except (OSError,ValueError) as error:
+                if interactive and ui:
+                    ui.say('bridge_connection_failed')
+                    if getattr(error,'_sfnp_public_connection_failure',False) and hasattr(ui,'problem'):
+                        ui.problem(str(error))
             finally:
                 close=getattr(peer,'close',None)
                 if close and not selected:close()

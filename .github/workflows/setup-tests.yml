@@ -220,7 +220,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Local test-server dependencies failed.' }
           $signIn = Join-Path $env:RUNNER_TEMP 'sign in helper'
           New-Item -ItemType Directory -Path $signIn -Force | Out-Null
-          Copy-Item setup/steam_link_setup_askpass_client.py,setup/steam-link-askpass.sh $signIn
+          Copy-Item -Path 'setup/*.py','setup/steam-link-askpass.sh' -Destination $signIn
           python -B tools/build_setup_askpass.py --compiler cl.exe --output (Join-Path $signIn 'steam-link-askpass.exe')
           if ($LASTEXITCODE -ne 0) { throw 'Windows sign-in helper build failed.' }
           $sshRoot = Join-Path $env:RUNNER_TEMP 'auth-only-client'

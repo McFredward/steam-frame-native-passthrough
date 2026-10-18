@@ -486,7 +486,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             p.say("bridge_health_ok")
             observed.append(p.confirm("bridge_picture"))
             observed.append(p.cancelled())
-            return 130
+            return 0
 
         app = UI.SetupApp(backend, "de")
         async with app.run_test(size=(80, 24)) as pilot:
@@ -495,6 +495,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("ctrl+c")
             await until(pilot, lambda: app.backend_finished)
             self.assertEqual(observed, [False, True])
+            self.assertEqual(app.backend_result, 130)
             self.assertIn("Einrichtung abgebrochen", str(app.query_one("#complete-title", Static).render()))
             self.assertIn("nicht automatisch zurückgenommen", str(app.query_one("#notice", Static).render()))
             self.assertNotIn(app.words["recovering"], app.detail_history)
@@ -507,7 +508,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             p = UI.active_presenter()
             observed.append(p.choose_action(["retry", "rollback", "exit"], recommended="retry"))
             observed.append(p.cancelled())
-            return 130
+            return 0
 
         app = UI.SetupApp(backend)
         async with app.run_test(size=(80, 24)) as pilot:
