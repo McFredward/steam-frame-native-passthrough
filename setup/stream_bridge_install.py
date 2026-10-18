@@ -36,6 +36,7 @@ TOOLS = frozenset('frame/tools/'+name+'.py' for name in (
     'app_payload_probe','compositor_startup_health','native_fragment_atlas_probe',
     'native_fragment_packed_output','native_fragment_r1_presenter','native_fragment_scene_presenter',
     'native_fragment_ssa_probe','native_fragment_stream_coverage','pixel_payload_recovery'))
+PROFILES = frozenset('frame/docs/protocols/scene-contribution-atlas-v'+str(n)+'.json' for n in (1,3))
 GENERATED = {'coverage.spv': {'bytes':7140,'sha256':'54760d17ec2933ca667923ca713f64d6810914f9b2b53503d9a6ebb68ee2bdc0'},
              'legacy.spv': {'bytes':31384,'sha256':'44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49'}}
 
@@ -68,12 +69,12 @@ class Bundle:
         engine.require(type(self.frame)is dict and set(self.frame)=={'reviewed','files','runtime_files','generated'} and
                        type(self.frame['reviewed'])is bool and type(self.frame['files'])is list and
                        len(self.frame['files'])==len(set(self.frame['files'])) and
-                       set(self.frame['files'])==TOOLS|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} and
+                       set(self.frame['files'])==TOOLS|PROFILES|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} and
                        self.frame['generated']==GENERATED and
                        {'frame/'+LIBRARY,'frame/tools/native_fragment_stream_coverage.py',
                         'frame/tools/native_fragment_scene_presenter.py','frame/libsfnp_stream_launch.so',
                         'frame/tools/compositor_startup_health.py'}<=set(self.frame['files']) and
-                       all(n in ('frame/'+LIBRARY,'frame/libsfnp_stream_launch.so') or re.fullmatch(r'frame/tools/[a-z0-9_]+[.]py',n)
+                       all(n in PROFILES|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} or re.fullmatch(r'frame/tools/[a-z0-9_]+[.]py',n)
                            for n in self.frame['files']), 'Unsupported Frame connection package.')
         engine.require(set(self.files)==set(self.pc['files'])|set(self.frame['files']),
                        'Unknown executable or shader payload in package.')
@@ -416,7 +417,7 @@ def generate_shaders(engine,bundle,original,stage):
     """Only owned pinned Python is shipped; native-derived output stays local."""
     e=engine;stage=Path(stage)
     for name in bundle.frame['files']:
-        if name.startswith('frame/tools/'):
+        if name in TOOLS|PROFILES:
             path=stage/Path(name).relative_to('frame')
             e.put(path,bundle.files[name])
     previous=list(sys.path)
@@ -609,7 +610,7 @@ class FrameInstall:
                # Publish opt-in after all code/configuration/pairing writes.
                'receiver.enable':MARKER}
         for name in bundle.frame['files']:
-            if name.startswith('frame/tools/'):files[str(Path(name).relative_to('frame'))]=bundle.files[name]
+            if name in TOOLS|PROFILES:files[str(Path(name).relative_to('frame'))]=bundle.files[name]
         operations=self.legacy_operations()
         for name,raw in files.items():operations.append(self.tx.operation(self.root/name,raw))
         manifest=self.config/'vulkan/implicit_layer.d'/MANIFEST

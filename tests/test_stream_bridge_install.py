@@ -70,6 +70,7 @@ class Tests(unittest.TestCase):
                   'frame/tools/native_fragment_stream_coverage.py':b'# fixture module\n',
                   'frame/tools/native_fragment_scene_presenter.py':b'# fixture module\n',
                   'frame/tools/compositor_startup_health.py':b'# fixture module\n'}
+        for name in b.PROFILES:payloads[name]=b'{}\n'
         for name in b.TOOLS:payloads.setdefault(name,b'# owned fixture source, not native execution\n')
         pc_pins={}
         for role,name in [('vrlink','drivers/vrlink/bin/win64/driver_vrlink.dll'),('vrpathreg','bin/win64/vrpathreg.exe')]:
@@ -188,6 +189,27 @@ class Tests(unittest.TestCase):
         self.unit.tx.commit();self.unit.undo()
         self.assertEqual(s.read(dropin),old_dropin);self.assertEqual(s.read(control),old_control);self.assertEqual(os.readlink(link),target);self.assertEqual(s.read(receipt),old_receipt)
 
+
+
+    def test_generation_stages_protocol_json_and_ignores_cached_tools(self):
+        import types,sys
+        coverage=b'owned fixture coverage';legacy=b'owned fixture legacy'
+        files={name:b'# unused own fixture source\n' for name in b.TOOLS}
+        files['frame/tools/native_fragment_ssa_probe.py']=b'IDENTITY="owned"\n'
+        files['frame/tools/native_fragment_stream_coverage.py']=b'import native_fragment_ssa_probe as s\ndef transform(original):\n assert s.IDENTITY=="owned"\n return b"owned fixture coverage",{}\n'
+        files['frame/tools/native_fragment_scene_presenter.py']=b'from pathlib import Path\ndef transform_robust(original,enabled,count):\n root=Path(__file__).resolve().parents[1]\n for version in (1,3):\n  assert (root/"docs/protocols"/("scene-contribution-atlas-v"+str(version)+".json")).read_bytes()==b"owned profile"\n return b"owned fixture legacy",{}\n'
+        for name in b.PROFILES:files[name]=b'owned profile'
+        bundle=types.SimpleNamespace(frame={'files':sorted(files)},files=files)
+        pins={name:{'bytes':len(raw),'sha256':s.sha(raw)} for name,raw in [('coverage.spv',coverage),('legacy.spv',legacy)]}
+        cached=types.ModuleType('native_fragment_ssa_probe');cached.IDENTITY='foreign';cached.__file__='/foreign/cached.py'
+        previous=sys.modules.get('native_fragment_ssa_probe');sys.modules['native_fragment_ssa_probe']=cached
+        try:
+            with tempfile.TemporaryDirectory(prefix='sfnp-own-source-') as stage,mock.patch.object(b,'GENERATED',pins):
+                result=b.generate_shaders(s,bundle,b'owned fixture input',Path(stage))
+            self.assertEqual(result,{'coverage.spv':coverage,'legacy.spv':legacy});self.assertIs(sys.modules['native_fragment_ssa_probe'],cached)
+        finally:
+            if previous is None:sys.modules.pop('native_fragment_ssa_probe',None)
+            else:sys.modules['native_fragment_ssa_probe']=previous
 
     def test_actual_remote_bootstrap_inventory_creates_no_frame_files(self):
         import subprocess
