@@ -152,7 +152,7 @@ jobs:
           call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
           if errorlevel 1 exit /b 1
           mkdir build
-          cl /nologo /TC /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /c tests/test_stream_bridge_sender_context_layout.c /Fo:build\context-layout.obj
+          cl /nologo /TC /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /c tests/test_stream_bridge_sender_context_layout.c /Fobuild\context-layout.obj
           if errorlevel 1 exit /b 1
           clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN tests/test_stream_bridge_sender_writable_context_shadow.cpp build\context-layout.obj /Fe:build\writable-context-shadow.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
           if errorlevel 1 exit /b 1
