@@ -24,6 +24,28 @@ class Files(fixtures.Tests):
         path=self.bundle_root/'stream-bridge-bundle.json';s.put(path,s.encoded(self.manifest),s.read(path))
         return b.Bundle(self.bundle_root,s)
 
+    def test_explicit_ctrl_c_preserves_exact_real_pc_and_frame_operation_checkpoints(self):
+        installer=b.LocalInstall(s,self.local);ports=Ports();ui=UI();snapshots={}
+        def prepare(action):
+            ports.mark('prepare_'+action)
+            installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+            with self.fake_generation():
+                self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+            paths=(installer.checkpoint().path,self.unit.checkpoint().path,installer.receipt,
+                   self.unit.tx.path,self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll',
+                   self.froot/b.LIBRARY,self.settings,self.fsettings)
+            snapshots.update((path,s.read(path)) for path in paths)
+            raise KeyboardInterrupt()
+        ports.prepare=prepare
+        ports.restore_files=lambda:self.fail('Explicit Ctrl+C must leave the actual checkpoints untouched')
+        ports.restart_original=lambda:self.fail('Explicit Ctrl+C must not restart the original runtime')
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+        self.assertEqual(len(snapshots),8)
+        self.assertTrue(all(path.exists() and s.read(path)==raw for path,raw in snapshots.items()))
+        self.assertIn('bridge_cancelled_retained',ui.messages)
+        self.assertNotIn('finished_prepared',ports.events)
+        self.assertNotIn('finished_original',ports.events)
+
     def test_confirmed_update_survives_recovery_and_installs_the_new_package(self):
         installer=b.LocalInstall(s,self.local)
         installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
@@ -298,10 +320,11 @@ class Files(fixtures.Tests):
 
 
 class UI:
-    def __init__(self,choices=(),picture=True):self.choices=iter(choices);self.messages=[];self.picture=picture
+    def __init__(self,choices=(),picture=True):self.choices=iter(choices);self.messages=[];self.picture=picture;self.stopped=False
     def say(self,key):self.messages.append(key)
     def confirm(self,key):return self.picture
     def choose_action(self,actions,recommended=None):return next(self.choices,'exit')
+    def cancelled(self):return self.stopped
 
 
 class Ports:
@@ -329,15 +352,110 @@ class Ports:
 
 
 class Workflow(unittest.TestCase):
-    def test_cancellation_restores_running_original_before_exiting_without_retry(self):
+    def assert_retained_cancellation(self,ports,ui):
+        self.assertNotIn('restore_files',ports.events)
+        self.assertNotIn('restart_original',ports.events)
+        self.assertNotIn('original_health',ports.events)
+        self.assertNotIn('finished_original',ports.events)
+        self.assertNotIn('finished_prepared',ports.events)
+        self.assertNotIn('allow_recovery',ports.events)
+        self.assertNotIn('bridge_rolled_back',ui.messages)
+        self.assertIn('bridge_cancelled_retained',ui.messages)
+
+    def test_keyboard_interrupt_at_each_stage_retains_checkpoints_without_undo_or_retry(self):
+        class SessionCancelled(KeyboardInterrupt):pass
+        stages=('begin','stop_pc','prepare','restart_prepared','prepared_health','picture')
+        for exception in (KeyboardInterrupt,SessionCancelled):
+            for stage in stages:
+                with self.subTest(exception=exception.__name__,stage=stage):
+                    ports=Ports();ui=UI()
+                    ui.allow_recovery=lambda:ports.mark('allow_recovery')
+                    ui.choose_action=lambda *a,**kw:self.fail('Explicit Ctrl+C must not offer retry or undo')
+                    def cancel(*a,**kw):
+                        ports.mark('cancel_'+stage)
+                        raise exception()
+                    if stage=='picture':ui.confirm=cancel
+                    else:setattr(ports,stage,cancel)
+                    self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+                    self.assert_retained_cancellation(ports,ui)
+                    self.assertEqual(ports.events.count('failure'),1)
+
+    def test_cooperative_cancel_after_each_operation_stops_before_the_next_one(self):
+        for stage in ('begin','stop_pc','prepare','restart_prepared','prepared_health'):
+            with self.subTest(stage=stage):
+                ports=Ports();ui=UI();original=getattr(ports,stage)
+                ui.allow_recovery=lambda:ports.mark('allow_recovery')
+                ui.choose_action=lambda *a,**kw:self.fail('Explicit Ctrl+C must not offer retry')
+                def complete_then_cancel(*a,**kw):
+                    result=original(*a,**kw);ui.stopped=True;return result
+                setattr(ports,stage,complete_then_cancel)
+                self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+                self.assert_retained_cancellation(ports,ui)
+                operations=[event for event in ports.events if event!='failure']
+                self.assertEqual(operations[-1],'prepare_install' if stage=='prepare' else stage)
+
+    def test_ctrl_c_modal_answer_is_not_treated_as_a_rejected_or_accepted_picture(self):
+        for answer in (False,True):
+            with self.subTest(modal_answer=answer):
+                ports=Ports();ui=UI()
+                def picture(key):ui.stopped=True;return answer
+                ui.confirm=picture
+                self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+                self.assert_retained_cancellation(ports,ui)
+
+    def test_cancel_before_begin_does_not_create_an_operation(self):
+        ports=Ports();ui=UI();ui.stopped=True
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+        self.assertEqual(ports.events,['failure'])
+        self.assert_retained_cancellation(ports,ui)
+
+    def test_cancel_during_slow_health_choice_does_not_start_rollback(self):
+        ports=Ports(prepared={'status':'not-ready','software_ready':False});ui=UI()
+        def choose(*a,**kw):ui.stopped=True;return 'rollback'
+        ui.choose_action=choose
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+        self.assert_retained_cancellation(ports,ui)
+
+    def test_cancel_racing_a_genuine_failure_is_not_cleared_by_recovery(self):
         ports=Ports();ui=UI()
         ui.allow_recovery=lambda:ports.mark('allow_recovery')
-        def cancel(action):ports.mark('prepare_'+action);raise KeyboardInterrupt()
-        ports.prepare=cancel
-        ui.choose_action=lambda *a,**kw:self.fail('A completed explicit cancellation must exit after recovery')
+        def failure(*a):ui.stopped=True;raise ValueError('ordinary error after Ctrl+C')
+        ports.prepare=failure
         self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
-        self.assertEqual(ports.events[-5:],['allow_recovery','restore_files','restart_original','original_health','finished_original'])
-        self.assertIn('bridge_rolled_back',ui.messages)
+        self.assert_retained_cancellation(ports,ui)
+
+    def test_explicit_recovery_cancel_does_not_continue_or_offer_retry(self):
+        for stage in ('entry','allow_recovery','restore_files','restart_original','original_health'):
+            with self.subTest(stage=stage):
+                ports=Ports();ui=UI()
+                ui.choose_action=lambda *a,**kw:self.fail('Interrupted recovery must stop without retry')
+                if stage=='entry':ui.stopped=True
+                elif stage=='allow_recovery':
+                    def resume():ports.mark('allow_recovery');ui.stopped=True
+                    ui.allow_recovery=resume
+                else:
+                    original=getattr(ports,stage)
+                    def complete_then_cancel(*a,**kw):
+                        result=original(*a,**kw);ui.stopped=True;return result
+                    setattr(ports,stage,complete_then_cancel)
+                with self.assertRaises(KeyboardInterrupt):flow.Workflow(ports,ui).recover()
+                self.assertNotIn('finished_original',ports.events)
+                self.assertNotIn('bridge_rolled_back',ui.messages)
+                self.assertIn('bridge_cancelled_retained',ui.messages)
+                self.assertEqual(ports.events.count('recovery_failure'),1)
+                if stage=='restore_files':self.assertNotIn('restart_original',ports.events)
+                if stage=='entry':self.assertEqual(ports.events,['recovery_failure'])
+
+    def test_interrupt_during_genuine_failure_recovery_returns_130_once(self):
+        ports=Ports(prepared=False);ui=UI()
+        def interrupt():ports.mark('restore_files');raise KeyboardInterrupt()
+        ports.restore_files=interrupt
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+        self.assertNotIn('restart_original',ports.events)
+        self.assertNotIn('finished_original',ports.events)
+        self.assertEqual(ports.events.count('failure'),1)
+        self.assertEqual(ports.events.count('recovery_failure'),1)
+        self.assertEqual(ui.messages.count('bridge_cancelled_retained'),1)
 
     def test_success_stages_then_restarts_then_checks(self):
         ports=Ports();ui=UI();self.assertEqual(flow.Workflow(ports,ui).run('install'),0)
