@@ -89,11 +89,11 @@ are complete. No current permission to install or restart is implied here.
 
 In the running approved diagnostic session, issue these deliberate phases:
 
-1. `phase --value0`: streamed game visible, local dashboard closed.
+1. `phase --value 0`: streamed game visible, local dashboard closed.
 2. Wait for status `queued_phase:0`; open the local Frame Steam menu and issue
-   `phase --value1` while it is open.
-3. Wait for `queued_phase:1`; close it and issue `phase --value2`.
-4. Wait for `queued_phase:2`, then explicitly `phase --value3` to disable and
+   `phase --value 1` while it is open.
+3. Wait for `queued_phase:1`; close it and issue `phase --value 2`.
+4. Wait for `queued_phase:2`, then explicitly `phase --value 3` to disable and
    collect. No automatic time or restart action occurs.
 
 Use `python3 -B probe/dashboard_transition_probe_session.py ACTION --run PATH`
