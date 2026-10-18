@@ -409,7 +409,7 @@ class SetupApp(App[int]):
         self.plan = ""
         self.outcome = None
         self.stage_name = "pc_inventory"
-        self.paths: dict[str, str] = {}
+        self.paths: dict[tuple[str, str], None] = {}
         self.detail_history: list[str] = []
         self.action_names: list[str] = []
         self.set_bindings()
@@ -551,8 +551,10 @@ class SetupApp(App[int]):
         self.query_one("#details-log", RichLog).write(Text(value))
 
     def add_path(self, label, value):
-        self.paths[_plain(label, 160)] = _plain(value, 4096)
-        self.query_one("#path-list", Static).update("\n\n".join(label + "\n" + path for label, path in self.paths.items()))
+        self.paths[(_plain(label, 160), _plain(value, 4096))] = None
+        if len(self.paths) > 32:
+            del self.paths[next(iter(self.paths))]
+        self.query_one("#path-list", Static).update("\n\n".join(label + "\n" + path for label, path in self.paths))
         # Paths stay visible after a failure without burying the normal flow.
         if "log" in label.casefold():
             self.query_one("#files", Collapsible).collapsed = False
