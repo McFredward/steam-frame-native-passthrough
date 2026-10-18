@@ -135,9 +135,11 @@ def select_asset(release, inspection=False, maintenance=False, bridge_preview=Fa
 
 def inspection_file(name):
     return (name in {'setup-inspection.json', 'setup/steam_link_setup.py', 'setup/steam_link_setup_ui.py',
+                     'setup/steam_link_setup_textual.py', 'setup/steam_link_setup_vendor.py',
                      'README.md', 'README.de.md', 'README.txt', 'LICENSE',
                      'patch-steam-link.cmd', 'patch-steam-link.sh'} or
-            name.startswith('setup/runtime/python/') or name.startswith('setup/runtime/openssh/'))
+            name.startswith('setup/runtime/python/') or name.startswith('setup/runtime/openssh/') or
+            name.startswith('setup/runtime/vendor/'))
 
 
 def arguments(args):
@@ -154,7 +156,7 @@ def extract(archive, target, inspection=False, maintenance=False, bridge_preview
     require(sum(map(bool, (inspection, maintenance, bridge_preview))) <= 1, 'Choose one setup mode.')
     with zipfile.ZipFile(archive) as package:
         items = package.infolist()
-        require(0 < len(items) <= 512, 'Archive entry bound exceeded.')
+        require(0 < len(items) <= 4096, 'Archive entry bound exceeded.')
         files = {}; names = set(); total = 0
         for item in items:
             name = safe_name(item.filename)
@@ -168,7 +170,7 @@ def extract(archive, target, inspection=False, maintenance=False, bridge_preview
             total += item.file_size
             require(total <= MAX_TOTAL, 'Expanded archive exceeds bound.')
             files[name] = item
-        require('bootstrap-package.json' in files and files['bootstrap-package.json'].file_size <= 256 * 1024,
+        require('bootstrap-package.json' in files and files['bootstrap-package.json'].file_size <= 1024 * 1024,
                 'Bootstrap manifest missing.')
         manifest = parse(package.read(files['bootstrap-package.json']))
         require(type(manifest) is dict and set(manifest) == {'schema', 'readiness', 'windows_python', 'files'} and

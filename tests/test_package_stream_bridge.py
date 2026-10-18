@@ -17,6 +17,8 @@ import zipfile
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('sfnp_package_bridge',ROOT/'tools/package_stream_bridge.py')
 p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p)
+spec=importlib.util.spec_from_file_location('sfnp_fixture_textual_wheels',ROOT/'tests/test_textual_dependencies.py')
+tw=importlib.util.module_from_spec(spec);spec.loader.exec_module(tw)
 def encoded(value):return (json.dumps(value,sort_keys=True,indent=2)+'\n').encode()
 def pe(dll=False):
     raw=bytearray(256);raw[:2]=b'MZ';struct.pack_into('<I',raw,60,64);raw[64:68]=b'PE\0\0';struct.pack_into('<H',raw,68,0x8664);struct.pack_into('<H',raw,86,0x2000 if dll else 0);struct.pack_into('<H',raw,88,0x20b);return bytes(raw)
@@ -45,6 +47,10 @@ class Tests(unittest.TestCase):
         self.ssh=self.base/'ssh.zip';self.ssh.write_bytes(archive(sshfiles))
         sshpin={'schema':'sfnp-portable-openssh-pin-v1','architecture':'x86_64','source_url':'https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64.zip','release_notes':'https://github.com/PowerShell/Win32-OpenSSH/releases/tag/10.0.0.0p2-Preview','upstream_status':'preview',**p.pin(self.ssh.read_bytes()),'files':{n:p.pin(raw) for n,raw in sshfiles.items()}}
         (self.root/'packaging/setup-openssh.json').write_bytes(encoded(sshpin))
+        self.wheels=self.base/'textual-wheels'
+        textualpin=json.loads((self.root/'packaging/setup-textual.json').read_bytes())
+        tw.fixture_wheels(self.wheels,textualpin)
+        (self.root/'packaging/setup-textual.json').write_bytes(encoded(textualpin))
         contract=p.load('sfnp_test_bridge_contract',self.root/'setup/stream_bridge_install.py')
         rp=lambda name:{'base':'steamvr','path':name,'bytes':1,'sha256':'a'*64}
         self.profile={'schema':p.PROFILE,'source_revision':'1'*40,'bridge_protocol':{'major':1,'minor':0,'wire_sha256':'a'*64},
@@ -54,7 +60,7 @@ class Tests(unittest.TestCase):
                       'frame':{'reviewed':True,'generated':contract.GENERATED,'runtime_files':{'vrlink':rp('tools/vrlink/bin/linuxarm64/vrlink'),'compositor':rp('bin/linuxarm64/vrcompositor'),'fragment':rp('resources/shaders/vulkan/distort_ps_achromatic_se2.spv'),'openvr':rp('bin/linuxarm64/libopenvr_api.so')}}}
         self.path=self.base/'profile.json';self.save_profile()
     def save_profile(self):self.path.write_bytes(encoded(self.profile))
-    def build(self,**kw):return p.build(self.pc,self.layer,self.selector,self.path,self.python,self.ssh,root=self.root,**kw)
+    def build(self,**kw):return p.build(self.pc,self.layer,self.selector,self.path,self.python,self.ssh,root=self.root,textual_wheels=self.wheels,**kw)
     def validation(self,checks=None):
         value={'schema':p.VALIDATION,'result':'PASS','runtime_profile_sha256':p.pin(self.path.read_bytes())['sha256'],'source_revision':self.profile['source_revision'],'source_pins':self.profile['source_pins'],'artifacts':self.profile['artifacts'],'checks':{n:True for n in (checks or p.CHECKS)},'hardware_verified':False}
         path=self.base/'validation.json';path.write_bytes(encoded(value));return path
@@ -71,6 +77,12 @@ class Tests(unittest.TestCase):
             bundle=json.loads(z.read('stream-bridge-bundle.json'));self.assertEqual(bundle['readiness'],'prototype');self.assertNotIn('steam-link-bundle.json',names)
             self.assertIn('setup/runtime/python/python.exe',names);self.assertIn('setup/runtime/openssh/ssh.exe',names)
             self.assertNotIn('setup/runtime/openssh/sshd.exe',names)
+            self.assertIn('setup/steam_link_setup_textual.py',names)
+            self.assertIn('setup/steam_link_setup_vendor.py',names)
+            marker=json.loads(z.read('setup/runtime/vendor/SFNP-TEXTUAL-PROVENANCE.json'))
+            self.assertEqual(marker['schema'],'sfnp-textual-vendor-v1')
+            self.assertEqual(marker['packages']['textual']['version'],'8.2.8')
+            self.assertIn(b'../vendor\n',z.read('setup/runtime/python/python314._pth'))
 
     def test_reproducible_archive(self):
         first,r1=self.build();second,r2=self.build();self.assertEqual(first,second);self.assertEqual(r1,r2)

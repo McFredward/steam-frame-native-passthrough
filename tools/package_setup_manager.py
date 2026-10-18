@@ -26,11 +26,11 @@ Private Python and a Windows SSH-client fallback are included for this run.
 '''
 
 
-def build(python_zip: Path, openssh_zip: Path):
+def build(python_zip: Path, openssh_zip: Path, textual_wheels: Path):
     spec = importlib.util.spec_from_file_location('sfnp_inspection_packager', ROOT / 'tools/package_setup_inspection.py')
     inspection = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(inspection)
-    raw = inspection.build(python_zip, openssh_zip)
+    raw = inspection.build(python_zip, openssh_zip, textual_wheels)
     with zipfile.ZipFile(io.BytesIO(raw)) as source:
         files = {name: source.read(name) for name in source.namelist() if name != 'bootstrap-package.json'}
     helper = (ROOT / 'tools/native_passthrough_setup.py').read_bytes()
@@ -59,9 +59,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--python-zip', type=Path, required=True)
     parser.add_argument('--openssh-zip', type=Path, required=True)
+    parser.add_argument('--textual-wheels', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    raw = build(args.python_zip, args.openssh_zip)
+    raw = build(args.python_zip, args.openssh_zip, args.textual_wheels)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:

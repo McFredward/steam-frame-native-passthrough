@@ -46,6 +46,11 @@ def windows_python(raw, expected_sha256, source_url):
             files[item.filename] = contents
     require({'python.exe', 'LICENSE.txt'} <= set(files) and files['python.exe'].startswith(b'MZ') and
             any(re.fullmatch(r'python[0-9]+\.zip', name) for name in files), 'Complete licensed embeddable Python required.')
+    # The embedded interpreter deliberately ignores global site-packages. Its
+    # only extra import path is this package's fully hash-checked private vendor.
+    pth = [name for name in files if re.fullmatch(r'python[0-9]+[.]_pth', name)]
+    require(len(pth) == 1, 'Portable Python isolated path configuration required.')
+    files[pth[0]] = files[pth[0]].rstrip(b'\r\n') + b'\n../vendor\n'
     prefix = 'setup/runtime/python/'
     result = {prefix + name: value for name, value in files.items()}
     result[prefix + 'SFNP-PROVENANCE.json'] = (json.dumps({
@@ -58,7 +63,7 @@ def assemble(files):
     require('bootstrap-package.json' not in files and
             {'steam-link-bundle.json', 'setup/steam_link_setup.py', 'setup/runtime/python/python.exe',
              'patch-steam-link.cmd', 'patch-steam-link.sh'} <= set(files), 'Incomplete online setup inventory.')
-    require(len(files) < 512 and sum(map(len, files.values())) <= 192 * 1024 * 1024, 'Setup package bound exceeded.')
+    require(len(files) < 4096 and sum(map(len, files.values())) <= 192 * 1024 * 1024, 'Setup package bound exceeded.')
     manifest = {'schema': 'sfnp-bootstrap-package-v1', 'readiness': 'release',
                 'windows_python': 'setup/runtime/python/python.exe',
                 'files': {name: pin(raw) for name, raw in sorted(files.items())}}
@@ -67,7 +72,7 @@ def assemble(files):
         for name, raw in sorted(files.items()):
             require(not name.startswith('/') and '\\' not in name and ':' not in name and
                     all(part not in ('', '.', '..') for part in name.split('/')) and
-                    0 < len(raw) <= 32 * 1024 * 1024, 'Unsafe setup file inventory.')
+                    0 <= len(raw) <= 32 * 1024 * 1024, 'Unsafe setup file inventory.')
             target.writestr(name, raw)
         target.writestr('bootstrap-package.json', json.dumps(manifest, sort_keys=True, indent=2) + '\n')
     raw = result.getvalue()
@@ -80,6 +85,7 @@ def main():
     parser.add_argument('--bundle', required=True, type=Path)
     parser.add_argument('--python-zip', required=True, type=Path)
     parser.add_argument('--openssh-zip', required=True, type=Path)
+    parser.add_argument('--textual-wheels', required=True, type=Path)
     parser.add_argument('--python-sha256', required=True)
     parser.add_argument('--python-source-url', required=True)
     parser.add_argument('--output', required=True, type=Path)
@@ -97,7 +103,8 @@ def main():
     verifier.verify_package(args.bundle.resolve() / 'frame-package')
     files = dict(bundle.files)
     files['steam-link-bundle.json'] = engine.read(args.bundle / 'steam-link-bundle.json', 128 * 1024)
-    for name in ('patch-steam-link.cmd', 'patch-steam-link.sh', 'steam_link_setup.py', 'steam_link_setup_ui.py'):
+    for name in ('patch-steam-link.cmd', 'patch-steam-link.sh', 'steam_link_setup.py', 'steam_link_setup_ui.py',
+                 'steam_link_setup_textual.py', 'steam_link_setup_vendor.py'):
         destination = 'setup/' + name if name.endswith('.py') else name
         files[destination] = (ROOT / 'setup' / name).read_bytes()
     files.update(windows_python(engine.read(args.python_zip), args.python_sha256, args.python_source_url))
@@ -105,6 +112,9 @@ def main():
     dependencies = importlib.util.module_from_spec(dependency_spec); dependency_spec.loader.exec_module(dependencies)
     ssh_pin = engine.parse(engine.read(ROOT / 'packaging/setup-openssh.json', 16384))
     files.update(dependencies.windows_openssh(engine.read(args.openssh_zip), ssh_pin))
+    vendor_spec = importlib.util.spec_from_file_location('sfnp_textual_packaging', ROOT / 'tools/package_setup_textual.py')
+    textual = importlib.util.module_from_spec(vendor_spec); vendor_spec.loader.exec_module(textual)
+    files.update(textual.vendor(args.textual_wheels, json.loads((ROOT / 'packaging/setup-textual.json').read_bytes())))
     raw = assemble(files)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

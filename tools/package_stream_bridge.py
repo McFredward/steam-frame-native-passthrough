@@ -43,13 +43,15 @@ def pin(raw):return {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
 def required_sources(root=ROOT):
     bridge=load('sfnp_bridge_package_contract',root/'setup/stream_bridge_install.py')
     return sorted({'setup/steam_link_setup.py','setup/steam_link_setup_ui.py','setup/stream_bridge_install.py',
+                   'setup/steam_link_setup_textual.py','setup/steam_link_setup_vendor.py',
                    'setup/steam_link_setup_session.py','setup/steam_link_setup_log.py',
                    'setup/steam_link_setup_pc.py','setup/steam_link_setup_frame.py',
                    'setup/steam_link_setup_checkpoint.py','setup/steam_link_setup_workflow.py',
                    'setup/patch-steam-link.cmd','setup/patch-steam-link.sh','LICENSE',
                    'pc/stream-bridge-sender-provider.vrdrivermanifest',
                    'tools/package_stream_bridge.py','tools/package_stream_link_setup.py',
-                   'tools/package_setup_dependencies.py','packaging/setup-python.json','packaging/setup-openssh.json'}|
+                   'tools/package_setup_dependencies.py','tools/package_setup_textual.py',
+                   'packaging/setup-textual.json','packaging/setup-python.json','packaging/setup-openssh.json'}|
                   {name.removeprefix('frame/') for name in bridge.TOOLS|bridge.PROFILES})
 
 
@@ -91,7 +93,7 @@ def validation(engine,profile,profile_raw,artifacts,receipts):
 
 
 def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,openssh_zip,
-          *,release=False,validation_receipts=(),root=ROOT):
+          *,release=False,validation_receipts=(),textual_wheels=None,root=ROOT):
     engine=load('sfnp_bridge_package_engine',root/'setup/steam_link_setup.py')
     bridge=load('sfnp_bridge_package_install',root/'setup/stream_bridge_install.py')
     shared=load('sfnp_bridge_package_runtime',root/'tools/package_stream_link_setup.py')
@@ -135,6 +137,8 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
     files={**payload,'stream-bridge-bundle.json':engine.encoded(bundle),
            'setup/steam_link_setup.py':source_bytes['setup/steam_link_setup.py'],
            'setup/steam_link_setup_ui.py':source_bytes['setup/steam_link_setup_ui.py'],
+           'setup/steam_link_setup_textual.py':source_bytes['setup/steam_link_setup_textual.py'],
+           'setup/steam_link_setup_vendor.py':source_bytes['setup/steam_link_setup_vendor.py'],
            'setup/stream_bridge_install.py':source_bytes['setup/stream_bridge_install.py'],
            'setup/steam_link_setup_session.py':source_bytes['setup/steam_link_setup_session.py'],
            'setup/steam_link_setup_log.py':source_bytes['setup/steam_link_setup_log.py'],
@@ -150,6 +154,8 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
     files.update(shared.windows_python(py_raw,py_pin['sha256'],py_pin['source_url']))
     ssh_pin=engine.parse(source_bytes['packaging/setup-openssh.json'])
     files.update(deps.windows_openssh(engine.read(openssh_zip),ssh_pin))
+    textual=load('sfnp_bridge_textual_packaging',root/'tools/package_setup_textual.py')
+    files.update(textual.vendor(textual_wheels,engine.parse(source_bytes['packaging/setup-textual.json'])))
     source_manifest={'schema':'sfnp-stream-bridge-package-source-v1','source_revision':profile['source_revision'],
                      'runtime_profile':pin(raw_profile),'source_pins':profile['source_pins'],
                      'native_artifacts':profile['artifacts'],'validation_receipts':receipts,
@@ -162,14 +168,14 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
         'Setup closes only verified PC SteamVR processes and leaves PC SteamVR closed. It restarts/checks the Frame interface and asks you to confirm the picture.\n'+
         'A failed start restores the exact original operation checkpoint and restarts the original Frame interface. Incomplete recovery offers Retry.\n'+
         'Use the explicit preview launcher for this package.\n').encode()
-    engine.require(len(files)<512 and sum(map(len,files.values()))<=MAX_EXPANDED,'Setup package exceeds its bounded inventory.')
+    engine.require(len(files)<4096 and sum(map(len,files.values()))<=MAX_EXPANDED,'Setup package exceeds its bounded inventory.')
     outer={'schema':BOOTSTRAP,'readiness':bundle['readiness'],'windows_python':'setup/runtime/python/python.exe',
            'files':{name:pin(raw) for name,raw in sorted(files.items())}}
     files['bootstrap-package.json']=engine.encoded(outer)
     output=io.BytesIO()
     with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
         for name,raw in sorted(files.items()):
-            engine.relative(name);engine.require(0<len(raw)<=engine.MAX_FILE,'Oversized or empty setup member.')
+            engine.relative(name);engine.require(0<=len(raw)<=engine.MAX_FILE,'Oversized setup member.')
             engine.require(not name.endswith('.spv'),'Native-derived shader payloads cannot be distributed.')
             info=zipfile.ZipInfo(name,date_time=(2026,10,18,0,0,0));info.external_attr=0o100600<<16
             archive.writestr(info,raw,compress_type=zipfile.ZIP_DEFLATED,compresslevel=6)
@@ -194,13 +200,13 @@ def publish(path,raw):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    for name in ('pc-provider','frame-layer','frame-selector','runtime-profile','python-zip','openssh-zip','output'):
+    for name in ('pc-provider','frame-layer','frame-selector','runtime-profile','python-zip','openssh-zip','textual-wheels','output'):
         parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--release',action='store_true')
     parser.add_argument('--validation-receipt',action='append',type=Path,default=[])
     args=parser.parse_args(argv)
     raw,receipt=build(args.pc_provider,args.frame_layer,args.frame_selector,args.runtime_profile,args.python_zip,args.openssh_zip,
-                      release=args.release,validation_receipts=args.validation_receipt)
+                      release=args.release,validation_receipts=args.validation_receipt,textual_wheels=args.textual_wheels)
     sidecar=args.output.with_suffix(args.output.suffix+'.receipt.json')
     if args.output.exists() or sidecar.exists():raise ValueError('An output or receipt already exists; it was preserved.')
     publish(args.output,raw)

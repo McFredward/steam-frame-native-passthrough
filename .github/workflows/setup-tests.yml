@@ -13,6 +13,7 @@ on:
       - 'tools/package_setup_manager.py'
       - 'tools/native_passthrough_setup.py'
       - 'tools/package_setup_dependencies.py'
+      - 'tools/package_setup_textual.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_stream_bridge_install.py'
@@ -27,6 +28,9 @@ on:
       - 'tests/test_setup_bootstrap.py'
       - 'tests/test_setup_ui.py'
       - 'tests/test_setup_dependencies.py'
+      - 'tests/test_textual_dependencies.py'
+      - 'tests/test_setup_textual.py'
+      - 'tests/test_setup_textual_integration.py'
       - '.github/workflows/setup-tests.yml'
   pull_request:
     paths:
@@ -40,6 +44,7 @@ on:
       - 'tools/package_setup_manager.py'
       - 'tools/native_passthrough_setup.py'
       - 'tools/package_setup_dependencies.py'
+      - 'tools/package_setup_textual.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_stream_bridge_install.py'
@@ -54,6 +59,9 @@ on:
       - 'tests/test_setup_bootstrap.py'
       - 'tests/test_setup_ui.py'
       - 'tests/test_setup_dependencies.py'
+      - 'tests/test_textual_dependencies.py'
+      - 'tests/test_setup_textual.py'
+      - 'tests/test_setup_textual_integration.py'
       - '.github/workflows/setup-tests.yml'
   workflow_dispatch:
 
@@ -67,12 +75,16 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Download exact offline Textual wheels for package checks
+        run: python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
+      - name: Real private Textual imports and asynchronous keyboard/mouse/resizing tests
+        run: python -B tests/test_textual_dependencies.py --wheels "${{ runner.temp }}/textual-wheels" --pilot tests/test_setup_textual.py
       - name: Actual wizard, temporary remote agent, and bootstrap fixtures
         run: |
           bash -n get.sh get-preview.sh setup/patch-steam-link.sh
@@ -88,9 +100,22 @@ jobs:
           python -B tests/test_setup_bootstrap.py
           python -B tests/test_setup_ui.py
           python -B tests/test_setup_dependencies.py
+          python -B tests/test_setup_textual_integration.py
+  linux-python-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Verify real offline UI on the documented minimum Python
+        run: |
+          python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
+          python -B tests/test_textual_dependencies.py --wheels "${{ runner.temp }}/textual-wheels" --pilot tests/test_setup_textual.py
   windows-bootstrap:
     runs-on: windows-2025
-    timeout-minutes: 3
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -112,6 +137,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'PC runtime control checks failed.' }
           python -B tests/test_setup_workflow.py Files.test_pc_install_rollback_removes_only_its_new_credentials Files.test_pc_repair_rollback_preserves_original_receipt_and_missing_file Files.test_pc_update_retains_initial_uninstall_baseline_and_pairing Files.test_pc_update_rollback_restores_previous_version_and_owned_preferences
           if ($LASTEXITCODE -ne 0) { throw 'Windows file rollback checks failed.' }
+      - name: Download exact offline Textual wheels for package checks
+        run: python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
       - name: Execute the actual packaged portable Python without Frame access
         shell: powershell
         run: |
@@ -136,7 +163,7 @@ jobs:
           $sshArchive = Join-Path $env:RUNNER_TEMP 'openssh-portable.zip'
           & curl.exe --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 16777216 --output $sshArchive $sshPin.source_url
           if ($LASTEXITCODE -ne 0 -or (Get-Item $sshArchive).Length -ne $sshPin.bytes -or (Get-FileHash $sshArchive).Hash.ToLowerInvariant() -cne $sshPin.sha256) { throw 'Official OpenSSH pin differs.' }
-          python -B tools/package_setup_inspection.py --python-zip $archive --openssh-zip $sshArchive --output $package
+          python -B tools/package_setup_inspection.py --python-zip $archive --openssh-zip $sshArchive --textual-wheels (Join-Path $env:RUNNER_TEMP 'textual-wheels') --output $package
           if ($LASTEXITCODE -ne 0) { throw 'Inspection packaging failed.' }
           $tokens=$null; $parseErrors=$null
           $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get.ps1'),[ref]$tokens,[ref]$parseErrors)
@@ -152,6 +179,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup runtime failed.' }
           & (Join-Path $target $runtime) -I -B tests/test_setup_ui.py
           if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup presentation failed.' }
+          & (Join-Path $target $runtime) -I -B tests/test_setup_textual.py
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual keyboard/mouse and screen checks failed.' }
+          & (Join-Path $target $runtime) -I -B tests/test_setup_textual_integration.py
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual entry-point and console ownership checks failed.' }
 
       - name: Actual packaged management mode (no Frame contact or removal)
         shell: powershell
@@ -160,7 +191,7 @@ jobs:
           $archive = Join-Path $env:RUNNER_TEMP 'python-embed.zip'
           $sshArchive = Join-Path $env:RUNNER_TEMP 'openssh-portable.zip'
           $package = Join-Path $env:RUNNER_TEMP 'setup-manager.zip'
-          python -B tools/package_setup_manager.py --python-zip $archive --openssh-zip $sshArchive --output $package
+          python -B tools/package_setup_manager.py --python-zip $archive --openssh-zip $sshArchive --textual-wheels (Join-Path $env:RUNNER_TEMP 'textual-wheels') --output $package
           if ($LASTEXITCODE -ne 0) { throw 'Management packaging failed.' }
           $target = Join-Path $env:RUNNER_TEMP 'actual-manager-package'
           [void][IO.Directory]::CreateDirectory($target)

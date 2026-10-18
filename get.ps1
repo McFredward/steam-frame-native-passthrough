@@ -102,9 +102,11 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
     }
     function Test-SfnpInspectionFile([string] $Name) {
         return ($Name -cin @('setup-inspection.json','setup/steam_link_setup.py','setup/steam_link_setup_ui.py',
+            'setup/steam_link_setup_textual.py','setup/steam_link_setup_vendor.py',
             'README.md','README.de.md','README.txt','LICENSE','patch-steam-link.cmd','patch-steam-link.sh') -or
             $Name.StartsWith('setup/runtime/python/', [StringComparison]::Ordinal) -or
-            $Name.StartsWith('setup/runtime/openssh/', [StringComparison]::Ordinal))
+            $Name.StartsWith('setup/runtime/openssh/', [StringComparison]::Ordinal) -or
+            $Name.StartsWith('setup/runtime/vendor/', [StringComparison]::Ordinal))
     }
     function Test-SfnpManagerFile([string] $Name) {
         return ((Test-SfnpInspectionFile $Name) -or $Name -cin @('setup-maintenance.json','setup/frame_native_uninstall.py'))
@@ -114,7 +116,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $package = [IO.Compression.ZipFile]::OpenRead($Archive)
         try {
-            Require-Sfnp ($package.Entries.Count -gt 0 -and $package.Entries.Count -le 512) 'Archive entry bound exceeded.'
+            Require-Sfnp ($package.Entries.Count -gt 0 -and $package.Entries.Count -le 4096) 'Archive entry bound exceeded.'
             $files = @{}
             $names = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
             [long] $total = 0
@@ -133,7 +135,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
                 $files[$name] = $entry
             }
             Require-Sfnp ($files.ContainsKey('bootstrap-package.json')) 'Bootstrap manifest missing.'
-            $rawManifest = Read-SfnpEntry $files['bootstrap-package.json'] 262144
+            $rawManifest = Read-SfnpEntry $files['bootstrap-package.json'] 1048576
             $manifest = [Text.Encoding]::UTF8.GetString($rawManifest) | ConvertFrom-Json
             $keys = @($manifest.PSObject.Properties.Name | Sort-Object)
             $schema = 'sfnp-bootstrap-package-v1'; $readiness = 'release'; $profileName = 'steam-link-bundle.json'
@@ -170,8 +172,8 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
                 $pin = $property.Value
                 Require-Sfnp ($files.ContainsKey($name) -and $name -ne 'bootstrap-package.json' -and
                     ((@($pin.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'bytes,sha256') -and
-                    $pin.bytes -is [ValueType] -and $pin.bytes -eq $files[$name].Length -and
-                    $pin.sha256 -cmatch '^[0-9a-f]{64}$') 'Invalid inner file pin.'
+                    ($pin.bytes -is [int] -or $pin.bytes -is [long]) -and $pin.bytes -ge 0 -and $pin.bytes -eq $files[$name].Length -and
+                    $pin.sha256 -is [string] -and $pin.sha256 -cmatch '^[0-9a-f]{64}$') 'Invalid inner file pin.'
                 $bytes = Read-SfnpEntry $files[$name] 33554432
                 Require-Sfnp ((Get-SfnpHash $bytes) -ceq $pin.sha256) 'Inner file hash mismatch.'
                 $path = Join-Path $Target $name

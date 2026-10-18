@@ -147,6 +147,27 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual((target / 'setup-inspection.json').read_bytes(), inspection_contents()['setup-inspection.json'])
         self.assertFalse((target / 'steam-link-bundle.json').exists())
 
+    def test_private_vendor_allowlist_and_reviewed_large_inventory(self):
+        files=inspection_contents()
+        files['setup/steam_link_setup_textual.py']=b'# Owned UI source fixture\n'
+        files['setup/steam_link_setup_vendor.py']=b'# Owned loader source fixture\n'
+        files.update({'setup/runtime/vendor/textual/fixture_'+str(i)+'_'+'x'*100+'.py':b'' for i in range(1400)})
+        raw=archive(files,inspection=True)
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            self.assertGreater(z.getinfo('bootstrap-package.json').file_size,256*1024)
+        target=self.extract(raw,True)
+        self.assertEqual(len([p for p in (target/'setup/runtime/vendor').rglob('*') if p.is_file()]),1400)
+
+    def test_reviewed_inventory_and_manifest_bounds_remain_enforced(self):
+        with self.assertRaisesRegex(ValueError,'manifest missing'):
+            self.extract(archive(mutate=lambda manifest:manifest.update(padding='x'*(1024*1024))))
+        self.assertEqual(list((self.path/'package').iterdir()),[])
+        (self.path/'package').rmdir()
+        for count in (4096,):
+            files=contents();files.update({'setup/runtime/vendor/f'+str(i)+'.py':b'' for i in range(count)})
+            with self.assertRaisesRegex(ValueError,'entry bound'):
+                self.extract(archive(files))
+
     def test_modes_cannot_accept_each_others_archives(self):
         for mode in (False, True):
             with self.subTest(inspection=mode), tempfile.TemporaryDirectory(dir=self.path) as temporary:
@@ -246,11 +267,13 @@ class BootstrapTests(unittest.TestCase):
             with zipfile.ZipFile(stream, 'w') as target:
                 for name, raw in files.items(): target.writestr(name, raw)
             return stream.getvalue()
-        files = {'python.exe': b'MZ_NON_EXECUTABLE_TEST_FIXTURE', 'LICENSE.txt': b'fixture license', 'python314.zip': b'fixture stdlib'}
+        files = {'python.exe': b'MZ_NON_EXECUTABLE_TEST_FIXTURE', 'LICENSE.txt': b'fixture license', 'python314.zip': b'fixture stdlib', 'python314._pth': b'python314.zip\n.\n# import site\n'}
         raw = runtime(files)
         digest = hashlib.sha256(raw).hexdigest()
         url = 'https://www.python.org/ftp/python/3.14.0/python-3.14.0-embed-amd64.zip'
-        self.assertIn('setup/runtime/python/LICENSE.txt', packaging.windows_python(raw, digest, url))
+        output=packaging.windows_python(raw,digest,url)
+        self.assertIn('setup/runtime/python/LICENSE.txt',output)
+        self.assertEqual(output['setup/runtime/python/python314._pth'],b'python314.zip\n.\n# import site\n../vendor\n')
         with self.assertRaises(ValueError): packaging.windows_python(raw, '0' * 64, url)
         with self.assertRaises(ValueError): packaging.windows_python(raw, digest, 'https://example.org/runtime.zip')
         del files['LICENSE.txt']; missing = runtime(files)
@@ -422,7 +445,12 @@ class BootstrapTests(unittest.TestCase):
         if not POWERSHELL: self.skipTest('Pass --pwsh to run actual PowerShell parser/extraction functions')
         valid = self.path / 'valid.zip'; valid.write_bytes(archive())
         bad = self.path / 'bad.zip'; bad.write_bytes(archive(mutate=lambda v: v.update(readiness='prototype')))
-        inspection = self.path / 'inspection.zip'; inspection.write_bytes(archive(inspection=True))
+        inspection = self.path / 'inspection.zip'
+        inspection_files=inspection_contents()
+        inspection_files['setup/steam_link_setup_textual.py']=b'# Owned Textual fixture\n'
+        inspection_files['setup/steam_link_setup_vendor.py']=b'# Owned loader fixture\n'
+        inspection_files.update({'setup/runtime/vendor/textual/fixture_'+str(i)+'_'+'x'*100+'.py':b'' for i in range(1400)})
+        inspection.write_bytes(archive(inspection_files,inspection=True))
         files = inspection_contents(); files['pc-provider/driver.dll'] = b'UNEXECUTED NATIVE FIXTURE'
         payload = self.path / 'payload.zip'; payload.write_bytes(archive(files, inspection=True))
         manager = self.path / 'manager.zip'; manager.write_bytes(archive(maintenance=True))

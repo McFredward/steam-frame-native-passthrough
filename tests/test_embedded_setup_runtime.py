@@ -25,6 +25,16 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 if args.manager:
     maintenance = module.Maintenance(args.package.resolve())
     assert maintenance is not None
+# The bundled _pth must make the exact offline runtime available even with -I.
+# This imports real upstream dependencies, not local fixture stand-ins.
+import importlib.metadata
+import textual, rich, pygments, markdown_it, mdit_py_plugins, platformdirs, typing_extensions, linkify_it, mdurl, uc_micro
+from textual.app import App
+from textual.widgets import Header, Footer, OptionList, Input, Button, RichLog
+vendor=(args.package.resolve()/'setup/runtime/vendor').resolve()
+assert importlib.metadata.version('textual') == '8.2.8'
+assert all(vendor in Path(item.__file__).resolve().parents for item in
+           [textual,rich,pygments,markdown_it,mdit_py_plugins,platformdirs,typing_extensions,linkify_it,mdurl,uc_micro])
 ui = module.load_presentation()
 assert ui.language('de') == 'de' and ui.language('en') == 'en'
 with tempfile.TemporaryDirectory(prefix='sfnp-embedded-acl-') as temporary:
@@ -69,5 +79,5 @@ with tempfile.TemporaryDirectory(prefix='sfnp-embedded-acl-') as temporary:
 print(json.dumps({'actual_bundled_python': sys.version, 'inspection_cli': 'passed',
                   'actual_windows_private_acl': sys.platform == 'win32', 'dummy_file_read': 'passed',
                   'actual_windows_public_hardlink': sys.platform == 'win32', 'public_hardlink_snapshot': 'passed',
-                  'included_ui_import': 'passed', 'portable_windows_ssh_execution': sys.platform == 'win32',
+                  'included_ui_import': 'passed', 'private_textual_version': importlib.metadata.version('textual'), 'portable_windows_ssh_execution': sys.platform == 'win32',
                   'frame_contact': False, 'native_patch_install': False}))
