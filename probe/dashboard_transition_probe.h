@@ -11,8 +11,8 @@ constexpr std::size_t BufferBytes = 1600;
 constexpr std::size_t Slots = 6;
 constexpr std::size_t MaximumPipelines = 8;
 constexpr std::size_t MaximumCommands = 512;
-constexpr const char* ShaderSha = "3439b80751b87307c16097490f036a50a161bda5f7ee446ac5550337144751de";
-constexpr std::size_t ShaderBytes = 60876;
+constexpr const char* ShaderSha = "04846d731cedfc6f1a98254d2239b0b90f75225567aeac2b868747415766222a";
+constexpr std::size_t ShaderBytes = 62908;
 constexpr std::size_t PipelineTagWord = 1403;
 constexpr std::uint32_t TagTemplate = 0x44545000;
 
@@ -47,28 +47,34 @@ public:
     Probe& operator=(const Probe&) = delete;
     ~Probe(); // Joins CPU writer only; Vulkan release is explicit and quiescent.
     void prepare(VkDevice, const VkDeviceCreateInfo&, PFN_vkGetDeviceProcAddr,
-                 const VkPhysicalDeviceMemoryProperties&, int ownedDirectoryFd) noexcept;
+                 const VkPhysicalDeviceMemoryProperties&, int ownedDirectoryFd, VkQueueFlags observedQueueFlags) noexcept;
     void pipeline(VkPipeline normal, VkPipelineCache, const VkGraphicsPipelineCreateInfo&,
                   const frame_pixel_ssbo_clone::Recipe&) noexcept;
     void pipelineRetiring(VkPipeline) noexcept;
+    void shaderObserved(VkShaderModule, const VkShaderModuleCreateInfo&) noexcept;
+    void pipelineObserved(VkPipeline, const VkGraphicsPipelineCreateInfo&, unsigned nativeReason = UINT32_MAX) noexcept;
     void queueRetrieved(std::uint32_t family, std::uint32_t index, VkQueue, bool ordinary = true) noexcept;
     void commandsAllocated(const VkCommandBufferAllocateInfo&, const VkCommandBuffer*, VkResult) noexcept;
     void commandsFreed(VkCommandPool, std::uint32_t, const VkCommandBuffer*) noexcept;
-    void poolRetired(VkCommandPool) noexcept;
+    void poolRetired(VkCommandPool, bool destroyed = false) noexcept;
     void begin(VkCommandBuffer, const VkCommandBufferBeginInfo&, VkResult) noexcept;
     void end(VkCommandBuffer, VkResult) noexcept;
     void reset(VkCommandBuffer, VkResult) noexcept;
     void bind(VkCommandBuffer, VkPipelineBindPoint, VkPipeline) noexcept;
+    void nativeDescriptorBinding(VkCommandBuffer, VkPipelineBindPoint, std::uint32_t firstSet, std::uint32_t count) noexcept;
     void unknown(VkCommandBuffer) noexcept;
     bool beforeDraw(VkCommandBuffer) noexcept;
     void afterDraw(VkCommandBuffer) noexcept;
-    void beforeSubmit(VkQueue, bool ordinary) noexcept;
+    void beforeSubmit(VkQueue, bool ordinary, std::uint32_t count = 0, const VkSubmitInfo* = nullptr) noexcept;
     void release(VkResult actualDeviceIdle) noexcept;
     Refusal refusal() const noexcept { return refusal_.load(std::memory_order_acquire); }
     bool prepared() const noexcept { return ready_; }
+    friend struct TestAccess;
 private:
     struct Pipeline { VkPipeline normal{}, instrumented{}; VkPipelineLayout layout{}; std::uint32_t tag{}; bool retired{}; };
-    struct Command { VkCommandBuffer value{}; VkCommandPool pool{}; VkPipeline bound{}; bool primary{}, recording{}, eligible{}, swapped{}; };
+    struct Command { VkCommandBuffer value{}; VkCommandPool pool{}; VkPipeline bound{}; std::uint64_t usedRoutes{}; bool unknownRoute{}, primary{}, recording{}, eligible{}, swapped{}; };
+    struct ShaderIdentity { std::uint64_t handle{}; std::uint32_t bytes{}; std::array<std::uint8_t,32> sha{}; };
+    struct Route { std::uint64_t handle{}; std::uint32_t tag{}, nativeReason{}, retired{}, reserved{}; std::array<std::uint8_t,32> vs{}, ps{}; std::array<std::uint64_t,3> draws{}; };
     Pipeline* lookup(VkPipeline) noexcept;
     Command* lookup(VkCommandBuffer) noexcept;
     void refuse(Refusal) noexcept;
@@ -103,6 +109,9 @@ private:
     std::array<bool, 4> phaseSpent_{};
     std::array<Pipeline, MaximumPipelines> pipelines_{};
     std::array<Command, MaximumCommands> commands_{};
+    std::array<ShaderIdentity,128> shaders_{};
+    std::array<Route,64> routes_{};
+    std::array<std::uint64_t,3> unknownRoutes_{};
     std::array<std::uint32_t, ShaderBytes / 4> shader_{};
     std::mutex mutex_;
     PhaseSequence sequence_;
@@ -114,6 +123,8 @@ private:
     std::thread writer_;
     VkQueue queue_{};
     std::uint32_t family_{};
+    std::uint32_t nativeQueueCreateInfos_{}, nativeQueueCount_{}, featureSource_{};
+    bool featureObserved_{}, featureEnabled_{};
     int directoryFd_ = -1;
     bool ready_ = false, released_ = false;
 };

@@ -16,7 +16,6 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import native_fragment_ssa_probe as ssa
-import native_fragment_atlas_probe as base
 import native_fragment_scene_presenter as scene
 
 SOURCE_SHA = '44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49'
@@ -92,6 +91,13 @@ def instrument(raw):
             constants[value] = fresh()
             declarations.append(make(43, 6, constants[value], value))
         return constants[value]
+    def floating(value):
+        bits = struct.unpack('<I', struct.pack('<f', value))[0]
+        key = ('float', bits)
+        if key not in constants:
+            constants[key] = fresh()
+            declarations.append(make(43, 8, constants[key], bits))
+        return constants[key]
     zero, one, two, three = [constant(x) for x in (0, 1, 2, 3)]
     uint_array, block, block_pointer, word_pointer, ssbo = [fresh() for _ in range(5)]
     local_array, local_pointer, local_word, guard_local = [fresh() for _ in range(4)]
@@ -125,6 +131,21 @@ def instrument(raw):
             value = emit(109, 6, emit(81, 8, coordinate, axis))
             grid = emit(199, 6, value, constant(31))
             eligible = emit(167, 96, eligible, emit(170, 96, grid, zero))
+        # Never let a faster distortion-border fallback steal the sole slot
+        # before the actual central video contribution runs its guard.
+        valid_r1 = None
+        central = None
+        for axis in (0, 1):
+            low = emit(81, 8, 871, axis)
+            high = emit(81, 8, 871, axis + 2)
+            ordered = emit(186, 96, high, low)
+            valid_r1 = ordered if valid_r1 is None else emit(167, 96, valid_r1, ordered)
+            q = emit(81, 8, 883, axis)
+            inside = emit(167, 96, emit(190, 96, q, floating(.45)), emit(188, 96, q, floating(.55)))
+            central = inside if central is None else emit(167, 96, central, inside)
+        # Invalid R1 has no meaningful centre. Preserve a distinct invalid-R1
+        # receipt instead of misclassifying its unread guards as a rejected atlas.
+        eligible = emit(167, 96, eligible, emit(166, 96, central, emit(168, 96, valid_r1)))
         selected, claimed, claimed_end, end = [fresh() for _ in range(4)]
         body += [make(247, end, 0), make(250, eligible, selected, end), make(248, selected)]
         slot = emit(128, 6, emit(132, 6, phase, two), 693)
@@ -139,7 +160,8 @@ def instrument(raw):
         for index in range(12):
             ptr = emit(65, local_word, guard_local, constant(index))
             words.append(emit(61, 6, ptr))
-        words += [zero] * (WORDS_PER_SLOT - len(words))
+        words += [zero] * (WORDS_PER_SLOT - len(words) - 1)
+        words += [emit(169, 6, valid_r1, one, zero)]
         require(len(words) == WORDS_PER_SLOT, 'fixed bounded sparse record')
         offset = emit(128, 6, constant(CONTROL_WORDS), emit(132, 6, slot, constant(WORDS_PER_SLOT)))
         for index, value in enumerate(words):
@@ -195,6 +217,9 @@ def instrument(raw):
               'guard_values_are_existing_reads': True, 'new_image_reads': 0,
               'native_output_stores_unchanged': True, 'native_descriptor_reads_added': 0,
               'requires_actually_enabled_fragment_stores': True,
+              'sample_region': 'existing normalized native q883 in [.45,.55]^2, grid32',
+              'missing_slot_is_incomplete_not_guard_rejection': True,
+              'invalid_r1_record_flag_word': 63,
               'unobserved_guard_word': 0x7fc00001,
               'runtime_or_device_permission': False}
     return binary, record

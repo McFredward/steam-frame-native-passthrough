@@ -41,7 +41,7 @@ void Probe::refuse(Refusal value) noexcept {
     if (refusal_.compare_exchange_strong(before, value)) ++revision_;
 }
 void Probe::prepare(VkDevice device, const VkDeviceCreateInfo& info, PFN_vkGetDeviceProcAddr gdpa,
-                    const VkPhysicalDeviceMemoryProperties& properties, int directory) noexcept {
+                    const VkPhysicalDeviceMemoryProperties& properties, int directory, VkQueueFlags queueFlags) noexcept {
     if (directoryFd_ >= 0 || ready_ || released_) return;
     constexpr char magic[] = "SFNP_DASHBOARD_TRANSITION/1\n";
     char marker[sizeof(magic)-1]{};
@@ -54,9 +54,12 @@ void Probe::prepare(VkDevice device, const VkDeviceCreateInfo& info, PFN_vkGetDe
     frame_pixel_ssbo_clone::FeatureFacts feature;
     frame_pixel_ssbo_clone::Refusal why;
     if (!frame_pixel_ssbo_clone::enabledFeature(info, true, feature, why)) refuse(Refusal::Feature);
+    featureObserved_=feature.observed;featureEnabled_=feature.enabled;featureSource_=unsigned(feature.source);
+    nativeQueueCreateInfos_=info.queueCreateInfoCount;
+    if(info.queueCreateInfoCount==1&&info.pQueueCreateInfos)nativeQueueCount_=info.pQueueCreateInfos[0].queueCount;
     if (info.queueCreateInfoCount != 1 || !info.pQueueCreateInfos ||
         info.pQueueCreateInfos[0].flags || info.pQueueCreateInfos[0].queueCount != 1 ||
-        info.pQueueCreateInfos[0].pNext) refuse(Refusal::QueueProfile);
+        info.pQueueCreateInfos[0].pNext || !(queueFlags&VK_QUEUE_GRAPHICS_BIT)) refuse(Refusal::QueueProfile);
     else family_ = info.pQueueCreateInfos[0].queueFamilyIndex;
 #define LOAD(name) name##_=reinterpret_cast<PFN_vk##name>(gdpa(device,"vk" #name)); if(!name##_)refuse(Refusal::Dispatch);
     LOAD(CreateBuffer) LOAD(DestroyBuffer) LOAD(GetBufferMemoryRequirements)
@@ -131,10 +134,10 @@ bool Probe::resources(const VkPhysicalDeviceMemoryProperties& properties) noexce
         CmdPipelineBarrier_(phaseCommands_[phase], VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
         CmdUpdateBuffer_(phaseCommands_[phase], buffer_, 0, 4, &phase);
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = phase == 3 ? VK_ACCESS_HOST_READ_BIT : VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        CmdPipelineBarrier_(phaseCommands_[phase], VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            phase == 3 ? VK_PIPELINE_STAGE_HOST_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | (phase == 3 ? VK_ACCESS_SHADER_WRITE_BIT : 0);
+        barrier.dstAccessMask = phase == 3 ? VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        CmdPipelineBarrier_(phaseCommands_[phase], VK_PIPELINE_STAGE_TRANSFER_BIT | (phase == 3 ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0),
+                            phase == 3 ? VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                             0, 0, nullptr, 1, &barrier, 0, nullptr);
         if (EndCommandBuffer_(phaseCommands_[phase]) != VK_SUCCESS) return false;
     }
@@ -181,8 +184,36 @@ void Probe::pipeline(VkPipeline normal, VkPipelineCache cache, const VkGraphicsP
 void Probe::pipelineRetiring(VkPipeline value) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (auto* p = lookup(value)) p->retired = true;
+    for(auto& route:routes_)if(route.handle==frame_pixel_ssbo_clone::handle(value))route.retired=1;
     // Keep companion resources until actual device quiescence. Native handle
     // destruction invalidates its recorded uses; never recycle a pipeline tag.
+}
+void Probe::shaderObserved(VkShaderModule value,const VkShaderModuleCreateInfo& info) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ready_ || !info.pCode || !info.codeSize || info.codeSize > 256u*1024u) return;
+    // Scalar module hashes only; no shader body is recorded or redistributed.
+    ShaderIdentity* target=nullptr;
+    for(auto& s:shaders_)if(s.handle==frame_pixel_ssbo_clone::handle(value)){target=&s;break;}
+    if(!target)for(auto& s:shaders_)if(!s.handle){target=&s;break;}
+    if(!target){refuse(Refusal::PipelineCapacity);return;}
+    target->handle=frame_pixel_ssbo_clone::handle(value);target->bytes=static_cast<std::uint32_t>(info.codeSize);
+    frame_receiver::Sha256 hash;hash.update(info.pCode,info.codeSize);target->sha=hash.finish();
+}
+void Probe::pipelineObserved(VkPipeline value,const VkGraphicsPipelineCreateInfo& info,unsigned reason) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!ready_)return;
+    Route* target=nullptr;
+    for(auto& r:routes_)if(r.handle==frame_pixel_ssbo_clone::handle(value)&&!r.retired){target=&r;break;}
+    if(!target)for(auto& r:routes_)if(!r.handle){target=&r;break;}
+    if(!target){refuse(Refusal::PipelineCapacity);return;}
+    target->handle=frame_pixel_ssbo_clone::handle(value);target->nativeReason=reason;
+    if(auto* p=lookup(value))target->tag=p->tag;
+    if(info.stageCount<=8&&info.pStages)for(unsigned i=0;i<info.stageCount;++i)
+        for(const auto& s:shaders_)if(s.handle==frame_pixel_ssbo_clone::handle(info.pStages[i].module)){
+            if(info.pStages[i].stage==VK_SHADER_STAGE_VERTEX_BIT)target->vs=s.sha;
+            if(info.pStages[i].stage==VK_SHADER_STAGE_FRAGMENT_BIT)target->ps=s.sha;
+        }
+    ++revision_;
 }
 void Probe::queueRetrieved(std::uint32_t family, std::uint32_t index, VkQueue value, bool ordinary) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -210,14 +241,17 @@ void Probe::commandsFreed(VkCommandPool pool, std::uint32_t count, const VkComma
         *c = {};
     }
 }
-void Probe::poolRetired(VkCommandPool pool) noexcept {
+void Probe::poolRetired(VkCommandPool pool,bool destroyed) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& c : commands_) if (c.pool == pool) { c.bound = {}; c.recording = c.eligible = false; }
+    for (auto& c : commands_) if (c.pool == pool) {
+        if(destroyed)c={};
+        else { c.bound = {}; c.usedRoutes=0;c.unknownRoute=false;c.recording = c.eligible = false; }
+    }
 }
 void Probe::begin(VkCommandBuffer value, const VkCommandBufferBeginInfo& info, VkResult result) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (auto* c = lookup(value)) {
-        c->bound = {}; c->swapped = false; c->recording = result == VK_SUCCESS;
+        c->bound = {}; c->usedRoutes=0;c->unknownRoute=false;c->swapped = false; c->recording = result == VK_SUCCESS;
         c->eligible = c->recording && c->primary && !info.pNext && !info.pInheritanceInfo &&
             !(info.flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT);
     }
@@ -229,7 +263,7 @@ void Probe::end(VkCommandBuffer value, VkResult result) noexcept {
 void Probe::reset(VkCommandBuffer value, VkResult result) noexcept {
     if (result != VK_SUCCESS) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (auto* c = lookup(value)) { c->bound = {}; c->recording = c->eligible = c->swapped = false; }
+    if (auto* c = lookup(value)) { c->bound = {}; c->usedRoutes=0;c->unknownRoute=false;c->recording = c->eligible = c->swapped = false; }
 }
 void Probe::bind(VkCommandBuffer value, VkPipelineBindPoint point, VkPipeline pipeline) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -237,11 +271,21 @@ void Probe::bind(VkCommandBuffer value, VkPipelineBindPoint point, VkPipeline pi
 }
 void Probe::unknown(VkCommandBuffer value) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (auto* c = lookup(value)) c->eligible = false;
+    if (auto* c = lookup(value)) {c->eligible = false;c->unknownRoute=true;}
+}
+void Probe::nativeDescriptorBinding(VkCommandBuffer value,VkPipelineBindPoint point,std::uint32_t first,std::uint32_t count) noexcept {
+    if(point==VK_PIPELINE_BIND_POINT_GRAPHICS&&count&&(first>0||count>1))unknown(value);
 }
 bool Probe::beforeDraw(VkCommandBuffer value) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     auto* c = lookup(value); auto* p = c ? lookup(c->bound) : nullptr;
+    if(c){
+        bool found=false;
+        for(std::size_t i=0;i<routes_.size();++i)if(routes_[i].handle==frame_pixel_ssbo_clone::handle(c->bound)&&!routes_[i].retired){
+            c->usedRoutes|=std::uint64_t(1)<<i;found=true;break;
+        }
+        if(!found)c->unknownRoute=true;
+    }
     if (!ready_ || refusal() != Refusal::None || !c || !p || !p->instrumented || !c->recording || !c->eligible) {
         ++missed_; return false;
     }
@@ -265,7 +309,7 @@ bool Probe::updatePhase(VkQueue queue, unsigned phase) noexcept {
     if (phase == 3) disabledFenceSubmitted_.store(true, std::memory_order_release);
     ++revision_; return true;
 }
-void Probe::beforeSubmit(VkQueue queue, bool ordinary) noexcept {
+void Probe::beforeSubmit(VkQueue queue, bool ordinary, std::uint32_t count, const VkSubmitInfo* submits) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ready_) return;
     ++submits_;
@@ -274,9 +318,18 @@ void Probe::beforeSubmit(VkQueue queue, bool ordinary) noexcept {
     const auto requested = refusal() == Refusal::None ? sequence_.requested.load(std::memory_order_acquire) : 3;
     if (requested != queuedPhase_.load(std::memory_order_acquire))
         updatePhase(queue, requested);
+    const auto phase=queuedPhase_.load(std::memory_order_acquire);
+    if(ordinary&&phase<3&&count<=128&&(!count||submits))for(unsigned i=0;i<count;++i)
+        if(submits[i].commandBufferCount<=MaximumCommands&&(!submits[i].commandBufferCount||submits[i].pCommandBuffers))
+            for(unsigned n=0;n<submits[i].commandBufferCount;++n){
+                const auto* c=lookup(submits[i].pCommandBuffers[n]);
+                if(!c){++unknownRoutes_[phase];continue;}
+                for(std::size_t r=0;r<routes_.size();++r)if(c->usedRoutes&(std::uint64_t(1)<<r))++routes_[r].draws[phase];
+                if(c->unknownRoute)++unknownRoutes_[phase];
+            }
 }
 void Probe::writer() noexcept {
-    unsigned update = 0; std::uint64_t previous = UINT64_MAX;
+    unsigned update = 0; std::uint64_t previous = UINT64_MAX;bool terminalWritten=false;
     while (!stop_.load(std::memory_order_acquire)) {
         char command[2]{};
         if (ownedRead(directoryFd_, "dashboard-transition.phase", command, 2) && command[1] == '\n' && command[0] >= '0' && command[0] <= '3') {
@@ -286,19 +339,37 @@ void Probe::writer() noexcept {
             const auto completed = GetFenceStatus_(device_, phaseFences_[3]);
             if (completed == VK_SUCCESS) {
                 if (!ownedWrite(directoryFd_, "dashboard-transition-records.bin", mapped_, BufferBytes)) refuse(Refusal::Collection);
+                std::array<Route,64> routes;
+                std::array<std::uint64_t,3> unknown;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    routes=routes_;unknown=unknownRoutes_;
+                }
+                if(!ownedWrite(directoryFd_,"dashboard-transition-routes.bin",routes.data(),sizeof(routes)) ||
+                   !ownedWrite(directoryFd_,"dashboard-transition-unknown-routes.bin",unknown.data(),sizeof(unknown)))refuse(Refusal::Collection);
                 collected_.store(true, std::memory_order_release); ++revision_;
             } else if (completed != VK_NOT_READY) refuse(Refusal::DeviceLost);
         }
-        const auto revision = revision_.load(std::memory_order_acquire);
-        if (revision != previous && update < 24) {
+        // Pipeline creation/route revisions never consume the phase-control
+        // budget. This key has at most12 monotonic lifecycle transitions.
+        const auto revision = (std::uint64_t(unsigned(refusal()))<<16) |
+            (std::uint64_t(sequence_.requested.load())<<8) | (std::uint64_t(queuedPhase_.load())<<4) |
+            std::uint64_t(collected_.load());
+        if ((revision != previous && update < 24) || (collected_.load()&&!terminalWritten)) {
             char output[1024]{}, name[64]{};
             const auto length = std::snprintf(output, sizeof(output),
-                "{\"schema\":\"sfnp-dashboard-transition-status-v1\",\"ready\":%s,\"refusal\":%u,\"requested_phase\":%u,\"queued_phase\":%u,\"instrumented_draws\":%llu,\"unobserved_draws\":%llu,\"submits\":%llu,\"collected\":%s,\"visibility_claim\":false,\"overlay_transport_claim\":false}\n",
+                "{\"schema\":\"sfnp-dashboard-transition-status-v1\",\"ready\":%s,\"refusal\":%u,\"requested_phase\":%u,\"queued_phase\":%u,\"instrumented_draws\":%llu,\"unobserved_draws\":%llu,\"submits\":%llu,\"collected\":%s,\"fragment_stores_observed\":%s,\"fragment_stores_enabled\":%s,\"feature_source\":%u,\"native_queue_create_infos\":%u,\"native_queue_count\":%u,\"native_queue_family\":%u,\"visibility_claim\":false,\"overlay_transport_claim\":false}\n",
                 ready_ ? "true" : "false", unsigned(refusal()), sequence_.requested.load(), queuedPhase_.load(),
                 static_cast<unsigned long long>(draws_.load()), static_cast<unsigned long long>(missed_.load()),
-                static_cast<unsigned long long>(submits_.load()), collected_.load() ? "true" : "false");
-            std::snprintf(name, sizeof(name), "dashboard-transition-status-%02u.json", update++);
-            if (length > 0 && std::size_t(length) < sizeof(output)) ownedWrite(directoryFd_, name, output, std::size_t(length));
+                static_cast<unsigned long long>(submits_.load()), collected_.load() ? "true" : "false",
+                featureObserved_?"true":"false",featureEnabled_?"true":"false",featureSource_,nativeQueueCreateInfos_,nativeQueueCount_,family_);
+            if(update<24){
+                std::snprintf(name, sizeof(name), "dashboard-transition-status-%02u.json", update++);
+                if (length > 0 && std::size_t(length) < sizeof(output)) ownedWrite(directoryFd_, name, output, std::size_t(length));
+            }
+            if(collected_.load()&&!terminalWritten&&length>0&&std::size_t(length)<sizeof(output)){
+                ownedWrite(directoryFd_,"dashboard-transition-terminal.json",output,std::size_t(length));terminalWritten=true;
+            }
             previous = revision;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
