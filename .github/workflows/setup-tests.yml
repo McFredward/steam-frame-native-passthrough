@@ -7,6 +7,7 @@ on:
       - 'get.sh'
       - 'get-preview.*'
       - 'setup/**'
+      - 'tools/package_stream_bridge.py'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
       - 'tools/package_setup_manager.py'
@@ -14,6 +15,8 @@ on:
       - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
+      - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_package_stream_bridge.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
       - 'tests/test_setup_ui.py'
@@ -25,6 +28,7 @@ on:
       - 'get.sh'
       - 'get-preview.*'
       - 'setup/**'
+      - 'tools/package_stream_bridge.py'
       - 'tools/package_stream_link_setup.py'
       - 'tools/package_setup_inspection.py'
       - 'tools/package_setup_manager.py'
@@ -32,6 +36,8 @@ on:
       - 'tools/package_setup_dependencies.py'
       - 'packaging/setup-*.json'
       - 'tests/test_embedded_setup_runtime.py'
+      - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_package_stream_bridge.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
       - 'tests/test_setup_ui.py'
@@ -59,6 +65,8 @@ jobs:
         run: |
           bash -n get.sh get-preview.sh setup/patch-steam-link.sh
           python -B tests/test_steam_link_setup.py
+          python -B tests/test_stream_bridge_install.py
+          python -B tests/test_package_stream_bridge.py
           python -B tests/test_setup_bootstrap.py
           python -B tests/test_setup_ui.py
           python -B tests/test_setup_dependencies.py
