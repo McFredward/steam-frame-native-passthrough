@@ -5,6 +5,7 @@ are contacted. Production authentication still uses OpenSSH, never Paramiko.
 """
 from __future__ import annotations
 import argparse
+import faulthandler
 import importlib.util
 import os
 from pathlib import Path
@@ -322,7 +323,12 @@ class ActualWizardEntry(unittest.IsolatedAsyncioTestCase):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--ssh');parser.add_argument('--setup-dir',type=Path);parser.add_argument('--require-real-ssh',action='store_true')
+    parser.add_argument('--diagnostic-timeout',type=int,help='CI-only: dump thread stacks and fail this isolated synthetic test process.')
     args,rest=parser.parse_known_args();SSH=args.ssh
     if args.setup_dir:SETUP_DIR=args.setup_dir
     if args.require_real_ssh and (paramiko is None or not (SSH or shutil.which('ssh'))):raise SystemExit('Actual OpenSSH fixture dependencies missing')
-    unittest.main(argv=[sys.argv[0],*rest])
+    if args.diagnostic_timeout:
+        faulthandler.dump_traceback_later(args.diagnostic_timeout,exit=True)
+    try:unittest.main(argv=[sys.argv[0],*rest])
+    finally:
+        if args.diagnostic_timeout:faulthandler.cancel_dump_traceback_later()

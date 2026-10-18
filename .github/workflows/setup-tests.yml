@@ -78,6 +78,11 @@ on:
         type: choice
         default: all
         options: [all, linux, windows, windows-auth, python39]
+      auth_case:
+        description: Repeat only the affected synthetic sign-in case
+        type: choice
+        default: all
+        options: [all, manual-discovery]
 
 permissions:
   contents: read
@@ -214,6 +219,8 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Real Windows OpenSSH sign-in and UI cancellation
         shell: powershell
+        env:
+          SFNP_AUTH_CASE: ${{ inputs.auth_case }}
         run: |
           $ErrorActionPreference = 'Stop'
           python -m pip install paramiko==4.0.0 textual==8.2.8
@@ -240,7 +247,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Checked OpenSSH client preparation failed.' }
             $ssh = Join-Path $sshRoot 'setup/runtime/openssh/ssh.exe'
           }
-          python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn
+          if ($env:SFNP_AUTH_CASE -eq 'manual-discovery') {
+            python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn --diagnostic-timeout 35 -v ActualWizardEntry.test_manual_ip_uses_actual_loader_and_shows_password_with_log_already_created
+          } else {
+            python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn -v
+          }
           if ($LASTEXITCODE -ne 0) { throw 'Actual Windows OpenSSH sign-in failed.' }
 
       - name: Actual packaged management mode (no Frame contact or removal)
