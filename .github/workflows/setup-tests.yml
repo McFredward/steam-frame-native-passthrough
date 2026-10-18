@@ -5,8 +5,12 @@ on:
     paths:
       - 'get.ps1'
       - 'get.sh'
+      - 'get-preview.*'
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
+      - 'tools/package_setup_inspection.py'
+      - 'packaging/setup-*.json'
+      - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
       - '.github/workflows/setup-tests.yml'
@@ -14,8 +18,12 @@ on:
     paths:
       - 'get.ps1'
       - 'get.sh'
+      - 'get-preview.*'
       - 'setup/**'
       - 'tools/package_stream_link_setup.py'
+      - 'tools/package_setup_inspection.py'
+      - 'packaging/setup-*.json'
+      - 'tests/test_embedded_setup_runtime.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
       - '.github/workflows/setup-tests.yml'
@@ -39,7 +47,7 @@ jobs:
           python-version: '3.12'
       - name: Actual wizard, temporary remote agent, and bootstrap fixtures
         run: |
-          bash -n get.sh setup/patch-steam-link.sh
+          bash -n get.sh get-preview.sh setup/patch-steam-link.sh
           python -B tests/test_steam_link_setup.py
           python -B tests/test_setup_bootstrap.py
   windows-bootstrap:
@@ -53,3 +61,26 @@ jobs:
       - name: Actual Windows PowerShell archive parser and bootstrap fixtures
         shell: powershell
         run: python -B tests/test_setup_bootstrap.py --pwsh "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+      - name: Execute the actual packaged portable Python without Frame access
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pin = Get-Content packaging/setup-python.json -Raw | ConvertFrom-Json
+          $archive = Join-Path $env:RUNNER_TEMP 'python-embed.zip'
+          & curl.exe --fail --silent --show-error --proto '=https' --max-time 60 --max-filesize 16777216 --output $archive $pin.source_url
+          if ($LASTEXITCODE -ne 0 -or (Get-Item $archive).Length -ne $pin.bytes -or (Get-FileHash $archive).Hash.ToLowerInvariant() -cne $pin.sha256) { throw 'Official Python pin differs.' }
+          $package = Join-Path $env:RUNNER_TEMP 'setup-inspection.zip'
+          python -B tools/package_setup_inspection.py --python-zip $archive --output $package
+          if ($LASTEXITCODE -ne 0) { throw 'Inspection packaging failed.' }
+          $tokens=$null; $parseErrors=$null
+          $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get.ps1'),[ref]$tokens,[ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { throw 'Bootstrap syntax error.' }
+          $previewAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get-preview.ps1'),[ref]$tokens,[ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { throw 'Preview launcher syntax error.' }
+          $functions=$ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)
+          foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
+          $target = Join-Path $env:RUNNER_TEMP 'actual-inspection-package'
+          [void][IO.Directory]::CreateDirectory($target)
+          $runtime = Expand-SfnpPackage $package $target $true
+          & (Join-Path $target $runtime) -I -B tests/test_embedded_setup_runtime.py --package $target
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup runtime failed.' }

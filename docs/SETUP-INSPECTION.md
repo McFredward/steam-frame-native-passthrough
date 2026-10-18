@@ -5,7 +5,25 @@ SSH. **It does not install the new sender/receiver bridge or fix image quality.*
 It never pairs devices, stages payloads, changes Frame files, registers a driver,
 or restarts Steam, SteamVR or the headset. Ordinary Steam Link stays unchanged.
 
-Run the dedicated inspection archive's launcher with `--inspect`. The assistant
+On Windows, open PowerShell normally (no administrator permission needed):
+
+```powershell
+irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/dev/get-preview.ps1 | iex
+```
+
+On Linux, open a terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/dev/get-preview.sh | bash
+```
+
+These preview launchers pin the reviewed bootstrap by commit and SHA-256 and
+request only the separate `setup-inspection-v1` prerelease archive. Windows
+uses the included official portable Python; no system Python installation is
+needed. Linux requires Python 3.9 or newer, curl and sha256sum. Keep the Frame
+awake on the same network; neither wearing it nor starting a stream is required.
+
+The assistant
 tries a previously provided address and common local Frame names. If they are
 unavailable, enter the Frame's IP address. Searching one private subnet is
 optional and happens only after you agree. OpenSSH handles the usual fingerprint

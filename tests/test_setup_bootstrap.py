@@ -80,6 +80,15 @@ class BootstrapTests(unittest.TestCase):
     def test_exact_public_asset(self):
         self.assertEqual(bootstrap.select_asset(self.release())['size'], 512)
 
+    def test_preview_wrappers_pin_reviewed_core_and_force_inspection(self):
+        for name, source, flag in [('get-preview.ps1', 'get.ps1', '-InspectionOnly'),
+                                   ('get-preview.sh', 'get.sh', '--inspect')]:
+            text = (ROOT / name).read_text()
+            digest = hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
+            self.assertIn(digest, text)
+            self.assertIn('/b171247a19b39236f764a5ee5525f0ad4cf4f110/' + source, text)
+            self.assertIn(flag, text)
+
     def test_explicit_inspection_release_is_separate_from_stable(self):
         release = self.release(True)
         self.assertEqual(bootstrap.select_asset(release, True)['name'], bootstrap.INSPECTION_ASSET)
