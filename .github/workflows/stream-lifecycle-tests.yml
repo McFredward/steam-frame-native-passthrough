@@ -51,6 +51,8 @@ jobs:
           mkdir -p build/nvenc-sdk
           curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/FFmpeg/nv-codec-headers/43d91706e097565f57b311e567f0219838bcc2f6/include/ffnvcodec/nvEncodeAPI.h -o build/nvenc-sdk/nvEncodeAPI.h
           echo 'be0c29a41ae3260fd016a9001fd959e747bac93ad21411759736abba4ffdea86  build/nvenc-sdk/nvEncodeAPI.h' | sha256sum --check --strict
+          curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/ValveSoftware/openvr/0924064316de3effbcd1acf1e309182a2deb1c05/headers/openvr_driver.h -o build/nvenc-sdk/openvr_driver.h
+          echo '1036efe998d63e82d1d3db2b32a2f58df4a8eeaf5280f50aaf28220ff60a40ab  build/nvenc-sdk/openvr_driver.h' | sha256sum --check --strict
       - name: Build the affected production control and encoder boundaries
         run: |
           cmake -S . -B build/lifecycle -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
