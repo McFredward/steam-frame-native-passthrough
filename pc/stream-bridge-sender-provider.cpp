@@ -92,10 +92,9 @@ bool imageProof(HMODULE module,void*** slot){
     constexpr std::array<std::uint8_t,32> textHash{{0x6e,0x3c,0x8b,0xfc,0x59,0x94,0x41,0x56,0x1e,0x4c,0xb4,0x0e,0x54,0x2b,0xc9,0x2d,0x93,0x07,0xd9,0xde,0x67,0xdf,0x0f,0x94,0xf2,0xb8,0x7d,0x77,0xfe,0x92,0x4c,0xa2}};
     std::array<std::uint8_t,32> observed{};
     if(!hashMemory(base+0x1000,12754860,observed)||observed!=textHash)return false;
-    // This frozen helper is only compared, NEVER called as a private ABI.
-    constexpr std::uint8_t expected[]{0x48,0xff,0x25,0x21,0x13,0x25,0x00};
-    if(std::memcmp(base+0x9db060,expected,sizeof(expected))!=0||
-       std::memcmp(base+0xc3dad8,"NvEncodeAPICreateInstance",25)!=0)return false;
+    // The executable hash also pins the import-tail helper; no private
+    // instruction body is embedded or called as a private ABI here.
+    if(std::memcmp(base+0xc3dad8,"NvEncodeAPICreateInstance",25)!=0)return false;
     auto* address=const_cast<std::uint8_t*>(base)+IatRva;
     if(!VirtualQuery(address,&memory,sizeof(memory))||memory.AllocationBase!=module||
        memory.State!=MEM_COMMIT||memory.Protect&PAGE_GUARD||memory.Protect==PAGE_NOACCESS)return false;
