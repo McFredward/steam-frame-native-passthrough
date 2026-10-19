@@ -71,6 +71,9 @@ public:
     Draw beforeDraw(VkCommandBuffer) noexcept;
     // The native queue owner calls these around its ORIGINAL submission. They
     // never wait; unsupported shape/route must keep ordinary native rendering.
+    // Until a first exact guarded recording can exist, forward the native call
+    // unchanged without owned zero/copy/guard submits. Afterwards, retirement
+    // or disablement never bypasses zeroing of potentially retained recordings.
     VkResult submit(VkQueue,std::uint32_t,const VkSubmitInfo*,VkFence) noexcept;
     VkResult submit2(VkQueue,std::uint32_t,const VkSubmitInfo2*,VkFence,bool khr=false) noexcept;
     // Cold diagnostics only. Counts are observations, never image authority;

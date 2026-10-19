@@ -56,6 +56,10 @@ struct Renderer::Impl {
         std::array<Use,gpu::MaximumSlots> uses{};std::size_t used=0;
     };
     std::atomic<std::uint64_t> observationEpoch{1};std::atomic<bool> lost{false};std::atomic<unsigned> admittedPipelines{0};
+    // Monotonic for this native device lifetime. Before any masked recording
+    // can exist, native startup submits need no owned GPU commands at all.
+    // Never clear on source loss/reset: a flags=0 CB may still retain coverage.
+    std::atomic<bool> guardedRecordingPossible{false};
     mutable std::mutex gate;VkDevice device{};PFN_vkGetDeviceProcAddr gdpa{};VkPhysicalDeviceMemoryProperties memory{};
     std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,coveragePrepared=false,registered=false,count1Authorized=false;
     gpu::Pool pool;journal::Journal definitions{1,{},journal::PendingCount1::RetainFacts};
@@ -450,6 +454,10 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     Impl::Use* use=nullptr;
     for(unsigned n=0;n<command->used;++n)if(command->uses[n].descriptor==command->set0&&command->uses[n].viewSerial==view->serial&&command->uses[n].picture.metadata.binding==picture->metadata.binding&&same(command->uses[n].picture.metadata.descriptor,picture->metadata.descriptor)){use=&command->uses[n];break;}
     if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return out;}auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return out;}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
+    // Publish before the wrapper can record the companion bind/draw. A submit
+    // observing false cannot contain an earlier guarded recording; recording
+    // and submitting the same CB concurrently is outside native Vulkan rules.
+    p.guardedRecordingPossible.store(true,std::memory_order_release);
     out.replacement=pipeline->coverage;out.layout=pipeline->layout;out.coverage=use->lease.set;out.control=command->control->set;out.ready=true;++p.counts.selected;return out;
 }
 void Renderer::commandReset(VkCommandBuffer value) noexcept{
@@ -460,7 +468,7 @@ void Renderer::commandReset(VkCommandBuffer value) noexcept{
 void Renderer::trackingLost() noexcept{impl_->lost.store(true,std::memory_order_release);}
 VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* infos,VkFence fence) noexcept{
     auto&p=*impl_;if(!p.QueueSubmit)return VK_ERROR_INITIALIZATION_FAILED;
-    if(!p.coveragePrepared||queue!=p.queue)return p.QueueSubmit(queue,count,infos,fence);
+    if(!p.coveragePrepared||queue!=p.queue||!p.guardedRecordingPossible.load(std::memory_order_acquire))return p.QueueSubmit(queue,count,infos,fence);
     ++p.counts.coreSubmits;
     p.pool.drainUploads(queue);
     // Same native queue owner, bounded stack-only scratch, original semaphores,
@@ -528,7 +536,7 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
 }
 VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2* infos,VkFence fence,bool khr) noexcept{
     auto&p=*impl_;const auto forward=khr?p.QueueSubmit2KHR:p.QueueSubmit2;if(!forward)return VK_ERROR_EXTENSION_NOT_PRESENT;
-    if(!p.coveragePrepared||queue!=p.queue)return forward(queue,count,infos,fence);
+    if(!p.coveragePrepared||queue!=p.queue||!p.guardedRecordingPossible.load(std::memory_order_acquire))return forward(queue,count,infos,fence);
     ++p.counts.submits2;
     p.pool.drainUploads(queue);
     std::array<VkSubmitInfo2,65> submits{};std::array<VkCommandBufferSubmitInfo,1024> commands{};

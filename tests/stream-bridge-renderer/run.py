@@ -8,8 +8,8 @@ The existing standalone native-fragment and R8 GPU proofs remain separate.
 import argparse, hashlib, json, pathlib, shutil, subprocess
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--thread-sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');p.add_argument('--reservation-recovery-only',action='store_true');p.add_argument('--continuous-only',action='store_true');a=p.parse_args()
- if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only,a.reservation_recovery_only,a.continuous_only))>1:p.error('choose one focused subset')
+ p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--thread-sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');p.add_argument('--reservation-recovery-only',action='store_true');p.add_argument('--continuous-only',action='store_true');p.add_argument('--idle-startup-only',action='store_true');a=p.parse_args()
+ if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only,a.reservation_recovery_only,a.continuous_only,a.idle_startup_only))>1:p.error('choose one focused subset')
  here=pathlib.Path(__file__).resolve().parent;root=a.native_root.resolve();out=a.output.resolve();cache=out/'cache';cache.mkdir(parents=True,exist_ok=True);source=out/'source';source.mkdir(exist_ok=True)
  fixtures=here/'fixture.cpp';shutil.copy2(fixtures,source/'fixture.cpp')
  files=['layer/stream_bridge_renderer.cpp','layer/stream_bridge_renderer.h','layer/stream_bridge_process.h','layer/stream_bridge_artifacts.h','layer/stream_bridge_coverage_gpu.cpp','layer/stream_bridge_coverage_gpu.h','layer/native_presenter_pipeline.h','layer/submit_timeline_contract.h','tests/stream-bridge-coverage-gpu/pool_tests.cpp']
@@ -25,6 +25,7 @@ def main():
  if a.timeline_only:args+=['timeline']
  if a.reservation_recovery_only:args+=['reservation-recovery']
  if a.continuous_only:args+=['continuous']
+ if a.idle_startup_only:args+=['idle-startup']
  input_pins={str(path.resolve()):hashlib.sha256(path.read_bytes()).hexdigest() for path in [a.vs,a.ps,a.coverage]}
  def run(name,production,sanitize=False,negative=False,thread_sanitize=False):
   binary=cache/name;command=['c++','-std=c++17','-O1','-g','-Wall','-Wextra','-Wpedantic','-Werror','-Wno-missing-field-initializers','-I'+str(source),'-I'+str(root),'-I'+str(root/'layer'),'-pthread']
@@ -35,6 +36,8 @@ def main():
   with (out/(name+'.log')).open('w') as log:status=subprocess.run([str(binary)]+args,stdout=log,stderr=subprocess.STDOUT).returncode
   if negative:
    if status==0:raise AssertionError(name+' survived causal control')
+   expected={'startup-always-adds-zero':'idle startup forwards original submit pointer/count/queue/fence and dispatch unchanged','loss-skips-retained-zero':'tracking loss retains mandatory zeroing for previously guarded Submit2 recordings'}
+   if name in expected and expected[name] not in (out/(name+'.log')).read_text():raise AssertionError(name+' failed outside its intended lifecycle assertion')
   elif status:
    diagnostic=(out/(name+'.log')).read_text()
    if thread_sanitize and 'FATAL: ThreadSanitizer: unexpected memory mapping' in diagnostic:return {'exit_status':status,'unavailable':True,'reason':'ThreadSanitizer cannot initialize its shadow address space in this host; no race-free claim.'}
@@ -63,6 +66,8 @@ def main():
    'reserve-takes-cold-mutex':('auto&p=*impl_;if(!n)return {};', 'auto&p=*impl_;if(!n)return {};std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock)return {};'),
    'canonical-timeline-rejected':('if(timeline==stream_bridge_submit::TimelineStatus::Extension)why=SubmitRefusal::Extension;','if(info.pNext)why=SubmitRefusal::Extension;'),
    'none-misreported-mask':('++p.counts.maskNone;return;','++p.counts.maskDecoded;return;'),
+   'startup-always-adds-zero':('||!p.guardedRecordingPossible.load(std::memory_order_acquire)', ''),
+   'loss-skips-retained-zero':('||!p.guardedRecordingPossible.load(std::memory_order_acquire)', '||!p.guardedRecordingPossible.load(std::memory_order_acquire)||p.lost.load(std::memory_order_acquire)'),
   }
   if a.artifact_fallback_only:mutations={}
   if a.reservation_recovery_only:mutations={name:value for name,value in mutations.items() if name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool')}
@@ -70,10 +75,11 @@ def main():
   if a.timeline_only:mutations={name:value for name,value in mutations.items() if name=='canonical-timeline-rejected'}
   if a.fallback_recovery_only:mutations={name:value for name,value in mutations.items() if name=='unsupported-submit-poisons-future'}
   if a.telemetry_only:mutations={name:value for name,value in mutations.items() if name in ('pending-misreported-ready','none-misreported-mask')}
+  if a.idle_startup_only:mutations={name:value for name,value in mutations.items() if name in ('startup-always-adds-zero','loss-skips-retained-zero')}
   for name,(old,new) in mutations.items():
    pool_mutant=name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool','acquire-takes-cold-mutex','copy-takes-cold-mutex','reserve-takes-cold-mutex');original_text=pool.read_text() if pool_mutant else text
    if old not in original_text:raise AssertionError('semantic control anchor missing: '+name)
-   path=source/(name+'.cpp');path.write_text(original_text.replace(old,new,1))
+   path=source/(name+'.cpp');path.write_text(original_text.replace(old,new) if name in ('startup-always-adds-zero','loss-skips-retained-zero') else original_text.replace(old,new,1))
    if pool_mutant:
     original_pool=pool;pool=path
     try:results[name]=run(name,renderer,negative=True)
