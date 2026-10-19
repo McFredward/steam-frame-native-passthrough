@@ -56,6 +56,9 @@ public:
     bool pollVerified(VerifiedControl&) noexcept;
     bool peerVerified() const noexcept;
     std::uint32_t peerAccessUnitCapacity() const noexcept;
+    // The encoder reads an immutable, lifetime-owned producer signer published
+    // only with the negotiated AU budget. It never takes the socket/control
+    // mutex; concurrent stop/reprepare revokes that signer before committing.
     // The caller supplies actual successful encode/output evidence. A completed
     // byte certificate is not itself proof of alpha, stereo or selected image.
     bool certifyAccessUnit(Bytes,const FrameDescriptor&,CoverageEncoding,Bytes coverage,

@@ -60,6 +60,12 @@ bool address(const ControlRequest& request,sockaddr_in& out){
 }
 struct ControlRuntime::Impl{
     static constexpr std::size_t Capacity=4;
+    struct FrameSigner{AuthSession auth;std::uint32_t budget=0;};
+    // Encoder certificates only read this generation's immutable signing state.
+    // They must not compete with socket polling, credentials or control HMACs.
+    // Publication requires the negotiated native AU budget; close revokes it
+    // before resetting the mutable control session. Readers own their lifetime.
+    std::shared_ptr<FrameSigner> frameSigner,pendingFrameSigner;
     struct Outbound{AuthEnvelope bytes{};std::size_t sent=0;std::uint64_t ticket=0;};
     mutable std::mutex mutex;AuthSession auth;LocalConfig config{};VideoStreamContext video{};
     CapacityProtection capacityProtection;Nonce budgetBinding{},challenge{};
@@ -74,6 +80,7 @@ struct ControlRuntime::Impl{
     std::array<SendReceipt,Capacity> sent{};std::size_t sentHead=0,sentCount=0;
     AuthEnvelope assembling{};std::size_t assembled=0;std::uint64_t nextTicket=0;
     void close(ControlStatus why){
+        std::atomic_store(&frameSigner,std::shared_ptr<FrameSigner>{});pendingFrameSigner.reset();
         revokePrivatePeer(peer);closeSocket(listener);peer=listener=Invalid;port=0;connecting=prepared=false;
         auth.reset();capacityProtection.reset();config={};video={};
         budgetBinding={};challenge={};nativeBudget=peerBudget=0;requireBudget=budgetChallengeSent=budgetAnswered=false;tx={};verified={};sent={};assembling={};
@@ -104,6 +111,11 @@ ControlStatus ControlRuntime::prepare(const ControlRequest& request) noexcept{
         ||(request.role==Role::Producer&&(!bridgeSystemRandom(binding.data(),binding.size())||!nonzero(binding))))return impl_->state=ControlStatus::RandomRefused;
     const auto auth=request.role==Role::Producer?impl_->auth.prepareProducer(pair,binding):impl_->auth.prepareReceiver(pair,request.video);
     if(auth!=AuthStatus::Ok||!impl_->capacityProtection.prepare(pair))return impl_->state=ControlStatus::AuthenticationRefused;
+    if(request.role==Role::Producer){
+        try{impl_->pendingFrameSigner=std::make_shared<Impl::FrameSigner>();}
+        catch(...){impl_->close(ControlStatus::IoRefused);return impl_->state;}
+        if(impl_->pendingFrameSigner->auth.prepareProducer(pair,binding)!=AuthStatus::Ok){impl_->close(ControlStatus::AuthenticationRefused);return impl_->state;}
+    }
     impl_->requireBudget=full;impl_->nativeBudget=request.nativeAccessUnitCapacity;impl_->challenge=local;
     impl_->config={request.role,request.buildId,local,request.offered,request.required};impl_->video=request.video;
 #ifdef _WIN32
@@ -126,7 +138,12 @@ ControlStatus ControlRuntime::prepare(const ControlRequest& request) noexcept{
         if(result!=0&&!pending(socketError())){impl_->close(ControlStatus::IoRefused);return impl_->state;}
         impl_->connecting=result!=0;impl_->state=impl_->connecting?ControlStatus::Connecting:ControlStatus::WaitingVideo;
     }
-    impl_->prepared=true;return impl_->state;
+    impl_->prepared=true;
+    if(impl_->pendingFrameSigner&&!impl_->requireBudget){
+        impl_->pendingFrameSigner->budget=MaximumAccessUnitBytes;
+        std::atomic_store(&impl_->frameSigner,std::move(impl_->pendingFrameSigner));
+    }
+    return impl_->state;
 }
 ControlStatus ControlRuntime::status()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->state;}
 CredentialStatus ControlRuntime::credentialStatus()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->credential;}
@@ -136,12 +153,10 @@ std::uint32_t ControlRuntime::peerAccessUnitCapacity()const noexcept{std::lock_g
 bool ControlRuntime::certifyAccessUnit(Bytes source,const FrameDescriptor& descriptor,CoverageEncoding encoding,
     Bytes coverage,std::vector<std::uint8_t>& output) noexcept{
     try{
-        std::unique_lock<std::mutex> lock(impl_->mutex,std::try_to_lock);
-        if(!lock.owns_lock()||!impl_->prepared||impl_->config.role!=Role::Producer)return false;
-        if(impl_->requireBudget&&!impl_->peerBudget)return false;
+        const auto signer=std::atomic_load(&impl_->frameSigner);if(!signer)return false;
         std::vector<std::uint8_t> candidate;
-        if(appendCertifiedFrame(source,descriptor,encoding,coverage,impl_->auth,candidate)!=FrameStatus::Ok||
-            (impl_->requireBudget&&candidate.size()>impl_->peerBudget))return false;
+        if(appendCertifiedFrame(source,descriptor,encoding,coverage,signer->auth,candidate)!=FrameStatus::Ok||
+            candidate.size()>signer->budget||std::atomic_load(&impl_->frameSigner)!=signer)return false;
         output.swap(candidate);return true;
     }catch(...){return false;}
 }
@@ -272,6 +287,9 @@ void ControlRuntime::tick() noexcept{
             if(impl_->config.role==Role::Producer){
                 if(!impl_->budgetChallengeSent||impl_->peerBudget||message.binding!=impl_->auth.binding()||message.challenge!=impl_->challenge){impl_->close(ControlStatus::AuthenticationRefused);return;}
                 impl_->peerBudget=message.maximumAccessUnitBytes;
+                if(!impl_->pendingFrameSigner){impl_->close(ControlStatus::AuthenticationRefused);return;}
+                impl_->pendingFrameSigner->budget=impl_->peerBudget;
+                std::atomic_store(&impl_->frameSigner,std::move(impl_->pendingFrameSigner));
             }else{
                 if(impl_->budgetAnswered||impl_->txCount==Impl::Capacity){impl_->close(ControlStatus::AuthenticationRefused);return;}
                 impl_->budgetBinding=message.binding;message.role=Role::Receiver;message.source=impl_->video;message.maximumAccessUnitBytes=impl_->nativeBudget;
