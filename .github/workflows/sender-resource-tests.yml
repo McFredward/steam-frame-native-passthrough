@@ -5,6 +5,9 @@ on:
     branches: [dev]
     paths:
       - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'pc/stream-bridge-sender-provider-directmode.*'
+      - 'pc/stream-bridge-sender-provider-swap-shape.h'
+      - 'tests/test_stream_bridge_sender_provider_directmode.cpp'
       - 'tests/test_stream_bridge_sender_shared_resource.cpp'
       - 'tests/test_stream_bridge_sender_provider_context.cpp'
       - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
@@ -13,6 +16,9 @@ on:
   pull_request:
     paths:
       - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'pc/stream-bridge-sender-provider-directmode.*'
+      - 'pc/stream-bridge-sender-provider-swap-shape.h'
+      - 'tests/test_stream_bridge_sender_provider_directmode.cpp'
       - 'tests/test_stream_bridge_sender_shared_resource.cpp'
       - 'tests/test_stream_bridge_sender_provider_context.cpp'
       - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
@@ -23,7 +29,7 @@ on:
       focus:
         description: Focused Windows production check
         type: choice
-        options: [shadow, context, all]
+        options: [shadow, context, shared, all]
         default: shadow
 
 permissions:
@@ -35,11 +41,59 @@ concurrency:
 
 jobs:
   shared-resource:
-    if: github.event_name == 'workflow_dispatch' && inputs.focus == 'all'
+    if: github.event_name == 'workflow_dispatch' && (inputs.focus == 'shared' || inputs.focus == 'all')
     runs-on: windows-2025
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare pinned public OpenVR declarations for DirectMode
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/openvr-sdk | Out-Null
+          Invoke-WebRequest 'https://raw.githubusercontent.com/ValveSoftware/openvr/0924064316de3effbcd1acf1e309182a2deb1c05/headers/openvr_driver.h' -OutFile build/openvr-sdk/openvr_driver.h
+          if ((Get-FileHash build/openvr-sdk/openvr_driver.h).Hash.ToLowerInvariant() -ne '1036efe998d63e82d1d3db2b32a2f58df4a8eeaf5280f50aaf28220ff60a40ab') { throw 'Public OpenVR SDK pin mismatch' }
+      - name: Compile actual DirectMode descriptor and ownership boundary
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /imsvcbuild/openvr-sdk tests/test_stream_bridge_sender_provider_directmode.cpp pc/stream-bridge-sender-provider-directmode.cpp /Fe:build\directmode.exe /Fo:build\
+          if errorlevel 1 exit /b 1
+      - name: Verify actual descriptor normalization and exact process ownership
+        shell: cmd
+        run: |
+          build\directmode.exe >build\directmode.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\directmode.log
+          exit /b %SFNP_RESULT%
+      - name: Prepare causal control with the former raw sample-count admission
+        shell: pwsh
+        run: |
+          $source = Get-Content pc/stream-bridge-sender-provider-directmode.cpp -Raw
+          $needle = 'bool description(const DirectMode::SwapTextureSetDesc_t& d){SharedTextureShape shape{};return decodeSwapTextureSetDesc(d,shape);}'
+          $old = 'bool description(const DirectMode::SwapTextureSetDesc_t& d){return d.nWidth&&d.nWidth<=16384&&d.nHeight&&d.nHeight<=16384&&d.nFormat&&d.nSampleCount&&d.nSampleCount<=8&&(d.nSampleCount&(d.nSampleCount-1))==0;}'
+          if ([regex]::Matches($source, [regex]::Escape($needle)).Count -ne 1) { throw 'Descriptor control must replace exactly one admission check' }
+          $source.Replace($needle, $old) | Set-Content build/directmode-old-decoder.cpp -Encoding utf8NoBOM
+      - name: Compile identical DirectMode fixture with only the old admission restored
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /Ipc /imsvcbuild/openvr-sdk tests/test_stream_bridge_sender_provider_directmode.cpp build/directmode-old-decoder.cpp /Fe:build\directmode-old-decoder.exe /Fo:build\
+          if errorlevel 1 exit /b 1
+      - name: Prove the former decoder loses ownership for the real packed descriptor
+        shell: pwsh
+        run: |
+          & build/directmode-old-decoder.exe *>build/directmode-old-decoder.log
+          $result = $LASTEXITCODE
+          $log = Get-Content build/directmode-old-decoder.log -Raw
+          Write-Host $log
+          if ($result -ne 1 -or $log -notmatch 'packed native descriptor 9 retains exact game ownership') { throw 'Old admission did not reproduce the actual packed-descriptor ownership failure' }
+          exit 0
       - name: Compile the actual production resource matcher with the Windows SDK
         shell: cmd
         run: |
@@ -47,7 +101,6 @@ jobs:
           if not defined SFNP_VS exit /b 1
           call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
           if errorlevel 1 exit /b 1
-          mkdir build
           cl /nologo /std:c++17 /EHsc /W4 /WX /I. tests/test_stream_bridge_sender_shared_resource.cpp pc/stream-bridge-sender-provider-coverage-render.cpp /Fe:build\shared-resource.exe /Fo:build\ /link d3d11.lib dxgi.lib dxguid.lib uuid.lib
           if errorlevel 1 exit /b 1
       - name: Verify metadata guards and independently opened native D3D11 resources
@@ -69,11 +122,12 @@ jobs:
         if: always()
         with:
           name: windows-shared-resource-evidence
-          path: build/shared-resource-*.log
+          path: |
+            build/shared-resource-*.log
+            build/directmode*.log
   context-observer:
-    # Retain the older production observer control as an explicit focused run.
-    # The independent shadow experiment does not certify that rejected route.
-    if: github.event_name == 'workflow_dispatch' && inputs.focus != 'shadow'
+    # Keep context loops separate from descriptor/shared-resource repair checks.
+    if: github.event_name == 'workflow_dispatch' && (inputs.focus == 'context' || inputs.focus == 'all')
     runs-on: windows-2025
     timeout-minutes: 4
     steps:
