@@ -12,17 +12,25 @@
 namespace stream_bridge::sender {
 using NativeCopy=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,ID3D11Resource*);
 using NativeMap=HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
+using NativeEnd=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*);
+using NativeFlush=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*);
+using NativeGetData=HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*,void*,UINT,UINT);
+struct CoverageReadbackResult {HRESULT query=E_PENDING;bool mapAttempted=false;};
 using NativeUnmap=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT);
 // Caller owns the same protected immediate-context interval. The optional
-// companion copy precedes the unchanged native input copy, forwarded once.
-// Ordering improves availability; it is not an all-device completion barrier.
+// companion copy, exact event End and asynchronous Flush precede the native
+// input copy, forwarded once. Only a fully admitted active-MR capture supplies
+// all three resources. Refusal adds no companion commands or Flush.
+// Flush submits work; it does not establish completion.
 void copyCoverageBeforeNative(ID3D11DeviceContext*,ID3D11Resource* nativeDestination,
-    ID3D11Resource* nativeSource,ID3D11Resource* readback,ID3D11Resource* coverage,NativeCopy)noexcept;
-// Exactly one nonblocking Map, and one Unmap on Map success. No Flush, wait,
+    ID3D11Resource* nativeSource,ID3D11Resource* readback,ID3D11Resource* coverage,ID3D11Query*,
+    NativeCopy,NativeEnd,NativeFlush)noexcept;
+// The exact event must complete before one nonblocking Map, and one Unmap
+// follows Map success. One DONOTFLUSH GetData; no Flush, wait,
 // retry, allocation or later-frame substitution. Destination receives A=255-T.
-HRESULT readCoverageNonblocking(ID3D11DeviceContext*,ID3D11Resource* readback,
+HRESULT readCoverageNonblocking(ID3D11DeviceContext*,ID3D11Resource* readback,ID3D11Query*,
     std::uint32_t width,std::uint32_t height,std::uint8_t* destination,std::size_t capacity,
-    NativeMap,NativeUnmap)noexcept;
+    NativeGetData,NativeMap,NativeUnmap,CoverageReadbackResult&)noexcept;
 using NativeDraw=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT);
 struct SharedTextureOwner {std::uint64_t handle=0,generation=0;std::uint32_t processId=0;};
 // Cold import compares the public kernel texture description against normalized

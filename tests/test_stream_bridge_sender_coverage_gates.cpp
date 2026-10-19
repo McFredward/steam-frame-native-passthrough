@@ -27,6 +27,9 @@ void run(){
     counters.constantBytes(128);counters.source(2160,2160,28);counters.output(1152,4608,103);
     snapshot=counters.snapshot();check(snapshot.lastConstantBytes==128&&snapshot.lastSourceWidth==2160&&snapshot.lastSourceHeight==2160&&snapshot.lastSourceFormat==28
         &&snapshot.lastOutputWidth==1152&&snapshot.lastOutputHeight==4608&&snapshot.lastOutputFormat==103,"cold description copies only the already observed public D3D metadata");
+    counters.submitted();counters.completion(0);counters.completion(1);counters.completion(0x887a0005u);
+    snapshot=counters.snapshot();check(snapshot.submittedReadbacks==1&&snapshot.queryReady==1&&snapshot.queryPending==1&&snapshot.queryErrors==1
+        &&snapshot.lastQueryResult==0x887a0005u,"completion pending is separate from Map busy and real query/device errors");
     counters.readback(0,125,82,19);counters.readback(0x887a000au,170,104,6);counters.readback(0x80070057u,90,35,2);
     snapshot=counters.snapshot();check(snapshot.readbackReady==1&&snapshot.readbackBusy==1&&snapshot.readbackErrors==1,
         "GPU pending is distinct from successful readback and API/device failures");
