@@ -16,29 +16,20 @@
 </p>
 
 > [!IMPORTANT]
-> **Supported SteamVR on the Frame: 2.18.2 · build 1791331621**
+> **Steam Frame SteamVR 2.18.2 · build 1791331621**
+>
+> **Experimental PC + Frame setup:** Windows · NVIDIA · HEVC. Exact runtime checks must pass.
 
-**For Steam Frame.** Play supported PC VR games in your real room over Steam Link.
+Play supported PC VR games in your real room over Steam Link.
 
-## Native passthrough — no colour replacement
+## Native transparency, no colour replacement
 
-The game sends a separate description of what is see-through, so every game
-colour stays available. The Frame combines it with its own live camera image,
-including partial transparency; the camera picture never needs to reach the PC.
+The game supplies transparency separately from its colours, so no colour has to
+be removed from the picture. The Frame combines the game with its own camera
+image, including partial transparency; the camera image stays on the headset.
 
-**[Install the stable Frame receiver](docs/INSTALL.md)** ·
-**[Try the paired PC + Frame preview](docs/PC-FRAME-SETUP.md#start-the-assistant)** ·
-[Compatibility](docs/COMPATIBILITY.md)
-
-## Choose your setup
-
-| Route | What to expect | Install |
-|---|---|---|
-| **Stable: Frame only** | Native passthrough has been confirmed in the headset. Sharing video space with transparency can reduce sharpness. | [Desktop Mode](docs/INSTALL.md#directly-on-the-frame) or [SSH](docs/INSTALL.md#from-a-pc-over-ssh) |
-| **Preview: PC + Frame** | Windows + NVIDIA + HEVC. Intended to retain normal RGB resolution; **not yet confirmed in a combined headset test**. | [One-command setup assistant](docs/PC-FRAME-SETUP.md#start-the-assistant) |
-
-The preview is a separate opt-in. It is not yet a verified fix for sharpness or
-Steam-menu behaviour. See [current limits and updates](docs/COMPATIBILITY.md).
+**[Install or update](docs/INSTALL.md)** · **[Compatibility](docs/COMPATIBILITY.md)** ·
+**[Uninstall or Undo](docs/PC-FRAME-SETUP.md#update-uninstall-and-undo)**
 
 ## Supported games
 
@@ -46,29 +37,33 @@ Steam-menu behaviour. See [current limits and updates](docs/COMPATIBILITY.md).
 |---|---|---|
 | Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (upcoming) |
 
-Other games need their own integration. Installing this patch alone does not
-add mixed reality to an unmodified game. Preview tests need a matching preview
-build of the game integration.
+Other games need their own integration. The patch alone cannot add mixed reality
+to an unmodified game.
 
 ## Get started
 
-1. Choose one installation route above. Keep the Frame awake and stop your VR stream.
-2. Start the game normally and enable its native Steam Link passthrough option.
-3. Turn that option off whenever you want the ordinary picture back.
+1. Run the [guided setup on your PC](docs/PC-FRAME-SETUP.md#start-the-assistant).
+   It installs matching PC and Frame companions and helps you connect to the headset.
+2. Start Steam Link and a supported game, then enable its native Steam Link
+   passthrough option. Turn that option off to restore the ordinary picture.
 
-Installation remains between sessions. For **Update**, **Uninstall** or **Undo**,
-use the [paired assistant](docs/PC-FRAME-SETUP.md#update-uninstall-and-undo), or the
-[stable Frame instructions](docs/INSTALL.md#update) if you installed only that receiver.
+The new route keeps the complete colour image for the game. **Its final picture
+quality and simultaneous game/Steam-menu composition are still being validated
+on hardware.** Unsupported or missing companions retain ordinary video.
+
+Only this paired route is developed and offered for installation. The former
+Frame-only receiver is [retired](docs/history/ATLAS-RECEIVER.md); old release
+archives are historical downloads, not a recommended alternative.
 
 ## For developers
 
 [Integrate your game](docs/DEVELOPING.md) ·
-[Runtime compatibility and limits](docs/COMPATIBILITY.md)
+[Protocol and runtime limits](docs/COMPATIBILITY.md)
 
 ## Credits
 
 Based on [Jake Lurie's steam-frame-chroma-key](https://github.com/spyjacob/steam-frame-chroma-key).
-Its history and [MIT license](LICENSE) are preserved; the native-opacity path is
+Its history and [MIT license](LICENSE) are preserved; native transparency is
 developed here by McFredward and contributors.
 
 Unofficial project, not affiliated with Valve.

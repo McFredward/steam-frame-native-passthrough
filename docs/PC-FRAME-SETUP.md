@@ -1,13 +1,10 @@
 # PC and Steam Frame setup assistant
 
-The **paired preview** installs a companion on both the PC and Steam Frame.
-It is intended to carry transparency without reducing the game's normal colour
-image. That quality improvement and the combined game/Steam-menu picture are
-**not yet confirmed in a headset test**.
-
-For the already demonstrated **Frame-only receiver**, use the separate
-[stable installation guide](INSTALL.md). The two routes and their limits are
-compared in [Compatibility](COMPATIBILITY.md).
+This is the only current installation route: an **experimental paired PC and
+Frame companion**, carrying transparency alongside the original colour video.
+Final headset sharpness and simultaneous game/menu composition are still being
+validated. The former [Frame-only atlas receiver](history/ATLAS-RECEIVER.md) is
+retired; archived downloads are not an alternative installation route.
 
 ## Before you begin
 
@@ -21,7 +18,7 @@ compared in [Compatibility](COMPATIBILITY.md).
   [supported-games table](../README.md#supported-games); an old game-side
   integration cannot be upgraded by installing the companions alone.
 - Keep the Frame awake, connected to the same network, and stop the VR stream.
-  Enable [persistent SSH access](INSTALL.md#keep-ssh-enabled-after-a-restart)
+  Enable [persistent SSH access](INSTALL.md#directly-on-the-frame)
   first. The assistant does not change the Frame's SSH service or system image.
 
 ## Start the assistant
@@ -29,24 +26,25 @@ compared in [Compatibility](COMPATIBILITY.md).
 On **Windows**, paste this into PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/dev/get-preview.ps1 | iex
+irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.ps1 | iex
 ```
 
 On **Linux**, the inspection/Frame-maintenance entry is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/dev/get-preview.sh | bash
+curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.sh | bash
 ```
 
-These are explicit preview entry points. They select the checked preview package;
-they do not turn an older stable Frame-only release into a paired installation.
+The standard entry selects only the paired experimental package; it cannot
+install an old Frame-only release. The `dev` branch and `get-preview` aliases are
+for development checks of this same route, not a second receiver method.
 Read a downloaded script before executing it if you prefer reviewing the source.
 The assistant prepares its private Python/UI dependencies and, on Windows, an
 OpenSSH fallback when needed. You do not need to install Python or use `pip`.
 
 Use **arrow keys**, **Tab**, **Enter** or the mouse. The PC and Frame cards show
-what is actually installed. **Legacy patch only** means that the Frame-only
-receiver exists, not that the new paired connection is installed. Technical
+what is actually installed. **Legacy patch only** identifies an old installation that can be migrated or
+removed. It does not enable a retired runtime path. Technical
 information and the exact log path are available in **Details**.
 
 ## Connect and apply

@@ -1,252 +1,89 @@
-# Stable Frame-only installation
+# Install Steam Link Native Passthrough
 
-This guide installs the **stable Frame-only receiver**, whose native passthrough
-has been demonstrated in the headset. It shares video space between colour and
-transparency, which can reduce sharpness. For the separate Windows/NVIDIA/HEVC
-**PC + Frame preview**, use the [paired setup assistant](PC-FRAME-SETUP.md). Its
-intended full-colour quality is not yet confirmed in a headset test.
+[Deutsch](INSTALL.de.md)
 
-Installation runs **on the Steam Frame**, either directly in Desktop Mode or
-from a PC over SSH. Both methods install the same files in your home directory.
-Keep the downloaded project folder for updates and recovery.
-
-## Before you begin
-
-You need a Steam Frame, a Windows PC with SteamVR and Steam Link, and a
-[supported game integration](../README.md). Check the accepted
-[Frame runtime and compatibility limits](COMPATIBILITY.md#supported-combination)
-before installing. This receiver alone cannot add passthrough to an unmodified
-game.
-
-The installer builds and checks the receiver locally. It needs Bash, Python3,
-CMake, `g++`, `spirv-val` and Vulkan headers; Git is needed for the clone route.
-These tools were present on the checked Frame. Missing requirements are reported;
-do not unlock the system partition or replace SteamVR files.
-
-Remove an older experimental or chroma-key installation using its own rollback
-procedure first. This installer refuses conflicting installations. Its first
-successful install requests activation; repeating the installation preserves a
-state you explicitly disabled. It never restarts SteamVR automatically.
+Install the **experimental paired PC + Frame setup**. Both companions are
+required; a Frame-only installation is no longer offered. Current support is
+**Windows + NVIDIA + HEVC**, with Frame **SteamVR 2.18.2, build 1791331621** and
+matching runtime fingerprints. See [compatibility](COMPATIBILITY.md).
 
 ## Directly on the Frame
 
-1. Save your game, stop the PC VR stream and open a terminal in the Frame's
-   Desktop Mode.
-2. Download and install the project:
+Use Desktop Mode to prepare SSH access, then run the guided assistant on your
+Windows gaming PC. The assistant installs both sides; running a receiver-only
+installer on the Frame cannot replace the PC companion.
+
+1. Enable Developer Mode and SSH in the Frame's settings and set the user password.
+2. In Desktop Mode, open a terminal and enable SSH across reboots:
 
    ```bash
-   git clone https://github.com/McFredward/steam-link-native-passthrough.git
-   cd steam-link-native-passthrough
-   bash setup.sh install
-   bash setup.sh status
+   sudo systemctl enable --now sshd.service
    ```
 
-   Alternatively, use GitHub's **Code → Download ZIP**, extract the archive and
-   open a terminal in the extracted folder. Run `bash setup.sh install`, followed
-   by `bash setup.sh status`. You do not need `chmod` or a manual shader download.
-3. Read the result. When you are ready, **manually restart SteamVR once** to load
-   the receiver. This interrupts the Frame's VR interface and any stream:
+3. Check both results, including after a reboot:
 
    ```bash
-   systemctl --user restart steamvr.service
+   systemctl is-enabled sshd.service
+   systemctl is-active sshd.service
    ```
 
-If installation or compatibility checks report a problem, resolve it before
-enabling the game's native passthrough option. See [recovery](#recovery).
+   They should read `enabled` and `active`. Keep Developer Mode enabled.
+4. Leave the Frame awake on the same network as the PC and stop the VR stream.
+5. On your PC, open PowerShell and run:
+
+   ```powershell
+   irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.ps1 | iex
+   ```
+
+   Follow the connection and Apply prompts. The assistant handles Python and
+   its UI dependencies. You do not need to install those tools yourself.
 
 ## From a PC over SSH
 
-Enable Developer Mode and SSH on the Frame, set its user password and find its
-current network address in the Frame's settings. Valve's
-[developer setup](https://partner.steamgames.com/doc/steamhardware/steamframe/setup)
-describes device access; menu locations can change with SteamOS updates.
+The same assistant discovers the Frame and connects over SSH; a manual IP is
+needed only if discovery fails. You enter the password inside the assistant.
+It is retained only for that setup session.
 
-### Keep SSH enabled after a restart
+If SSH is not enabled yet, use the Desktop Mode steps above. To verify access
+manually, run `ssh steamos@<frame-ip>` using the current Wi-Fi address shown on
+the Frame. Valve's [developer setup](https://partner.steamgames.com/doc/steamhardware/steamframe/setup)
+provides additional device-access guidance.
 
-In the Frame's **Desktop Mode**, open a terminal and run:
+Run the PowerShell command above on the Windows gaming PC and choose Install,
+Update or Repair after inspection. Keep the Frame awake through the coordinated
+restart and picture check. The assistant keeps its current interface running
+while staging files and checks that it starts again afterward. It leaves PC
+SteamVR closed; start your stream normally when setup finishes.
 
-```bash
-sudo systemctl enable --now sshd.service
-```
-
-Enter the user password you set in the Frame's Developer settings when prompted.
-This starts SSH now and enables it for future boots; no separate autostart script
-is needed. Keep Developer Mode enabled.
-
-Check the service, including after restarting the Frame:
+Linux can inspect the setup and perform supported Frame maintenance:
 
 ```bash
-systemctl is-enabled sshd.service
-systemctl is-active sshd.service
+curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.sh | bash
 ```
 
-The results should be `enabled` and `active`. Use the Frame's current Wi-Fi
-address when connecting; it can change after a restart.
+A native Linux PC sender is not yet supported. Proton does not turn Linux
+SteamVR into the Windows driver host.
 
-### Connect and install
+## First run
 
-1. Save your game and stop the PC VR stream. Open PowerShell or a terminal on
-   the PC and connect:
-
-   ```text
-   ssh steamos@<frame-ip>
-   ```
-
-2. Run the following commands **in that SSH session, on the Frame**:
-
-   ```bash
-   git clone https://github.com/McFredward/steam-link-native-passthrough.git
-   cd steam-link-native-passthrough
-   bash setup.sh install
-   bash setup.sh status
-   ```
-
-3. Read the result. When you are ready, manually restart SteamVR once:
-
-   ```bash
-   systemctl --user restart steamvr.service
-   ```
-
-That restart interrupts the Frame's VR interface and any stream. No installer
-command schedules a restart or an expiry timer. Keep SSH available while trying
-an experimental build.
-
-## Use with GloomhavenVR
-
-1. Confirm that `bash setup.sh status` accepts the installed receiver, then
-   start the PC VR stream and GloomhavenVR normally.
-2. Open **VR Options → World → Scenery**. Choose **Mixed Reality** in the
-   environment selector, then check **Steam Link native passthrough** directly
-   below it. The native choice is available only on an identified Steam Frame
-   connection through Steam Link.
-3. Changes apply immediately, including while VR Options remains open. Opening
-   the options does not turn passthrough off. Disable the native choice or
-   Mixed Reality to stop it; there is no automatic timeout.
-
-The matching game integration is required; see the [supported games and minimum
-versions](../README.md#supported-games). Steam Frame standalone passthrough is
-built into the mod and does not need this streamed receiver.
-
-On a fresh GloomhavenVR installation, Mixed Reality starts off and the native
-Steam Link preference starts on. An existing saved off preference is kept.
-Connection detection does not check whether the matching receiver is installed
-and active.
-
-The game setting controls the current picture. Turning it off restores ordinary
-output when the next game image reaches the headset; it does not uninstall the
-receiver. **If the receiver is disabled or incompatible, turn the native game
-option off too.** Otherwise, you may see the packed transmission image instead
-of an ordinary game view.
-
-## Disable
-
-Run these commands from the project folder **on the Frame**, directly or over
-SSH:
-
-| Command | Purpose |
-|---|---|
-| `bash setup.sh status` | Show installation, compatibility and recovery state. |
-| `bash setup.sh disable` | Disable activation for subsequent SteamVR starts. |
-| `bash setup.sh enable` | Re-enable a checked installation after resolving a refusal. |
-| `bash setup.sh uninstall` | Remove owned files once SteamVR is stopped; report any pending cleanup. |
-| `bash setup.sh emergency-off` | Disable activation even when SteamVR's interface or camera API is unavailable. |
-
-First turn off **Steam Link native passthrough** in the game. Disabling or
-uninstalling the receiver cannot undo changes already loaded in a running
-SteamVR process. Save your work and finish a disable/recovery operation with a
-**manual SteamVR restart**:
-
-```bash
-systemctl --user restart steamvr.service
-```
-
-## Uninstall
-
-For a complete uninstall, stop SteamVR manually, run `bash setup.sh uninstall`,
-then start SteamVR normally. If you ran uninstall while SteamVR was active and
-it reports pending cleanup, stop SteamVR and run the command again before
-starting it. Status also reports camera-setting restoration that could not yet
-complete.
-
-## Recovery
-
-If SteamVR does not start normally, use Desktop Mode or SSH, open the project
-folder and run:
-
-```bash
-bash setup.sh emergency-off
-bash setup.sh status
-```
-
-Then restart SteamVR manually. Emergency-off removes activation independently
-of whether the camera API works; restoring a saved camera setting can still be
-pending. It does not claim to unload a library from a running process.
-
-A failed or incomplete previous launch can leave activation disabled. Inspect
-`status`, resolve the reported problem and use `bash setup.sh enable` before
-your next manual restart. Do not bypass compatibility checks.
-
-If the game shows a packed or incorrect image, turn off **Steam Link native
-passthrough** in GloomhavenVR. Restart the game if the ordinary image does not
-return, inspect `status` and consult the [compatibility notes](COMPATIBILITY.md).
-Opening VR Options alone does not turn the source off. The game temporarily
-pauses the legacy source on known XR input-focus loss; this is not a guarantee
-that every local Steam menu is composited correctly over passthrough. See
-[picture and menu limits](COMPATIBILITY.md#picture-edges-and-menus).
-
-Earlier development attempts caused recoverable black/blue screens and Steam
-startup failures. User-directory installation and startup checks reduce repeat
-failures; they cannot guarantee that every future SteamVR change is harmless.
-Keep a way to reach Desktop Mode or SSH until the installation works for you.
+Start Steam Link and a [supported game](../README.md#supported-games). Enable
+native Steam Link passthrough in the game. Both current companions and a matching
+game integration are needed. The picture should remain ordinary if they cannot
+establish permission; disabling the option restores the ordinary game picture.
+No feature timeout is used.
 
 ## Update
 
-The installed files remain across updates. Each SteamVR start checks the Frame's
-runtime files again; an unknown fingerprint pauses activation. A PC-side
-SteamVR or Steam Link update can also change the stream without changing those
-Frame files. If that happens, keep the game's native option off until a
-compatible update is available.
+Run the same command again. The assistant checks the current installation before
+offering Update, Repair, Uninstall or Undo. Unknown/changed files are preserved.
+SteamVR/Steam Link updates can make an exact runtime pin incompatible; that
+refuses native passthrough rather than certifying an unknown runtime. Update the
+companion when a compatible release becomes available.
 
-To update a Git checkout:
+For [Uninstall, Undo, logs and recovery](PC-FRAME-SETUP.md#update-uninstall-and-undo),
+use the same assistant. Ctrl+C stops setup without an automatic rollback; keep
+the displayed recovery paths for the next run. Undo is complete only after the
+previous owned state and running Frame interface have been verified.
 
-1. Save your work and stop SteamVR manually.
-2. In the project folder on the Frame, run:
-
-   ```bash
-   git pull --ff-only
-   bash setup.sh install
-   bash setup.sh status
-   ```
-
-3. Inspect the result, then start SteamVR normally when ready. A loaded library
-   is never overwritten in place.
-
-If you installed from a ZIP, download and extract the updated project, then run
-`bash setup.sh install` and `bash setup.sh status` from its folder while SteamVR
-is stopped. Keep a copy of the project available for recovery.
-
-### If Steam starts SteamVR again during maintenance
-
-Steam can immediately request another start after a manual stop. If the installer
-still reports that SteamVR is running, use SSH and temporarily block those start
-requests before repeating your update or uninstall:
-
-```bash
-systemctl --user mask --runtime --now steamvr.service
-```
-
-This pauses the Frame's VR interface. After completing the operation, remove the
-temporary block you just created and start SteamVR again:
-
-```bash
-systemctl --user unmask --runtime steamvr.service
-systemctl --user start steamvr.service
-```
-
-Use this only when the service was not already masked; preserve any pre-existing
-mask. `--runtime` does not change the system installation and expires at reboot.
-Do not use `--force` or replace an existing unit file. If the maintenance command
-fails, remove your temporary block and start SteamVR again before investigating.
-
-See [compatibility and recovery limits](COMPATIBILITY.md) for the supported scope
-and [the developer guide](DEVELOPING.md) for architecture and integration details.
+The retired receiver's old archives are [historical](history/ATLAS-RECEIVER.md).
+Do not use their install or enable commands with the current version.

@@ -16,62 +16,55 @@
 </p>
 
 > [!IMPORTANT]
-> **Unterstütztes SteamVR auf der Frame: 2.18.2 · Build 1791331621**
+> **Steam Frame SteamVR 2.18.2 · Build 1791331621**
+>
+> **Experimentelle PC- und Frame-Einrichtung:** Windows · NVIDIA · HEVC. Die genaue Laufzeitprüfung muss bestehen.
 
-**Für Steam Frame.** Spiele unterstützte PC-VR-Spiele über Steam Link in deinem echten Zimmer.
+Spiele unterstützte PC-VR-Spiele über Steam Link in deinem echten Zimmer.
 
-## Natives Passthrough — keine Farbersetzung
+## Native Transparenz, kein Farbersatz
 
-Das Spiel überträgt separat, welche Bildbereiche durchsichtig sind; alle
-Spielfarben bleiben erhalten. Die Frame verbindet das mit ihrem eigenen
-Live-Kamerabild, auch bei teilweiser Transparenz; das Kamerabild muss nicht zum PC.
+Das Spiel liefert seine Transparenz getrennt von den Farben; keine Farbe muss
+aus dem Bild entfernt werden. Die Frame verbindet das Spiel mit ihrem eigenen
+Kamerabild, auch bei Teiltransparenz; das Kamerabild bleibt auf der Brille.
 
-**[Stabilen Frame-Empfänger installieren](docs/INSTALL.md)** ·
-**[Gekoppelte PC- und Frame-Vorschau testen](docs/PC-FRAME-SETUP.md#start-the-assistant)** ·
-[Kompatibilität](docs/COMPATIBILITY.md)
-
-Die weiterführenden Anleitungen sind auf Englisch.
-
-## Wähle deine Einrichtung
-
-| Variante | Was dich erwartet | Installation |
-|---|---|---|
-| **Stabil: nur Frame** | Natives Passthrough ist im Headset bestätigt. Die Transparenz teilt sich Platz im Videobild und kann die Schärfe verringern. | [Desktop-Modus](docs/INSTALL.md#directly-on-the-frame) oder [SSH](docs/INSTALL.md#from-a-pc-over-ssh) |
-| **Vorschau: PC + Frame** | Windows + NVIDIA + HEVC. Soll die normale RGB-Auflösung erhalten; **noch nicht im gemeinsamen Headset-Test bestätigt**. | [Einrichtungsassistent mit einem Befehl](docs/PC-FRAME-SETUP.md#start-the-assistant) |
-
-Die Vorschau wird separat gewählt. Sie ist noch keine bestätigte Lösung für
-Bildschärfe oder Steam-Menüs. Siehe [Grenzen und Updates](docs/COMPATIBILITY.md).
+**[Installieren oder aktualisieren](docs/INSTALL.de.md)** ·
+**[Kompatibilität](docs/COMPATIBILITY.md)** ·
+**[Deinstallieren oder zurücknehmen](docs/PC-FRAME-SETUP.md#update-uninstall-and-undo)**
 
 ## Unterstützte Spiele
 
-| Spiel | Benötigter Mod | Mindestversion |
+| Spiel | Benötigte Mod | Mindestversion |
 |---|---|---|
-| Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (noch nicht veröffentlicht) |
+| Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (angekündigt) |
 
-Andere Spiele benötigen eine eigene Integration. Dieser Patch allein ergänzt
-kein Mixed Reality in einem unveränderten Spiel. Vorschau-Tests benötigen einen
-passenden Vorschau-Build der Spielintegration.
+Andere Spiele benötigen eine eigene Integration. Der Patch allein ergänzt kein
+Mixed Reality in einem unveränderten Spiel.
 
 ## Loslegen
 
-1. Wähle oben eine Installationsvariante. Lass die Frame eingeschaltet und beende deinen VR-Stream.
-2. Starte das Spiel wie gewohnt und aktiviere dessen natives Steam-Link-Passthrough.
-3. Schalte die Option aus, wenn du das normale Bild zurückhaben möchtest.
+1. Starte die [geführte Einrichtung auf deinem PC](docs/PC-FRAME-SETUP.md#start-the-assistant).
+   Sie installiert passende Komponenten auf PC und Frame und hilft bei der Verbindung.
+2. Starte Steam Link und ein unterstütztes Spiel. Aktiviere dort natives
+   Steam-Link-Passthrough. Mit derselben Option erhältst du das normale Bild zurück.
 
-Die Installation bleibt zwischen Sitzungen erhalten. Für **Aktualisieren**,
-**Deinstallieren** oder **Rücknahme** nutze den
-[gekoppelten Assistenten](docs/PC-FRAME-SETUP.md#update-uninstall-and-undo), oder die
-[stabile Frame-Anleitung](docs/INSTALL.md#update), wenn du nur diesen Empfänger installiert hast.
+Der neue Weg lässt das vollständige Farbbild für das Spiel frei. **Die endgültige
+Bildqualität und die gleichzeitige Darstellung von Spiel und Steam-Menü werden
+noch auf der Brille geprüft.** Fehlt eine passende Komponente, bleibt das normale Videobild erhalten.
+
+Nur dieser gekoppelte Weg wird weiterentwickelt und zur Installation angeboten.
+Der frühere reine Frame-Empfänger ist [eingestellt](docs/history/ATLAS-RECEIVER.md).
+Alte Releasearchive dokumentieren frühere Stände und sind keine empfohlene Alternative.
 
 ## Für Entwickler
 
-[Eigenes Spiel integrieren](docs/DEVELOPING.md) ·
-[Laufzeit-Kompatibilität und Grenzen](docs/COMPATIBILITY.md)
+[Spiel integrieren](docs/DEVELOPING.md) ·
+[Protokoll und Laufzeitgrenzen](docs/COMPATIBILITY.md)
 
 ## Credits
 
-Basiert auf [Jake Luries steam-frame-chroma-key](https://github.com/spyjacob/steam-frame-chroma-key).
-Die Historie und [MIT-Lizenz](LICENSE) bleiben erhalten; die native Transparenz
-entwickeln McFredward und Mitwirkende in diesem Projekt weiter.
+Auf Grundlage von [Jake Luries steam-frame-chroma-key](https://github.com/spyjacob/steam-frame-chroma-key).
+Die Vorgeschichte und [MIT-Lizenz](LICENSE) bleiben erhalten; native Transparenz
+wird hier von McFredward und Mitwirkenden entwickelt.
 
-Inoffizielles Projekt ohne Verbindung zu Valve.
+Inoffizielles Projekt, nicht mit Valve verbunden.
