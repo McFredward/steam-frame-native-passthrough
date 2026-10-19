@@ -42,7 +42,7 @@ def pin(raw):return {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
 
 def required_sources(root=ROOT):
     bridge=load('sfnp_bridge_package_contract',root/'setup/stream_bridge_install.py')
-    return sorted({'VERSION','setup/steam_link_setup.py','setup/steam_link_setup_ui.py','setup/stream_bridge_install.py',
+    return sorted({'VERSION','PATCH_VERSIONS.json','setup/steam_link_setup.py','setup/steam_link_setup_ui.py','setup/stream_bridge_install.py',
                    'setup/steam_link_setup_textual.py','setup/steam_link_setup_vendor.py',
                    'setup/steam_link_setup_auth.py','setup/steam_link_setup_askpass_client.py',
                    'setup/steam-link-askpass.sh','setup/steam_link_askpass.c','tools/build_setup_askpass.py',
@@ -71,6 +71,16 @@ def own_artifacts(engine,pc_provider,frame_layer,frame_selector):
         engine.require(len(raw)>=64 and raw[:7]==b'\x7fELF\x02\x01\x01' and
                        struct.unpack_from('<HH',raw,16)==(3,183),'Unsupported Frame shared library architecture or image kind.')
     return artifacts
+
+
+def patch_versions(engine,bridge,raw):
+    """Installer updates do not assign a new version to unchanged native patches."""
+    value=engine.parse(raw)
+    engine.require(type(value)is dict and set(value)=={'schema','pc','frame'} and
+                   value['schema']=='sfnp-patch-versions-v1','Unknown native patch versions manifest.')
+    versions={side:bridge.patch_version(value[side]) for side in ('pc','frame')}
+    engine.require(all(versions.values()),'Both native patch semantic versions are required.')
+    return versions
 
 
 def validation(engine,profile,profile_raw,artifacts,receipts):
@@ -111,7 +121,8 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
     engine.require({name:pin(raw) for name,raw in source_bytes.items()}==profile['source_pins'],
                    'Owned setup or generator sources differ from the reviewed profile.')
     version=bridge.patch_version(source_bytes['VERSION'].decode('ascii').strip())
-    engine.require(version is not None,'A project semantic version is required.')
+    engine.require(version is not None,'An installer semantic version is required.')
+    components=patch_versions(engine,bridge,source_bytes['PATCH_VERSIONS.json'])
     artifacts=own_artifacts(engine,pc_provider,frame_layer,frame_selector)
     engine.require(profile['artifacts']=={name:pin(raw) for name,raw in artifacts.items()},
                    'A native artifact differs from the reviewed runtime profile.')
@@ -129,7 +140,7 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
     payload.update({name:source_bytes[name.removeprefix('frame/')] for name in bridge.TOOLS|bridge.PROFILES})
     bundle={'schema':bridge.SCHEMA,'version':version,'readiness':'release' if release else 'prototype',
             'bridge_protocol':profile['bridge_protocol'],'files':{name:pin(raw) for name,raw in sorted(payload.items())},
-            'pc':{**pc,'version':version,'files':sorted(bridge.PC_FILES)},'frame':{**frame,'version':version,'files':sorted(name for name in payload if name.startswith('frame/'))}}
+            'pc':{**pc,'version':components['pc'],'files':sorted(bridge.PC_FILES)},'frame':{**frame,'version':components['frame'],'files':sorted(name for name in payload if name.startswith('frame/'))}}
     # Exercise the actual installed-engine manifest parser. This publishes no
     # native shader, changes no provider registration and never calls dlopen.
     with tempfile.TemporaryDirectory(prefix='sfnp-package-contract-') as temporary:
@@ -138,7 +149,8 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
         engine.put(candidate/'stream-bridge-bundle.json',engine.encoded(bundle))
         parsed=bridge.Bundle(candidate,engine)
         if release:parsed.admit('Windows')
-    files={**payload,'VERSION':source_bytes['VERSION'],'stream-bridge-bundle.json':engine.encoded(bundle),
+    files={**payload,'VERSION':source_bytes['VERSION'],'PATCH_VERSIONS.json':source_bytes['PATCH_VERSIONS.json'],
+           'stream-bridge-bundle.json':engine.encoded(bundle),
            'setup/steam_link_setup.py':source_bytes['setup/steam_link_setup.py'],
            'setup/steam_link_setup_ui.py':source_bytes['setup/steam_link_setup_ui.py'],
            'setup/steam_link_setup_textual.py':source_bytes['setup/steam_link_setup_textual.py'],
@@ -168,12 +180,13 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
     files.update(deps.windows_openssh(engine.read(openssh_zip),ssh_pin))
     textual=load('sfnp_bridge_textual_packaging',root/'tools/package_setup_textual.py')
     files.update(textual.vendor(textual_wheels,engine.parse(source_bytes['packaging/setup-textual.json'])))
-    source_manifest={'schema':'sfnp-stream-bridge-package-source-v1','version':version,'source_revision':profile['source_revision'],
+    source_manifest={'schema':'sfnp-stream-bridge-package-source-v1','version':version,'component_versions':components,'source_revision':profile['source_revision'],
                      'runtime_profile':pin(raw_profile),'source_pins':profile['source_pins'],
                      'native_artifacts':profile['artifacts'],'validation_receipts':receipts,
                      'hardware_verified':False,'automatic_restart':bool(release)}
     files['stream-bridge-package-source.json']=engine.encoded(source_manifest)
-    files['README.txt']=('Steam Link Native Passthrough '+version+' - '+('reviewed setup' if release else 'prototype setup')+'\n\n'+
+    files['README.txt']=('Steam Link Native Passthrough installer '+version+' - '+('reviewed setup' if release else 'prototype setup')+'\n'+
+        'PC patch '+components['pc']+'; Frame patch '+components['frame']+'.\n\n'+
         ('Run patch-steam-link.cmd on Windows. Confirmed setup prepares Frame files while its interface stays running, then coordinates and monitors the required restart.\n'
          if release else 'Checks only: installation and pairing are deliberately blocked in this prototype.\n')+
         'The Linux PC sender is not included. Native-derived shaders are generated locally, never shipped.\n'+
@@ -193,7 +206,7 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
             archive.writestr(info,raw,compress_type=zipfile.ZIP_DEFLATED,compresslevel=6)
     raw=output.getvalue();engine.require(len(raw)<=MAX_ARCHIVE,'Setup archive exceeds download limit.')
     receipt={'schema':'sfnp-stream-bridge-packaging-result-v1','result':'PASS','archive':pin(raw),
-             'version':version,
+             'version':version,'component_versions':components,
              'readiness':bundle['readiness'],'native_installable':bool(release),
              'source_revision':profile['source_revision'],'runtime_profile':pin(raw_profile),
              'source_pins':profile['source_pins'],'artifacts':profile['artifacts'],

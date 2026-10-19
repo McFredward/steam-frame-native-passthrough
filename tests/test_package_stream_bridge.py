@@ -104,19 +104,68 @@ class Tests(unittest.TestCase):
     def test_reproducible_archive(self):
         first,r1=self.build();second,r2=self.build();self.assertEqual(first,second);self.assertEqual(r1,r2)
 
-    def test_project_version_is_source_pinned_and_stamped_in_package_and_both_roles(self):
+    def test_installer_and_patch_versions_are_source_pinned_and_stamped_independently(self):
         raw,receipt=self.build()
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             version=z.read('VERSION').decode().strip()
+            components=json.loads(z.read('PATCH_VERSIONS.json'))
+            versions={side:components[side] for side in ('pc','frame')}
             bundle=json.loads(z.read('stream-bridge-bundle.json'))
             self.assertEqual(version,(ROOT/'VERSION').read_text().strip());self.assertEqual(receipt['version'],version)
             self.assertEqual(bundle['version'],version)
-            self.assertEqual(bundle['pc']['version'],version);self.assertEqual(bundle['frame']['version'],version)
-            self.assertEqual(json.loads(z.read('stream-bridge-package-source.json'))['version'],version)
+            self.assertEqual(bundle['pc']['version'],components['pc']);self.assertEqual(bundle['frame']['version'],components['frame'])
+            source=json.loads(z.read('stream-bridge-package-source.json'))
+            self.assertEqual(source['version'],version);self.assertEqual(source['component_versions'],versions)
+            self.assertEqual(receipt['component_versions'],versions)
             self.assertEqual(receipt['source_pins']['VERSION'],p.pin(z.read('VERSION')))
+            self.assertEqual(receipt['source_pins']['PATCH_VERSIONS.json'],p.pin(z.read('PATCH_VERSIONS.json')))
+            self.assertEqual(z.read('PATCH_VERSIONS.json'),(ROOT/'PATCH_VERSIONS.json').read_bytes())
         changed='0.0.1' if version=='0.0.0' else '0.0.0'
         (self.root/'VERSION').write_text(changed+'\n')
         with self.assertRaisesRegex(ValueError,'sources differ'):self.build()
+
+    def test_installer_only_update_keeps_patch_versions_and_native_bytes(self):
+        first,_=self.build()
+        (self.root/'VERSION').write_text('9.8.7\n')
+        self.profile['source_pins']['VERSION']=p.pin((self.root/'VERSION').read_bytes());self.save_profile()
+        second,receipt=self.build()
+        with zipfile.ZipFile(io.BytesIO(first)) as before,zipfile.ZipFile(io.BytesIO(second)) as after:
+            previous=json.loads(before.read('stream-bridge-bundle.json'));current=json.loads(after.read('stream-bridge-bundle.json'))
+            self.assertEqual(current['version'],'9.8.7');self.assertEqual(receipt['version'],'9.8.7')
+            for side in ('pc','frame'):self.assertEqual(current[side]['version'],previous[side]['version'])
+            self.assertEqual(current['files'],previous['files'])
+            for name in current['files']:self.assertEqual(after.read(name),before.read(name))
+            self.assertEqual(after.read('PATCH_VERSIONS.json'),before.read('PATCH_VERSIONS.json'))
+
+    def test_pc_and_frame_patch_versions_may_differ(self):
+        path=self.root/'PATCH_VERSIONS.json';value=json.loads(path.read_bytes())
+        value.update(pc='1.4.0',frame='2.1.0-beta.2');path.write_bytes(encoded(value))
+        self.profile['source_pins']['PATCH_VERSIONS.json']=p.pin(path.read_bytes());self.save_profile()
+        raw,receipt=self.build()
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            bundle=json.loads(z.read('stream-bridge-bundle.json'))
+            self.assertEqual(bundle['version'],(self.root/'VERSION').read_text().strip())
+            self.assertEqual(bundle['pc']['version'],'1.4.0');self.assertEqual(bundle['frame']['version'],'2.1.0-beta.2')
+            self.assertEqual(receipt['component_versions'],{'pc':'1.4.0','frame':'2.1.0-beta.2'})
+
+    def test_patch_version_change_requires_reviewed_source_pin(self):
+        path=self.root/'PATCH_VERSIONS.json';value=json.loads(path.read_bytes());value['pc']='0.2.12'
+        path.write_bytes(encoded(value))
+        with self.assertRaisesRegex(ValueError,'sources differ'):self.build()
+
+    def test_patch_version_manifest_rejects_unknown_or_missing_semantic_versions(self):
+        path=self.root/'PATCH_VERSIONS.json';original=json.loads(path.read_bytes())
+        for invalid in (None,[],{**original,'schema':'unknown'},
+                        {key:value for key,value in original.items() if key!='frame'},
+                        {**original,'extra':True},{**original,'pc':None},{**original,'frame':12},
+                        {**original,'pc':'1.02.3'},{**original,'frame':'1.2.3-01'}):
+            with self.subTest(invalid=invalid):
+                path.write_bytes(encoded(invalid));self.profile['source_pins']['PATCH_VERSIONS.json']=p.pin(path.read_bytes());self.save_profile()
+                with self.assertRaises(ValueError):self.build()
+
+    def test_missing_patch_version_manifest_cannot_create_package(self):
+        (self.root/'PATCH_VERSIONS.json').unlink()
+        with self.assertRaises(OSError):self.build()
 
     def test_release_requires_exact_complete_receipts(self):
         with self.assertRaisesRegex(ValueError,'receipts'):self.build(release=True)
