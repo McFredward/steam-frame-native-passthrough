@@ -66,9 +66,6 @@ und lass sie bis zum Abschluss eingeschaltet.
 Starte deinen Steam-Link-Stream und aktiviere natives Steam-Link-Passthrough im Spiel.
 Dieselbe Zeile bietet später **Update, Deinstallation oder Rücknahme** an.
 
-Gelegentliche Passthrough-Aussetzer und die gleichzeitige Darstellung
-von Spiel und Steam-Menü werden noch untersucht.
-
 ## Für Entwickler
 
 [Spiel integrieren](docs/DEVELOPING.md) · [Kompatibilität](docs/COMPATIBILITY.md) ·

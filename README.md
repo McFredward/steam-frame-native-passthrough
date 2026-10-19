@@ -66,9 +66,6 @@ until setup finishes.
 Start your Steam Link stream and enable native Steam Link passthrough in the game.
 Run the same command again to **update, uninstall or restore the previous setup**.
 
-Occasional passthrough interruptions and simultaneous game/Steam-menu
-composition are still being investigated.
-
 ## For developers
 
 [Integrate your game](docs/DEVELOPING.md) · [Compatibility](docs/COMPATIBILITY.md) ·
