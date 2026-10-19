@@ -60,6 +60,47 @@ class Tests(unittest.TestCase):
         self.unit=b.FrameInstall(s,home=self.fhome,steamvr=self.fsvr,root=self.froot,config=self.fhome/'.config',run=system,machine=lambda:'aarch64')
         self.bundle_root=self.base/'bundle';self.bundle_root.mkdir(mode=0o700)
         self.make_bundle()
+        self.camera_calls=[];self.camera_native_calls=[];self.camera_refuse=False
+        real=b.load_module
+        owner=self
+        class Camera:
+            """Synthetic public settings API; real helper/receipt code stays in use."""
+            def __init__(inner,pin):
+                raw,_=s.read_public_reference(Path(pin['path']),pin['bytes'])
+                s.require(len(raw)==pin['bytes'] and s.sha(raw)==pin['sha256'],'fixture native pin changed')
+                prefs=s.parse(s.read(owner.fsettings)) if owner.fsettings.exists() else {}
+                inner.value=prefs.get('camera',{}).get('forceSceneAlphaBlending',False)
+            def __enter__(inner):return inner
+            def __exit__(inner,*unused):pass
+            def read(inner):return inner.value
+            def write(inner,value):inner.change(value)
+            def remove_override(inner):inner.change(None)
+            def change(inner,value):
+                owner.camera_native_calls.append(value)
+                if owner.camera_refuse:return
+                inner.value=False if value is None else value
+                before=s.read(owner.fsettings) if owner.fsettings.exists() else None
+                prefs=s.parse(before) if before else {}
+                if value is None:
+                    prefs.get('camera',{}).pop('forceSceneAlphaBlending',None)
+                    if not prefs.get('camera'):prefs.pop('camera',None)
+                else:prefs.setdefault('camera',{})['forceSceneAlphaBlending']=value
+                mode=owner.fsettings.stat().st_mode&0o777 if owner.fsettings.exists() else 0o600
+                s.put(owner.fsettings,s.encoded(prefs),before);os.chmod(owner.fsettings,mode)
+        self.camera_factory=Camera
+        def camera_module(raw,name):
+            module=real(raw,name)
+            if name.startswith('sfnp_camera_'):
+                restore=module.restore_owned;override=module.apply_owned_override
+                def run_restore(root):
+                    owner.camera_calls.append(('restore',str(root)))
+                    return restore(root,api_factory=Camera,persist_timeout=0)
+                def run_override(root,authority):
+                    owner.camera_calls.append(('override',dict(authority)))
+                    return override(root,authority,api_factory=Camera,persist_timeout=0)
+                module.restore_owned=run_restore;module.apply_owned_override=run_override
+            return module
+        patch=mock.patch.object(b,'load_module',side_effect=camera_module);patch.start();self.addCleanup(patch.stop)
 
     def make_bundle(self,readiness='release'):
         pins=lambda raw:{'bytes':len(raw),'sha256':s.sha(raw)}
@@ -68,7 +109,8 @@ class Tests(unittest.TestCase):
                   'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll':b'fixture provider, never loaded',
                   'frame/'+b.LIBRARY:bytes(elf),'frame/libsfnp_stream_launch.so':bytes(elf),
                   'frame/tools/native_fragment_stream_coverage.py':b'# fixture module\n',
-                  'frame/tools/compositor_startup_health.py':b'# fixture module\n'}
+                  'frame/tools/compositor_startup_health.py':b'# fixture module\n',
+                  'frame/tools/stream_bridge_camera.py':(ROOT/'tools/stream_bridge_camera.py').read_bytes()}
         for name in b.PROFILES:payloads[name]=b'{}\n'
         for name in b.TOOLS:payloads.setdefault(name,b'# owned fixture source, not native execution\n')
         pc_pins={}
@@ -76,7 +118,7 @@ class Tests(unittest.TestCase):
             raw=('fixture '+role).encode();s.put(self.runtime/name,raw);pc_pins[role]={'base':'steamvr','path':name,**pins(raw)}
         frame_pins={}
         for role,name in [('vrlink','tools/vrlink/bin/linuxarm64/vrlink'),('compositor','bin/linuxarm64/vrcompositor'),('fragment','resources/native.spv'),('openvr','bin/linuxarm64/libopenvr_api.so')]:
-            raw=('frame fixture '+role).encode();s.put(self.fsvr/name,raw);frame_pins[role]={'base':'steamvr','path':name,**pins(raw)}
+            raw=('frame fixture '+role).encode();raw=raw.ljust(128,b'_') if role=='openvr' else raw;s.put(self.fsvr/name,raw);frame_pins[role]={'base':'steamvr','path':name,**pins(raw)}
         self.manifest={'schema':b.SCHEMA,'readiness':readiness,'bridge_protocol':{'major':1,'minor':0,'wire_sha256':'a'*64},
                        'files':{name:pins(raw) for name,raw in payloads.items()},
                        'pc':{'reviewed':True,'platform':'windows-x86_64','files':sorted(b.PC_FILES),'runtime_files':pc_pins},
@@ -310,6 +352,230 @@ class Tests(unittest.TestCase):
         self.system.live=False;target=self.runtime/'drivers/vrlink/bin/win64/driver_vrlink.dll';s.put(target,b'changed',s.read(target))
         with self.assertRaisesRegex(s.SetupError,'not supported'):installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
         self.assertFalse(installer.receipt.exists())
+
+    def legacy_frame(self,original=False):
+        # Seed a genuine old receipt shape and its owned global True without
+        # executing old code. Every predecessor/payload remains exact and private.
+        prefs=s.parse(s.read(self.fsettings))
+        if original is None:prefs['camera'].pop('forceSceneAlphaBlending',None)
+        else:prefs['camera']['forceSceneAlphaBlending']=original
+        s.put(self.fsettings,s.encoded(prefs),s.read(self.fsettings))
+        self.version_bundle(pc='0.2.4',frame='0.2.4')
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();state=self.unit.tx.state();state['settings'].pop('policy')
+        remaining=[]
+        for op in state['operations']:
+            if op['path'] in (str(self.froot/b.CAMERA_CONFIG),str(self.froot/b.CAMERA_TOOL),
+                str(self.fhome/'.config/systemd/user/steamvr.service.d'/b.CAMERA_HOOK)):
+                self.unit.tx.replace(op,reverse=True)
+            else:remaining.append(op)
+        state['operations']=remaining
+        s.put(self.unit.tx.path,s.encoded(state),s.read(self.unit.tx.path))
+        prefs=s.parse(s.read(self.fsettings));prefs.setdefault('camera',{})['forceSceneAlphaBlending']=True
+        s.put(self.fsettings,s.encoded(prefs),s.read(self.fsettings))
+        return state
+
+    def update_frame_version(self,version):
+        self.version_bundle(pc='0.2.4',frame=version)
+        with self.fake_generation():
+            result=self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        return result
+
+    def test_legacy_update_restores_owned_true_via_real_helper_before_restart(self):
+        before=self.legacy_frame()
+        result=self.update_frame_version('0.2.5')
+        self.assertEqual(result['reason'],'prepared-update')
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],False)
+        self.assertEqual(self.camera_native_calls,[False])
+        state=self.unit.tx.state()
+        self.assertEqual(state['settings'],{**before['settings'],'policy':b.SESSION_POLICY})
+        config=s.parse(s.read(self.froot/b.CAMERA_CONFIG,private=True))
+        migration=config['legacy_migration']
+        self.assertRegex(migration['id'],'^[0-9a-f]{64}$')
+        self.assertEqual({k:v for k,v in migration.items() if k!='id'},
+            {'section_present':True,'present':True,'value':False,'installed':True})
+        marker=s.parse(s.read(self.froot/'camera-session-migration.json',private=True))
+        self.assertEqual(marker['id'],migration['id']);self.assertEqual(marker['phase'],'consumed')
+        self.assertFalse(any('camera-session-migration.json' in op['path'] for op in state['operations']))
+        self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
+        self.assertFalse(any('restart' in cmd or 'stop' in cmd for cmd in self.commands))
+
+    def test_legacy_update_checkpoint_undo_restores_native_true_and_reupgrade_has_new_grant(self):
+        original=self.legacy_frame();self.update_frame_version('0.2.5')
+        first=s.parse(s.read(self.froot/b.CAMERA_CONFIG,private=True))['legacy_migration']['id']
+        self.unit.checkpoint().restore()
+        self.assertEqual(self.unit.tx.state(),original)
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],True)
+        self.assertEqual(self.camera_native_calls,[False,True])
+        self.assertFalse((self.froot/b.CAMERA_CONFIG).exists())
+        self.assertFalse((self.froot/b.CAMERA_TOOL).exists())
+        self.unit.checkpoint().verify_restored();self.unit.checkpoint().finish(restored=True)
+        self.update_frame_version('0.2.5')
+        second=s.parse(s.read(self.froot/b.CAMERA_CONFIG,private=True))['legacy_migration']['id']
+        self.assertNotEqual(first,second)
+        self.assertEqual(self.camera_native_calls,[False,True,False])
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],False)
+
+    def test_session_update_keeps_grant_and_preserves_user_changed_true_through_uninstall(self):
+        self.legacy_frame();self.update_frame_version('0.2.5')
+        config=s.parse(s.read(self.froot/b.CAMERA_CONFIG,private=True));self.unit.checkpoint().finish()
+        prefs=s.parse(s.read(self.fsettings));prefs['camera']['forceSceneAlphaBlending']=True;prefs['user']['later']=17
+        s.put(self.fsettings,s.encoded(prefs),s.read(self.fsettings));before=s.read(self.fsettings)
+        self.update_frame_version('0.2.6')
+        self.assertEqual(s.parse(s.read(self.froot/b.CAMERA_CONFIG))['legacy_migration'],config['legacy_migration'])
+        self.assertEqual(s.read(self.fsettings),before)
+        self.unit.checkpoint().finish()
+        self.unit.undo(live=True)
+        self.assertEqual(s.read(self.fsettings),before)
+        self.assertEqual(self.camera_native_calls,[False])
+
+    def test_legacy_uninstall_and_undo_use_exact_transmitted_helper_and_native_before(self):
+        original=self.legacy_frame()
+        self.version_bundle(pc='0.2.4',frame='0.2.5')
+        result=b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertEqual(result['reason'],'uninstalled')
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],False)
+        self.assertIsNone(self.unit.tx.state())
+        self.assertEqual(self.camera_native_calls,[False])
+        b.remote_request(s,b.request(self.bundle,'bridge-restore'),unit=self.unit)
+        self.assertEqual(self.unit.tx.state(),original)
+        self.assertEqual(self.camera_native_calls,[False,True])
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],True)
+        self.unit.checkpoint().verify_restored()
+
+    def test_cold_generation_failure_preserves_active_camera_lease_without_pausing(self):
+        self.version_bundle(pc='0.2.4',frame='0.2.5')
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit()
+        with self.unit.camera_context() as (module,root):
+            config,sha=module.load_config(root)
+            session=module.Session(root,config,sha,self.camera_factory(config['library']));session.enable()
+        self.addCleanup(session.restore)
+        before=s.read(self.unit.tx.path);lease=s.read(self.froot/'camera-session-lease.json',private=True)
+        calls=list(self.camera_calls);native=list(self.camera_native_calls)
+        self.version_bundle(pc='0.2.4',frame='0.2.6')
+        for boundary in ('generation','backup'):
+            with self.subTest(boundary=boundary):
+                failure=mock.patch.object(b,'generate_shaders',side_effect=OSError('owned preparation failure')) if boundary=='generation' else mock.patch.object(self.unit,'backup',side_effect=OSError('owned preparation failure'))
+                with self.fake_generation(),failure:
+                    with self.assertRaisesRegex(OSError,'owned preparation failure'):
+                        self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+                self.assertEqual(s.read(self.unit.tx.path),before)
+                self.assertEqual(s.read(self.froot/'camera-session-lease.json',private=True),lease)
+                self.assertEqual(self.camera_calls,calls);self.assertEqual(self.camera_native_calls,native)
+                self.assertFalse((self.froot/'camera-session.pause').exists())
+                self.assertFalse(self.unit.checkpoint().path.exists())
+                self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],True)
+
+    def active_camera(self):
+        with self.unit.camera_context() as (module,root):
+            config,sha=module.load_config(root)
+            session=module.Session(root,config,sha,self.camera_factory(config['library']));session.enable()
+        return session
+
+    def test_session_update_quiesces_real_live_lease_before_replacing_configuration(self):
+        self.version_bundle(pc='0.2.4',frame='0.2.5')
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();session=self.active_camera()
+        self.assertTrue((self.froot/'camera-session-lease.json').exists())
+        self.update_frame_version('0.2.6')
+        self.assertEqual(self.camera_native_calls,[True,False])
+        self.assertFalse((self.froot/'camera-session-lease.json').exists())
+        self.assertTrue((self.froot/'camera-session.pause').exists())
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],False)
+        with self.assertRaisesRegex(RuntimeError,'paused'):session.enable()
+        self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
+
+    def test_session_uninstall_restores_real_live_lease_before_deleting_helper(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();self.active_camera()
+        self.unit.undo(live=True)
+        self.assertEqual(self.camera_native_calls,[True,False])
+        self.assertFalse((self.froot/'camera-session-lease.json').exists())
+        self.assertFalse((self.froot/b.CAMERA_TOOL).exists())
+        self.assertFalse((self.froot/b.CAMERA_CONFIG).exists())
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],False)
+
+    def test_checkpoint_foreign_payload_refuses_before_any_native_camera_override(self):
+        self.legacy_frame();self.update_frame_version('0.2.5')
+        target=self.froot/b.CAMERA_TOOL;before=s.read(target);s.put(target,before+b' foreign modification',before)
+        calls=list(self.camera_calls);native=list(self.camera_native_calls)
+        with self.assertRaisesRegex(s.SetupError,'changed file was preserved'):
+            self.unit.checkpoint().restore()
+        self.assertEqual(self.camera_calls,calls);self.assertEqual(self.camera_native_calls,native)
+        self.assertTrue((self.froot/b.CAMERA_TOOL).exists());self.assertTrue((self.froot/b.CAMERA_CONFIG).exists())
+        self.assertEqual(s.read(target),before+b' foreign modification')
+
+    def test_checkpoint_foreign_camera_value_refuses_before_native_override(self):
+        self.legacy_frame();self.update_frame_version('0.2.5')
+        prefs=s.parse(s.read(self.fsettings));prefs['camera']['forceSceneAlphaBlending']='foreign-value'
+        s.put(self.fsettings,s.encoded(prefs),s.read(self.fsettings))
+        calls=list(self.camera_calls);native=list(self.camera_native_calls)
+        with self.assertRaisesRegex(s.SetupError,'Changed camera checkpoint preserved'):
+            self.unit.checkpoint().restore()
+        self.assertEqual(self.camera_calls,calls);self.assertEqual(self.camera_native_calls,native)
+        self.assertEqual(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],'foreign-value')
+
+    def test_legacy_absent_key_is_removed_only_through_native_api(self):
+        self.legacy_frame(original=None);self.update_frame_version('0.2.5')
+        prefs=s.parse(s.read(self.fsettings))
+        self.assertNotIn('forceSceneAlphaBlending',prefs.get('camera',{}))
+        self.assertEqual(prefs['user'],{'quality':3})
+        self.assertEqual(self.camera_native_calls,[None])
+        grant=s.parse(s.read(self.froot/b.CAMERA_CONFIG))['legacy_migration']
+        self.assertFalse(grant['present']);self.assertIsNone(grant['value'])
+
+    def test_legacy_helper_hash_tamper_refuses_before_native_change_or_payload_removal(self):
+        self.legacy_frame();self.version_bundle(pc='0.2.4',frame='0.2.5')
+        before=s.read(self.unit.tx.path);settings=s.read(self.fsettings)
+        request=b.request(self.bundle,'bridge-undo',automated=True)
+        request['camera_source']=base64.b64encode(b'foreign camera helper').decode()
+        with self.assertRaisesRegex(s.SetupError,'differs from the checked package'):
+            b.remote_request(s,request,unit=self.unit)
+        self.assertEqual(s.read(self.unit.tx.path),before);self.assertEqual(s.read(self.fsettings),settings)
+        self.assertEqual(self.camera_calls,[]);self.assertEqual(self.camera_native_calls,[])
+
+    def test_live_camera_refusal_keeps_static_files_for_recovery(self):
+        self.legacy_frame();self.version_bundle(pc='0.2.4',frame='0.2.5');self.camera_refuse=True
+        with self.fake_generation(),self.assertRaisesRegex(s.SetupError,'could not be restored safely'):
+            self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.assertTrue((self.froot/b.CAMERA_CONFIG).exists())
+        self.assertTrue((self.froot/b.CAMERA_TOOL).exists())
+        self.assertTrue(self.unit.checkpoint().path.exists())
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],True)
+
+    def test_fresh_frame_install_preserves_camera_setting_and_stages_session_startup(self):
+        before=s.read(self.fsettings)
+        with self.fake_generation():
+            self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.assertEqual(s.read(self.fsettings),before,'Installation must not globally enable native camera blending')
+        self.unit.tx.commit();state=self.unit.tx.state()
+        self.assertEqual(state['settings']['policy'],'session-managed-v1')
+        config=s.parse(s.read(self.froot/'camera-session.json',private=True))
+        pin=self.bundle.frame['runtime_files']['openvr']
+        self.assertEqual(config,{'schema':'sfnp-camera-session-config-v1','settings':str(self.fsettings),
+            'library':{'path':str(self.fsvr/pin['path']),'bytes':pin['bytes'],'sha256':pin['sha256']}})
+        hook=self.fhome/'.config/systemd/user/steamvr.service.d/85-steam-link-native-passthrough-camera.conf'
+        text=hook.read_text()
+        self.assertIn('ExecStartPre=-/usr/bin/python3 -I -B ',text)
+        self.assertIn('stream_bridge_camera.py',text);self.assertIn(' startup --root ',text)
+        self.assertNotIn('Environment=',text);self.assertNotIn('ExecStop',text)
+        self.assertEqual((self.froot/'camera-session.json').stat().st_mode&0o777,0o600)
+        self.assertIn('frame/tools/stream_bridge_camera.py',b.TOOLS)
+        self.assertFalse(any(op['path'].endswith(('camera-session-lease.json','camera-session-migration.json')) for op in state['operations']))
+        self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
+
+    def test_fresh_frame_install_does_not_create_a_missing_camera_settings_file(self):
+        self.fsettings.unlink()
+        with self.fake_generation():
+            self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.assertFalse(self.fsettings.exists(),'A session-managed install must not create global camera settings')
+        self.unit.tx.commit()
+        entry=self.unit.tx.state()['settings']['baseline']['camera']['keys']['forceSceneAlphaBlending']
+        self.assertFalse(entry['present']);self.assertIsNone(entry['value'])
+        self.assertEqual(self.unit.undo(live=True)['reason'],'uninstalled')
+        self.assertFalse(self.fsettings.exists())
 
     def test_frame_real_transaction_no_system_binary_write(self):
         original=s.read(self.fsettings);elfs={str(p):p.read_bytes() for p in self.fsvr.rglob('*') if p.is_file()}

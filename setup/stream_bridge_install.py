@@ -5,6 +5,7 @@ inventory only. Source identities and successful software tests do not turn a
 prototype into an installable release.
 """
 from __future__ import annotations
+from contextlib import contextmanager
 import base64
 import ast
 import hashlib
@@ -63,11 +64,15 @@ LAYER = 'VK_LAYER_SFNP_stream_bridge'
 LIBRARY = 'libVkLayer_steam_link_bridge.so'
 MANIFEST = 'VkLayer_SFNP_stream_bridge.json'
 SETTINGS_SECTION = 'driver_steam_link_native_passthrough'
+SESSION_POLICY = 'session-managed-v1'
+CAMERA_CONFIG = 'camera-session.json'
+CAMERA_HOOK = '85-steam-link-native-passthrough-camera.conf'
+CAMERA_TOOL = 'tools/stream_bridge_camera.py'
 PC_FILES = {'pc-provider/driver.vrdrivermanifest',
             'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'}
 TOOLS = frozenset('frame/tools/'+name+'.py' for name in (
     'app_payload_probe','compositor_startup_health','native_fragment_count1_interface',
-    'native_fragment_ssa_probe','native_fragment_stream_coverage','pixel_payload_recovery'))
+    'native_fragment_ssa_probe','native_fragment_stream_coverage','pixel_payload_recovery','stream_bridge_camera'))
 PROFILES = frozenset()
 GENERATED = {'coverage.spv': {'bytes':7188,'sha256':'316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e'}}
 # Removal/recovery allowlist only. These files are never generated, installed or
@@ -212,7 +217,8 @@ def local_address(frame_host, *, resolver=socket.gethostbyname, socket_factory=s
 
 def validate_settings_receipt(engine,value,expected_path,section,keys):
     e=engine
-    e.require(type(value)is dict and set(value)=={'path','baseline'} and value['path']==str(expected_path) and
+    e.require(type(value)is dict and set(value) in ({'path','baseline'},{'path','baseline','policy'}) and
+              ('policy' not in value or section=='camera' and value['policy']==SESSION_POLICY) and value['path']==str(expected_path) and
               type(value['baseline'])is dict and set(value['baseline'])=={section},'Unknown settings restoration receipt.')
     spec=value['baseline'][section]
     e.require(type(spec)is dict and set(spec)=={'present','keys'} and type(spec['present'])is bool and
@@ -253,6 +259,9 @@ class SettingsChange:
 
     @staticmethod
     def restore(engine, receipt):
+        # Session-owned changes have separate live leases. Installation itself
+        # never owns or overwrites the user's persistent camera preference.
+        if receipt.get('policy')==SESSION_POLICY:return
         path=Path(receipt['path']);before=engine.read(path,2*1024*1024);value=engine.parse(before)
         for section,spec in receipt['baseline'].items():
             engine.require(type(value.get(section))is dict,'Changed SteamVR settings preserved.')
@@ -477,8 +486,11 @@ class FrameTransaction:
 
     def state(self):
         if not self.path.exists():return None
-        e=self.e;v=e.parse(e.read(self.path,64*1024*1024,private=True))
-        e.require(set(v)-{'version'}=={'schema','home','root','bundle','phase','operations','settings','pair'} and
+        return self.validate_state(self.e.parse(self.e.read(self.path,64*1024*1024,private=True)))
+
+    def validate_state(self,v):
+        e=self.e
+        e.require(type(v)is dict and set(v)-{'version'}=={'schema','home','root','bundle','phase','operations','settings','pair'} and
                   v['schema']==RECEIPT and v['home']==str(self.home) and v['root']==str(self.root) and
                   v['phase'] in ('pending','installed','removing') and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
                   re.fullmatch('[0-9a-f]{32}',v['pair']) and type(v['operations'])is list and
@@ -488,7 +500,8 @@ class FrameTransaction:
                  self.home/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json',
                  self.home/'.config/SteamFrameNativePassthrough/control.json',
                  Path(os.environ.get('XDG_CONFIG_HOME') or self.home/'.config')/'vulkan/implicit_layer.d'/MANIFEST,
-                 Path(os.environ.get('XDG_CONFIG_HOME') or self.home/'.config')/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf'}
+                 Path(os.environ.get('XDG_CONFIG_HOME') or self.home/'.config')/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf',
+                 Path(os.environ.get('XDG_CONFIG_HOME') or self.home/'.config')/'systemd/user/steamvr.service.d'/CAMERA_HOOK}
         validate_settings_receipt(e,v['settings'],self.home/'.local/share/Steam/config/steamvr.vrsettings','camera',('forceSceneAlphaBlending',))
         e.require(len({o['path'] for o in v['operations']})==len(v['operations']),'Duplicate stored operations.')
         for operation in v['operations']:
@@ -678,9 +691,10 @@ class FrameInstall:
                   self.home/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json',
                   self.home/'.config/SteamFrameNativePassthrough/control.json',
                   self.config/'vulkan/implicit_layer.d'/MANIFEST,
-                  self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf'}
+                  self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf',
+                  self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK}
         names={LIBRARY,'libsfnp_stream_launch.so','coverage.spv','receiver.conf','launch.conf',
-               'receiver.enable','pairings/active.json','install.json'}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}|RETIRED_FRAME_FILES
+               'receiver.enable','pairings/active.json','install.json',CAMERA_CONFIG}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}|RETIRED_FRAME_FILES
         def allowed(path):
             if path in external:return True
             if not path.is_relative_to(self.root):return False
@@ -688,7 +702,28 @@ class FrameInstall:
             return name in names or re.fullmatch('pairings/[0-9a-f]{32}[.]json',name) is not None
         def current(path):self.tx.owned(path);return helper.read_value(self.e,path)
         def replace(path,old,new):self.tx.owned(path);return helper.replace_value(self.e,path,old,new)
-        return helper.Checkpoint(self.e,self.root/'setup-restore.json',allowed,current,replace)
+        owner=self
+        class FrameCheckpoint(helper.Checkpoint):
+            def restore(checkpoint):
+                value=checkpoint.value()
+                if value is None:return super().restore()
+                owner.camera_checkpoint_preflight(checkpoint,value)
+                with owner.camera_context(checkpoint=value) as camera:
+                    if camera:
+                        owner.camera_call(camera,'restore_owned')
+                        for item in value['settings']:
+                            if item['section']=='camera' and item['key']=='forceSceneAlphaBlending':
+                                desired=item['before']['value'] if item['before']['present'] else None
+                                owner.e.require(desired is None or type(desired)is bool,
+                                                'Unknown original camera checkpoint preserved.')
+                                before=owner.camera_value(Path(item['path']))
+                                owner.e.require({'present':before is not None,'value':before} in
+                                    [item['before'],*item['after']], 'Changed camera checkpoint preserved.')
+                                owner.camera_call(camera,'apply_owned_override',{
+                                    'schema':'sfnp-camera-override-authority-v1','settings':item['path'],
+                                    'before':before,'desired':desired,'section_present':item['section_present']})
+                    return super().restore()
+        return FrameCheckpoint(self.e,self.root/'setup-restore.json',allowed,current,replace)
 
     def backup(self,action,operations,settings,transaction_values):
         helper=load_helper(self.e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint()
@@ -698,9 +733,14 @@ class FrameInstall:
             if after and after['kind']=='file':after={**after,'mode':op['mode']}
             entries.append(checkpoint.operation(Path(op['path']),[after]))
         entries.append(checkpoint.operation(self.tx.path,transaction_values))
-        entries_settings=[checkpoint.setting(Path(settings['path']),section,key,[{'present':entry['present'],'value':entry['value']}]
+        entries_settings=[] if settings.get('policy')==SESSION_POLICY else [checkpoint.setting(Path(settings['path']),section,key,[{'present':entry['present'],'value':entry['value']}]
                        if action=='uninstall' else [{'present':True,'value':entry['installed']}])
                        for section,spec in settings['baseline'].items() for key,entry in spec['keys'].items()]
+        if action=='update' and settings.get('policy')!=SESSION_POLICY:
+            for item in entries_settings:
+                if item['section']=='camera' and item['key']=='forceSceneAlphaBlending':
+                    original=settings['baseline']['camera']['keys']['forceSceneAlphaBlending']
+                    item['after'].append({'present':original['present'],'value':original['value']})
         checkpoint.begin(action,entries,entries_settings)
 
     def runtime(self,bundle):
@@ -788,6 +828,129 @@ class FrameInstall:
         return ('[Service]\nEnvironment='+self.systemd('LD_PRELOAD='+preload)+'\nEnvironment='+
                 self.systemd('SFNP_STREAM_BRIDGE_CONFIG='+config)+'\n').encode()
 
+    def camera_checkpoint_preflight(self,checkpoint,value):
+        """Prove exact reversal scope before any live native settings mutation."""
+        e=self.e
+        for op in value['operations']:
+            observed=checkpoint.current(Path(op['path']))
+            e.require(observed==op['before'] or observed in op['after'],
+                      'A changed file was preserved; camera recovery did not start.')
+        for item in value['settings']:
+            path=Path(item['path']);prefs=e.parse(e.read(path,2*1024*1024)) if path.exists() else {}
+            section=prefs.get(item['section'],{})
+            e.require(type(section)is dict,'Changed camera checkpoint preserved.')
+            observed={'present':item['key'] in section,'value':section.get(item['key'])}
+            e.require(e.encoded(observed) in [e.encoded(entry) for entry in [item['before'],*item['after']]],
+                      'Changed camera checkpoint preserved.')
+
+    def camera_value(self,path):
+        prefs=self.e.parse(self.e.read(path,2*1024*1024)) if path.exists() else {}
+        section=prefs.get('camera',{})
+        self.e.require(type(section)is dict and ('forceSceneAlphaBlending' not in section or
+                       type(section['forceSceneAlphaBlending'])is bool), 'Unknown current camera preference preserved.')
+        return section.get('forceSceneAlphaBlending')
+
+    def camera_state(self,checkpoint=None):
+        state=self.tx.state();fallback=state
+        if state and any(op['path']==str(self.root/CAMERA_CONFIG) for op in state['operations']):return state
+        if checkpoint:
+            for op in checkpoint['operations']:
+                if op['path']!=str(self.tx.path):continue
+                for entry in reversed([op['before'],*op['after']]):
+                    if entry is None or entry['kind']!='file':continue
+                    candidate=self.tx.validate_state(self.e.parse(base64.b64decode(entry['bytes'],validate=True)))
+                    if any(o['path']==str(self.root/CAMERA_CONFIG) for o in candidate['operations']):return candidate
+                    if fallback is None:fallback=candidate
+        return fallback
+
+    @contextmanager
+    def camera_context(self,*,state=None,checkpoint=None):
+        """Hold exact reviewed helper code in memory across payload deletion."""
+        e=self.e;state=state or self.camera_state(checkpoint)
+        operations={op['path']:op for op in state['operations']} if state else {}
+        config_op=operations.get(str(self.root/CAMERA_CONFIG));source_op=operations.get(str(self.root/CAMERA_TOOL))
+        if config_op and source_op:
+            def admitted(path,observed):
+                op=operations[str(path)]
+                if observed in (op['before'],op['after']):return True
+                if checkpoint:
+                    item=next((item for item in checkpoint['operations'] if item['path']==str(path)),None)
+                    if item:return observed==item['before'] or observed in item['after']
+                return False
+            for name,op in ((CAMERA_CONFIG,config_op),(CAMERA_TOOL,source_op)):
+                path=self.root/name;observed=self.tx.current(path)
+                # Checkpoint file metadata includes mode; transaction values do not.
+                checkpoint_current=load_helper(e,'steam_link_setup_checkpoint').read_value(e,path)
+                e.require(admitted(path,observed) or admitted(path,checkpoint_current),
+                          'Changed camera helper or configuration preserved.')
+                e.require(op['after'] is not None and op['after']['kind']=='file',
+                          'Missing owned camera helper authority.')
+                if name==CAMERA_CONFIG and observed is None:
+                    # A not-yet-published initial operation can safely be staged
+                    # solely to quiesce native state before its own reversal.
+                    e.put(path,base64.b64decode(op['after']['bytes'],validate=True))
+                    os.chmod(path,0o600)
+            raw=base64.b64decode(source_op['after']['bytes'],validate=True)
+            module=load_module(raw,'sfnp_camera_'+e.sha(raw)[:16])
+            yield module,self.root
+            return
+        payload=getattr(self,'_camera_payload',None)
+        if state is None:
+            yield None;return
+        e.require(payload is not None,'A verified camera helper is required to restore this older installation safely.')
+        source,library=payload
+        settings=state['settings']
+        config=self.camera_config(None,settings,previous=state,library=library)
+        # An old installation has no live session helper. Its exact receipt
+        # grants a narrowly scoped native restore using this reviewed tool.
+        self.root.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        with tempfile.TemporaryDirectory(prefix='camera-restore-',dir=self.root.parent) as temporary:
+            root=Path(temporary);os.chmod(root,0o700)
+            e.put(root/CAMERA_CONFIG,config)
+            module=load_module(source,'sfnp_camera_'+e.sha(source)[:16])
+            yield module,root
+
+    def camera_call(self,camera,method,*args):
+        module,root=camera
+        callback=getattr(module,method,None)
+        self.e.require(callable(callback),'The reviewed camera helper API is unavailable; existing files were preserved.')
+        try:result=callback(root,*args)
+        except Exception as error:
+            raise self.e.SetupError('The native camera preference could not be restored safely. Existing files and recovery records were kept.') from error
+        self.e.require(type(result)is dict and result.get('persisted') is True and
+                       result.get('status') in ('restored','unchanged'),
+                       'The native camera restoration was not confirmed; existing files were preserved.')
+        return result
+
+    def camera_config(self,bundle,settings,*,previous=None,library=None):
+        """Pinned native API and one stable, explicitly granted legacy migration."""
+        e=self.e
+        if library is None:
+            pin=bundle.frame['runtime_files']['openvr']
+            base={'steamvr':self.steamvr,'home':self.home,'system':Path('/')}[pin['base']]
+            library={'path':str(base/e.relative(pin['path'])),'bytes':pin['bytes'],'sha256':pin['sha256']}
+        value={'schema':'sfnp-camera-session-config-v1','settings':settings['path'],'library':library}
+        if previous is not None:
+            old_config=next((op['after'] for op in previous['operations'] if op['path']==str(self.root/CAMERA_CONFIG)),None)
+            if previous['settings'].get('policy')==SESSION_POLICY and old_config is not None:
+                e.require(old_config.get('kind')=='file','Unknown camera session configuration preserved.')
+                prior=e.parse(base64.b64decode(old_config['bytes'],validate=True))
+                if 'legacy_migration' in prior:value['legacy_migration']=prior['legacy_migration']
+            elif previous['settings'].get('policy')!=SESSION_POLICY:
+                path=Path(settings['path']);prefs=e.parse(e.read(path,2*1024*1024)) if path.exists() else {}
+                current=prefs.get('camera',{})
+                if type(current)is dict and current.get('forceSceneAlphaBlending') is True:
+                    section=settings['baseline']['camera'];entry=section['keys']['forceSceneAlphaBlending']
+                    e.require((not entry['present'] and entry['value'] is None) or type(entry['value'])is bool,
+                              'Unknown original camera preference preserved; migration was not applied.')
+                    value['legacy_migration']={'id':secrets.token_hex(32),'section_present':section['present'],
+                        'present':entry['present'],'value':entry['value'],'installed':True}
+        return e.encoded(value)
+
+    def camera_dropin(self):
+        return ('[Service]\nExecStartPre=-/usr/bin/python3 -I -B '+self.systemd(str(self.root/CAMERA_TOOL))+
+                ' startup --root '+self.systemd(str(self.root))+'\n').encode()
+
     def plan(self,bundle,pair,address,port,*,live=False):
         e=self.e;bundle.admit('Windows')
         e.require(self.machine().lower() in ('aarch64','arm64'),'The selected device is not a supported Steam Frame.')
@@ -832,10 +995,13 @@ class FrameInstall:
         operations.append(self.tx.operation(dropin,self.dropin()))
         settings=self.home/'.local/share/Steam/config/steamvr.vrsettings'
         change=SettingsChange(e,settings,{'camera':{'forceSceneAlphaBlending':True}})
-        before,after,baseline=change.planned()
-        # Settings get a separate key-level receipt; do not restore the whole
-        # SteamVR file after the player changes unrelated preferences later.
-        return operations,{'path':str(settings),'baseline':baseline},(before,after)
+        before,_,baseline=change.planned()
+        # Keep the original key-level history, but own no persistent True.
+        # The separate helper owns short-lived native settings leases instead.
+        receipt={'path':str(settings),'baseline':baseline,'policy':SESSION_POLICY}
+        operations.append(self.tx.operation(self.root/CAMERA_CONFIG,self.camera_config(bundle,receipt)))
+        operations.append(self.tx.operation(self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK,self.camera_dropin()))
+        return operations,receipt,(before,before)
 
     def install(self,bundle,pair,address,port,*,backup=False,live=False):
         e=self.e;current=self.tx.state()
@@ -872,8 +1038,9 @@ class FrameInstall:
         self.tx.begin(bundle.pin,operations,settings,pair['pair_id'],version=bundle.frame.get('version'))
         try:
             settings_path=Path(settings['path']);mode=stat.S_IMODE(settings_path.stat().st_mode) if settings_path.exists() else 0o600
-            e.put(settings_path,after,before)
-            os.chmod(settings_path,mode)
+            if after!=before:
+                e.put(settings_path,after,before)
+                os.chmod(settings_path,mode)
             self.system('daemon-reload')
         except BaseException:
             self.undo(live=live)
@@ -910,17 +1077,17 @@ class FrameInstall:
             value=e.parse(e.read(old_control,4096,private=True))
             e.require(value.get('schema')=='sfnp-user-control-v1' and value.get('enabled') is False,
                       'A retired Frame receiver is active; remove it with checked maintenance before updating.')
-        settings=current['settings'];preferences=e.parse(e.read(Path(settings['path']),2*1024*1024))
-        for section,spec in settings['baseline'].items():
-            values=preferences.get(section)
-            e.require(type(values)is dict and all(key in values and type(values[key])is type(entry['installed']) and
-                      values[key]==entry['installed'] for key,entry in spec['keys'].items()),
-                      'Changed Frame settings preserved; update stopped.')
+        # Retain initial key history without treating a player's current camera
+        # preference as an immutable installed payload. Only an exact old True
+        # can grant the one-time legacy restoration in the helper configuration.
+        settings={**current['settings'],'policy':SESSION_POLICY}
         with tempfile.TemporaryDirectory(prefix='prepare-update-',dir=self.root.parent) as stage:
             outputs=generate_shaders(e,bundle,original,Path(stage))
         wanted={self.root/LIBRARY:bundle.files['frame/'+LIBRARY],
                 self.root/'libsfnp_stream_launch.so':bundle.files['frame/libsfnp_stream_launch.so'],
-                self.root/'receiver.conf':MARKER+address.encode()+b'\n'+str(port).encode()+b'\n'}
+                self.root/'receiver.conf':MARKER+address.encode()+b'\n'+str(port).encode()+b'\n',
+                self.root/CAMERA_CONFIG:self.camera_config(bundle,settings,previous=current),
+                self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK:self.camera_dropin()}
         wanted.update({self.root/name:raw for name,raw in outputs.items()})
         wanted.update({self.root/Path(name).relative_to('frame'):bundle.files[name]
                        for name in TOOLS|PROFILES})
@@ -942,13 +1109,22 @@ class FrameInstall:
                     op['after']=None
                 observed=self.tx.current(path)
                 if observed!=op['after']:changes.append({**op,'before':observed})
-        pending={**current,'bundle':bundle.pin,'operations':operations,'phase':'pending'}
+        pending={**current,'bundle':bundle.pin,'operations':operations,'settings':settings,'phase':'pending'}
         pending.pop('version',None);pending.update(version_fields(bundle.frame))
         committed={**pending,'phase':'installed'};helper=load_helper(e,'steam_link_setup_checkpoint')
         previous=e.read(self.tx.path,64*1024*1024,private=True)
-        self.backup('update',changes,settings,[helper.file_value(e.encoded(pending)),helper.file_value(e.encoded(committed))])
+        self.backup('update',changes,current['settings'],[helper.file_value(e.encoded(pending)),helper.file_value(e.encoded(committed))])
         e.put(self.tx.path,e.encoded(pending),previous)
+        # All cold work and the exact recovery journal precede live quiescence.
+        # A generation/backup failure must not pause an otherwise valid session.
+        if current['settings'].get('policy')==SESSION_POLICY:
+            with self.camera_context(state=current) as camera:
+                self.camera_call(camera,'restore_owned')
         for op in changes:self.tx.replace(op)
+        if current['settings'].get('policy')!=SESSION_POLICY:
+            # The verified new config/helper now exist, but native VR has not
+            # restarted yet. Restore its old owned global True through the API.
+            with self.camera_context() as camera:self.camera_call(camera,'restore_owned')
         self.system('daemon-reload')
         return {'reason':'prepared-update','pair_id':current['pair'],'automatic_restart':False,
                 'manual_restart_required':True,'coverage_operational':False}
@@ -960,6 +1136,8 @@ class FrameInstall:
         if backup:
             operations=[{**op,'after':op['before']} for op in state['operations']]
             self.backup('uninstall',operations,state['settings'],[None])
+        with self.camera_context(state=state) as camera:
+            if camera:self.camera_call(camera,'restore_owned')
         # Revoke new activation first; never restore the old layer while the new
         # compositor is still using the same native descriptor path.
         marker=self.root/'receiver.enable'
@@ -1038,6 +1216,19 @@ def remote_request(engine,request,*,unit=None):
         if command=='bridge-runtime-restart':return lifecycle.restart(restoring=request.get('restoring') is True,
             health_receipt=observer.baseline())
         return lifecycle.restored(health_ok=request.get('health_ok') is True)
+    if command in ('bridge-restore','bridge-undo'):
+        view=ReadOnlyView(e,request['manifest']);pin=view.value['files']['frame/'+CAMERA_TOOL]
+        encoded=request.get('camera_source')
+        e.require(type(encoded)is str,'The verified camera cleanup helper is missing.')
+        source=base64.b64decode(encoded,validate=True)
+        e.require(len(source)==pin['bytes'] and e.sha(source)==pin['sha256'],
+                  'The camera cleanup helper differs from the checked package.')
+        provider=view.frame['runtime_files']['openvr']
+        base={'steamvr':unit.steamvr,'home':unit.home,'system':Path('/')}[provider['base']]
+        path=base/e.relative(provider['path']);raw,_=e.read_public_reference(path,provider['bytes'])
+        e.require(len(raw)==provider['bytes'] and e.sha(raw)==provider['sha256'],
+                  'The native camera provider does not match the checked package.')
+        unit._camera_payload=(source,{'path':str(path),'bytes':provider['bytes'],'sha256':provider['sha256']})
     if command=='bridge-restore':
         result=unit.checkpoint().restore();unit.system('daemon-reload');return result
     if command=='bridge-checkpoint-finish':unit.checkpoint().finish(restored=request.get('restored') is True);return {'reason':'complete'}
@@ -1146,6 +1337,8 @@ def request(bundle,command,**values):
     if command=='bridge-prepare':
         result['files']={name:{**bundle.value['files'][name],
             'data':base64.b64encode(raw).decode()} for name,raw in bundle.files.items()}
+    if command in ('bridge-restore','bridge-undo'):
+        result['camera_source']=base64.b64encode(bundle.files['frame/'+CAMERA_TOOL]).decode()
     if command in ('bridge-health-baseline','bridge-health','bridge-runtime-restart'):
         result['health_source']=base64.b64encode(bundle.files['frame/tools/compositor_startup_health.py']).decode()
     return result
