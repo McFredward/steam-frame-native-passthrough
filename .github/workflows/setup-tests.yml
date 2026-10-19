@@ -100,7 +100,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: setup-tests-${{ github.ref }}
+  group: setup-tests-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'all' }}
   cancel-in-progress: true
 
 jobs:
