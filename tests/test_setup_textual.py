@@ -69,6 +69,50 @@ class PicturePorts:
 
 
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_copy_controls_are_compact_secondary_utilities_in_main_view_and_modal(self):
+        for lang in ("en", "de"):
+            def backend():
+                p = UI.active_presenter()
+                p.path("C:/Setup/logs/setup-737.jsonl", "setup_log")
+                p.choose_action(["exit"])
+                return 0
+            app = UI.SetupApp(backend, lang)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await until(pilot, lambda: app.prompt is not None)
+                for width, height in ((80, 24), (42, 16)):
+                    await pilot.resize_terminal(width, height)
+                    app.query_one("#copy-log", Button).focus(scroll_visible=False)
+                    app.query_one("#file-buttons").scroll_visible(animate=False)
+                    await pilot.pause()
+                    row = app.query_one("#file-buttons")
+                    self.assertEqual(row.region.height, 1)
+                    for button in row.query(Button):
+                        self.assertEqual(button.variant, "default")
+                        self.assertTrue(button.compact)
+                        self.assertEqual(button.region.height, 1)
+                        self.assertLess(button.region.width, width // 2)
+                        self.assertLessEqual(button.region.width, len(button.label.plain) + 4)
+                        self.assertTrue(row.region.contains_region(button.region), (lang, width, button.id))
+                        self.assertTrue(app.query_one("#body").content_region.contains_region(button.region))
+                        self.assertEqual(button.styles.background.a, 0)
+                await pilot.press("f3")
+                await until(pilot, lambda: isinstance(app.screen, UI.PathsScreen))
+                for width, height in ((80, 24), (42, 16)):
+                    await pilot.resize_terminal(width, height)
+                    await pilot.pause()
+                    row = app.screen.query_one("#paths-buttons")
+                    self.assertEqual(row.region.height, 1)
+                    for button in row.query(Button):
+                        self.assertEqual(button.variant, "default")
+                        self.assertTrue(button.compact)
+                        self.assertEqual(button.region.height, 1)
+                        self.assertLessEqual(button.region.width, len(button.label.plain) + 4)
+                        self.assertTrue(row.region.contains_region(button.region), (lang, width, button.id))
+                        self.assertEqual(button.styles.background.a, 0)
+                await pilot.press("escape", "ctrl+c")
+                await until(pilot, lambda: app.backend_finished)
+            app.backend.join()
+
     async def test_file_paths_offer_native_copy_and_readonly_fallback_at_small_sizes(self):
         log = "C:/Users/Player/AppData/Local/Steam Link Native Passthrough/logs/setup-736.jsonl"
         recovery = "C:/Users/Player/AppData/Local/Steam Link Native Passthrough/recovery/checkpoint.json"

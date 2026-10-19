@@ -47,7 +47,7 @@ WORDS = {
         "working": "Preparing your setup", "review": "Choose what happens next",
         "details": "Details & activity", "files": "Logs & recovery files", "empty_files": "Paths appear here when setup reports them.",
         "paths_help": "Choose a file with ↑ ↓. Copy its full path, or copy the complete list to share with a bug report.",
-        "path_copy": "Copy", "paths_copy_all": "Copy all", "copy_log": "Copy log path", "paths_open": "Open paths", "path_close": "Close",
+        "path_copy": "Copy", "paths_copy_all": "Copy all", "copy_log": "Copy log path", "copy_log_short": "Copy log", "paths_open": "Open paths", "path_close": "Close",
         "copied_path": "Path copied to the clipboard.", "copied_paths": "File paths copied to the clipboard.",
         "copy_failed": "Clipboard unavailable. Select the path with Shift+drag, then use your terminal's Copy command.",
         "copy_missing": "Setup has not reported a log path yet. Press F3 to see the available files.",
@@ -82,7 +82,7 @@ WORDS = {
         "working": "Die Einrichtung wird vorbereitet", "review": "Wähle den nächsten Schritt",
         "details": "Details & Verlauf", "files": "Logs & Wiederherstellungsdateien", "empty_files": "Hier erscheinen die Pfade, sobald die Einrichtung sie meldet.",
         "paths_help": "Wähle mit ↑ ↓ eine Datei. Kopiere ihren vollständigen Pfad oder die gesamte Liste für einen Fehlerbericht.",
-        "path_copy": "Kopieren", "paths_copy_all": "Alle", "copy_log": "Log-Pfad kopieren", "paths_open": "Pfade öffnen", "path_close": "Schließen",
+        "path_copy": "Kopieren", "paths_copy_all": "Alle", "copy_log": "Log-Pfad kopieren", "copy_log_short": "Log kopieren", "paths_open": "Pfade öffnen", "path_close": "Schließen",
         "copied_path": "Pfad in die Zwischenablage kopiert.", "copied_paths": "Dateipfade in die Zwischenablage kopiert.",
         "copy_failed": "Zwischenablage nicht verfügbar. Pfad mit Umschalt+Ziehen markieren und im Terminal kopieren.",
         "copy_missing": "Es wurde noch kein Log-Pfad gemeldet. F3 zeigt die verfügbaren Dateien.",
@@ -225,9 +225,10 @@ class PathsScreen(ModalScreen[None]):
                                   show_line_numbers=False, soft_wrap=True, id="selected-path")
             yield Static("" if self.paths else self.words["paths_empty"], id="copy-status", markup=False)
             with Horizontal(id="paths-buttons"):
-                yield Button(self.words["path_copy"], id="copy-path", disabled=not self.paths, variant="primary")
-                yield Button(self.words["paths_copy_all"], id="copy-paths", disabled=not self.paths)
-                yield Button(self.words["path_close"], id="paths-close")
+                yield Button(self.words["path_copy"], id="copy-path", disabled=not self.paths, compact=True, classes="path-utility")
+                yield Button(self.words["paths_copy_all"], id="copy-paths", disabled=not self.paths, compact=True, classes="path-utility")
+                yield Static("", id="paths-space")
+                yield Button(self.words["path_close"], id="paths-close", compact=True, classes="path-utility")
 
     def on_mount(self):
         choices = self.query_one("#path-choices", OptionList)
@@ -688,8 +689,11 @@ class SetupApp(App[int]):
     Collapsible > Contents { padding: 0 1; }
     #details-log { height: 10; min-height: 4; background: #0b111b; border: round #203e52; }
     #path-list { height: auto; color: #a8bfce; }
-    #file-buttons { height: auto; }
-    #file-buttons Button { width: 1fr; min-width: 0; padding: 0 1; margin-left: 0; }
+    #file-buttons { height: 1; }
+    .path-utility { width: auto; min-width: 0; height: 1; min-height: 1; max-height: 1; padding: 0 1; margin: 0; border: none; background: transparent; color: #8ea9bc; text-style: none; }
+    .path-utility:hover { color: #dbe7f3; background: #19394b; border: none; }
+    .path-utility:focus { color: #dbe7f3; text-style: underline; border: none; }
+    .path-utility:disabled { text-style: dim; }
     #small { height: auto; color: #dbb67d; margin-bottom: 1; }
     .muted { color: #8ea9bc; height: auto; }
     Footer { background: #101e2e; color: #a5bdce; }
@@ -730,8 +734,8 @@ class SetupApp(App[int]):
     #path-choices { height: 1fr; min-height: 2; border: none; }
     #selected-path { height: 3; min-height: 3; padding: 0; border: solid #315a72; }
     #copy-status { height: auto; max-height: 4; color: #dbb67d; }
-    #paths-buttons { height: 3; }
-    #paths-buttons Button { width: 1fr; min-width: 0; height: 3; min-height: 3; max-height: 3; padding: 0 1; margin-left: 0; }
+    #paths-buttons { height: 1; }
+    #paths-space { width: 1fr; height: 1; }
     PathsScreen.short #paths-help { display: none; }
     PathsScreen.short #copy-status { max-height: 3; }
     """
@@ -798,8 +802,8 @@ class SetupApp(App[int]):
             with Collapsible(title=self.words["files"], collapsed=True, id="files"):
                 yield Static(self.words["empty_files"], id="path-list", markup=False)
                 with Horizontal(id="file-buttons"):
-                    yield Button(self.words["copy_log"], id="copy-log")
-                    yield Button(self.words["paths_open"], id="show-paths")
+                    yield Button(self.words["copy_log_short"], id="copy-log", compact=True, classes="path-utility", tooltip=self.words["copy_log"] + " (F4)")
+                    yield Button(self.words["paths_open"], id="show-paths", compact=True, classes="path-utility", tooltip=self.words["files"] + " (F3)")
             with Collapsible(title=self.words["details"], collapsed=True, id="details"):
                 yield RichLog(id="details-log", max_lines=MAX_DETAILS, wrap=True, markup=False, highlight=False)
         yield Footer()
