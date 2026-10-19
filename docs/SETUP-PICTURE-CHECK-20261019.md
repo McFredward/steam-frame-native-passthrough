@@ -11,8 +11,9 @@ short terminals, the explanation scrolls inside the popup while all three
 answer buttons stay within its bounds. Resizing does not dismiss or change the
 question.
 
-- **Yes** permits the successful operation to finish and release its recovery
-  checkpoints.
+- **Yes** accepts the working installation. Final checkpoint cleanup follows;
+  an error during that cleanup or a success message must never start Undo,
+  change installed files, or restart either runtime.
 - **No** performs another bounded, read-only startup/health observation. Even a
   passing software result does not override the user's visible failure. The
   next menu offers **Retry verification**, **Restore previous setup**, and
@@ -50,3 +51,22 @@ Three causal controls must fail that same actual-file fixture: removing the
 fresh read-only recheck, omitting original-image confirmation, and treating No
 as cancellation. These are software and UI-path checks; they do not establish a
 visible headset result or exercise a live device restart.
+
+## Post-acceptance failure boundary (0.2.3)
+
+The former workflow kept final checkpoint cleanup and success messages inside
+the same exception handler as installation/startup. Consequently, a cleanup
+exception or even a UI reporting exception after Yes could invoke automatic
+recovery of an already accepted installation. A real Textual-to-Workflow
+regression fixture reproduces this in both languages; the earlier checks only
+covered rejection/cancellation and successful finalization.
+
+After acceptance, finalization has its own failure boundary. It can report
+retained records and their paths but cannot reenter installation or recovery.
+Its explicit Retry repeats only idempotent receipt cleanup; a reply lost after
+cleanup completed is reconciled as already finished. Missing receipts grant no
+installation, startup or restoration authority. Corrupt or replaced receipts
+remain errors. Exit retains the accepted installation and available records.
+Success-message failures after completed cleanup likewise cannot change the
+accepted runtime. Errors before acceptance, explicit Undo and immediate
+Ctrl+C cancellation keep their existing contracts.
