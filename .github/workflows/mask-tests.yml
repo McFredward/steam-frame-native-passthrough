@@ -4,6 +4,7 @@ on:
     branches: [dev]
     paths-ignore:
       - '**/*.md'
+      - 'VERSION'
       - 'get.ps1'
       - 'get.sh'
       - 'get-preview.*'
@@ -53,6 +54,7 @@ on:
   pull_request:
     paths-ignore:
       - '**/*.md'
+      - 'VERSION'
       - 'get.ps1'
       - 'get.sh'
       - 'get-preview.*'
