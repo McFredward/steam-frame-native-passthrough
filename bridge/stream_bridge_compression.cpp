@@ -8,7 +8,10 @@
 // Its default compressor uses a bounded 16-KiB stack table, no heap state.
 #define LZ4LIB_VISIBILITY static
 #define LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION 1
-#if defined(__GNUC__)
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#elif defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma GCC visibility push(hidden)
@@ -17,7 +20,9 @@
 #pragma warning(disable:4505)
 #endif
 #include "../third_party/lz4/lz4.c"
-#if defined(__GNUC__)
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
 #pragma GCC visibility pop
 #pragma GCC diagnostic pop
 #elif defined(_MSC_VER)

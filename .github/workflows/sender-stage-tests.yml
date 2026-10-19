@@ -16,13 +16,19 @@ on:
       - 'cmake/StreamBridge.cmake'
       - '.github/workflows/sender-stage-tests.yml'
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Rerun only the affected platform
+        type: choice
+        options: [all, windows, linux]
+        default: all
 permissions:
   contents: read
 jobs:
   stage-pipeline:
     strategy:
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.platform == 'windows' && '["windows-2025"]' || github.event_name == 'workflow_dispatch' && inputs.platform == 'linux' && '["ubuntu-24.04"]' || '["ubuntu-24.04","windows-2025"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 4
     steps:
