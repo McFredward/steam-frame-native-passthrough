@@ -66,6 +66,8 @@ struct Fake{
     nd::DecodeProvider* inspectDuringQbuf=nullptr;nd::SnapshotStats duringCounts{};bool duringGap=false;
     bool requireCaptureSink=false;unsigned sinkCalls=0;nd::CaptureObservation lastSink{};
     nd::DecodeProvider* revokeDuringQbuf=nullptr;
+    nd::DecodeProvider* streamOffDuringQbuf=nullptr;
+    nd::DecodeProvider* streamOffDuringCaptureDequeue=nullptr;
 } fake;
 bool copy(void* output,std::uintptr_t source,std::size_t n,void*) noexcept{
     ++fake.reads;errno=EDOM;
@@ -89,7 +91,9 @@ int originalIoctl(int fd,unsigned long request,...){
             auto& b=*static_cast<v4l2_buffer*>(p);
             if(fake.zeroCopyDuringQbuf&&b.index<fake.memory.size())fake.memory[b.index].fill(0xee);
             if(fake.revokeDuringQbuf)fake.revokeDuringQbuf->stop();
+            if(fake.streamOffDuringQbuf){auto* provider=fake.streamOffDuringQbuf;fake.streamOffDuringQbuf=nullptr;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;provider->invokeIoctl(base+0x312e8,fd,VIDIOC_STREAMOFF,&type);}
         }
+        if(request==VIDIOC_DQBUF&&static_cast<v4l2_buffer*>(p)->type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE&&fake.streamOffDuringCaptureDequeue){auto* provider=fake.streamOffDuringCaptureDequeue;fake.streamOffDuringCaptureDequeue=nullptr;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;provider->invokeIoctl(0x100000+0x312e8,fd,VIDIOC_STREAMOFF,&type);}
     }
     if(request==VIDIOC_QBUF&&static_cast<v4l2_buffer*>(p)->type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE&&fake.requireCaptureSink)
         check(fake.sinkCalls&&fake.lastSink.kind==nd::CaptureKind::Requeue,"synchronous registered sink invalidates capture before original QBUF even on failure");
@@ -226,6 +230,52 @@ void unsafeShapes(){
     check(!nd::preparePinnedProcess(calls()),"actual host executable cannot impersonate pinned vrlink");
     const auto entries=nd::preparedEntries();check(!entries.ioctl&&!entries.mmap&&!entries.close&&!entries.munmap,"unprepared runtime exposes no hook entries");
 }
+void configureCapture(nd::DecodeProvider& p,unsigned count=2){
+    auto f=format();f.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    check(p.invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&f)==0,"restart capture format initially configured");
+    v4l2_requestbuffers r{};r.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;r.memory=V4L2_MEMORY_DMABUF;r.count=count;
+    check(p.invokeIoctl(base+0x324a8,23,VIDIOC_REQBUFS,&r)==0,"restart capture physical allocation initially configured");
+    for(unsigned n=0;n<count;++n){Buffer b(n);b.b.type=r.type;b.b.memory=r.memory;check(p.invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b)==0,"restart capture slot initially queried");}
+}
+void captureQueue(nd::DecodeProvider& p,unsigned index){
+    Buffer b(index);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;b.plane.m.fd=73+static_cast<int>(index);b.b.timestamp.tv_sec=0x4321;
+    check(p.invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==0,"retained capture slot fresh QBUF original succeeds");
+}
+void captureDequeue(nd::DecodeProvider& p,unsigned index){
+    Buffer b(index);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;b.b.timestamp.tv_sec=0x4321;fake.dequeue=index;
+    check(p.invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0,"retained capture slot native DQ original succeeds");
+}
+nd::CaptureObservation decodedEvent(nd::DecodeProvider& p){nd::CaptureObservation result{};bool found=false;while(p.pollCapture(result))if(result.kind==nd::CaptureKind::Decoded){found=true;break;}check(found,"fresh successful capture has exact decoded lease event");return result;}
+void streamRestart(){
+    for(bool failedStop:{false,true}){
+        auto p=provider();setup(*p,2);map(*p,0);map(*p,1);configureCapture(*p);
+        fake.memory[0].fill(0x42);queue(*p,0);const auto before=poll(*p,0x42);dequeue(*p,0);
+        captureQueue(*p,0);captureDequeue(*p,0);const auto old=decodedEvent(*p);check(p->captureLeaseCurrentOnWorker(old),"pre-reset capture lease is genuinely current");
+        captureQueue(*p,1);queue(*p,1);nd::CaptureObservation event{};while(p->pollCapture(event)){}
+        const auto reads=fake.dataReads,callsBefore=fake.ioctlCalls,maps=fake.mapCalls;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        fake.result=failedStop?-1:0;fake.error=failedStop?EBUSY:EOVERFLOW;errno=EALREADY;
+        check(p->invokeIoctl(base+0x312e8,23,VIDIOC_STREAMOFF,&type)==fake.result&&fake.ioctlCalls==callsBefore+1&&fake.receivedErrno==EALREADY&&errno==fake.error,"successful or failed STREAMOFF preserves exact original count/result/errno");
+        check(!p->captureLeaseCurrentOnWorker(old),"attempted stream reset revokes every old capture before native reuse");
+        check(p->pollCapture(event)&&event.kind==nd::CaptureKind::SourceReset&&event.sourcePoolGeneration==before.poolGeneration&&event.resetReason==nd::ResetReason::OutputStreamOff,"logical OUTPUT retirement identifies old pool and bounded concrete reset cause");
+        noObservation(*p,"STREAMOFF discards all old queued snapshot evidence");
+        fake.result=0;fake.error=EOVERFLOW;captureDequeue(*p,1);
+        check(!p->pollCapture(event),"late pre-reset CAPTURE DQ cannot become a new-source picture");
+        fake.result=-1;fake.error=EIO;check(p->invokeIoctl(base+0x31368,23,VIDIOC_STREAMON,&type)==-1&&errno==EIO,"failed native STREAMON preserves error and grants no new capture authority");
+        check(!p->captureLeaseCurrentOnWorker(old)&&!p->pollCapture(event),"STREAMON attempt never restores retired leases or fabricates decoded content");
+        fake.result=0;fake.error=EOVERFLOW;check(p->invokeIoctl(base+0x31368,23,VIDIOC_STREAMON,&type)==0,"native normal reset restarts original OUTPUT queue without allocation calls");
+        fake.memory[0].fill(0x53);queue(*p,0);const auto after=poll(*p,0x53);
+        check(after.poolGeneration>before.poolGeneration&&fake.dataReads==reads+1&&fake.mapCalls==maps,"STREAMOFF/ON reuses original queried MMAP storage under a strictly newer source lifetime");
+        captureQueue(*p,0);captureDequeue(*p,0);const auto fresh=decodedEvent(*p);
+        check(fresh.sourcePoolGeneration==after.poolGeneration&&fresh.capturePoolGeneration>old.capturePoolGeneration&&fresh.contentGeneration>old.contentGeneration&&p->captureLeaseCurrentOnWorker(fresh)&&!p->captureLeaseCurrentOnWorker(old),"retained physical capture storage needs a fresh successful queue cycle and cannot revive old content");
+        for(unsigned n=0;n<32;++n){dequeue(*p,0);fake.memory[0].fill(0x64);queue(*p,0);check(poll(*p,0x64).poolGeneration==after.poolGeneration,"steady post-reset inputs stay in same fresh physical pool admission");}
+        check(std::strcmp(nd::resetReasonName(nd::ResetReason::OutputStreamOff),"output-stream-off")==0&&std::strcmp(nd::resetReasonName(static_cast<nd::ResetReason>(255)),"unknown")==0,"reset reasons are bounded scalar diagnostics with explicit unknown value");
+    }
+    {auto p=provider();setup(*p,2);map(*p,0);map(*p,1);fake.memory[0].fill(0x42);fake.streamOffDuringQbuf=p.get();Buffer b(0);const auto callsBefore=fake.ioctlCalls;
+     check(p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&b.b)==0&&fake.ioctlCalls==callsBefore+2,"in-flight original QBUF can overlap real logical STREAMOFF");noObservation(*p,"old reserved snapshot cannot publish after concurrent stream retirement");
+     fake.memory[1].fill(0x53);queue(*p,1);poll(*p,0x53);}
+    {auto p=provider();setup(*p);map(*p,0);configureCapture(*p);captureQueue(*p,0);fake.streamOffDuringCaptureDequeue=p.get();captureDequeue(*p,0);nd::CaptureObservation event{};bool decoded=false;while(p->pollCapture(event))decoded|=event.kind==nd::CaptureKind::Decoded;check(!decoded,"DQ begun before STREAMOFF cannot publish under a post-reset capture generation");captureQueue(*p,0);captureDequeue(*p,0);check(p->captureLeaseCurrentOnWorker(decodedEvent(*p)),"fresh CAPTURE queue after concurrent reset establishes new current ownership");}
+    {auto p=provider();setup(*p);map(*p,0);configureCapture(*p);captureQueue(*p,0);captureDequeue(*p,0);const auto old=decodedEvent(*p);int type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;p->invokeIoctl(base+0x312e8,23,VIDIOC_STREAMOFF,&type);check(!p->captureLeaseCurrentOnWorker(old),"CAPTURE-only STREAMOFF also revokes exact decoded leases");captureQueue(*p,0);captureDequeue(*p,0);const auto fresh=decodedEvent(*p);check(fresh.sourcePoolGeneration==old.sourcePoolGeneration&&fresh.capturePoolGeneration>old.capturePoolGeneration&&fresh.contentGeneration>old.contentGeneration,"capture restart preserves OUTPUT allocation/source but requires new capture cycle");}
+}
 void captureOwnership(){
     auto p=provider();check(p->setCaptureSink([](const nd::CaptureObservation& fact,void*) noexcept{++fake.sinkCalls;fake.lastSink=fact;},nullptr),"source sink registers before actual native pool");
     setup(*p);check(!p->setCaptureSink(nullptr,nullptr),"late sink registration refused after lifecycle already began");
@@ -314,5 +364,5 @@ void captureHandoff(){
     }
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--handoff")==0){captureHandoff();std::printf("%u exact native handoff checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();captureHandoff();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--restart")==0){streamRestart();std::printf("%u exact native stream restart checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--handoff")==0){captureHandoff();std::printf("%u exact native handoff checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();captureHandoff();streamRestart();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
 #endif

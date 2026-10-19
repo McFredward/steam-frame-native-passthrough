@@ -56,14 +56,22 @@ struct DecodeProvider::Impl{
         if(captureSize==captureEvents.size()){increment(counts.captureDropped);return;}
         captureEvents[(captureHead+captureSize)%captureEvents.size()]=event;++captureSize;
     }
-    void revokeCapture(Device& d,bool source=false){
-        d.capture={};d.captureCount=0;d.captureConfigured=false;
+    void revokeCapture(Device& d,bool source=false,ResetReason why=ResetReason::None,bool retainAllocation=false){
+        if(retainAllocation){
+            // STREAMOFF retires queue/content ownership, not REQBUFS storage.
+            // A late old DQ cannot authorize a new source: every retained slot
+            // needs a successful fresh QBUF under this new capture generation.
+            for(auto& b:d.capture){b.queued=b.decoded=false;b.dmabuf=-1;b.token=0;}
+        }else {d.capture={};d.captureCount=0;d.captureConfigured=false;}
         if(generation==~std::uint64_t(0)){d.captureGeneration=0;active=false;}else d.captureGeneration=++generation;
-        captureEvent({source?CaptureKind::SourceReset:CaptureKind::Reset,d.fd,-1,0,0,d.generation,d.captureGeneration,0});
+        CaptureObservation event{source?CaptureKind::SourceReset:CaptureKind::Reset,d.fd,-1,0,0,d.generation,d.captureGeneration,0};event.resetReason=why;captureEvent(event);
     }
-    void revoke(Device& d){
+    void revoke(Device& d,ResetReason why=ResetReason::None,bool retainAllocation=false){
         for(auto& s:slots)if(s.state!=Slot::Free&&s.fact.fd==d.fd)s.state=Slot::Free;
-        revokeCapture(d,true);d.buffers={};d.count=0;d.content=0;
+        revokeCapture(d,true,why,retainAllocation);
+        if(retainAllocation)for(auto& b:d.buffers)b.queued=b.pending=false;
+        else {d.buffers={};d.count=0;}
+        d.content=0;
         if(generation==~std::uint64_t(0)){d.generation=0;active=false;}else d.generation=++generation;
     }
     bool captureCurrent(const CaptureObservation& fact){
@@ -77,6 +85,12 @@ struct DecodeProvider::Impl{
     bool read(void* out,const void* source,std::size_t n){return reader.copy&&source&&reader.copy(out,reinterpret_cast<std::uintptr_t>(source),n,reader.context);}
     bool shape(void* source,v4l2_buffer& b,v4l2_plane& plane){return read(&b,source,sizeof b)&&ordinaryBuffer(b)&&read(&plane,b.m.planes,sizeof plane);}
 };
+const char* resetReasonName(ResetReason reason) noexcept{
+    constexpr const char* names[]{"none","output-format","output-buffer-allocation","output-stream-off",
+        "capture-format","capture-buffer-allocation","capture-stream-off","unsupported-output-queue",
+        "unsupported-capture-queue","output-unmap","decoder-close","capture-close","provider-stop"};
+    const auto index=static_cast<std::size_t>(reason);return index<sizeof(names)/sizeof(*names)?names[index]:"unknown";
+}
 DecodeProvider::DecodeProvider():impl_(new Impl){}
 DecodeProvider::~DecodeProvider()=default;
 bool DecodeProvider::prepare(const ImageIdentity& image,const Originals& originals,Reader reader) noexcept{
@@ -89,7 +103,7 @@ bool DecodeProvider::prepare(const ImageIdentity& image,const Originals& origina
 }
 void DecodeProvider::stop() noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);impl_->active=false;
-    for(auto& device:impl_->devices)if(device.fd>=0)impl_->revokeCapture(device,true);
+    for(auto& device:impl_->devices)if(device.fd>=0)impl_->revokeCapture(device,true,ResetReason::ProviderStop);
     impl_->devices={};
     for(auto& s:impl_->slots){s.state=Impl::Slot::Free;}
     impl_->captureEvents={};impl_->captureHead=impl_->captureSize=0;
@@ -117,14 +131,17 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
         std::lock_guard<std::mutex> lock(impl_->mutex);
         auto* d=impl_->find(fd);
         if(request==VIDIOC_S_FMT){shape=impl_->read(&format,argument,sizeof format);
-            if(d&&shape&&format.type==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE){impl_->revoke(*d);d->hevc=false;} // revoke before any codec change
+            if(d&&shape&&format.type==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE){impl_->revoke(*d,ResetReason::OutputFormat);d->hevc=false;} // revoke before any codec change
         }else if(request==VIDIOC_REQBUFS){shape=impl_->read(&requested,argument,sizeof requested);
-            if(d&&shape&&requested.type==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)impl_->revoke(*d);
+            if(d&&shape&&requested.type==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)impl_->revoke(*d,ResetReason::OutputBuffers);
         }else if(request==VIDIOC_STREAMOFF||request==VIDIOC_STREAMON){shape=impl_->read(&streamType,argument,sizeof streamType);
-            if(d&&shape&&request==VIDIOC_STREAMOFF&&streamType==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)impl_->revoke(*d);
+            if(d&&shape&&request==VIDIOC_STREAMOFF){
+                if(streamType==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE){impl_->revoke(*d,ResetReason::OutputStreamOff,true);work=true;}
+                else if(streamType==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE){impl_->revokeCapture(*d,false,ResetReason::CaptureStreamOff,true);work=true;}
+            }
         }else shape=impl_->shape(argument,buffer,plane);
         if(d&&d->hevc){
-            if(captureSite&&(request==VIDIOC_S_FMT||request==VIDIOC_REQBUFS))impl_->revokeCapture(*d);
+            if(captureSite&&(request==VIDIOC_S_FMT||request==VIDIOC_REQBUFS))impl_->revokeCapture(*d,false,request==VIDIOC_S_FMT?ResetReason::CaptureFormat:ResetReason::CaptureBuffers);
             captureGeneration=d->captureGeneration;
             if(captureSite&&request!=VIDIOC_S_FMT&&request!=VIDIOC_REQBUFS){
                 captureShape=impl_->read(&captureBuffer,argument,sizeof captureBuffer)&&captureBuffer.type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
@@ -139,7 +156,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                         work=true;
                     }else captureShape=false;
                 }
-                if(request==VIDIOC_QBUF&&!captureShape)impl_->revokeCapture(*d);
+                if(request==VIDIOC_QBUF&&!captureShape)impl_->revokeCapture(*d,false,ResetReason::UnsupportedCaptureQueue);
             }
         }
         if(d)expectedGeneration=d->generation;
@@ -207,7 +224,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                 v4l2_format actual{};
                 if(impl_->read(&actual,argument,sizeof actual)&&actual.type==format.type
                     &&actual.fmt.pix_mp.pixelformat==V4L2_PIX_FMT_HEVC&&actual.fmt.pix_mp.num_planes==1){
-                    d=impl_->allocate(fd);if(d){impl_->revoke(*d);d->hevc=d->generation!=0;}
+                    d=impl_->allocate(fd);if(d){impl_->revoke(*d,ResetReason::OutputFormat);d->hevc=d->generation!=0;}
                 }
             }else if(d&&d->hevc&&d->generation==expectedGeneration&&request==VIDIOC_REQBUFS&&shape
                 &&requested.type==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE&&requested.memory==V4L2_MEMORY_MMAP){
@@ -234,7 +251,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                         static_cast<std::uint32_t>(buffer.timestamp.tv_sec),d->generation,0,0,inputLoss,sequence});
                     work=true;
                 }
-            }else impl_->revoke(*d); // Successful unsupported shape loses ownership evidence.
+            }else impl_->revoke(*d,ResetReason::UnsupportedOutputQueue); // Successful unsupported shape loses ownership evidence.
         }
         if(slotIndex<SnapshotCapacity){auto& slot=impl_->slots[slotIndex];
             if(slot.state==Impl::Slot::Reserved&&slot.ticket==reservation){
@@ -278,13 +295,13 @@ int DecodeProvider::invokeMunmap(std::uintptr_t,void* address,std::size_t size) 
     OriginalMunmap original;const int incoming=errno;
     {std::lock_guard<std::mutex> lock(impl_->mutex);original=impl_->calls.munmap;
         // Any unmap caller can invalidate our mapping; revoke BEFORE forwarding.
-        for(auto& d:impl_->devices)for(auto& b:d.buffers)if(b.mapped&&overlap(b.address,b.length,reinterpret_cast<std::uintptr_t>(address),size))impl_->revoke(d);}
+        for(auto& d:impl_->devices)for(auto& b:d.buffers)if(b.mapped&&overlap(b.address,b.length,reinterpret_cast<std::uintptr_t>(address),size))impl_->revoke(d,ResetReason::OutputUnmap);}
     if(!original){errno=ENOSYS;return -1;}errno=incoming;return original(address,size);
 }
 int DecodeProvider::invokeClose(std::uintptr_t,int fd) noexcept{
     OriginalClose original;const int incoming=errno;
-    {std::lock_guard<std::mutex> lock(impl_->mutex);original=impl_->calls.close;if(auto* d=impl_->find(fd)){impl_->revoke(*d);*d=Impl::Device{};}
-        for(auto& d:impl_->devices)if(d.fd>=0)for(const auto& b:d.capture)if(b.dmabuf==fd){impl_->revokeCapture(d);break;}}
+    {std::lock_guard<std::mutex> lock(impl_->mutex);original=impl_->calls.close;if(auto* d=impl_->find(fd)){impl_->revoke(*d,ResetReason::DecoderClose);*d=Impl::Device{};}
+        for(auto& d:impl_->devices)if(d.fd>=0)for(const auto& b:d.capture)if(b.dmabuf==fd){impl_->revokeCapture(d,false,ResetReason::CaptureClose);break;}}
     if(!original){errno=ENOSYS;return -1;}errno=incoming;return original(fd);
 }
 bool DecodeProvider::poll(Observation& observation,std::uint8_t* output,std::size_t capacity) noexcept{
