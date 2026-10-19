@@ -39,6 +39,13 @@ both decoder publication and actual masked rendering. None coverage, source
 loss and disconnect withdraw permission. An actual suspend offset forces an
 acknowledged restore/enable sequence; a scheduling stall does not.
 
+A final stereo review found an additional activation edge: a boolean readiness
+change between the two eye draws could admit only the second eye. A unique grant
+captured at command begin now binds both draws and submission. A later grant,
+even after a successful disable/enable, cannot revive the old recording. This
+is a bounded follow-up to the already passing camera and installer checks;
+its focused stereo and acknowledgment controls do not rerun unrelated suites.
+
 The original preference is journaled before mutation. Startup recovery is
 offline and fail-open so a missing or damaged optional helper cannot block the
 Frame interface. Update/removal use the live API before deleting the helper,

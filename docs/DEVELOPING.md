@@ -99,6 +99,11 @@ OpenVR inside Valve's Steam or compositor process. The renderer and decoder
 handoff require the helper's current enable acknowledgment, independently of
 the exact image/mask proof.
 
+Each native command recording freezes one nonzero camera grant. Both eye draws
+and submission require that exact grant; readiness becoming true halfway through
+a recording must not activate only one eye. A revoke followed by a fresh enable
+gets a different grant, so an old recording cannot regain permission by ABA.
+
 None coverage, source-epoch loss, disconnect and teardown revoke readiness and
 restore the original preference. A real Linux suspend is detected by the
 `CLOCK_BOOTTIME − CLOCK_MONOTONIC` offset, not by a long frame or an expiry timer.
