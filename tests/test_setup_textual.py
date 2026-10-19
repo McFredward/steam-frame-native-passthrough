@@ -42,6 +42,32 @@ async def until(pilot, predicate):
     raise AssertionError("the expected UI/worker state was not reached")
 
 
+class PicturePorts:
+    """No device I/O: a real workflow with observable transaction boundaries."""
+    error = ValueError
+
+    def __init__(self, *, finish_error=None):
+        self.events = []
+        self.finish_error = finish_error
+        self.stale_health = False
+
+    def begin(self): self.events.append("begin")
+    def stop_pc(self): self.events.append("stop_pc")
+    def prepare(self, action): self.events.append("prepare")
+    def restart_prepared(self): self.events.append("restart_prepared")
+    def prepared_health(self):
+        self.events.append("prepared_health")
+        return {"software_ready": not self.stale_health}
+    def restore_files(self): self.events.append("restore_files")
+    def restart_original(self): self.events.append("restart_original")
+    def original_health(self): self.events.append("original_health"); return {"software_ready": True}
+    def finish(self, *, restored):
+        self.events.append("finish_original" if restored else "finish_prepared")
+        if self.finish_error is not None:
+            raise self.finish_error
+    def failure(self, error, *, recovery): self.events.append("failure")
+
+
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
     async def test_detected_runtime_versions_and_patch_actions_remain_visible_at_80x24(self):
         for lang in ('en','de'):
@@ -212,6 +238,138 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                         await until(pilot, lambda: app.backend_finished)
                         self.assertEqual(observed, [None])
                     app.backend.join()
+
+    async def test_picture_yes_does_not_restore_when_final_checkpoint_cleanup_fails(self):
+        for lang in ("en", "de"):
+            ports = PicturePorts(finish_error=OSError("owned final checkpoint unavailable"))
+            app = UI.SetupApp(lambda: FLOW.Workflow(ports, UI.active_presenter()).run("update"), lang)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+                await pilot.pause()
+                # Exercise the actual Yes button, not a canned bool presenter.
+                await pilot.click("#picture-yes")
+                await until(pilot, lambda: "restore_files" in ports.events or
+                            (app.prompt is not None and not isinstance(app.screen, UI.PictureScreen)))
+                restored = "restore_files" in ports.events
+                if restored:
+                    await pilot.press("ctrl+c")
+                else:
+                    self.assertEqual(app.action_names, ["retry", "exit"])
+                    await pilot.press("down", "enter")
+                await until(pilot, lambda: app.backend_finished)
+                self.assertFalse(restored, "A confirmed usable picture must never authorize automatic Undo")
+                self.assertEqual(app.backend_result, 2)
+                self.assertEqual(ports.events.count("finish_prepared"), 1)
+                self.assertEqual(ports.events.count("prepared_health"), 1)
+                self.assertNotIn("restart_original", ports.events)
+                self.assertIn(app.texts["bridge_finalize_incomplete"], app.detail_history)
+            app.backend.join()
+
+    async def test_yes_finalize_retry_only_reconciles_records_without_health_or_restart(self):
+        ports = PicturePorts()
+        original_finish = ports.finish
+        def finish(*, restored):
+            original_finish(restored=restored)
+            if ports.events.count("finish_prepared") == 1:
+                raise OSError("owned lost finalization reply")
+        ports.finish = finish
+        app = UI.SetupApp(lambda: FLOW.Workflow(ports, UI.active_presenter()).run("update"), "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+            await pilot.pause()
+            await pilot.press("right", "enter")
+            await until(pilot, lambda: app.prompt is not None and not isinstance(app.screen, UI.PictureScreen))
+            self.assertEqual(app.action_names, ["retry", "exit"])
+            self.assertEqual(app.query_one(OptionList).highlighted, 0)
+            await pilot.press("enter")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(app.backend_result, 0)
+            self.assertEqual(ports.events.count("finish_prepared"), 2)
+            self.assertEqual(ports.events.count("prepared_health"), 1)
+            self.assertEqual(ports.events.count("restart_prepared"), 1)
+            self.assertEqual(ports.events.count("prepare"), 1)
+            self.assertNotIn("restore_files", ports.events)
+            self.assertNotIn("restart_original", ports.events)
+        app.backend.join()
+
+    async def test_ctrl_c_during_yes_finalization_retry_keeps_current_picture_and_records(self):
+        ports = PicturePorts(finish_error=OSError("owned unfinished cleanup"))
+        app = UI.SetupApp(lambda: FLOW.Workflow(ports, UI.active_presenter()).run("update"), "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+            await pilot.pause()
+            await pilot.press("right", "enter")
+            await until(pilot, lambda: app.prompt is not None and not isinstance(app.screen, UI.PictureScreen))
+            await pilot.press("ctrl+c")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertTrue(app.stop_requested)
+            self.assertEqual(app.backend_result, 130)
+            self.assertEqual(ports.events.count("finish_prepared"), 1)
+            self.assertNotIn("restore_files", ports.events)
+            self.assertNotIn("restart_original", ports.events)
+        app.backend.join()
+
+    async def test_picture_yes_commits_once_and_ignores_stale_no_and_health_state(self):
+        for lang in ("en", "de"):
+            ports = PicturePorts()
+            app = UI.SetupApp(lambda: FLOW.Workflow(ports, UI.active_presenter()).run("install"), lang)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+                await pilot.pause()
+                prompt = app.prompt
+                # Health becomes stale while the user looks into the headset.
+                # The positive picture verdict must not launch another check.
+                ports.stale_health = True
+                await pilot.press("right", "enter")
+                await until(pilot, lambda: app.backend_finished)
+                app.resolve_prompt(False, expected=prompt)
+                self.assertEqual(app.backend_result, 0)
+                self.assertEqual(ports.events.count("finish_prepared"), 1)
+                self.assertEqual(ports.events.count("prepared_health"), 1)
+                self.assertNotIn("restore_files", ports.events)
+                self.assertEqual(app.outcome, "bridge_installed")
+            app.backend.join()
+
+    async def test_notice_failure_after_yes_commit_cannot_restore_or_repeat_finish(self):
+        ports = PicturePorts()
+        def backend():
+            presenter = UI.active_presenter()
+            real_say = presenter.say
+            def say(key):
+                if key == "bridge_pc_stopped":
+                    raise RuntimeError("owned UI notification fixture")
+                real_say(key)
+            presenter.say = say
+            return FLOW.Workflow(ports, presenter).run("update")
+        app = UI.SetupApp(backend, "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+            await pilot.pause()
+            await pilot.press("right", "enter")
+            await until(pilot, lambda: app.backend_finished or "restore_files" in ports.events)
+            restored = "restore_files" in ports.events
+            if not app.backend_finished:
+                await pilot.press("ctrl+c")
+                await until(pilot, lambda: app.backend_finished)
+            self.assertFalse(restored)
+            self.assertEqual(app.backend_result, 0)
+            self.assertEqual(ports.events.count("finish_prepared"), 1)
+            self.assertEqual(app.outcome, "bridge_installed")
+        app.backend.join()
+
+    async def test_ctrl_c_at_real_workflow_picture_neither_finalizes_nor_restores(self):
+        ports = PicturePorts()
+        app = UI.SetupApp(lambda: FLOW.Workflow(ports, UI.active_presenter()).run("update"), "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+            await pilot.press("ctrl+c")
+            await until(pilot, lambda: app.backend_finished)
+            self.assertTrue(app.stop_requested)
+            self.assertEqual(app.backend_result, 130)
+            self.assertNotIn("finish_prepared", ports.events)
+            self.assertNotIn("restore_files", ports.events)
+            self.assertNotIn("restart_original", ports.events)
+        app.backend.join()
 
     async def test_picture_no_rechecks_actual_workflow_and_explicit_undo_requires_original_picture(self):
         class Ports:

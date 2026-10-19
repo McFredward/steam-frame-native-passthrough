@@ -1229,6 +1229,10 @@ class Automation:
 
     def original_health(self):
         self.phase('startup_health');result=self.call('bridge-health',baseline=self.restore_baseline)
+        # A usable Frame does not complete a failed PC restoration. Resolve
+        # that operation before asking for Yes, not during record cleanup.
+        self.e.require(self.pc_recovery_error is None,
+                       'The original Frame interface is running, but PC recovery is incomplete. Retry can continue recovery.')
         return result
 
     def finish(self,*,restored):

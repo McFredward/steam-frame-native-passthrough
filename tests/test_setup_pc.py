@@ -129,6 +129,22 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.life.snapshot(),original)
         self.life.finish();self.assertFalse(self.life.path.exists())
 
+    def test_finish_reconciles_already_removed_receipt_without_process_actions(self):
+        self.life.snapshot();self.life.finish()
+        self.assertFalse(self.life.path.exists())
+        self.life.finish()
+        self.assertEqual(self.adapter.launches,0)
+        self.assertEqual(self.adapter.graceful_calls,[])
+        self.assertEqual(self.adapter.terminate_calls,[])
+
+    def test_finish_does_not_treat_dangling_link_as_an_already_removed_receipt(self):
+        target=self.data/'missing-own-target'
+        try:self.life.path.symlink_to(target)
+        except (OSError,NotImplementedError):self.skipTest('symbolic link creation unavailable')
+        with self.assertRaises(e.SetupError):self.life.finish()
+        self.assertTrue(self.life.path.is_symlink())
+        self.assertFalse(target.exists())
+
     def test_finish_removes_only_verified_unchanged_baseline(self):
         self.life.snapshot();value=e.parse(self.life.path.read_bytes());value['running']=True
         self.life.path.write_bytes(e.encoded(value))
