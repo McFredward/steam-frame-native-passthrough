@@ -241,9 +241,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -m pip install paramiko==4.0.0 textual==8.2.8
           if ($LASTEXITCODE -ne 0) { throw 'Local test-server dependencies failed.' }
-          $signIn = Join-Path $env:RUNNER_TEMP 'sign in helper'
+          $signInRoot = Join-Path $env:RUNNER_TEMP 'sign in helper'
+          $signIn = Join-Path $signInRoot 'setup'
           New-Item -ItemType Directory -Path $signIn -Force | Out-Null
           Copy-Item -Path 'setup/*.py','setup/steam-link-askpass.sh' -Destination $signIn
+          # Match the delivered setup/ + frame/tools/ layout. The production
+          # Remote constructor reads this reviewed source before SSH sign-in.
+          $frameTools = Join-Path $signInRoot 'frame/tools'
+          New-Item -ItemType Directory -Path $frameTools -Force | Out-Null
+          Copy-Item tools/stream_bridge_camera.py -Destination $frameTools
           python -B tools/build_setup_askpass.py --compiler cl.exe --output (Join-Path $signIn 'steam-link-askpass.exe')
           if ($LASTEXITCODE -ne 0) { throw 'Windows sign-in helper build failed.' }
           $sshRoot = Join-Path $env:RUNNER_TEMP 'auth-only-client'
