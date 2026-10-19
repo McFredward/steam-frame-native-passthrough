@@ -54,8 +54,34 @@ jobs:
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\stage-pipeline.log
           exit /b %SFNP_RESULT%
+      - name: Require cross-stage reader coupling to fail the deterministic pipeline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p build/reader-coupled/pc
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('pc/stream-bridge-sender-provider-coverage-stages.h').read_text()
+          needle = '        if(!input)return {};'
+          assert source.count(needle) == 1
+          # Model the forbidden old metadata ownership: any CPU reader blocks
+          # otherwise independent source copies. Real callbacks, accepted native
+          # receipts and all fixture scheduling remain unchanged.
+          source = source.replace(needle, needle + '\n        for(const auto& slot:slots_)if((slot.word.load(std::memory_order_acquire)&PhaseMask)==static_cast<std::uint64_t>(Phase::Reading))return {};')
+          Path('build/reader-coupled/pc/stream-bridge-sender-provider-coverage-stages.h').write_text(source)
+          PY
+          c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -Ibuild/reader-coupled -I. -isystem build/nvenc-sdk tests/test_stream_bridge_sender_stage_pipeline.cpp build/stages/libsfnp_stream_sender_boundary.a build/stages/libsfnp_stream_bridge.a -pthread -o build/reader-coupled-pipeline
+          set +e
+          build/reader-coupled-pipeline >build/reader-coupled.log 2>&1
+          result=$?
+          set -e
+          cat build/reader-coupled.log
+          test "$result" -eq 1
+          grep -F 'bounded native producer has an unowned exact stage' build/reader-coupled.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-stage-pipeline-${{ runner.os }}
-          path: build/stage-pipeline.log
+          path: |
+            build/stage-pipeline.log
+            build/reader-coupled.log
