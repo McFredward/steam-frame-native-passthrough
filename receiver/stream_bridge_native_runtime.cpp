@@ -394,7 +394,13 @@ bool currentCapture(const CaptureObservation& fact,void*) noexcept{return pinned
 bool random(void* out,std::size_t n,void*) noexcept{return stream_bridge::bridgeSystemRandom(out,n);}
 void observed(void*) noexcept{wakePinnedReceiver();}
 }
-void wakePinnedReceiver() noexcept{wakeGeneration.fetch_add(1,std::memory_order_release);wake.notify_one();}
+void wakePinnedReceiver() noexcept{
+    // This mutex protects only the condition-variable check/enqueue boundary,
+    // never worker processing or provider/control state. Publishing without it
+    // can lose notify between a false predicate and entering the wait.
+    {std::lock_guard<std::mutex> lock(sleepMutex);wakeGeneration.fetch_add(1,std::memory_order_release);}
+    wake.notify_one();
+}
 bool startPinnedReceiver(const RuntimeRequest& request) noexcept{
     if(!request.explicitlyEnabled)return true;
     std::lock_guard<std::mutex> lock(lifetime);if(running.load(std::memory_order_acquire))return false;
