@@ -120,9 +120,10 @@ struct Pool::Impl {
             const auto refs=s.refs.load(std::memory_order_acquire);
             if((refs&Writer)||(refs>>16)!=l.generation||!(refs&RefMask))return false;
             // Copying means our own prior queue submit returned VK_SUCCESS.
-            // It is usable before CPU reap only on that same ordered queue,
-            // and only when a previous completed upload initialized this image.
-            const bool usable=s.state==State::Ready||(s.state==State::Copying&&s.initializedShaderReadLayout);
+            // Its transfer-to-fragment barrier also orders a first-use layout
+            // transition before later native draws on this same ordered queue.
+            // A CPU fence poll is storage-reuse proof, not sampling permission.
+            const bool usable=s.state==State::Ready||(s.state==State::Copying);
             if(!usable||s.generation!=l.generation||s.set!=l.set||
                 s.quarantine.load(std::memory_order_acquire))return false;
             mask|=1u<<l.slot;gs[l.slot]=l.generation;
@@ -137,8 +138,7 @@ struct Pool::Impl {
                 if((refs&Writer)||!(refs>>16)||(refs&RefMask)==RefMask)break;
                 if(!s.refs.compare_exchange_strong(refs,refs+1,std::memory_order_acq_rel))continue;
                 const auto state=s.state.load(std::memory_order_acquire);
-                const bool usable=state==State::Ready||(scheduled&&s.initializedShaderReadLayout.load(std::memory_order_acquire)&&
-                    (state==State::Pending||state==State::Submitting||state==State::Copying));
+                const bool usable=state==State::Ready||(scheduled&&(state==State::Pending||state==State::Submitting||state==State::Copying));
                 if(usable&&!s.quarantine.load(std::memory_order_acquire)&&same(s.frame,frame))return {index,refs>>16,s.set};
                 // This claim still owns one reference, so neither the writer
                 // bit nor its generation can change until this decrement.

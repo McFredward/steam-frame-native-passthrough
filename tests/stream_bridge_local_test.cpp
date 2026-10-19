@@ -61,6 +61,14 @@ void localFramingAndRights(){Directory dir;local::Channel source,target;const au
     check(target.receive(got)&&got.kind==local::Kind::Decoded&&got.dmabuf>=0&&got.readOnlyLeases>=0&&got.dmabuf!=image.fd,"actual SCM_RIGHTS transfers owned descriptors, not producer fd integers");
     struct stat a{},b{};check(fstat(image.fd,&a)==0&&fstat(got.dmabuf,&b)==0&&a.st_dev==b.st_dev&&a.st_ino==b.st_ino,"transferred DMA allocation preserves exact kernel identity");
     local::LeaseReader reader;check(reader.mapReadOnly(got.readOnlyLeases)&&reader.current(got.lease),"actual transferred shared lease remains tied to current source capture");
+    auto ready=got;ready.kind=local::Kind::Ready;ready.dmabuf=ready.readOnlyLeases=-1;
+    check(target.enqueue(ready),"consumer can acknowledge its exact prepared capture without transferring fds");
+    check(!source.enqueue(ready)&&!target.enqueue(c),"local message direction cannot grant opposite-role authority");
+    pump(source,target);local::Message acknowledgement;
+    check(source.receive(acknowledgement)&&acknowledgement.kind==local::Kind::Ready&&acknowledgement.binding==got.binding
+        &&acknowledgement.lease.sequence==got.lease.sequence&&acknowledgement.lease.epoch==got.lease.epoch
+        &&acknowledgement.lease.kernel==got.lease.kernel&&acknowledgement.lease.capture.contentGeneration==got.lease.capture.contentGeneration
+        &&acknowledgement.dmabuf<0&&acknowledgement.readOnlyLeases<0,"actual bidirectional channel preserves exact read-only preparation receipt");
     auto requeue=captureFact;requeue.kind=nd::CaptureKind::Requeue;writer.captureEvent(requeue);check(!reader.current(got.lease),"cross-process-design shared mapping sees immediate source invalidation without IPC receive");
     close(got.dmabuf);close(got.readOnlyLeases);source.stop();pump(source,target);check(target.state()==local::State::Lost,"actual socket EOF revokes local channel");
     target.stop();check(!std::filesystem::exists(path),"only owned unchanged socket removed on stop");
@@ -123,7 +131,7 @@ void idleProducerLiveness(){
     const int accepted=accept4(listener,nullptr,nullptr,SOCK_CLOEXEC|SOCK_NONBLOCK);check(accepted>=0,"actual fixture consumer accepted");producer.tick();
     check(producer.state()==local::State::Connected,"reverse-byte fixture reached connected state");
     check(send(accepted,"x",1,MSG_NOSIGNAL)==1,"unexpected reverse-direction byte sent");producer.tick();
-    check(producer.state()==local::State::Refused,"unidirectional bridge refuses unexpected reverse bytes instead of ignoring them");
+    check(producer.state()==local::State::Refused,"bidirectional bridge refuses malformed reverse bytes before an entire header arrives");
     producer.stop();close(accepted);close(listener);
 }
 void peerAndPathRefusals(){Directory dir;const auto path=dir.path/"receiver.sock";local::Channel server,client;const auto pin=selfPin();
@@ -136,17 +144,18 @@ void peerAndPathRefusals(){Directory dir;const auto path=dir.path/"receiver.sock
     check(!server.preparePinned(local::Endpoint::CompositorConsumer,foreign,pin)&&std::filesystem::file_size(foreign)==8,"existing unknown path never unlinked/overwritten");
     chmod(dir.path.c_str(),0755);check(!server.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"public socket directory refused");chmod(dir.path.c_str(),0700);
     check(server.preparePinned(local::Endpoint::CompositorConsumer,path,pin)&&client.preparePinned(local::Endpoint::VrlinkProducer,path,pin),"capacity endpoints");pump(client,server);auto m=certified();
-    check(client.enqueue(m)&&client.enqueue(m)&&!client.enqueue(m),"two-frame local queue bounded without eviction");
+    for(unsigned n=0;n<nd::MaxBuffers*2;++n)check(client.enqueue(m),"complete native input/decoded burst fits bounded local queue");
+    check(!client.enqueue(m),"bounded local queue refuses overflow without eviction");
     auto bad=m;bad.certifiedMetadata.resize(local::Channel::MaximumPayload+1);check(!client.enqueue(bad),"oversized local payload refused");
 }
 int rawConnect(const std::filesystem::path& path){const int fd=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);check(fd>=0,"actual malformed-input source socket");sockaddr_un address{};address.sun_family=AF_UNIX;std::strcpy(address.sun_path,path.c_str());check(connect(fd,reinterpret_cast<const sockaddr*>(&address),sizeof address)==0,"actual malformed-input source connects");return fd;}
 unsigned fdCount(){unsigned n=0;for(int fd=0;fd<512;++fd)if(fcntl(fd,F_GETFD)>=0)++n;return n;}
 void malformedAndForeignLifetime(){Directory dir;const auto path=dir.path/"receiver.sock";const auto pin=selfPin();local::Channel server;
     check(server.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"malformed-input listener");int fd=rawConnect(path);server.tick();
-    std::array<std::uint8_t,192> bad{};std::memcpy(bad.data(),"SFL1",4);bad[4]=2;
-    check(send(fd,bad.data(),bad.size()-1,MSG_NOSIGNAL)==static_cast<ssize_t>(bad.size()-1),"partial untrusted header source");server.tick();
+    std::array<std::uint8_t,192> bad{};std::memcpy(bad.data(),"SFL2",4);bad[4]=3;
+    check(send(fd,bad.data(),3,MSG_NOSIGNAL)==3,"partial untrusted header source");server.tick();
     local::Message out;check(server.state()==local::State::Connected&&!server.receive(out),"partial header never publishes metadata");
-    check(send(fd,bad.data()+bad.size()-1,1,MSG_NOSIGNAL)==1,"complete bad version header");server.tick();check(server.state()==local::State::Refused,"unsupported local version refused before payload allocation");close(fd);server.stop();
+    check(send(fd,bad.data()+3,bad.size()-3,MSG_NOSIGNAL)==static_cast<ssize_t>(bad.size()-3),"complete bad version header");server.tick();check(server.state()==local::State::Refused,"unsupported local version refused before payload allocation");close(fd);server.stop();
     check(server.preparePinned(local::Endpoint::CompositorConsumer,path,pin),"extra-rights listener");fd=rawConnect(path);server.tick();File f1,f2,f3;const auto before=fdCount();
     iovec io{bad.data(),bad.size()};msghdr message{};message.msg_iov=&io;message.msg_iovlen=1;alignas(cmsghdr)std::array<char,CMSG_SPACE(sizeof(int)*3)> rights{};
     message.msg_control=rights.data();message.msg_controllen=rights.size();auto* control=CMSG_FIRSTHDR(&message);control->cmsg_level=SOL_SOCKET;control->cmsg_type=SCM_RIGHTS;control->cmsg_len=CMSG_LEN(sizeof(int)*3);int fds[]{f1.fd,f2.fd,f3.fd};std::memcpy(CMSG_DATA(control),fds,sizeof fds);

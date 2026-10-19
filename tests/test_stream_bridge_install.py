@@ -208,6 +208,27 @@ class Tests(unittest.TestCase):
         versions=[e['versions'] for e in events if 'versions'in e]
         self.assertEqual(versions,[plans[0]])
 
+    def test_runtime_versions_reach_real_pc_and_remote_inspection_without_granting_compatibility(self):
+        import contextlib,io,types
+        s.put(self.runtime/'version.vrmanifest',s.encoded({'version':'2.18.2'}))
+        s.put(self.fsvr/'version.vrmanifest',s.encoded({'major':2,'minor':18,'build':3}))
+        s.put(self.fsvr/'tools/vrlink/version.vrmanifest',s.encoded({'version':'4.5.6'}))
+        # A plausible version label cannot repair a changed pinned runtime file.
+        path=self.fsvr/'bin/linuxarm64/vrcompositor';path.write_bytes(b'changed native file')
+        class Peer:
+            def call(inner,request):return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=True,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        output=io.StringIO()
+        before={str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with contextlib.redirect_stdout(output):self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        report=json.loads(output.getvalue())
+        self.assertEqual(report['pc']['runtime_versions']['steamvr']['version'],'2.18.2')
+        self.assertEqual(report['frame']['runtime_versions']['steamvr']['version'],'2.18.3')
+        self.assertEqual(report['frame']['runtime_versions']['steam_link']['version'],'4.5.6')
+        self.assertFalse(report['frame']['runtime_compatible'])
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
     def test_version_inspection_reports_missing_and_unversioned_independently(self):
         import contextlib,io,types
         installed=b.LocalInstall(s,self.local)

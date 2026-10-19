@@ -704,6 +704,8 @@ class SetupApp(App[int]):
             if isinstance(files, dict) and files:
                 ready = all(isinstance(item, dict) and item.get("status") == "match" for item in files.values())
             state = self.words["ready"] if ready else self.words["attention"]
+            for row in _existing_words().runtime_labels(lambda k:self.texts[k],value):
+                state += "\n" + row
             installed = value.get("installed")
             versioned=bool({"installed_version","target_version"}&set(value))
             if versioned:self.add_class("versioned")

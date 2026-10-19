@@ -134,6 +134,11 @@ TEXT = {
         'report': 'Report saved: ',
         'done_prompt': 'Press Enter to close. ',
         'title': 'Steam Link Native Passthrough',
+        'runtime_unknown': 'Unknown',
+        'runtime_bundled': 'Bundled with SteamVR',
+        'runtime_steamvr': 'SteamVR: {version}',
+        'runtime_steam_link': 'Steam Link: {version}',
+        'runtime_build': 'build {build}',
         'version_installed': 'Installed patch: {version}',
         'version_target': 'Available patch: {version}',
         'version_missing': 'Not installed',
@@ -257,6 +262,11 @@ TEXT = {
         'report': 'Bericht gespeichert: ',
         'done_prompt': 'Zum Schließen Enter drücken. ',
         'title': 'Steam Link Native Passthrough',
+        'runtime_unknown': 'Unbekannt',
+        'runtime_bundled': 'Mit SteamVR geliefert',
+        'runtime_steamvr': 'SteamVR: {version}',
+        'runtime_steam_link': 'Steam Link: {version}',
+        'runtime_build': 'Build {build}',
         'version_installed': 'Installierter Patch: {version}',
         'version_target': 'Verfügbarer Patch: {version}',
         'version_missing': 'Nicht installiert',
@@ -306,6 +316,35 @@ def version_labels(text,record):
     elif record.get('installed') is not True:current=text('version_unchecked')
     elif current is None:current=text('version_unknown')
     return current,safe(record.get('target_version')) or text('version_unknown')
+
+
+def runtime_labels(text, record):
+    """Presentation metadata is not compatibility or installation authority."""
+    versions = record.get('runtime_versions')
+    if type(versions) is not dict:
+        return []
+    rows = []
+    steamvr_known = False
+    for component in ('steamvr', 'steam_link'):
+        item = versions.get(component)
+        item = item if type(item) is dict else {}
+        version, build = item.get('version'), item.get('build')
+        if type(version) is not str or not re.fullmatch(r'[0-9]{1,5}(?:[.][0-9]{1,10}){1,3}', version):
+            version = None
+        if type(build) is not str or not re.fullmatch(r'[0-9]{1,20}', build):
+            build = None
+        if component == 'steamvr':
+            steamvr_known = bool(version or build)
+        label = version or text('runtime_unknown')
+        if component == 'steam_link' and not version and not build and steamvr_known and (
+                record.get('compatible') is True or record.get('runtime_compatible') is True):
+            # This is a package relationship; the SteamVR label above carries
+            # its actual version/build. Never invent a separate Link version.
+            label = text('runtime_bundled')
+        if build:
+            label = version + ' (' + build + ')' if version else text('runtime_build').format(build=build)
+        rows.append(text('runtime_' + component).format(version=label))
+    return rows
 
 
 def version_plan(text,pc,frame):
@@ -560,11 +599,13 @@ class Presenter:
         if type(report)is dict:pc=report.get('pc',pc);frame=report.get('frame',frame)
         with self._lock:
             for role,value in (('pc',pc),('frame',frame)):
-                if type(value)is not dict or not {'installed_version','target_version'}&set(value):continue
+                if type(value)is not dict or not {'installed_version','target_version','runtime_versions'}&set(value):continue
                 current,target=version_labels(self.text,value)
                 self._paragraph(self.text('version_'+role))
-                self._paragraph(self.text('version_installed').format(version=current),indent=4)
-                self._paragraph(self.text('version_target').format(version=target),indent=4)
+                for row in runtime_labels(self.text,value):self._paragraph(row,indent=4)
+                if {'installed_version','target_version'}&set(value):
+                    self._paragraph(self.text('version_installed').format(version=current),indent=4)
+                    self._paragraph(self.text('version_target').format(version=target),indent=4)
 
     def version_plan(self,*,pc,frame):
         with self._lock:

@@ -45,6 +45,13 @@ struct CaptureObservation{
 };
 struct SnapshotStats{std::uint64_t accepted=0,dropped=0,rejected=0,captureDropped=0;};
 using CaptureSink=void(*)(const CaptureObservation&,void*) noexcept;
+// Optional native decoder-thread handoff. Successful exact CAPTURE DQBUF only:
+// after scalar publication and after releasing the provider mutex, before
+// exposing the original successful result to native code. A registered owner
+// can wait for an exact downstream coverage acknowledgement and may revalidate
+// the lease through captureLeaseCurrentOnWorker. Never called by the compositor.
+using CaptureHandoff=void(*)(const CaptureObservation&,void*) noexcept;
+using ObservationWake=void(*)(void*) noexcept;
 
 // Public V4L2 lifecycle observer. No private C++ object fields, metadata parser,
 // authentication, renderer, settings or transport. Each original runs once.
@@ -72,6 +79,8 @@ public:
     // mutex contention for a stale lease. Never call this from rendering.
     bool captureLeaseCurrentOnWorker(const CaptureObservation&) const noexcept;
     bool setCaptureSink(CaptureSink,void*) noexcept;
+    bool setCaptureHandoff(CaptureHandoff,void*) noexcept;
+    bool setObservationWake(ObservationWake,void*) noexcept;
     SnapshotStats stats() const noexcept;
     OriginalIoctl originalIoctl() const noexcept;
     std::uintptr_t imageBase() const noexcept;
@@ -90,6 +99,8 @@ SnapshotStats pinnedSnapshotStats() noexcept;
 bool pinnedCaptureLeaseCurrent(const CaptureObservation&) noexcept;
 bool pinnedCaptureLeaseCurrentOnWorker(const CaptureObservation&) noexcept;
 bool setPinnedCaptureSink(CaptureSink,void*) noexcept;
+bool setPinnedCaptureHandoff(CaptureHandoff,void*) noexcept;
+bool setPinnedObservationWake(ObservationWake,void*) noexcept;
 struct Entries{void* ioctl=nullptr;OriginalMmap mmap=nullptr;OriginalMunmap munmap=nullptr;OriginalClose close=nullptr;};
 Entries preparedEntries() noexcept;
 std::uintptr_t preparedImageBase() noexcept;

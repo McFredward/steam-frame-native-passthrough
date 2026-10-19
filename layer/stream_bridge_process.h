@@ -17,6 +17,8 @@ struct ProcessConsumer {
     void (*picture)(void*,const LocalPicture&) noexcept=nullptr;
     void (*tick)(void*) noexcept=nullptr;
     bool (*admitted)(void*) noexcept=nullptr;
+    // Exact pre-draw retention; never depends on a future native image import.
+    bool (*published)(void*,const LocalPicture&) noexcept=nullptr;
 };
 bool prepareProcessCold() noexcept;
 bool enabled() noexcept;

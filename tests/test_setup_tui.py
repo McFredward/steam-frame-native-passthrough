@@ -121,6 +121,40 @@ class Menus(unittest.TestCase):
         result = ui.Presenter(stream, lambda _: next(values), lang='en', input_enabled=True, width=22)
         return result, stream
 
+    def test_bundled_link_label_refers_to_known_steamvr_without_inventing_own_version(self):
+        for lang in ('en','de'):
+            text=lambda key:ui.TEXT[lang][key]
+            record={'compatible':True,'runtime_versions':{'steamvr':{'version':None,'build':'1789498647'},'steam_link':{'version':None,'build':None}}}
+            rows=ui.runtime_labels(text,record)
+            self.assertEqual(rows[0],'SteamVR: '+text('runtime_build').format(build='1789498647'))
+            self.assertEqual(rows[1],'Steam Link: '+text('runtime_bundled'))
+            self.assertNotIn('1789498647',rows[1])
+            self.assertIsNone(record['runtime_versions']['steam_link']['version'])
+            self.assertIn(text('runtime_unknown'),ui.runtime_labels(text,{**record,'compatible':False})[1])
+            record['runtime_versions']['steam_link']['version']='9.8.7'
+            self.assertEqual(ui.runtime_labels(text,record)[1],'Steam Link: 9.8.7')
+
+    def test_runtime_labels_are_distinct_from_patch_versions_and_sanitize_unknown_metadata(self):
+        for lang in ('en','de'):
+            stream=io.StringIO();presenter=ui.Presenter(stream,lang=lang,width=80)
+            record={'installed':True,'installed_version':'0.2.1','target_version':'0.2.2',
+                    'runtime_versions':{'steamvr':{'version':'2.18.2','build':'1791331621'},
+                                        'steam_link':{'version':None,'build':None}}}
+            presenter.inventory(pc=record)
+            output=stream.getvalue()
+            self.assertIn('SteamVR: 2.18.2 (1791331621)',output)
+            self.assertIn('Steam Link: '+presenter.text('runtime_unknown'),output)
+            self.assertIn('0.2.1',output);self.assertIn('0.2.2',output)
+            bad={'runtime_versions':{'steamvr':{'version':'\x1b[31m2.18.2','build':'oops'},
+                                     'steam_link':{'version':'2.18.2\n[bad]','build':True}}}
+            rows=ui.runtime_labels(presenter.text,bad)
+            self.assertEqual(rows,['SteamVR: '+presenter.text('runtime_unknown'),'Steam Link: '+presenter.text('runtime_unknown')])
+            self.assertEqual(ui.runtime_labels(presenter.text,{}),[])
+            stream.seek(0);stream.truncate(0)
+            presenter.inventory(pc={'runtime_versions':record['runtime_versions']})
+            self.assertIn('SteamVR: 2.18.2 (1791331621)',stream.getvalue())
+            self.assertNotIn(presenter.text('version_installed').split(':')[0],stream.getvalue())
+
     def test_patch_versions_are_shown_independently_in_console_status_and_plan(self):
         for lang in ('en','de'):
             presenter,stream=self.make();presenter.lang=lang

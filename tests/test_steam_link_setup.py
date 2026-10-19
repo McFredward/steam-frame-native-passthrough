@@ -86,6 +86,79 @@ class WizardTests(unittest.TestCase):
     def tearDown(self):
         if hasattr(builtins,'sfnp_fixture_verified'):del builtins.sfnp_fixture_verified
         self.temp.cleanup()
+    def test_runtime_versions_keep_semantic_patch_separate_from_steam_package_build(self):
+        root=self.base/'Library/steamapps/common/SteamVR';root.mkdir(parents=True)
+        s.put(root/'version.vrmanifest',s.encoded({'major':2,'minor':18,'build':2}))
+        s.put(root/'tools/vrlink/version.vrmanifest',s.encoded({'version':'7.3.1'}))
+        s.put(root.parent.parent/'appmanifest_250820.acf',b'"AppState" { "appid" "250820" "installdir" "SteamVR" "buildid" "1791331621" }')
+        before={str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        observed=s.runtime_versions(root)
+        self.assertEqual(observed['steamvr']['version'],'2.18.2')
+        self.assertEqual(observed['steamvr']['build'],'1791331621')
+        self.assertEqual(observed['steam_link']['version'],'7.3.1')
+        self.assertIsNone(observed['steam_link']['build'],'The Steam package build is not a separate Steam Link version')
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+        local=s.Local(self.home,'Windows',steamvr=root)
+        self.assertEqual(local.inventory()['runtime_versions'],observed)
+        self.assertFalse(local.inventory()['installed'])
+
+    def test_runtime_numeric_bin_version_is_build_only_and_manifest_build_takes_precedence(self):
+        version=self.steamvr/'bin/version.txt';version.parent.mkdir(parents=True,exist_ok=True)
+        version.write_bytes(b'1789498647\r\n')
+        observed=s.runtime_versions(self.steamvr)
+        self.assertIsNone(observed['steamvr']['version'])
+        self.assertEqual(observed['steamvr']['build'],'1789498647')
+        self.assertEqual(observed['steamvr']['build_source'],'bin/version.txt')
+        self.assertIsNone(observed['steam_link']['version'])
+        root=self.base/'Library/steamapps/common/SteamVR';(root/'bin').mkdir(parents=True)
+        (root/'bin/version.txt').write_bytes(b'1789498647\r\n')
+        s.put(root/'version.vrmanifest',s.encoded({'version':'2.18.2'}))
+        s.put(root.parent.parent/'appmanifest_250820.acf',b'"appid" "250820" "installdir" "SteamVR" "buildid" "123456"')
+        result=s.runtime_versions(root)['steamvr']
+        self.assertEqual(result['version'],'2.18.2');self.assertEqual(result['build'],'123456')
+        self.assertEqual(result['build_source'],'appmanifest_250820.acf')
+
+    def test_runtime_numeric_bin_version_rejects_multiple_values_text_and_oversize(self):
+        path=self.steamvr/'bin/version.txt';path.parent.mkdir(parents=True,exist_ok=True)
+        for raw in (b'2.18.2',b'123\n456',b'-123',b'1'*21,b' '*65,b'123\x1b[31m',b'\xff'):
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                self.assertIsNone(s.runtime_versions(self.steamvr)['steamvr']['build'])
+        if os.name!='nt':
+            path.unlink();target=self.base/'other-build';target.write_bytes(b'123')
+            path.symlink_to(target)
+            self.assertIsNone(s.runtime_versions(self.steamvr)['steamvr']['build'])
+
+    def test_runtime_versions_refuse_unrelated_or_ambiguous_package_builds(self):
+        root=self.base/'Library/steamapps/common/SteamVR';root.mkdir(parents=True)
+        s.put(root/'version.vrmanifest',s.encoded({'version':'2.18.2'}))
+        manifest=root.parent.parent/'appmanifest_250820.acf'
+        cases=(b'"appid" "123" "installdir" "SteamVR" "buildid" "100"',
+               b'"appid" "250820" "installdir" "Other" "buildid" "100"',
+               b'"appid" "250820" "installdir" "SteamVR" "buildid" "100" "buildid" "200"',
+               b'"appid" "250820" "installdir" "SteamVR" "buildid" "unsafe\x1b[31m"')
+        for raw in cases:
+            with self.subTest(raw=raw):
+                manifest.write_bytes(raw)
+                result=s.runtime_versions(root)
+                self.assertEqual(result['steamvr']['version'],'2.18.2')
+                self.assertIsNone(result['steamvr']['build'])
+
+    def test_runtime_version_missing_malformed_redirected_or_oversized_stays_unknown(self):
+        self.assertTrue(all(v['version'] is None for v in s.runtime_versions(None).values()))
+        path=self.steamvr/'version.vrmanifest'
+        for raw in (b'not json',b'{"version":"2.18.2","version":"9.9.9"}',
+                    s.encoded({'version':'2.18.2\n[bad]'}),s.encoded({'major':True,'minor':18,'build':2}),
+                    s.encoded({'major':2,'minor':18,'build':100000}),b' '*16385):
+            with self.subTest(raw=raw[:70]):
+                path.write_bytes(raw)
+                self.assertIsNone(s.runtime_versions(self.steamvr)['steamvr']['version'])
+        if os.name!='nt':
+            path.unlink();target=self.base/'external-version';target.write_bytes(s.encoded({'version':'9.9.9'}))
+            path.symlink_to(target)
+            self.assertIsNone(s.runtime_versions(self.steamvr)['steamvr']['version'])
+        self.assertIsNone(s.runtime_versions(self.steamvr)['steam_link']['version'])
+
     def make_bundle(self, readiness='release', verifier=VERIFIER, component=True):
         proto={'major':1,'minor':0,'wire_sha256':'a'*64}
         profile={'profile':'owned-fixture','complete':True,'architecture':'aarch64','runtime_files':{

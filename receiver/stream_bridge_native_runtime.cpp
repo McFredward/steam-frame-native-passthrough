@@ -385,13 +385,21 @@ RuntimeNotice ReceiverWorker::status()const noexcept{return impl_->current;}
 bool ReceiverWorker::immediateWorkPending()const noexcept{return impl_->enabled&&impl_->backlog;}
 namespace {
 std::mutex lifetime;std::unique_ptr<ReceiverWorker> worker;std::thread thread;
-std::atomic<bool> running{false};std::condition_variable wake;std::mutex sleepMutex;
+std::atomic<bool> running{false};std::atomic<std::uint64_t> wakeGeneration{0};std::condition_variable wake;std::mutex sleepMutex;
 struct StopAtExit {~StopAtExit(){stopPinnedReceiver();}} stopAtExit;
 bool poll(Observation& out,std::uint8_t* bytes,std::size_t n,void*) noexcept{return pollPinnedProcess(out,bytes,n);}
 bool capture(CaptureObservation& out,void*) noexcept{return pollPinnedCapture(out);}
 SnapshotStats stats(void*) noexcept{return pinnedSnapshotStats();}
 bool currentCapture(const CaptureObservation& fact,void*) noexcept{return pinnedCaptureLeaseCurrentOnWorker(fact);}
 bool random(void* out,std::size_t n,void*) noexcept{return stream_bridge::bridgeSystemRandom(out,n);}
+void observed(void*) noexcept{wakePinnedReceiver();}
+}
+void wakePinnedReceiver() noexcept{
+    // This mutex protects only the condition-variable check/enqueue boundary,
+    // never worker processing or provider/control state. Publishing without it
+    // can lose notify between a false predicate and entering the wait.
+    {std::lock_guard<std::mutex> lock(sleepMutex);wakeGeneration.fetch_add(1,std::memory_order_release);}
+    wake.notify_one();
 }
 bool startPinnedReceiver(const RuntimeRequest& request) noexcept{
     if(!request.explicitlyEnabled)return true;
@@ -399,11 +407,13 @@ bool startPinnedReceiver(const RuntimeRequest& request) noexcept{
     try{
         auto candidate=std::make_unique<ReceiverWorker>();
         if(!candidate->prepare(request,{poll,capture,stats,random,nullptr,nullptr,currentCapture})||!publishPinnedDecodeImports())return false;
+        if(!setPinnedObservationWake(observed,nullptr)){restorePinnedDecodeImports();return false;}
         worker=std::move(candidate);running.store(true,std::memory_order_release);
         try{thread=std::thread([]{while(running.load(std::memory_order_acquire)){
+            const auto generation=wakeGeneration.load(std::memory_order_acquire);
             worker->tick();if(worker->immediateWorkPending())continue;
             std::unique_lock<std::mutex> lock(sleepMutex);
-            wake.wait_for(lock,std::chrono::milliseconds(2),[]{return !running.load(std::memory_order_acquire);});}
+            wake.wait_for(lock,std::chrono::milliseconds(2),[generation]{return !running.load(std::memory_order_acquire)||wakeGeneration.load(std::memory_order_acquire)!=generation;});}
             worker->stop();});}
         catch(...){running.store(false,std::memory_order_release);worker.reset();restorePinnedDecodeImports();return false;}
         return true;

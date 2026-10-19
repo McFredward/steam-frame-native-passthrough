@@ -43,7 +43,7 @@ public:
 private:
     struct Impl;std::unique_ptr<Impl> impl_;
 };
-enum class Kind:std::uint8_t{Certified=1,Decoded=2};
+enum class Kind:std::uint8_t{Certified=1,Decoded=2,Ready=3};
 struct Message {
     Kind kind=Kind::Certified;
     stream_bridge_native::SourceIdentity source{};
@@ -81,6 +81,9 @@ public:
     bool enqueue(const Message&) noexcept;
     void tick() noexcept;
     bool receive(Message&) noexcept;
+    // Cold worker poll only. The owning worker keeps this fd alive while polling.
+    int activityFd() const noexcept;
+    bool pendingOutput() const noexcept;
     State state() const noexcept;
     void stop() noexcept;
 private:

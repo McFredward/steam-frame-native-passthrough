@@ -5,6 +5,8 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'VERSION'
+      # Archive/bootstrap updates do not change compiled native sources.
+      - 'distribution/**'
       - 'get.ps1'
       - 'get.sh'
       - 'get-preview.*'
@@ -55,6 +57,8 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'VERSION'
+      # Archive/bootstrap updates do not change compiled native sources.
+      - 'distribution/**'
       - 'get.ps1'
       - 'get.sh'
       - 'get-preview.*'

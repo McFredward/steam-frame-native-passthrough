@@ -710,6 +710,7 @@ class FrameInstall:
             try:current=all(self.tx.current(Path(o['path']))==o['after'] for o in state['operations'])
             except (OSError,ValueError):current=False
         return {**version_status(state,bundle.frame),'architecture':self.machine(),'runtime_compatible':compatible,
+                'runtime_versions':self.e.runtime_versions(self.steamvr),
                 'installed':state is not None,'files_current':current,
                 'recovery_pending':(self.root/'setup-restore.json').exists() or (self.root/'lifecycle.json').exists(),
                 'legacy_installed':(self.home/'.config/SteamFrameNativePassthrough/install.json').exists(),
@@ -1411,16 +1412,17 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if log:log.event('preflight','result',status='ok',versions=versions)
     report={'schema':SCHEMA,'bridge_available':available,'automatic_restart':False,'version_update_blocked':downgrade,
             'version':bundle.value.get('version'),'target_versions':{k:v['target_version'] for k,v in versions.items()},
-            'pc':{'compatible':installed.check(bundle,pc),**pc_versions},'frame':frame}
+            'pc':{'compatible':installed.check(bundle,pc),'runtime_versions':pc.get('runtime_versions'),**pc_versions},'frame':frame}
     if args.check or args.dry_run:
         print(json.dumps(report,sort_keys=True));return 0
     def display_inventory(current_pc,current_frame):
         if not hasattr(ui,'inventory'):return
         observed_pc=version_status(installed.state(),bundle.pc)
         ui.inventory(pc={'steamvr':str(current_pc.get('steamvr') or ''),'platform':current_pc.get('platform'),
+                         'runtime_versions':current_pc.get('runtime_versions'),
                          'compatible':installed.check(bundle,current_pc),**observed_pc},
                      frame={**frame_versions} if current_frame is None else {key:current_frame.get(key) for key in
-                         ('installed','installed_version','legacy_installed','runtime_compatible','enabled','recovery_pending')}|{
+                         ('installed','installed_version','legacy_installed','runtime_compatible','runtime_versions','enabled','recovery_pending')}|{
                          'host':str(address),'target_version':bundle.frame.get('version')},
                      report={'bridge_available':available,'automatic_restart':False})
     def refresh_inventory():

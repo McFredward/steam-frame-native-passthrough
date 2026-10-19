@@ -43,6 +43,35 @@ async def until(pilot, predicate):
 
 
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_detected_runtime_versions_and_patch_actions_remain_visible_at_80x24(self):
+        for lang in ('en','de'):
+            runtime={'steamvr':{'version':'2.18.2','build':'1791331621'},'steam_link':{'version':None,'build':None}}
+            def backend():
+                p=UI.active_presenter()
+                p.inventory(pc={'compatible':False,'installed':True,'installed_version':'0.2.0','target_version':'0.2.1','runtime_versions':runtime},
+                            frame={'runtime_compatible':True,'installed':True,'installed_version':'0.2.0','target_version':'0.2.1','runtime_versions':runtime,'host':'192.168.0.25'})
+                p.choose_action(['update','uninstall','retry','check','exit'],recommended='update')
+                return 0
+            app=UI.SetupApp(backend,lang)
+            async with app.run_test(size=(80,24)) as pilot:
+                await until(pilot,lambda:app.prompt is not None);await pilot.pause()
+                body=app.query_one('#body')
+                for key in ('pc','frame'):
+                    text=str(app.query_one('#'+key+'-status',Static).render())
+                    self.assertIn('SteamVR: 2.18.2 (1791331621)',text)
+                    self.assertIn('Steam Link: '+app.texts['runtime_unknown' if key=='pc' else 'runtime_bundled'],text)
+                    self.assertIn('0.2.0',text);self.assertIn('0.2.1',text)
+                    self.assertTrue(body.content_region.contains_region(app.query_one('#'+key+'-status').region),key)
+                self.assertIn(app.words['attention'],str(app.query_one('#pc-status',Static).render()))
+                self.assertGreater(app.query_one(OptionList).region.height,0)
+                self.assertTrue(body.content_region.contains_region(app.query_one(OptionList).region))
+                for width,height in ((42,16),(100,36),(80,24)):
+                    await pilot.resize_terminal(width,height);await pilot.pause()
+                    self.assertLessEqual(app.query_one('#frame-card').region.right,width)
+                    self.assertIn('SteamVR: 2.18.2',str(app.query_one('#frame-status',Static).render()))
+                await pilot.press('end','enter');await until(pilot,lambda:app.backend_finished)
+            app.backend.join()
+
     async def test_component_version_cards_remain_in_compact_viewport_while_actions_scroll(self):
         for lang in ("en","de"):
             def backend():

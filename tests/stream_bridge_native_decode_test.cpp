@@ -8,6 +8,11 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <atomic>
+#include <condition_variable>
+#include <chrono>
+#include <thread>
+#include <mutex>
 #include <linux/videodev2.h>
 #include <sys/mman.h>
 namespace nd=stream_bridge_native;
@@ -258,6 +263,56 @@ void captureOwnership(){
     p->stop();check(fake.lastSink.kind==nd::CaptureKind::SourceReset,"stop revokes shared source sink synchronously before teardown");
     check(p->setCaptureSink(nullptr,nullptr),"sink can detach only after stopped native ownership");
 }
+struct HandoffProbe {
+    std::mutex mutex;std::condition_variable changed;
+    bool entered=false,release=false;nd::CaptureObservation event{};
+    unsigned calls=0,wakes=0;int originalCalls=0;nd::DecodeProvider* provider=nullptr;
+};
+void handoff(const nd::CaptureObservation& event,void* context)noexcept{
+    auto& p=*static_cast<HandoffProbe*>(context);std::unique_lock<std::mutex> lock(p.mutex);
+    ++p.calls;p.event=event;p.originalCalls=static_cast<int>(fake.ioctlCalls);p.entered=true;p.changed.notify_all();
+    p.changed.wait(lock,[&]{return p.release;});errno=EDOM;
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+void observed(void* context)noexcept{auto& p=*static_cast<HandoffProbe*>(context);++p.wakes;errno=EDOM;}
+void captureHandoff(){
+    for(unsigned invalidate=0;invalidate<3;++invalidate){
+        auto p=provider();HandoffProbe probe;probe.provider=p.get();
+        check(p->setCaptureHandoff(handoff,&probe)&&p->setObservationWake(observed,&probe),"handoff and observation wake register before native lifecycle");
+        setup(*p);check(!p->setCaptureHandoff(nullptr,nullptr)&&!p->setObservationWake(nullptr,nullptr),"late handoff/wake mutation refused");
+        auto f=format();f.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&f);
+        v4l2_requestbuffers request{};request.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;request.memory=V4L2_MEMORY_DMABUF;request.count=4;p->invokeIoctl(base+0x324a8,23,VIDIOC_REQBUFS,&request);
+        Buffer b(0);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;p->invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b);b.plane.m.fd=73;b.b.timestamp.tv_sec=0x4321;b.b.timestamp.tv_usec=0;
+        nd::CaptureObservation discard{};while(p->pollCapture(discard)){}
+        p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b);fake.dequeue=0;
+        const auto before=fake.ioctlCalls,wakes=probe.wakes;std::atomic<bool> returned{false};int result=-2,resultErrno=0;
+        std::thread native([&]{errno=EALREADY;result=p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);resultErrno=errno;returned.store(true,std::memory_order_release);});
+        {std::unique_lock<std::mutex> lock(probe.mutex);check(probe.changed.wait_for(lock,std::chrono::seconds(3),[&]{return probe.entered;}),"exact successful DQ reaches handoff before native exposure");}
+        std::mutex doneMutex;std::condition_variable doneChanged;bool done=false,current=false,published=false,afterReset=false;
+        std::thread observer([&]{
+            current=p->captureLeaseCurrentOnWorker(probe.event);nd::CaptureObservation event{};while(p->pollCapture(event))if(event.kind==nd::CaptureKind::Decoded)published=event.nativeTimestampToken==probe.event.nativeTimestampToken&&event.contentGeneration==probe.event.contentGeneration;
+            if(invalidate==1)p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b);
+            if(invalidate==2)p->stop();
+            afterReset=p->captureLeaseCurrentOnWorker(probe.event);
+            {std::lock_guard<std::mutex> lock(doneMutex);done=true;}doneChanged.notify_all();
+        });
+        bool independent=false;
+        {std::unique_lock<std::mutex> lock(doneMutex);independent=doneChanged.wait_for(lock,std::chrono::seconds(2),[&]{return done;});}
+        const bool nativeStillHeld=!returned.load(std::memory_order_acquire);
+        {std::lock_guard<std::mutex> lock(probe.mutex);probe.release=true;}probe.changed.notify_all();observer.join();native.join();
+        check(independent&&current&&published,"handoff holds no provider mutex: worker polls and validates exact published capture while native DQ is blocked");
+        check(nativeStillHeld&&probe.calls==1&&probe.originalCalls==static_cast<int>(before+1),"original DQ exactly once, completed before synchronous handoff and not yet exposed");
+        check(result==0&&resultErrno==fake.error&&probe.wakes>=wakes+1,"handoff/wake errno cannot replace original return or original errno");
+        check(afterReset==(invalidate==0),"concurrent exact requeue/reset invalidates waiting native capture without reviving stale source");
+        check(probe.event.dmabufFd==73&&probe.event.nativeTimestampToken==0x4321&&probe.event.sourcePoolGeneration&&probe.event.capturePoolGeneration,"handoff is bound to exact source, capture generation, native token and buffer");
+        const auto prior=probe.calls;
+        p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);check(probe.calls==prior+unsigned(invalidate==1),"only a newly requeued successful native DQ can create another handoff");
+        const auto last=probe.calls;
+        p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"duplicate successful DQ cannot invent another decoded handoff");
+        fake.result=-1;p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"failed native DQ never waits");fake.result=0;
+        p->invokeIoctl(base+0xdead,23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"foreign native caller never waits");
+        p->stop();check(p->setCaptureHandoff(nullptr,nullptr)&&p->setObservationWake(nullptr,nullptr),"stopped ownership permits optional handoff/wake detach");
+    }
+}
+}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--handoff")==0){captureHandoff();std::printf("%u exact native handoff checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();captureHandoff();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
 #endif

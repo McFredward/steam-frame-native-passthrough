@@ -45,7 +45,7 @@ that cannot initialize TSan's shadow mapping is explicitly recorded as
 unavailable, without claiming race-free execution.
 
 `--continuous-only` follows 128 successive source frames through the production
-pool's eight slots. Its public Vulkan fake executes actual recorded staging
+pool's finite `MaximumSlots` storage. Its public Vulkan fake executes actual recorded staging
 copies and checks each changed R8 marker in both native eye draws, including
 legal flags=0 repeats. Every active exact frame must retain coverage; explicit
 inactive `None` intervals are a separate control with precisely matching opaque
@@ -61,9 +61,14 @@ ownership; state/layout and GPU counts are atomic. Queue copies own
 before publishing their immutable reservation. A worker poll cannot take away
 an otherwise ready exact frame. Separate pool tests overlap 4,088 cold uploads
 with retained hot references and block an actual `Submitting` copy while cold
-reap/duplicate upload and seven other masks proceed. First-use layout remains
-strictly completion-proven; the warmed continuous test is not a promise that
-an uninitialized first upload can be sampled. Source/decoder admission must
+reap/duplicate upload and other masks proceed. First-use scheduled recording
+may retain a pending image. Actual submit permission still requires a successful
+copy submit on the same original queue, whose transfer-to-fragment barrier
+orders its first layout transition and writes before the native draw. The
+telemetry fixture verifies those first copied bytes without a CPU fence reap;
+it still reports storage as `Copying`, never `Ready`, until actual completion.
+Failed copies and a different native queue never gain sampling permission.
+Source/decoder admission must
 also prevent an active frame without its exact coverage from reaching this
 stage. This fixture does not certify the hardware's message timing or picture.
 

@@ -140,8 +140,8 @@ struct Integration {
   VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};ci.image=image;ci.viewType=VK_IMAGE_VIEW_TYPE_2D;ci.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};renderer.viewCreated(view,ci);writeView(view);
   picture.metadata.kind=local::Kind::Decoded;picture.metadata.descriptor={7,9,16,2};picture.metadata.binding[0]=31;picture.metadata.lease.kernel={std::uint64_t(st.st_dev),std::uint64_t(st.st_ino)};picture.metadata.lease.sequence=71;picture.metadata.peerConfirmed=true;picture.leases=std::make_shared<local::LeaseReader>();picture.connection=connection;
   if(prime){publish();consumer.picture(consumer.owner,picture);
-  // Uploads become acquirable only after the ORIGINAL admitted queue drains
-  // them and its real (fake-public-API) upload fence has signalled.
+  // This convenience path completes a cold upload. First-use scheduling is
+  // independently exercised below without signalling its upload fence.
   renderer.submit(vk.queue,0,nullptr,VK_NULL_HANDLE);vk.signal();consumer.tick(consumer.owner);}
   renderer.commandAllocated(handle<VkCommandBuffer>(0x70fff),VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);renderer.commandAllocated(cb,VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);
  }
@@ -170,13 +170,14 @@ void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint3
   check(s.metadata==2&&s.maskRejected==1&&!s.maskDecoded&&!s.poolUploaded,"invalid authenticated mask bytes have a distinct decode refusal");
   f.publish();consumer.picture(consumer.owner,f.picture);consumer.picture(consumer.owner,f.picture);s=f.renderer.statsCold();
   check(s.maskDecoded==1&&s.uploadAccepted==1&&s.poolUploaded==1&&s.pending==1&&!s.copying&&!s.ready&&s.pictures==1,"decoded accepted pending upload and unique delivered picture are separate facts");
-  check(!f.record().ready,"pending upload cannot count as a selected ready mask");s=f.renderer.statsCold();
-  check(s.drawRefusals[std::size_t(sr::DrawRefusal::ReadyMask)]==1&&!s.selected&&!s.guardAccepted,"missing GPU readiness has its own draw refusal and no invented display success");
-  f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);s=f.renderer.statsCold();check(!s.pending&&s.copying==1&&!s.ready,"accepted native upload submit is copying until its actual fence completes");
-  f.vk.signal();consumer.tick(consumer.owner);check(f.record().ready,"real completed upload remains selectable");s=f.renderer.statsCold();
-  check(s.ready==1&&s.selected==1&&!s.guardAttempts&&!s.guardAccepted,"recording selected coverage is not a successful native submission");
-  check(f.submit(false)==VK_SUCCESS,"current coverage submit accepted");s=f.renderer.statsCold();
-  check(s.guardAttempts==1&&s.guardAccepted==1&&!s.guardRefused,"only original successful guarded submit increments accepted counter");
+  const auto selected=f.record();check(selected.ready,"exact first-use pending mask can be recorded before its same-queue copy");s=f.renderer.statsCold();
+  check(s.pending==1&&!s.copying&&!s.ready&&s.selected==1&&!s.guardAttempts&&!s.guardAccepted,"scheduled recording is neither completed storage nor successful display");
+  f.vk.appMasks[number(f.cb)]={selected.coverage};
+  check(f.submit(false)==VK_SUCCESS,"native submit first enqueues actual R8 copy and then guarded sampling");s=f.renderer.statsCold();
+  check(!s.pending&&s.copying==1&&!s.ready&&s.guardAttempts==1&&s.guardAccepted==1&&!s.guardRefused,"copying on the original queue permits exact first sampling without a CPU fence wait");
+  check(f.vk.sampledMasks.size()==1&&f.vk.sampledMasks.back()==std::vector<std::uint8_t>(32,127),"first native draw samples its own newly copied bytes, never uninitialized storage");
+  f.vk.signal();consumer.tick(consumer.owner);s=f.renderer.statsCold();
+  check(s.ready==1&&s.selected==1&&s.guardAccepted==1,"later fence reap records completion without inventing another presentation");
   f.vk.failOriginal=true;check(f.submit(false)==VK_ERROR_DEVICE_LOST,"actual native submit refusal remains unchanged");s=f.renderer.statsCold();
   check(s.guardAttempts==2&&s.guardAccepted==1&&s.guardRefused==1&&s.quarantined==1,"failed original submit is distinct and genuine GPU quarantine remains present");
  }
@@ -201,7 +202,7 @@ void continuous(const std::vector<std::uint32_t>& vs,const std::vector<std::uint
   // Cold startup prewarms every finite slot through actual queue copy/fence
   // completion. The tested active stream never relies on a first-use image.
   for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSlots;++n){++f.picture.metadata.descriptor.sourceFrame;publish(true,static_cast<std::uint8_t>(n+1));f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);f.vk.signal();consumer.tick(consumer.owner);}
-  check(f.renderer.statsCold().ready==8,"continuous stream starts with eight actual initialized images");const auto allocations=f.vk.allocations;unsigned activeFrames=0,inactiveFrames=0;
+  check(f.renderer.statsCold().ready==stream_bridge_coverage_gpu::MaximumSlots,"continuous stream starts with every finite image actually initialized");const auto allocations=f.vk.allocations;unsigned activeFrames=0,inactiveFrames=0;
   for(unsigned frame=0;frame<128;++frame){const bool active=!mode||frame%11!=3;const auto marker=static_cast<std::uint8_t>((frame*37)%253+1);
    ++f.picture.metadata.descriptor.sourceFrame;f.picture.metadata.lease.sequence=++leaseSequence;publish(active,marker);consumer.picture(consumer.owner,f.picture);
    f.vk.appControl.erase(number(f.cb));f.vk.appMasks.erase(number(f.cb));
@@ -239,7 +240,7 @@ void continuous(const std::vector<std::uint32_t>& vs,const std::vector<std::uint
   check(left.ready&&right.ready,"an already published exact mask remains recordable while cold fence status is blocked");
   check(result==VK_SUCCESS&&f.renderer.statsCold().guardAccepted==previous+1,"cold fence poll cannot interrupt exact copy/reservation/native/tail submission");
   check(f.vk.sampledMasks.size()==samples+2&&f.vk.sampledMasks[samples]==std::vector<std::uint8_t>(32,201)&&f.vk.sampledMasks[samples+1]==std::vector<std::uint8_t>(32,201),"complete blocked-worker frame samples its new exact R8 bytes in both eyes");
-  f.vk.signal();consumer.tick(consumer.owner);const auto stats=f.renderer.statsCold();check(!stats.quarantined&&!stats.guardRefused&&!stats.uploadRefused&&stats.ready==8,"complete blocked-worker cycle retires normally without lost pool slots");
+  f.vk.signal();consumer.tick(consumer.owner);const auto stats=f.renderer.statsCold();check(!stats.quarantined&&!stats.guardRefused&&!stats.uploadRefused&&stats.ready==stream_bridge_coverage_gpu::MaximumSlots,"complete blocked-worker cycle retires normally without lost pool slots");
  }
 
 }

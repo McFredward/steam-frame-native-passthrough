@@ -1,5 +1,6 @@
 #pragma once
 #include "stream-bridge-sender.h"
+#include "stream-bridge-sender-backend.h"
 #include <nvEncodeAPI.h> // Explicit, hash-pinned SDK 11.1 input; never downloaded at build time.
 #include <array>
 #include <atomic>
@@ -44,10 +45,8 @@ struct ReconfigureStats {
     int lastStatus=0;std::uint32_t lastWidth=0,lastHeight=0;
     bool lastContractKnown=false,lastSameContract=false,lastResetEncoder=false;
 };
-struct EncoderState{void* encoder=nullptr;std::uint64_t generation=0;bool hevc=false,peerConfirmed=false,probeObserved=false;std::uint32_t width=0,height=0;bool encoded=false;};
 // Public NVENC ABI boundary. No private Steam object layout or function jump.
 // Single process-lifetime instance; factory tables may retain these callbacks.
-enum class DiscoveryAdmission { Ready, Busy, Refused };
 class NvencBoundary {
 public:
     explicit NvencBoundary(const std::array<std::uint8_t,32>& verifiedModuleHash);
