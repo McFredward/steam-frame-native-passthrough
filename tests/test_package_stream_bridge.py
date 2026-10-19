@@ -83,6 +83,7 @@ class Tests(unittest.TestCase):
             self.assertIn('frame/tools/native_fragment_count1_interface.py',names)
             self.assertFalse(any('scene-contribution-atlas' in n or 'scene_presenter' in n or n.endswith('legacy.spv') for n in names))
             self.assertIn('setup/stream_bridge_install.py',names);self.assertIn('LICENSE',names)
+            self.assertEqual(z.read('third_party/lz4/LICENSE'),(ROOT/'third_party/lz4/LICENSE').read_bytes())
             outer=json.loads(z.read('bootstrap-package.json'));self.assertEqual(outer['schema'],p.BOOTSTRAP);self.assertEqual(outer['readiness'],'prototype')
             self.assertEqual(set(outer['files']),names-{'bootstrap-package.json'})
             for n,pin in outer['files'].items():self.assertEqual(p.pin(z.read(n)),pin)

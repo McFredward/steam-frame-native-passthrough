@@ -52,6 +52,27 @@ void invalidState(){
     auto invalid=config(Role::Producer);invalid.nonce={};require(p.begin(invalid,channel())==Status::InvalidArgument&&p.peerNonce()==rh.senderNonce,"invalid begin leaves old state");
     p.reset();require(!p.configured()&&!p.confirmed()&&p.negotiatedCapabilities()==0,"transport loss removes trust");require(p.begin(config(Role::Producer),channel())==Status::InvalidArgument,"immediate local nonce reuse refused");auto fresh=config(Role::Producer);fresh.nonce=nonce(65);require(p.begin(fresh,channel())==Status::Ok,"fresh reconnect");require(p.receive(view(b),channel())==Status::OutOfOrder,"old COMMIT not new handshake");require(p.receive(view(validWire),channel())==Status::SessionMismatch&&p.peerNonce()==Nonce{},"previous peer HELLO cannot preempt new session");
 }
+void compressedCoverageNegotiation(){
+    auto full=config(Role::Producer);full.offered=full.required=KnownCapabilities;
+    auto old=config(Role::Receiver);old.offered=old.required=KnownCapabilities&~CapRleLz4;
+    Handshake producer,receiver;
+    require(producer.begin(full,channel())==Status::Ok&&receiver.begin(old,channel())==Status::Ok,"paired codec and old participant configurations are valid");
+    Message hello;require(receiver.next(hello)==Status::Ok,"old participant hello available");
+    auto encoded=wire(hello);
+    require(producer.receive(view(encoded),channel())==Status::IncompatibleCapabilities&&!producer.confirmed(),"current native deployment refuses an old peer before sending compressed masks");
+    // The optional protocol capability can still be negotiated away by callers
+    // that explicitly support the older raw/RLE route. Native deployment requires it.
+    full.required&=~CapRleLz4;
+    Handshake optional,legacy;
+    require(optional.begin(full,channel())==Status::Ok&&legacy.begin(old,channel())==Status::Ok,"optional compression configuration accepted");
+    for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){relay(optional,legacy,kind);relay(legacy,optional,kind);}
+    require(optional.confirmed()&&legacy.confirmed()&&!(optional.negotiatedCapabilities()&CapRleLz4),"optional compression never appears without both peers advertising it");
+    Handshake p,r;auto modern=config(Role::Receiver);modern.offered=modern.required=KnownCapabilities;
+    full.required=KnownCapabilities;
+    require(p.begin(full,channel())==Status::Ok&&r.begin(modern,channel())==Status::Ok,"current paired codec configurations accepted");
+    for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){relay(p,r,kind);relay(r,p,kind);}
+    require(p.confirmed()&&r.confirmed()&&(p.negotiatedCapabilities()&CapRleLz4),"compressed coverage needs a complete mutually confirmed capability exchange");
+}
 void probe(){
     Handshake p,r;ProbeTracker t;ProbeMessage request;require(t.begin(p,7,nonce(90),request)==Status::OutOfOrder,"probe needs mutual handshake");confirmed(p,r);require(t.begin(r,7,nonce(90),request)==Status::RoleMismatch,"only producer sends probe");require(t.begin(p,7,nonce(90),request)==Status::Ok&&!t.observed(),"fresh probe prepared");
     std::array<std::uint8_t,ProbeBytes> payload{};require(encodeProbe(request,payload)==Status::Ok,"encode probe");
@@ -63,4 +84,4 @@ void probe(){
     auto bad=payload;bad[72]=1;const auto saved=decoded;require(decodeProbe(view(bad),decoded)==Status::Malformed&&decoded.sequence==saved.sequence&&decoded.freshToken==saved.freshToken,"reserved probe bytes no output change");p.reset();require(t.acceptEcho(p,view(payload),channel())!=Status::Ok,"disconnect revokes old echo authority");t.reset();require(!t.observed(),"probe reset");
 }
 }
-int main(){try{goldens();invalidState();probe();std::cout<<checks<<" stream bridge checks passed\n";return EXIT_SUCCESS;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return EXIT_FAILURE;}}
+int main(){try{goldens();invalidState();compressedCoverageNegotiation();probe();std::cout<<checks<<" stream bridge checks passed\n";return EXIT_SUCCESS;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return EXIT_FAILURE;}}

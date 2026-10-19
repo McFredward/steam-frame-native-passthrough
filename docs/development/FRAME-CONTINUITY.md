@@ -168,3 +168,67 @@ This release removes identified avoidable withdrawal/polling, but does not
 claim uninterrupted loading or packet-loss resilience verified on hardware.
 The good live install was read only; updating remains a user-directed setup
 action. No timer, unattended restart or diagnostic module was deployed.
+
+
+## Lossless mask bandwidth and classified source gaps (0.2.9)
+
+The matched 2026-10-19 game710/patch0.2.8 capture contains 21,295 masked
+frames, 3,297,085,392 original video bytes, 3,581,818,604 RLE coverage bytes
+and 6,897,449,108 complete escaped AU bytes. Coverage added 108.6% of the
+original coded-video size; the complete stream was about 2.09 times that size.
+The largest certified AU was 1,257,066 bytes. A Frame FEC/backtrack failure at
+19:27:31.741 matches the PC's reset storm at19:27:32.890–19:27:34.381. Later
+PC transport failures also recover. This establishes substantial avoidable
+payload pressure, not a proof that every gap is caused by network congestion.
+
+The long signed-None interval at19:29:09–19:30:15 matches the PC dashboard
+opening at19:29:09.935 and closing at19:30:16.898. Shorter loading intervals
+are source-contract gated. Current evidence does not distinguish a temporarily
+missing declaration from a different native loading/dashboard source PID. The
+game does not repeatedly withdraw its live RGBA declaration in this capture;
+keeping an obsolete camera or guessing foreign-source alpha would not be a
+valid fix. New coherent fixed-cost observations distinguish no declaration,
+foreign PID, and a genuinely revoked captured generation. Each new cause and
+at most eight changed cold snapshots are reported, independently of the older
+exhausted generic reporting budget. Quiet COM metadata polling now respects its
+five-second deadline rather than falling back to every8ms.
+
+`CapRleLz4` (bit32) negotiates a new lossless per-frame encoding3. Both current
+native participants require the capability before admitting the paired route;
+optional protocol callers can still negotiate the older intersection. An old
+participant is never sent an unsupported compressed mask. Missing or incompatible
+pairing preserves ordinary Steam Link and withholds native-MR application permission.
+
+The encoding is uint32LE decoded-RLE length followed by one independent LZ4
+block. It reconstructs exactly the existing RLE pairs and full-resolution R8
+coverage, including every fractional alpha value. No image/eye extent, video
+resolution, crop, quality, mask sample precision or shader mapping changes.
+Every frame remains independently decodable; no previous frame is needed.
+The selector compares Raw, RLE and negotiated RLE+LZ4 and sends the smallest.
+Compression runs on the existing output-processing path after releasing exact
+GPU-stage ownership, never in native Draw/Copy or compositor callbacks.
+
+Before decompression, the receiver authenticates the header and compressed
+payload hash. Decoded RLE length is bounded by the exact descriptor's pixel
+count and the global byte ceiling before allocation. LZ4 must consume a valid
+bounded block with precisely the declared output; RLE pairs must cover exactly
+the original pixel count. Truncated blocks, malformed lengths/offsets, forged
+hashes/MACs and inconsistent pixel totals are refused transactionally.
+`third_party/lz4/README.md` records the pinned upstream source; its BSD licence
+ships in the setup archive. There is no external runtime LZ4 dependency.
+
+Focused codec fixtures cover real signed AU and detached metadata roundtrips,
+fractional pixels, truncations, malformed blocks and deterministic fuzz inputs,
+including ASan/UBSan. Native Encode/Lock tests check negotiated versus older
+peers and concurrent full-resolution stage ownership. A focused production
+Renderer/Pool test verifies that decompressed fractional R8 values are copied
+and sampled byte-for-byte on first use; its public-call driver is a software
+fixture, not a headset image or real-GPU measurement. Synthetic host bandwidth
+benchmarks show compression potential only. New encoded/raw byte totals,
+per-format frame counts and bounded encode timing measure the next real run.
+
+This candidate reduces measured bandwidth waste and makes remaining source gaps
+attributable. It does not claim that all loading/menu/network gaps are already
+eliminated on hardware. The current camera helper, projection shaders, camera
+switch lifetime and exact source/frame/eye/lease safety checks remain unchanged.
+No diagnostic module, timer or unattended headset restart is installed.

@@ -18,6 +18,9 @@ struct NvencOutputEvidence {
     // Snapshot at actual Lock, scoped to this encoder generation. Session
     // permission only: exact source/coverage/selected-surface proof is separate.
     bool coverageSessionAuthorized=false;
+    // A separate negotiated capability: knowing ordinary RLE does not prove
+    // the receiver can decode an independent lossless LZ4/RLE mask.
+    bool compressedCoverageAuthorized=false;
 };
 struct DeviceObserver {
     // Successful actual public Open session. Device is borrowed native identity;

@@ -63,8 +63,12 @@ bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8
     // dispatch; this test proves accepted native source lifetime/concurrency.
     const auto pixels=owned->resources.pixels;
     check(pixels.size()==Pixels&&std::all_of(pixels.begin(),pixels.end(),[&](std::uint8_t p){return p==std::uint8_t(r.present);}),"all full-size pixels still belong to that accepted frame during concurrent copies");
-    std::vector<std::uint8_t> rle;check(encodeCoverageRle({pixels.data(),pixels.size()},rle),"full exact current mask encodes");
-    output.assign(candidate.data,candidate.data+candidate.size);output.insert(output.end(),rle.begin(),rle.end());++masks;return true;
+    std::vector<std::uint8_t> encoded;CoverageEncoding encoding=CoverageEncoding::None;
+    check(encodeBestCoverage({pixels.data(),pixels.size()},e.compressedCoverageAuthorized,encoding,encoded)&&encoding==CoverageEncoding::RleLz4,
+        "actual negotiated native Lock compresses its full exact current mask");
+    CertifiedAccessUnit certificate;certificate.descriptor={e.submission,e.encoderGeneration,Width,Height};certificate.coverageEncoding=encoding;certificate.coverage=encoded;
+    std::vector<std::uint8_t> decoded;check(decodeCertifiedCoverage(certificate,decoded)&&decoded==pixels,"every compressed concurrent native submission retains all full-resolution coverage pixels");
+    output.assign(candidate.data,candidate.data+candidate.size);output.insert(output.end(),encoded.begin(),encoded.end());++masks;return true;
 }
 void copy(unsigned i,std::uint64_t present){
     auto write=stages.capture(reinterpret_cast<std::uintptr_t>(input(i)));check(bool(write),"bounded native producer has an unowned exact stage");

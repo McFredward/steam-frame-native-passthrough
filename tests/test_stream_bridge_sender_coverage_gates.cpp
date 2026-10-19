@@ -36,6 +36,12 @@ void run(){
     counters.payload(2000,500,2700);counters.payload(100,40,340);
     auto payload=counters.snapshot();check(payload.maskedVideoBytes==2100&&payload.maskRleBytes==540&&payload.maskedWireBytes==3040&&payload.maxMaskedWireBytes==2700,
         "paired-frame accounting separates original video, coverage and escaped/certified access units");
+    CoverageGateCounters codecCounters;
+    codecCounters.payload(200,20,400,3,4096,14);codecCounters.payload(200,30,410,2,4096,4);codecCounters.payload(200,4096,4500,1,4096,6);
+    const auto codecs=codecCounters.snapshot();
+    check(codecs.maskRleBytes==30&&codecs.maskEncodedBytes==4146&&codecs.maskRawBytes==12288&&codecs.maskEncodingFrames[1]==1&&codecs.maskEncodingFrames[2]==1&&codecs.maskEncodingFrames[3]==1,
+        "raw/RLE/LZ4 totals preserve the old RLE metric while counting all exact encoded payload and decoded byte savings");
+    check(codecs.lastEncodeUs==6&&codecs.maxEncodeUs==14,"bounded compression timing distinguishes the most recent mask from its actual maximum");
     counters.payload(std::numeric_limits<std::uint64_t>::max(),0,0);
     check(counters.snapshot().maskedVideoBytes==std::numeric_limits<std::uint64_t>::max(),"payload byte totals saturate without wrapping or touching frame authority");
     check(cold.hookDraws==0&&cold.nativeDraws==0&&cold.completePairs==0&&cold.lastRefusal==CoverageGate::None,"diagnostic counters start without rendering authority or samples");

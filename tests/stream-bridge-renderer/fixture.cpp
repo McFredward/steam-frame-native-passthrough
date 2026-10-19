@@ -174,6 +174,18 @@ struct Integration {
  }
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
+void compressedCoverage(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ Integration f(vs,ps,1,true,true,false,false,false);
+ // Pattern includes both hard coverage boundaries and genuine fractional alpha.
+ std::vector<std::uint8_t> expected(32);const std::array<std::uint8_t,4> values{{0,127,255,42}};
+ for(unsigned i=0;i<expected.size();++i)expected[i]=values[i%values.size()];
+ sb::CertifiedAccessUnit certificate;certificate.descriptor=f.picture.metadata.descriptor;certificate.binding=f.picture.metadata.binding;
+ check(sb::encodeBestCoverage({expected.data(),expected.size()},true,certificate.coverageEncoding,certificate.coverage)&&certificate.coverageEncoding==sb::CoverageEncoding::RleLz4,"renderer fixture actually selects negotiated compressed fractional coverage");
+ consumer.coverage(consumer.owner,certificate);consumer.picture(consumer.owner,f.picture);
+ const auto draw=f.record();check(draw.ready,"compressed exact current mask reaches the original renderer on first use");f.vk.appMasks[number(f.cb)]={draw.coverage};
+ check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1&&f.vk.sampledMasks.back()==expected,"native companion samples every decompressed R8 coverage value exactly without reducing extent or rounding alpha");
+ check(f.renderer.statsCold().uploadAccepted==1&&!f.renderer.statsCold().uploadRefused,"compressed first-use mask preserves the existing exact-picture upload path");
+}
 void cameraEpoch(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  {Integration f(vs,ps,1);cameraReady=false;
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};f.renderer.commandBegin(f.cb,&begin);
@@ -580,7 +592,8 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
 }
 }
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
- if(argc==5&&std::strcmp(argv[4],"camera-epoch")==0)cameraEpoch(vs,ps);
+ if(argc==5&&std::strcmp(argv[4],"compressed-coverage")==0)compressedCoverage(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"camera-epoch")==0)cameraEpoch(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"camera-pending")==0){cameraPending(vs,ps);idleStartup(vs,ps);cameraEpoch(vs,ps);}
  else if(argc==5&&std::strcmp(argv[4],"resource-pressure")==0){for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);}
  else if(argc==5&&std::strncmp(argv[4],"pressure-",9)==0){const auto mode=unsigned(argv[4][9]-'0');check(mode<7&&argv[4][10]=='\0',"bounded pressure case");if(mode<6)resourcePressure(vs,ps,mode);else resourceTelemetry(vs,ps);}

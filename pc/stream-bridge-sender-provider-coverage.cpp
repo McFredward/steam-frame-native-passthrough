@@ -203,16 +203,19 @@ struct SenderCoverage::Impl {
         // Do not hold the GPU metadata mutex while scanning/compressing the
         // CPU copy or authenticating it. Native Draw must never wait for RLE.
         if(!pixels.empty()){
-            std::vector<std::uint8_t> rle;
-            if(!encodeCoverageRle({pixels.data(),pixels.size()},rle))s.gates.refuse(CoverageGate::RleEncode);
+            std::vector<std::uint8_t> encoded;CoverageEncoding encoding=CoverageEncoding::None;
+            const auto encodeStarted=clockMicros();
+            const bool encodedMask=encodeBestCoverage({pixels.data(),pixels.size()},e.compressedCoverageAuthorized,encoding,encoded);
+            const auto encodeUs=elapsedMicros(encodeStarted,clockMicros());
+            if(!encodedMask)s.gates.refuse(CoverageGate::RleEncode);
             else if(!s.sourceCurrent(maskContract,maskPid))s.gates.refuse(CoverageGate::SourceRevoked);
-            else if(!s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::Rle,{rle.data(),rle.size()},output))s.gates.refuse(CoverageGate::FrameCertificate);
+            else if(!s.control.certifyAccessUnit(candidate,descriptor,encoding,{encoded.data(),encoded.size()},output))s.gates.refuse(CoverageGate::FrameCertificate);
             else{
                 // Local EOF can revoke the format during compression or MAC.
                 // Only publish the still-current capture; no stale mask leaves
                 // this callback even when its original GPU readback was valid.
                 if(!s.sourceCurrent(maskContract,maskPid)){output.clear();s.gates.refuse(CoverageGate::SourceRevoked);return false;}
-                s.lastPid=maskPid;s.state=7;s.gates.payload(candidate.size,rle.size(),output.size());s.gates.signal(CoverageSignal::CertifiedMasks);return true;
+                s.lastPid=maskPid;s.state=7;s.gates.payload(candidate.size,encoded.size(),output.size(),static_cast<unsigned>(encoding),pixels.size(),encodeUs);s.gates.signal(CoverageSignal::CertifiedMasks);return true;
             }
         }
         // Discovery/coded-boundary certificate without a mask is useful and
