@@ -52,8 +52,10 @@
   unscoped proof or connection failure retains the emergency opaque path.
 - Keep semantic versions and per-PC/Frame installation status, but do not create
   separate version-tagged GitHub Releases for routine candidates (2026-10-19).
-  Publish the stable repository installation line in both READMEs and update its
-  existing delivery channels after validation.
+  Publish the stable repository installation line in both READMEs. The previous
+  release download channels are no longer present: deliver the validated archive
+  from an immutable repository commit with exact size/SHA256 in the bootstrap,
+  without recreating GitHub Releases.
 - Clean completed temporary test artifacts after every run (maintainer request,
   2026-10-11). Retain small validation records and only the build outputs still
   needed for review/deployment. Protect active workers, hardware logs, source
