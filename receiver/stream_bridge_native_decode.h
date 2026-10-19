@@ -29,11 +29,16 @@ struct Observation{
     bool completeAccessUnit=false;
     std::uint32_t bufferCapacity=0;
 };
-enum class CaptureKind:std::uint8_t{Reset,Requeue,Decoded,SourceReset};
+enum class CaptureKind:std::uint8_t{Reset,Requeue,Decoded,SourceReset,InputGap};
+enum class InputLoss:std::uint8_t{None,SnapshotFull,CopyRejected};
 struct CaptureObservation{
     CaptureKind kind=CaptureKind::Reset;int fd=-1,dmabufFd=-1;
     std::uint32_t index=0,nativeTimestampToken=0;
     std::uint64_t sourcePoolGeneration=0,capturePoolGeneration=0,contentGeneration=0;
+    // Successful original OUTPUT QBUF with exact scalar ownership but no byte
+    // snapshot. Sequence is the corresponding post-success loss counter, not
+    // an AU certificate, CAPTURE lease or permission to select an image.
+    InputLoss inputLoss=InputLoss::None;std::uint64_t lossSequence=0;
 };
 struct SnapshotStats{std::uint64_t accepted=0,dropped=0,rejected=0,captureDropped=0;};
 using CaptureSink=void(*)(const CaptureObservation&,void*) noexcept;

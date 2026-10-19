@@ -26,7 +26,7 @@ struct Process {
     std::shared_ptr<local::LeaseReader> currentLeases;
     std::shared_ptr<std::atomic<bool>> connection;std::uint64_t lastConnect=0;
     std::thread worker;std::uint32_t notes=0;bool prepared=false;
-    std::array<std::uint32_t,9> sourceNotices{}; // Written only by the receiver worker.
+    std::array<std::array<std::uint32_t,24>,9> sourceNotices{};unsigned sourceNoticeLines=0; // Written only by the receiver worker.
     std::uint32_t channelNotices=0; // Written only by the local channel worker.
 };
 Process* process() noexcept{
@@ -75,15 +75,20 @@ void decoded(const native::DecodedFrame& frame,void* context) noexcept{
 }
 void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
     auto&p=*static_cast<Process*>(context);if(notice.state==native::RuntimeState::SourceLost||notice.state==native::RuntimeState::SenderUnavailable)p.writer.invalidateCurrentEpoch();
-    // Worker-only, first occurrence of each state/control pair. Repeated
-    // reconnects cannot flood the journal or hide a later admission failure.
-    const auto state=static_cast<unsigned>(notice.state),control=static_cast<unsigned>(notice.control);
-    if(state>=p.sourceNotices.size()||control>=32)return;
-    const auto bit=std::uint32_t(1)<<control;if(p.sourceNotices[state]&bit)return;
-    p.sourceNotices[state]|=bit;
+    // Worker-only, first occurrence of each state/control/reason, with an
+    // overall process bound. Keep distinct native-loss causes visible without
+    // journal growth proportional to frames or repeated connection attempts.
+    const auto state=static_cast<unsigned>(notice.state),control=static_cast<unsigned>(notice.control),reason=static_cast<unsigned>(notice.reason);
+    if(state>=p.sourceNotices.size()||control>=32||reason>=p.sourceNotices[state].size()||p.sourceNoticeLines>=64)return;
+    const auto bit=std::uint32_t(1)<<control;if(p.sourceNotices[state][reason]&bit)return;
+    p.sourceNotices[state][reason]|=bit;++p.sourceNoticeLines;
     constexpr const char* names[]{"disabled","waiting-native-source","waiting-local-image-route","negotiating",
         "peer-confirmed","source-proof-lost","sender-unavailable","pairing-refused","source-refused"};
-    std::fprintf(stderr,"[Steam Link Native Passthrough] receiver %s; control=%s\n",names[state],sb::controlStatusName(notice.control));
+        std::fprintf(stderr,"[Steam Link Native Passthrough] receiver %s; control=%s; reason=%s; pool=%llu; admission=%llu; snapshots=%llu/%llu/%llu; capture-lost=%llu\n",
+        names[state],sb::controlStatusName(notice.control),native::runtimeReasonName(notice.reason),
+        static_cast<unsigned long long>(notice.source.outputPoolGeneration),static_cast<unsigned long long>(notice.source.stream.generation),
+        static_cast<unsigned long long>(notice.statistics.accepted),static_cast<unsigned long long>(notice.statistics.dropped),
+        static_cast<unsigned long long>(notice.statistics.rejected),static_cast<unsigned long long>(notice.statistics.captureDropped));
 }
 void consume(Process&p,local::Message& message){
     if(!message.peerConfirmed)return;

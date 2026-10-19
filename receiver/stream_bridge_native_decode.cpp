@@ -50,7 +50,7 @@ struct DecodeProvider::Impl{
     Device* find(int fd){for(auto& d:devices)if(d.fd==fd&&fd>=0)return &d;return nullptr;}
     Device* allocate(int fd){if(auto* d=find(fd))return d;for(auto& d:devices)if(d.fd<0){d.fd=fd;return &d;}return nullptr;}
     void captureEvent(const CaptureObservation& event){
-        if(sink)sink(event,sinkContext);
+        if(sink&&event.kind!=CaptureKind::InputGap)sink(event,sinkContext);
         if(captureSize==captureEvents.size()){increment(counts.captureDropped);return;}
         captureEvents[(captureHead+captureSize)%captureEvents.size()]=event;++captureSize;
     }
@@ -97,6 +97,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
     const bool admitted=knownIoctl(caller,request);
     v4l2_format format{};v4l2_requestbuffers requested{};v4l2_buffer buffer{};v4l2_plane plane{};
     int streamType=0;std::uint64_t expectedGeneration=0,reservation=0;std::size_t slotIndex=SnapshotCapacity;
+    InputLoss inputLoss=InputLoss::None;bool knownGap=false;
     bool shape=false;const bool captureSite=caller==impl_->base+0x3242c||caller==impl_->base+0x324a8
         ||caller==impl_->base+0x325c8||caller==impl_->base+0x310f8||caller==impl_->base+0x32a5c;
     std::uint64_t captureGeneration=0;v4l2_buffer captureBuffer{};v4l2_plane capturePlane{};bool captureShape=false;
@@ -137,15 +138,16 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                 &&std::uint64_t(buffer.timestamp.tv_sec)<=std::numeric_limits<std::uint32_t>::max()
                 &&buffer.timestamp.tv_usec==0&&(buffer.flags&V4L2_BUF_FLAG_TIMESTAMP_MASK)==V4L2_BUF_FLAG_TIMESTAMP_COPY;
             if(valid){
+                knownGap=true;
                 for(std::size_t i=0;i<impl_->slots.size();++i)if(impl_->slots[i].state==Impl::Slot::Free){slotIndex=i;break;}
                 if(slotIndex<SnapshotCapacity&&impl_->ticket!=~std::uint64_t(0)){
                     auto& slot=impl_->slots[slotIndex];slot.state=Impl::Slot::Reserved;reservation=slot.ticket=++impl_->ticket;
                     const auto used=plane.bytesused-plane.data_offset;
                     if(impl_->reader.copy(slot.bytes.data(),b.address+plane.data_offset,used,impl_->reader.context)){
                         b.pending=true;slot.fact={fd,buffer.index,used,d->generation,0,static_cast<std::uint32_t>(buffer.timestamp.tv_sec),false,b.length};
-                    }else{slot.state=Impl::Slot::Free;slotIndex=SnapshotCapacity;increment(impl_->counts.rejected);}
-                }else increment(impl_->counts.dropped);
-            }else increment(impl_->counts.rejected);
+                    }else{slot.state=Impl::Slot::Free;slotIndex=SnapshotCapacity;inputLoss=InputLoss::CopyRejected;}
+                }else inputLoss=InputLoss::SnapshotFull;
+            }else inputLoss=InputLoss::CopyRejected;
         }
     }
     errno=incoming;const int result=original(fd,request,argument);const int error=errno;
@@ -205,8 +207,17 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
             }
         }
         if(impl_->active&&result==0&&d&&d->generation==expectedGeneration&&request==VIDIOC_QBUF&&!captureSite){
-            if(shape&&buffer.index<d->count)d->buffers[buffer.index].queued=true; // even when no snapshot slot/copy was available
-            else impl_->revoke(*d); // successful unsupported shape loses ownership evidence
+            if(shape&&buffer.index<d->count){
+                d->buffers[buffer.index].queued=true; // Native ownership transferred even without a snapshot.
+                if(inputLoss!=InputLoss::None){
+                    auto& sequence=inputLoss==InputLoss::SnapshotFull?impl_->counts.dropped:impl_->counts.rejected;
+                    // Publish the loss and its exact gap together, only AFTER a
+                    // successful original QBUF on this still-current pool.
+                    increment(sequence);
+                    if(knownGap)impl_->captureEvent({CaptureKind::InputGap,fd,-1,buffer.index,
+                        static_cast<std::uint32_t>(buffer.timestamp.tv_sec),d->generation,0,0,inputLoss,sequence});
+                }
+            }else impl_->revoke(*d); // Successful unsupported shape loses ownership evidence.
         }
         if(slotIndex<SnapshotCapacity){auto& slot=impl_->slots[slotIndex];
             if(slot.state==Impl::Slot::Reserved&&slot.ticket==reservation){
