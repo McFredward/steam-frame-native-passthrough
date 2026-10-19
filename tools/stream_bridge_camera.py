@@ -456,7 +456,7 @@ def restore_offline(config, override, section_present, *, owned_true):
     return 'restored'
 
 
-def migration_state(root, old):
+def migration_record(root):
     path = root / MIGRATION
     if not path.exists():return None, None
     raw, _ = read_file(path, MAX_JSON, private=True);v = parsed(raw)
@@ -466,7 +466,12 @@ def migration_state(root, old):
         and type(v['settings_signature']) is list and len(v['settings_signature']) == 5
         and all(type(n) is int and n >= 0 for n in v['settings_signature']),
         'unknown camera migration record preserved')
-    return (v if v['id'] == old['id'] else None), raw
+    return v, raw
+
+
+def migration_state(root, old):
+    value, raw = migration_record(root)
+    return (value if value is not None and value['id'] == old['id'] else None), raw
 
 
 def migration_begin(root, config):
@@ -495,17 +500,24 @@ def migration_finish(root, old, marker):
     replace(root / MIGRATION, encoded(done), raw)
 
 
-def inactive_config(root, active_settings, home):
-    """Prove the historical wrong target is not the current native config."""
-    root = private_root(root);config, sha = load_config(root)
+def inactive_target(active_settings, home):
     home = absolute(str(Path.home() if home is None else home))
     active = absolute(str(active_settings))
     require(active == resolve_settings(home), 'active OpenVR config changed or was not verified')
+    target = home / '.local/share/Steam/config/steamvr.vrsettings'
+    require(target != active, 'only the known inactive historical camera target is permitted')
+    settings(active)
+    return target
+
+
+def inactive_config(root, active_settings, home):
+    """Prove the historical wrong target is not the current native config."""
+    root = private_root(root);config, sha = load_config(root)
+    historical = inactive_target(active_settings, home)
     target = absolute(config['settings'])
-    require(target == home / '.local/share/Steam/config/steamvr.vrsettings'
-        and target != active, 'only the known inactive historical camera target is permitted')
+    require(target == historical, 'only the known inactive historical camera target is permitted')
     # Both files must exist independently; read_file rejects symlinks/hardlinks.
-    settings(active);settings(target)
+    settings(target)
     return root, config, sha
 
 
@@ -519,6 +531,52 @@ def inactive_lease(root, sha):
     return raw
 
 
+def completed_inactive(root, config=None):
+    require(not os.path.lexists(root / LEASE), 'camera target transfer requires no session lease')
+    if config is None:
+        marker, _ = migration_record(root)
+    else:
+        old = config.get('legacy_migration')
+        require(old is not None, 'completed inactive migration authority required')
+        marker, _ = migration_state(root, old)
+    require(marker is not None and marker['phase'] == 'consumed',
+        'completed inactive migration authority required')
+
+
+def pause_inactive(root, config, sha, active_settings):
+    """Recover a pre-publication target transfer while staying paused."""
+    path = root / PAUSE
+    if path.exists():
+        raw, _ = read_file(path, MAX_JSON, private=True)
+        if parsed(raw) == {'schema':PAUSE_SCHEMA, 'settings':str(active_settings)}:
+            completed_inactive(root, config)
+            replace(path, encoded({'schema':PAUSE_SCHEMA, 'settings':config['settings']}), raw)
+    pause(root, sha)
+
+
+def prepare_target(root, new_settings, *, home=None):
+    """Transfer a completed recovery's pause before publishing the new config.
+
+    The pause is never absent: the old helper remains blocked throughout the
+    target change, and only startup with the newly published config can clear
+    the transferred pause. A rollback before publication can normalize it back.
+    """
+    root = private_root(root);inactive_target(new_settings, home)
+    with locked(root):
+        historical = inactive_target(new_settings, home)
+        config = None
+        if os.path.lexists(root / CONFIG):
+            _, config, _ = inactive_config(root, new_settings, home)
+        completed_inactive(root, config)
+        path = root / PAUSE;raw, _ = read_file(path, MAX_JSON, private=True)
+        before = parsed(raw)
+        desired = {'schema':PAUSE_SCHEMA, 'settings':str(new_settings)}
+        require(before == {'schema':PAUSE_SCHEMA, 'settings':str(historical)} or before == desired,
+            'unknown camera pause preserved during target transfer')
+        if before != desired:replace(path, encoded(desired), raw)
+    return {'status':'unchanged' if before == desired else 'restored', 'persisted':True}
+
+
 def restore_inactive(root, active_settings, *, home=None):
     """Quiesce a proven unused legacy config without touching the native API."""
     root, config, sha = inactive_config(root, active_settings, home)
@@ -527,7 +585,7 @@ def restore_inactive(root, active_settings, *, home=None):
         # Recheck the native registry after waiting for the session owner.
         inactive_config(root, active_settings, home)
         lease_raw = inactive_lease(root, sha)
-        pause(root, sha)
+        pause_inactive(root, config, sha, active_settings)
         old = config.get('legacy_migration')
         if old:
             marker, _ = migration_state(root, old)
@@ -555,7 +613,7 @@ def apply_owned_inactive(root, authority, active_settings, *, home=None):
     with locked(root):
         inactive_config(root, active_settings, home)
         lease_raw = inactive_lease(root, sha)
-        pause(root, sha)
+        pause_inactive(root, config, sha, active_settings)
         path = absolute(config['settings']);value, current, raw, _ = settings(path)
         require(current is authority['before'], 'changed inactive camera checkpoint preserved')
         desired = authority['desired']

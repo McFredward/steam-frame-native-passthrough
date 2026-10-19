@@ -402,6 +402,69 @@ class InactiveSettingsControls(unittest.TestCase):
         self.registry.unlink();other=self.home/'other';other.write_text('{}');self.registry.symlink_to(other)
         with self.assertRaisesRegex(tool.SafetyError,'symlink'):self.restore()
         self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_completed_target_transfer_stays_paused_until_new_config_startup(self):
+        self.restore();pause=self.root/tool.PAUSE
+        self.assertEqual(tool.prepare_target(self.root,self.active,home=self.home),
+            {'status':'restored','persisted':True})
+        self.assertEqual(json.loads(pause.read_text())['settings'],str(self.active))
+        self.assertEqual(tool.prepare_target(self.root,self.active,home=self.home),
+            {'status':'unchanged','persisted':True})
+        _,sha=tool.load_config(self.root)
+        camera=mock.Mock()
+        with self.assertRaisesRegex(tool.SafetyError,'paused'):
+            tool.Session(self.root,self.config,sha,camera).enable()
+        camera.read.assert_not_called()
+        tool.startup(self.root,running=lambda:True)
+        self.assertTrue(pause.exists())
+        self.config['settings']=str(self.active);self.config.pop('legacy_migration');self.write_config()
+        tool.startup(self.root,running=lambda:False)
+        self.assertFalse(pause.exists());self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_target_transfer_rollback_before_publication_restores_old_pause(self):
+        self.restore()
+        tool.apply_owned_inactive(self.root,self.authority(None,True),self.active,home=self.home)
+        tool.prepare_target(self.root,self.active,home=self.home)
+        self.assertEqual(self.restore(),{'status':'unchanged','persisted':True})
+        self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.obsolete))
+        self.assertIs(tool.settings(self.obsolete)[1],True)
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_configless_completed_recovery_can_transfer_pause_for_fresh_install(self):
+        self.restore();(self.root/tool.CONFIG).unlink()
+        tool.prepare_target(self.root,self.active,home=self.home)
+        self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.active))
+        self.config['settings']=str(self.active);self.config.pop('legacy_migration');self.write_config()
+        tool.startup(self.root,running=lambda:False)
+        self.assertFalse((self.root/tool.PAUSE).exists())
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_target_transfer_refuses_pending_migration_any_lease_or_unknown_pause(self):
+        tool.migration_begin(self.root,self.config);_,sha=tool.load_config(self.root);tool.pause(self.root,sha)
+        original=(self.root/tool.PAUSE).read_bytes()
+        with self.assertRaisesRegex(tool.SafetyError,'completed'):
+            tool.prepare_target(self.root,self.active,home=self.home)
+        self.restore();self.lease()
+        with self.assertRaisesRegex(tool.SafetyError,'no session lease'):
+            tool.prepare_target(self.root,self.active,home=self.home)
+        (self.root/tool.LEASE).unlink()
+        (self.root/tool.PAUSE).write_bytes(tool.encoded({'schema':tool.PAUSE_SCHEMA,'settings':str(self.home/'foreign')}))
+        with self.assertRaisesRegex(tool.SafetyError,'unknown camera pause'):
+            tool.prepare_target(self.root,self.active,home=self.home)
+        (self.root/tool.PAUSE).write_bytes(original)
+        self.config['legacy_migration']['id']='22'*32;self.write_config()
+        with self.assertRaisesRegex(tool.SafetyError,'completed'):
+            tool.prepare_target(self.root,self.active,home=self.home)
+        self.assertEqual((self.root/tool.PAUSE).read_bytes(),original)
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_configless_transfer_requires_valid_consumed_marker(self):
+        self.restore();(self.root/tool.CONFIG).unlink()
+        path=self.root/tool.MIGRATION;valid=json.loads(path.read_text())
+        for value in ({**valid,'phase':'pending'}, {**valid,'unknown':True}):
+            path.write_bytes(tool.encoded(value))
+            with self.assertRaises(tool.SafetyError):
+                tool.prepare_target(self.root,self.active,home=self.home)
+        path.unlink()
+        with self.assertRaisesRegex(tool.SafetyError,'completed'):
+            tool.prepare_target(self.root,self.active,home=self.home)
+        self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.obsolete))
+        self.assertEqual(self.active.read_bytes(),self.active_before)
 
 
 if __name__=='__main__':unittest.main()
