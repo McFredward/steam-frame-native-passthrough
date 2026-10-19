@@ -51,6 +51,14 @@ Paired rollback skips these removal paths so the retired generation is never
 briefly reactivated. Exact checkpoint predecessors remain available for an
 explicit Undo.
 
+An interrupted Uninstall can have already removed its installation receipt or
+some payload files. Only the validated private Uninstall checkpoint may supply
+their exact original bytes and planned absence. The remover reads that authority
+in memory and verifies remaining hashes; it never republishes a retired receipt,
+hook or library to resume. New removals keep the old receipt until last. A pending
+update transfers its existing proven state and original Undo authority as metadata
+before direct removal, with one final vanilla restart and picture check.
+
 Unknown or changed files, a missing launch-hook ownership entry, an orphan camera
 receipt or an unrecorded camera baseline must prevent a **complete** uninstall
 claim. Preserve the evidence and explain the unresolved ownership rather than
