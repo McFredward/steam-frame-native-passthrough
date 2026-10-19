@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <fcntl.h>
 #include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -86,5 +87,22 @@ void health(){
     until(client,root,true,[&]{return !client.ready();},"explicit native API/session loss N revokes prior acknowledged readiness");
     stop(client,root);
 }
+struct Environment {
+    const char* name;bool existed;std::string previous;
+    Environment(const char* key,const std::string& value):name(key),existed(getenv(key)!=nullptr),previous(existed?getenv(key):""){setenv(name,value.c_str(),1);}
+    ~Environment(){if(existed)setenv(name,previous.c_str(),1);else unsetenv(name);}
+};
+void isolation(){
+    Root root("isolation");const int native=open((root.path/"native-resource").c_str(),O_CREAT|O_RDWR,0600);struct stat before{};
+    check(native>=3&&!fstat(native,&before)&&!(fcntl(native,F_GETFD)&FD_CLOEXEC),"native resource fixture deliberately lacks close-on-exec");
+    Environment library("LD_LIBRARY_PATH","/sfnp-fixture-foreign-libraries");
+    Environment resource("SFNP_FIXTURE_NATIVE_FD",std::to_string(native)+":"+std::to_string(before.st_dev)+":"+std::to_string(before.st_ino));
+    stream_bridge_camera::Client client;client.request(true);until(client,root,true,[&]{return client.ready();},"isolated system-Python child completes real private protocol");
+    check(root.events().find("clean-library-search")!=std::string::npos,"Steam library search paths are absent from independent system Python helper");
+    check(root.events().find("native-resource-not-inherited")!=std::string::npos,"native non-CLOEXEC resource never leaks into independent helper");
+    struct stat after{};check(!fstat(native,&after)&&after.st_dev==before.st_dev&&after.st_ino==before.st_ino,"child closefrom leaves native parent resource unchanged");
+    check(std::string(getenv("LD_LIBRARY_PATH"))=="/sfnp-fixture-foreign-libraries","native parent environment remains byte-for-byte untouched");
+    stop(client,root);close(native);
 }
-int main(int argc,char** argv){try{if(argc==2&&std::string(argv[1])=="resume")resume();else{lifecycle();stale();refusal();resume();health();}std::printf("%u actual camera client subprocess checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+}
+int main(int argc,char** argv){try{if(argc==2&&std::string(argv[1])=="resume")resume();else if(argc==2&&std::string(argv[1])=="isolation")isolation();else{lifecycle();stale();refusal();resume();health();isolation();}std::printf("%u actual camera client subprocess checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

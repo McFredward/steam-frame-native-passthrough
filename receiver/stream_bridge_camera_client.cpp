@@ -33,7 +33,7 @@ bool launchFiles(const std::filesystem::path& root){
     close(directory);return good;
 }
 bool omitEnvironment(const char* entry){
-    return !std::strncmp(entry,"LD_PRELOAD=",11)||!std::strncmp(entry,"LD_AUDIT=",9)
+    return !std::strncmp(entry,"LD_PRELOAD=",11)||!std::strncmp(entry,"LD_AUDIT=",9)||!std::strncmp(entry,"LD_LIBRARY_PATH=",16)
         ||!std::strncmp(entry,"PYTHON",6)||!std::strncmp(entry,"SFNP_STREAM_BRIDGE_CONFIG=",24);
 }
 bool clockSample(ClockSample& sample,void*) noexcept{
@@ -85,8 +85,10 @@ struct Client::Impl {
         if(posix_spawn_file_actions_init(&files.actions)){fail("helper file actions unavailable");return false;}files.initialized=true;
         int error=posix_spawn_file_actions_adddup2(&files.actions,files.pair[1],STDIN_FILENO);
         if(!error)error=posix_spawn_file_actions_adddup2(&files.actions,files.pair[1],STDOUT_FILENO);
-        if(!error)error=posix_spawn_file_actions_addclose(&files.actions,files.pair[0]);
-        if(!error)error=posix_spawn_file_actions_addclose(&files.actions,files.pair[1]);
+        // Supported Frame glibc and the cross SDK expose closefrom. It runs in
+        // the spawned child only, after its private stdin/stdout were installed.
+        // A native non-CLOEXEC GPU/decoder/socket FD must never become ours.
+        if(!error)error=posix_spawn_file_actions_addclosefrom_np(&files.actions,3);
         const auto directory=root.string(),script=(root/"tools/stream_bridge_camera.py").string();
         const char* values[]{"/usr/bin/python3","-I","-B",script.c_str(),"serve","--root",directory.c_str(),nullptr};
         std::vector<char*> environment;for(auto** old=environ;old&&*old;++old)if(!omitEnvironment(*old))environment.push_back(*old);environment.push_back(nullptr);

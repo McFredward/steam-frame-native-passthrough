@@ -20,6 +20,13 @@ def emit(text):
  except BrokenPipeError:
   sys.stdout=open(os.devnull,'w');raise SystemExit(0)
 try:
+ if mode=='isolation':
+  if 'LD_LIBRARY_PATH' not in os.environ:mark('clean-library-search')
+  fd,dev,ino=map(int,os.environ['SFNP_FIXTURE_NATIVE_FD'].split(':'))
+  try:
+   observed=os.fstat(fd);closed=(observed.st_dev,observed.st_ino)!=(dev,ino)
+  except OSError:closed=True
+  if closed:mark('native-resource-not-inherited')
  mark('started');emit('R 0')
  for raw in sys.stdin:
   op,value=raw.split();seq=int(value);mark(op+' '+value)
