@@ -275,23 +275,31 @@ class Files(fixtures.Tests):
         self.assertFalse(self.unit.checkpoint().path.exists())
 
     def test_live_frame_install_and_restore_keep_ui_up_and_original_settings(self):
-        self.active=True;before=s.read(self.fsettings)
+        self.active=True;before=s.read(self.fsettings);initial_mode=self.fsettings.stat().st_mode&0o777
         with self.fake_generation(),mock.patch.object(self.unit,'cold',side_effect=AssertionError('UI must remain running')):
             self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
         self.unit.tx.commit();self.assertTrue(self.unit.checkpoint().path.exists())
+        self.assertEqual(s.read(self.fsettings),before)
+        self.assertEqual(self.fsettings.stat().st_mode&0o777,initial_mode)
+        self.assertEqual(self.unit.checkpoint().value()['settings'],[])
         preferences=s.parse(s.read(self.fsettings));preferences['user']['later']=8
         s.put(self.fsettings,s.encoded(preferences),s.read(self.fsettings))
+        later_mode=self.fsettings.stat().st_mode&0o777
         self.unit.checkpoint().restore();self.assertIsNone(self.unit.tx.state())
         self.unit.checkpoint().verify_restored()
         expected=s.parse(before);expected['user']['later']=8
         self.assertEqual(s.parse(s.read(self.fsettings)),expected)
-        self.assertEqual(self.fsettings.stat().st_mode&0o777,0o666)
+        # Session-policy setup owns no persistent camera/file-mode edit. A
+        # later preferences writer's mode must survive this unrelated Undo.
+        self.assertEqual(self.fsettings.stat().st_mode&0o777,later_mode)
+        self.assertEqual(self.camera_native_calls,[])
         self.assertFalse((self.froot/b.LIBRARY).exists());self.assertTrue(self.active)
         self.unit.checkpoint().finish(restored=True)
         self.assertFalse(self.unit.checkpoint().path.exists())
         self.assertFalse(any('stop' in cmd for cmd in self.commands))
 
     def test_failed_frame_repair_restores_existing_installation_not_uninstall(self):
+        preferences=s.read(self.fsettings)
         with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
         self.unit.tx.commit();receipt=s.read(self.unit.tx.path)
         missing=self.froot/'coverage.spv';missing.unlink();self.active=True
@@ -299,7 +307,10 @@ class Files(fixtures.Tests):
         self.assertTrue(missing.exists());self.unit.checkpoint().restore()
         self.assertFalse(missing.exists());self.assertEqual(s.read(self.unit.tx.path),receipt)
         self.assertTrue((self.froot/b.LIBRARY).exists())
-        self.assertTrue(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'])
+        self.assertEqual(self.unit.tx.state()['settings']['policy'],b.SESSION_POLICY)
+        self.assertEqual(s.read(self.fsettings),preferences)
+        self.assertFalse(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'])
+        self.assertEqual(self.camera_native_calls,[])
         self.unit.checkpoint().finish(restored=True)
 
     def test_frame_uninstall_can_restore_exact_pre_uninstall_state(self):
