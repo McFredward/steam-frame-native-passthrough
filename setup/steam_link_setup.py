@@ -403,6 +403,59 @@ class Inspection:
         return result
 
 
+def runtime_versions(steamvr):
+    """Read bounded public labels only; these never grant compatibility.
+
+    SteamVR's manifest build component is its patch number. The Steam app
+    manifest's buildid is a separate package build, bound to this install dir.
+    Steam Link often has no separate version manifest; report that honestly.
+    """
+    unknown = lambda: {'version':None, 'build':None, 'source':None}
+    result = {'steamvr':unknown(), 'steam_link':unknown()}
+    if steamvr is None:
+        return result
+    try:
+        root = no_links(Path(steamvr))
+    except (OSError, ValueError, TypeError):
+        return result
+
+    def manifest(relative_path):
+        try:
+            raw, _ = read_public_reference(root / relative_path, 16384)
+            value = parse(raw)
+            version = value.get('version')
+            if not (type(version) is str and re.fullmatch(r'[0-9]{1,5}(?:[.][0-9]{1,10}){1,3}', version)):
+                parts = [value.get(k) for k in ('major','minor','build')]
+                version = '.'.join(map(str, parts)) if all(type(v) is int and 0 <= v <= 99999 for v in parts) else None
+            if version is not None:
+                return {'version':version, 'build':None, 'source':relative_path}
+        except (OSError, ValueError, TypeError):
+            pass
+        return unknown()
+
+    result['steamvr'] = manifest('version.vrmanifest')
+    # Read only this installation's Steam package record, never another library.
+    if root.parent.name.casefold() == 'common' and root.parent.parent.name.casefold() == 'steamapps':
+        try:
+            raw, _ = read_public_reference(root.parent.parent / 'appmanifest_250820.acf', 65536)
+            text = raw.decode('utf-8-sig')
+            def field(name):
+                values = re.findall(r'"' + name + r'"\s*"([^"\r\n\x00]*)"', text, re.IGNORECASE)
+                return values[0] if len(values) == 1 else None
+            build = field('buildid')
+            if field('appid') == '250820' and field('installdir') == root.name and type(build) is str and re.fullmatch(r'[0-9]{1,20}', build):
+                result['steamvr']['build'] = build
+                result['steamvr']['build_source'] = 'appmanifest_250820.acf'
+        except (OSError, ValueError, UnicodeError):
+            pass
+    for name in ('tools/vrlink/version.vrmanifest', 'drivers/vrlink/version.vrmanifest'):
+        observed = manifest(name)
+        if observed['version'] is not None:
+            result['steam_link'] = observed
+            break
+    return result
+
+
 def inspection_report(local, pc, frame, profile):
     observed = None if frame is None else {key:frame.get(key) for key in
                ('architecture','installed','legacy_installed','enabled','runtime_compatible')}
@@ -410,7 +463,8 @@ def inspection_report(local, pc, frame, profile):
         observed['host'] = host(frame['host'])
     return {'schema':INSPECTION,'inspection_only':True,'bridge_available':False,'automatic_restart':False,
             'pc':{'platform':pc['platform'],'steamvr':pc.get('steamvr'),
-                  'installed':pc.get('installed'),'registered':pc.get('registered'),'files':profile.pc_files(pc)},
+                  'installed':pc.get('installed'),'registered':pc.get('registered'),'files':profile.pc_files(pc),
+                  'runtime_versions':pc.get('runtime_versions')},
             'frame':observed}
 
 
@@ -819,6 +873,7 @@ class Local:
         state = self.state()
         return {'platform': self.system.lower() + '-x86_64' if platform.machine().lower() in ('amd64', 'x86_64') else 'unsupported',
                 'steamvr': str(roots[0]) if roots else None, 'registry': str(self.registry),
+                'runtime_versions':runtime_versions(roots[0] if roots else None),
                 'registered': str(self.root / 'pc-provider') in paths.get('external_drivers', []),
                 'installed': state is not None, 'state': state, 'active_pair': None if inspection else self.active_pair(),
                 'automatic_restart': False}
