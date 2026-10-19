@@ -705,6 +705,8 @@ def restore_owned(root, *, api_factory=NativeCamera, persist_timeout=3.0):
     changed = False
     with locked(root):
         pause(root, sha)
+        if not cleanup_pending(root, config, sha):
+            return {'status':'unchanged', 'persisted':True}
         with api_factory(config['library']) as camera:
             session = Session(root, config, sha, camera)
             if (root / LEASE).exists():
@@ -728,6 +730,33 @@ def restore_owned(root, *, api_factory=NativeCamera, persist_timeout=3.0):
                     time.sleep(0.05)
                 migration_finish(root, old, marker);changed = True
     return {'status':'restored' if changed else 'unchanged', 'persisted':True}
+
+
+def cleanup_pending(root, config, sha):
+    """Called under the ownership lock; missing native ABI is not permission."""
+    if (root / LEASE).exists():
+        load_lease(root, sha)
+        return True
+    old = config.get('legacy_migration')
+    if old:
+        marker, _ = migration_state(root, old)
+        return not marker or marker['phase'] != 'consumed'
+    return False
+
+
+def prepare_offline_restore(root):
+    """Quiesce renewals; existing startup restores exact ownership before VR starts."""
+    root = private_root(root);config, sha = load_config(root)
+    with locked(root):
+        cleanup_pending(root, config, sha)
+        pause(root, sha)
+    return {'status':'deferred', 'persisted':False}
+
+
+def offline_cleanup_ready(root):
+    root = private_root(root);config, sha = load_config(root)
+    with locked(root):
+        return not cleanup_pending(root, config, sha) and not (root / PAUSE).exists()
 
 
 def serve(root, *, input_stream=None, output_stream=None, api_factory=NativeCamera):

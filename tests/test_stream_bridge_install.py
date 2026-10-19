@@ -254,6 +254,307 @@ class Tests(unittest.TestCase):
         self.bundle=b.Bundle(self.bundle_root,s)
         return self.bundle
 
+    def change_runtime(self,side,role):
+        pins=self.bundle.pc['runtime_files'] if side=='pc' else self.bundle.frame['runtime_files']
+        path=(self.runtime if side=='pc' else self.fsvr)/pins[role]['path']
+        old=path.read_bytes();raw=bytearray(256)
+        if side=='pc':raw[:2]=b'MZ';raw[60:64]=(128).to_bytes(4,'little');raw[128:134]=b'PE\x00\x00d\x86'
+        elif role=='fragment':raw[:4]=b'\x03\x02\x23\x07'
+        else:raw[:7]=b'\x7fELF\x02\x01\x01';raw[18:20]=b'\xb7\x00'
+        raw[-8:]=b'untested';path.write_bytes(raw)
+        return path,old
+
+    def consent(self,side):
+        snapshot=b.LocalInstall(s,self.local).snapshot(self.bundle,self.local.inventory()) if side=='pc' else self.unit.snapshot(self.bundle)
+        return {'bundle':self.bundle.pin,'snapshot':snapshot}
+
+    def wizard(self,*,untested=True,change_after_confirm=None,action='install'):
+        import types,contextlib
+        owner=self
+        class UI:
+            messages=[];questions=[];warnings=[]
+            def banner(inner,**kw):pass
+            def status(inner,*a):pass
+            def path(inner,*a,**kw):pass
+            def say(inner,key):inner.messages.append(key)
+            def inventory(inner,**kw):pass
+            def version_plan(inner,**kw):pass
+            def suspend(inner):return contextlib.nullcontext()
+            def untested_runtime(inner,**kw):inner.warnings.append(kw)
+            def choose_action(inner,*a,**kw):return 'exit'
+            def confirm(inner,key):
+                inner.questions.append(key)
+                if key=='bridge_untested_confirm':
+                    if change_after_confirm:change_after_confirm()
+                    return untested
+                return True
+        ui=UI()
+        class Runtime:
+            def __init__(inner,*a):pass
+            def snapshot(inner):pass
+            def stop(inner):owner.system.live=False
+            def restore(inner):pass
+            def finish(inner):pass
+        class Peer:
+            def call(inner,request):
+                if request['command']=='bridge-health-baseline':return {'baseline':'synthetic','checkpoint':'synthetic'}
+                if request['command']=='bridge-health':return {'software_ready':True,'status':'ready'}
+                if request['command'].startswith('bridge-runtime-'):return {'running':True}
+                return b.remote_request(s,request,unit=owner.unit)
+            def close(inner):pass
+        real=b.load_helper
+        def helper(engine,name):return types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else real(engine,name)
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=action)
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:ui)),mock.patch.object(b,'local_address',return_value='192.168.1.4'),mock.patch.object(b,'load_helper',side_effect=helper):
+            result=b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer())
+        return result,ui
+
+    def test_confirmed_untested_install_really_installs_reversible_inactive_pair(self):
+        self.change_runtime('pc','vrlink');self.change_runtime('frame','vrlink');before=self.fsettings.read_bytes()
+        with mock.patch.object(b,'generate_shaders',side_effect=AssertionError('unproven shader generation')):
+            result,ui=self.wizard()
+        self.assertEqual(result,0);self.assertEqual(ui.questions[:2],['bridge_confirm','bridge_untested_confirm'])
+        pc=b.LocalInstall(s,self.local).state();frame=self.unit.tx.state()
+        self.assertEqual(pc['activation_mode'],'inactive');self.assertEqual(frame['activation_mode'],'inactive')
+        self.assertEqual(pc['pair'],frame['pair']);self.assertFalse(self.local.inventory()['registered']);self.assertEqual(self.system.calls,[])
+        self.assertTrue((self.froot/b.LIBRARY).exists());self.assertTrue((self.froot/'pairings/active.json').exists())
+        for path in self.unit.activation_paths():self.assertFalse(path.exists(),str(path))
+        self.assertEqual(self.fsettings.read_bytes(),before);self.assertEqual(self.camera_native_calls,[])
+        self.assertEqual(ui.messages[-1],'bridge_untested_installed')
+        self.assertEqual(b.remote_request(s,b.request(self.bundle,'bridge-inventory'),unit=self.unit)['activation_mode'],'inactive')
+        self.unit.undo(live=True,purge_legacy=True);b.LocalInstall(s,self.local).uninstall(self.local.inventory())
+        self.assertFalse(self.unit.tx.path.exists());self.assertIsNone(b.LocalInstall(s,self.local).state());self.assertEqual(self.system.calls,[])
+
+    def test_untested_no_aborts_before_payload_or_lifecycle_records(self):
+        self.change_runtime('pc','vrlink');self.change_runtime('frame','compositor')
+        result,ui=self.wizard(untested=False)
+        self.assertEqual(result,0);self.assertIn('bridge_untested_confirm',ui.questions)
+        self.assertFalse(self.unit.tx.path.exists());self.assertIsNone(b.LocalInstall(s,self.local).state())
+        self.assertFalse((self.froot/'lifecycle.json').exists());self.assertFalse((self.local.root/'setup-restore.json').exists())
+
+    def test_changed_versions_with_exact_native_bytes_warn_and_stay_active(self):
+        s.put(self.runtime/'version.vrmanifest',s.encoded({'version':'2.99.1'}))
+        s.put(self.fsvr/'version.vrmanifest',s.encoded({'version':'2.99.2'}))
+        with self.fake_generation():result,ui=self.wizard()
+        self.assertEqual(result,0);self.assertIn('bridge_untested_confirm',ui.questions)
+        self.assertEqual(ui.warnings[0]['pc']['steamvr']['version'],'2.99.1')
+        self.assertTrue((self.froot/'receiver.enable').exists());self.assertTrue(self.local.inventory()['registered'])
+        self.assertNotIn('bridge_untested_installed',ui.messages)
+
+    def test_native_build_labels_use_reviewed_source_namespace(self):
+        for side,version,build in (('pc','2.17.10','1789498647'),('frame','2.18.2','1791331621')):
+            pins=self.bundle.pc['runtime_files'] if side=='pc' else self.bundle.frame['runtime_files']
+            bases={'steamvr':self.runtime if side=='pc' else self.fsvr}
+            for source,number,known in (('bin/version.txt',build,True),('bin/version.txt','1999999999',False),
+                                        ('appmanifest_250820.acf','29999999',True),('appmanifest_250820.acf',build,True)):
+                versions={'steamvr':{'version':version,'build':number,'build_source':source}}
+                snapshot=b.runtime_snapshot(s,pins,bases,side=side,versions=versions)
+                self.assertEqual(snapshot['_runtime_versions']['matches'],known)
+                self.assertEqual(snapshot['_runtime_versions']['value'],versions)
+
+    def test_only_public_registration_tool_change_keeps_native_path_active(self):
+        self.change_runtime('pc','vrpathreg');installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,runtime_consent=self.consent('pc'))
+        self.assertTrue(self.local.inventory()['registered']);self.assertNotIn('activation_mode',installer.state())
+        self.assertNotEqual(installer.state()['vrpathreg']['sha256'],self.bundle.pc['runtime_files']['vrpathreg']['sha256'])
+        self.change_runtime('pc','vrpathreg')[0].write_bytes(self.change_runtime('pc','vrpathreg')[0].read_bytes()+b'next')
+        installer.uninstall(self.local.inventory());self.assertFalse(self.local.inventory()['registered'])
+        self.assertEqual([call[1] for call in self.system.calls],['adddriver','removedriver'])
+
+    def test_public_openvr_change_uses_observed_pin_but_private_contracts_stay_active(self):
+        path,_=self.change_runtime('frame','openvr')
+        with self.fake_generation():
+            self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True,runtime_consent=self.consent('frame'))
+        config=s.parse(s.read(self.froot/b.CAMERA_CONFIG))
+        self.assertEqual(config['library']['sha256'],s.sha(path.read_bytes()));self.assertTrue((self.froot/'receiver.enable').exists())
+        self.assertEqual(self.camera_native_calls,[])
+
+    def test_same_bundle_openvr_repair_updates_public_pin_and_undo_is_exact(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();before=self.unit.tx.path.read_bytes();old_config=(self.froot/b.CAMERA_CONFIG).read_bytes()
+        path,_=self.change_runtime('frame','openvr')
+        with self.fake_generation():
+            result=self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True,runtime_consent=self.consent('frame'))
+        self.assertEqual(result['reason'],'prepared-update');self.unit.tx.commit()
+        self.assertEqual(s.parse(s.read(self.froot/b.CAMERA_CONFIG))['library']['sha256'],s.sha(path.read_bytes()))
+        self.assertEqual(self.camera_native_calls,[])
+        self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+        self.assertEqual((self.froot/b.CAMERA_CONFIG).read_bytes(),old_config);self.assertEqual(self.unit.tx.path.read_bytes(),before)
+
+    def test_public_provider_update_with_old_lease_requires_original_cold_recovery_then_retry(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();before=self.unit.tx.path.read_bytes();camera=self.unit.camera_helper();config,sha=camera.load_config(self.froot)
+        camera.Session(self.froot,config,sha,self.camera_factory(config['library'])).enable()
+        path,_=self.change_runtime('frame','openvr');calls=list(self.camera_native_calls)
+        with self.fake_generation(),self.assertRaisesRegex(s.SetupError,'could not be restored safely'):
+            self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True,runtime_consent=self.consent('frame'))
+        self.assertEqual(self.camera_native_calls,calls);self.assertEqual(camera.load_config(self.froot)[1],sha)
+        self.unit.checkpoint().restore();self.assertEqual(self.unit.tx.path.read_bytes(),before)
+        camera.startup(self.froot,running=lambda:False,alive=lambda _:False)
+        self.assertFalse((self.froot/camera.LEASE).exists());self.unit.checkpoint().verify_restored();self.unit.checkpoint().finish(restored=True)
+        with self.fake_generation():
+            self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True,runtime_consent=self.consent('frame'))
+        self.unit.tx.commit();self.assertTrue((self.froot/'receiver.enable').exists())
+        self.assertEqual(camera.load_config(self.froot)[0]['library']['sha256'],s.sha(path.read_bytes()));self.assertEqual(self.camera_native_calls,calls)
+
+    def test_missing_damaged_or_redirected_public_cli_refuses_before_registration_writes(self):
+        path=self.runtime/self.bundle.pc['runtime_files']['vrpathreg']['path'];old=path.read_bytes()
+        installer=b.LocalInstall(s,self.local)
+        for bad in ('missing','damaged','redirected'):
+            with self.subTest(bad=bad):
+                path.unlink()
+                if bad=='damaged':path.write_bytes(b'not an executable')
+                if bad=='redirected':path.symlink_to(self.settings)
+                consent=self.consent('pc')
+                with self.assertRaises((s.SetupError,OSError)):
+                    installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,runtime_consent=consent)
+                self.assertIsNone(installer.state());self.assertEqual(self.system.calls,[])
+                self.assertFalse((self.local.root/'pc-provider').exists())
+                if os.path.lexists(path):path.unlink()
+                path.write_bytes(old)
+
+    def test_retry_and_recovery_require_fresh_consent_including_label_changes(self):
+        import types
+        self.change_runtime('pc','vrlink');ui=mock.Mock();ui.confirm.return_value=True
+        class Peer:
+            needs_terminal=False
+            def call(inner,request):return b.remote_request(s,request,unit=self.unit)
+        context={'log':None,'operation_action':'install'}
+        real=b.load_helper
+        def load(engine,name):return types.SimpleNamespace(Lifecycle=lambda *a:mock.Mock()) if name=='steam_link_setup_pc' else real(engine,name)
+        with mock.patch.object(b,'load_helper',side_effect=load):
+            ports=b.Automation(s,self.bundle,self.local,b.LocalInstall(s,self.local),Peer(),ui,context,None,'192.168.1.25','steamos')
+        ports.confirm_runtime();ports.require_runtime_approval(consume=True)
+        self.assertEqual(ui.confirm.call_count,1)
+        ports.require_runtime_approval(consume=True);self.assertEqual(ui.confirm.call_count,2)
+        s.put(self.runtime/'version.vrmanifest',s.encoded({'version':'2.99.3'}))
+        ports.restore_files=mock.Mock();ports.pc_recovery_error=None;ports.restored_frame={'continuation':'fixture'}
+        with mock.patch.object(ports.installed,'checkpoint',return_value=mock.Mock()),mock.patch.object(ports,'call',return_value={'continuation':'fixture'}):
+            # Keep production inventory/snapshot reads while isolating only
+            # the already-covered restore/lifecycle boundary.
+            with mock.patch.object(ports,'runtime_view',side_effect=lambda:(
+                {'bundle':self.bundle.pin,'pc':ports.installed.snapshot(self.bundle,self.local.inventory()),'frame':self.unit.snapshot(self.bundle)},self.local.inventory(),self.unit.inventory(self.bundle))):
+                ports.reconcile_for_apply()
+        self.assertEqual(ui.confirm.call_count,3);ports.restore_files.assert_called_once_with(continuation=True)
+
+    def test_inactive_missing_payload_repair_preserves_final_completion_status(self):
+        self.change_runtime('frame','vrlink')
+        result,_=self.wizard();self.assertEqual(result,0);self.assertTrue(self.local.inventory()['registered'])
+        (self.froot/b.LIBRARY).unlink()
+        result,ui=self.wizard(action='update')
+        self.assertEqual(result,0);self.assertTrue((self.froot/b.LIBRARY).exists())
+        self.assertEqual(ui.messages[-1],'bridge_untested_installed');self.assertFalse((self.froot/'receiver.enable').exists())
+
+    def test_snapshot_change_including_return_to_known_bytes_refuses_before_writes(self):
+        installer=b.LocalInstall(s,self.local);path,old=self.change_runtime('pc','vrlink');consent=self.consent('pc')
+        path.write_bytes(old)
+        with self.assertRaisesRegex(s.SetupError,'changed or was not'):
+            installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,runtime_consent=consent)
+        self.assertIsNone(installer.state());self.assertEqual(self.system.calls,[])
+
+    def test_confirmation_runtime_change_does_not_apply_old_consent(self):
+        path,_=self.change_runtime('pc','vrlink');self.change_runtime('frame','vrlink')
+        result,ui=self.wizard(change_after_confirm=lambda:path.write_bytes(path.read_bytes()+b'changed-again'))
+        self.assertEqual(result,2);self.assertFalse(self.unit.tx.path.exists());self.assertEqual(self.system.calls,[])
+
+    def test_active_passive_and_back_updates_keep_pair_and_exact_undo(self):
+        installer=b.LocalInstall(s,self.local);installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();old_frame=self.unit.tx.path.read_bytes();old_pc=installer.receipt.read_bytes()
+        pc_path,pc_old=self.change_runtime('pc','vrlink');frame_path,frame_old=self.change_runtime('frame','vrlink')
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True,runtime_consent=self.consent('pc'))
+        self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True,runtime_consent=self.consent('frame'));self.unit.tx.commit()
+        self.assertFalse(self.local.inventory()['registered']);self.assertFalse((self.froot/'receiver.enable').exists());self.assertFalse((self.froot/'coverage.spv').exists())
+        self.assertEqual(installer.state()['pair'],self.pair['pair_id']);self.assertEqual(self.unit.tx.state()['activation_mode'],'inactive')
+        self.unit.checkpoint().restore();installer.checkpoint().restore();installer.registration(self.local.inventory(),True,installer.state()['vrpathreg'])
+        self.assertEqual(self.unit.tx.path.read_bytes(),old_frame);self.assertEqual(installer.receipt.read_bytes(),old_pc)
+        self.unit.checkpoint().finish(restored=True);installer.checkpoint().finish(restored=True)
+        # A second explicit transition followed by a known-runtime repair must
+        # recreate all activation components, even with this identical bundle.
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True,runtime_consent=self.consent('pc'))
+        self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True,runtime_consent=self.consent('frame'));self.unit.tx.commit()
+        self.unit.checkpoint().finish();installer.checkpoint().finish();passive=self.unit.tx.path.read_bytes()
+        pc_path.write_bytes(pc_old);frame_path.write_bytes(frame_old)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit();self.assertTrue((self.froot/'receiver.enable').exists());self.assertTrue((self.froot/'coverage.spv').exists());self.assertTrue(self.local.inventory()['registered'])
+        self.unit.checkpoint().restore();self.assertEqual(self.unit.tx.path.read_bytes(),passive)
+
+    def test_active_uninstall_after_openvr_change_without_lease_never_loads_api(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();self.change_runtime('frame','openvr')
+        b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertFalse(self.unit.tx.path.exists());self.assertEqual(self.camera_native_calls,[])
+
+    def test_unsupported_live_camera_lease_is_restored_only_at_cold_start(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();camera=self.unit.camera_helper();config,sha=camera.load_config(self.froot)
+        session=camera.Session(self.froot,config,sha,self.camera_factory(config['library']));session.enable()
+        self.change_runtime('frame','openvr');self.change_runtime('frame','vrlink');calls=list(self.camera_native_calls)
+        self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True,runtime_consent=self.consent('frame'));self.unit.tx.commit()
+        self.assertFalse((self.froot/'receiver.enable').exists());self.assertTrue((self.froot/b.CAMERA_CONFIG).exists())
+        self.assertEqual(self.camera_native_calls,calls)
+        with self.assertRaisesRegex(s.SetupError,'recovery is still pending'):self.unit.finalize_inactive()
+        camera.startup(self.froot,running=lambda:True,alive=lambda _:False)
+        self.assertTrue((self.froot/camera.LEASE).exists());self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],True)
+        # Explicit fake stopped-runtime evidence models ExecCondition after the
+        # orchestrator stops the native generation, never a production override.
+        camera.startup(self.froot,running=lambda:False,alive=lambda _:False)
+        self.assertFalse((self.froot/camera.LEASE).exists());self.unit.finalize_inactive()
+        self.assertFalse((self.froot/b.CAMERA_CONFIG).exists());self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],False)
+        self.assertEqual(self.camera_native_calls,calls);self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+
+    def test_offline_uninstall_finalization_retries_after_each_durable_boundary(self):
+        for boundary in ('config','helper','receipt','reload'):
+            with self.subTest(boundary=boundary):
+                with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+                self.unit.tx.commit();camera=self.unit.camera_helper();config,sha=camera.load_config(self.froot)
+                camera.Session(self.froot,config,sha,self.camera_factory(config['library'])).enable()
+                path,old=self.change_runtime('frame','openvr');calls=list(self.camera_native_calls)
+                result=self.unit.undo(live=True,purge_legacy=True,backup=True,target=self.bundle.pin)
+                self.assertTrue(result['camera_cleanup_pending']);self.assertEqual(self.camera_native_calls,calls)
+                camera.startup(self.froot,running=lambda:False,alive=lambda _:False)
+                real_replace=self.unit.tx.replace;real_remove=s.remove_owned;real_system=self.unit.system;failed=[]
+                def replace(operation,*args,**kwargs):
+                    result=real_replace(operation,*args,**kwargs)
+                    target=self.froot/(b.CAMERA_CONFIG if boundary=='config' else b.CAMERA_TOOL)
+                    if boundary in ('config','helper') and operation['path']==str(target) and not failed:
+                        failed.append(True);raise OSError('fixture interruption after deletion')
+                    return result
+                def remove(target,raw):
+                    if boundary=='receipt' and target==self.unit.tx.path and not failed:
+                        failed.append(True);raise OSError('fixture interruption before receipt removal')
+                    return real_remove(target,raw)
+                def system(*args):
+                    if boundary=='reload' and args==('daemon-reload',) and not failed:
+                        failed.append(True);raise OSError('fixture interruption during reload')
+                    return real_system(*args)
+                with mock.patch.object(self.unit.tx,'replace',side_effect=replace),mock.patch.object(s,'remove_owned',side_effect=remove),mock.patch.object(self.unit,'system',side_effect=system):
+                    with self.assertRaisesRegex(OSError,'fixture interruption'):self.unit.finalize_inactive()
+                self.assertEqual(self.unit.tx.state()['phase'],'finalizing-remove')
+                self.unit.finalize_inactive();self.assertFalse(self.unit.tx.path.exists())
+                for activation in self.unit.activation_paths():self.assertFalse(activation.exists())
+                self.assertFalse((self.froot/b.CAMERA_TOOL).exists());self.assertEqual(self.camera_native_calls,calls)
+                self.unit.checkpoint().finish();path.write_bytes(old)
+
+    def test_inactive_update_finalization_retry_before_final_receipt_publish(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();before=self.unit.tx.path.read_bytes();camera=self.unit.camera_helper();config,sha=camera.load_config(self.froot)
+        camera.Session(self.froot,config,sha,self.camera_factory(config['library'])).enable()
+        self.change_runtime('frame','openvr');self.change_runtime('frame','vrlink')
+        self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True,runtime_consent=self.consent('frame'));self.unit.tx.commit()
+        camera.startup(self.froot,running=lambda:False,alive=lambda _:False)
+        real=s.put;failed=[]
+        def put(path,raw,*args,**kwargs):
+            if path==self.unit.tx.path and s.parse(raw)['phase']=='installed' and not failed:
+                failed.append(True);raise OSError('fixture receipt publish interrupted')
+            return real(path,raw,*args,**kwargs)
+        with mock.patch.object(s,'put',side_effect=put),self.assertRaisesRegex(OSError,'receipt publish interrupted'):
+            self.unit.finalize_inactive()
+        self.assertFalse((self.froot/b.CAMERA_CONFIG).exists());self.assertEqual(self.unit.tx.state()['phase'],'finalizing')
+        self.unit.finalize_inactive();self.assertEqual(self.unit.tx.state()['phase'],'installed')
+        self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored();self.assertEqual(self.unit.tx.path.read_bytes(),before)
+
     def test_semantic_version_precedence_and_rejection(self):
         ordered=['1.0.0-alpha','1.0.0-alpha.1','1.0.0-alpha.beta','1.0.0-beta','1.0.0-beta.2','1.0.0-beta.11','1.0.0-rc.1','1.0.0','1.0.1','2.0.0']
         for a,z in zip(ordered,ordered[1:]):
@@ -463,7 +764,7 @@ class Tests(unittest.TestCase):
         installer=b.LocalInstall(s,self.local);self.system.live=True
         with self.assertRaisesRegex(s.SetupError,'Close SteamVR'):installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
         self.system.live=False;target=self.runtime/'drivers/vrlink/bin/win64/driver_vrlink.dll';s.put(target,b'changed',s.read(target))
-        with self.assertRaisesRegex(s.SetupError,'not supported'):installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.assertRaisesRegex(s.SetupError,'missing or damaged'):installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
         self.assertFalse(installer.receipt.exists())
 
     def legacy_frame(self,original=False):

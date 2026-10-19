@@ -137,6 +137,60 @@ def version_status(state,target):
             'target_version':patch_version(target.get('version'))}
 
 
+def runtime_snapshot(engine,pins,bases,*,side,versions):
+    """Observe bounded local files; observations never replace native ABI pins."""
+    result={}
+    for role,pin in pins.items():
+        path=bases[pin['base']]/engine.relative(pin['path'])
+        try:
+            raw,_=engine.read_public_reference(path,engine.MAX_FILE)
+            observed={'bytes':len(raw),'sha256':engine.sha(raw)}
+        except (OSError,ValueError) as error:
+            observed={'unavailable':True,'status':'missing' if getattr(error,'reason',None)=='missing' else 'unreadable'}
+        match=observed=={key:pin[key] for key in ('bytes','sha256')}
+        valid=match
+        if 'sha256' in observed and not match:
+            valid=True
+            if side=='frame' and role in ('vrlink','compositor','openvr'):
+                valid=len(raw)>=64 and raw[:7]==b'\x7fELF\x02\x01\x01' and raw[18:20]==b'\xb7\x00'
+            elif side=='frame' and role=='fragment':valid=len(raw)>=20 and len(raw)%4==0 and raw[:4]==b'\x03\x02\x23\x07'
+            elif side=='pc' and role in ('vrlink','vrpathreg'):
+                offset=int.from_bytes(raw[60:64],'little') if len(raw)>=64 else len(raw)
+                valid=raw[:2]==b'MZ' and offset<=len(raw)-6 and raw[offset:offset+6]==b'PE\x00\x00d\x86'
+        result[role]={'base':pin['base'],'path':pin['path'],**observed,
+                      'matches':match,'format_valid':valid}
+    label=versions.get('steamvr',{});version,build=label.get('version'),label.get('build')
+    tested='2.17.10' if side=='pc' else '2.18.2'
+    native_build='1789498647' if side=='pc' else '1791331621'
+    # Steam package buildids and native timestamp builds are separate namespaces.
+    # Retain both in consent, but compare only the reviewed native label source.
+    result['_runtime_versions']={'value':versions,'matches':(version is None or version==tested) and
+        (label.get('build_source')!='bin/version.txt' or build is None or build==native_build)}
+    return result
+
+
+def native_admitted(side,snapshot):
+    required=('vrlink',) if side=='pc' else ('vrlink','compositor','fragment')
+    return all(snapshot[role]['matches'] for role in required) and (side=='pc' or
+        snapshot['openvr']['format_valid'] and 64<=snapshot['openvr'].get('bytes',0)<=2*1024*1024)
+
+
+def runtime_admission(engine,bundle,side,snapshot,consent):
+    required=('vrlink',) if side=='pc' else ('vrlink','compositor','fragment')
+    engine.require(all(snapshot[role]['format_valid'] for role in required),
+        'The SteamVR runtime is missing or damaged. Its native executable and shader paths must be valid before installation.')
+    if consent is not None or not all(item['matches'] for item in snapshot.values()):
+        engine.require(consent=={'bundle':bundle.pin,'snapshot':snapshot},
+            'The untested runtime changed or was not explicitly confirmed. Check both devices and confirm again.')
+    return native_admitted(side,snapshot)
+
+
+def activation_status(admitted,state=None):
+    mode=state.get('activation_mode','active') if state else ('active' if admitted else 'inactive')
+    return {'runtime_admitted':admitted,'activation_mode':mode,
+            'admission_reason':'known-native-bindings' if admitted else 'unknown-native-bindings'}
+
+
 class Bundle:
     def __init__(self, root, engine):
         self.engine = engine
@@ -223,7 +277,7 @@ def local_address(frame_host, *, resolver=socket.gethostbyname, socket_factory=s
 
 
 
-def validate_settings_receipt(engine,value,expected_path,section,keys):
+def validate_settings_receipt(engine,value,expected_path,section,keys,*,inactive=False):
     e=engine
     e.require(type(value)is dict and set(value) in ({'path','baseline'},{'path','baseline','policy'}) and
               ('policy' not in value or section=='camera' and value['policy']==SESSION_POLICY) and value['path']==str(expected_path) and
@@ -234,7 +288,9 @@ def validate_settings_receipt(engine,value,expected_path,section,keys):
     for key,entry in spec['keys'].items():
         e.require(type(entry)is dict and set(entry)=={'present','value','installed'} and type(entry['present'])is bool,
                   'Unknown restored setting predecessor.')
-        if key in ('enableStreamBridge','forceSceneAlphaBlending'):
+        if key=='enableStreamBridge' and inactive:
+            e.require(entry['installed'] is False,'Unknown installed inactive switch value.')
+        elif key in ('enableStreamBridge','forceSceneAlphaBlending'):
             e.require(entry['installed'] is True,'Unknown installed switch value.')
         elif key=='controlListenAddress':private_ipv4(entry['installed'])
         else:e.require(type(entry['installed'])is int and 1024<=entry['installed']<=65535,'Unknown installed port.')
@@ -298,14 +354,15 @@ class LocalInstall:
 
     def validate_state(self,v):
         e=self.e
-        e.require(set(v)-{'version'}=={'schema','bundle','files','settings','registered_before','pair','vrpathreg'} and
+        e.require(set(v)-{'version','activation_mode'}=={'schema','bundle','files','settings','registered_before','pair','vrpathreg'} and
                   v['schema']==RECEIPT and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
                   set(v['files'])==PC_FILES,'Unknown PC connection receipt preserved.')
         version_fields(v)
+        e.require(v.get('activation_mode','active') in ('active','inactive'),'Unknown PC activation state preserved.')
         e.records(v['files'])
         e.require(type(v['registered_before'])is bool and re.fullmatch('[0-9a-f]{32}',v['pair']),'Unknown PC ownership receipt.')
         e.require(type(v['vrpathreg'])is dict and set(v['vrpathreg'])=={'base','path','bytes','sha256'} and v['vrpathreg']['base']=='steamvr' and v['vrpathreg']['path']=='bin/win64/vrpathreg.exe','Unknown registration predecessor.')
-        validate_settings_receipt(e,v['settings'],self.settings_path(),SETTINGS_SECTION,('enableStreamBridge','controlListenAddress','controlPort'))
+        validate_settings_receipt(e,v['settings'],self.settings_path(),SETTINGS_SECTION,('enableStreamBridge','controlListenAddress','controlPort'),inactive=v.get('activation_mode')=='inactive')
         return v
 
     def settings_path(self):
@@ -325,6 +382,29 @@ class LocalInstall:
             except (OSError,ValueError,TypeError):matches[role]=False
         return bool(matches) and all(matches.values())
 
+    def snapshot(self,bundle,pc):
+        return runtime_snapshot(self.e,bundle.pc['runtime_files'],{'steamvr':Path(pc['steamvr']) if pc.get('steamvr') else Path('/sfnp-missing')},
+            side='pc',versions=pc.get('runtime_versions') or self.e.runtime_versions(pc.get('steamvr')))
+
+    def registration(self,pc,registered,pin):
+        """Public registration CLI only; observed identity grants no private ABI."""
+        tool=self.registration_tool(pc,pin)
+        self.local.register(tool,'adddriver' if registered else 'removedriver')
+        self.e.require(bool(self.local.inventory().get('registered'))==registered,'The owned driver registration could not be confirmed.')
+
+    def registration_tool(self,pc,pin):
+        e=self.e
+        e.require(Path(pc.get('steamvr') or '').is_absolute() and pin['path']=='bin/win64/vrpathreg.exe',
+                  'The SteamVR registration tool location is unknown.')
+        try:return self.local.verify_tool(pc,pin)
+        except (OSError,ValueError):
+            raw=e.read(Path(pc['steamvr'])/'bin/win64/vrpathreg.exe',e.MAX_FILE)
+            offset=int.from_bytes(raw[60:64],'little') if len(raw)>=64 else len(raw)
+            e.require(raw[:2]==b'MZ' and offset<=len(raw)-6 and raw[offset:offset+6]==b'PE\x00\x00d\x86',
+                      'The SteamVR registration tool is missing or damaged; repair SteamVR before changing registration.')
+            observed={'base':'steamvr','path':'bin/win64/vrpathreg.exe','bytes':len(raw),'sha256':e.sha(raw)}
+            return self.local.verify_tool(pc,observed)
+
     def checkpoint(self,pair_id=None):
         helper=load_helper(self.e,'steam_link_setup_checkpoint')
         paths={self.local.root/name for name in PC_FILES}|{self.receipt,self.settings_path(),self.local.root/'pairings/active.json'}
@@ -333,23 +413,27 @@ class LocalInstall:
         return helper.Checkpoint(self.e,self.local.root/'setup-restore.json',allowed,
             lambda p:helper.read_value(self.e,p),lambda p,old,new:helper.replace_value(self.e,p,old,new))
 
-    def install(self,bundle,pc,pair,address,port,*,backup=False):
+    def install(self,bundle,pc,pair,address,port,*,backup=False,runtime_consent=None):
         e=self.e;bundle.admit(self.local.system)
-        e.require(self.check(bundle,pc),'This SteamVR version is not supported by this package.')
+        snapshot=self.snapshot(bundle,pc);runtime_active=runtime_admission(e,bundle,'pc',snapshot,runtime_consent)
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before installing or updating the connection.')
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
         old=self.state();planned={name:bundle.files[name] for name in PC_FILES}
         e.require(not blocked_version_update(bundle.pc.get('version'),old.get('version') if old else None),
                   'The installed PC patch is newer or the package is unversioned; downgrade was not applied.')
-        tool_pin=bundle.pc['runtime_files']['vrpathreg'];tool=self.local.verify_tool(pc,tool_pin)
+        tool_pin=bundle.pc['runtime_files']['vrpathreg'];tool=None
+        if runtime_active:
+            observed=snapshot['vrpathreg'];e.require(observed['format_valid'],'The SteamVR registration tool is missing or damaged.')
+            tool_pin={key:observed[key] for key in ('base','path','bytes','sha256')};tool=self.local.verify_tool(pc,tool_pin)
+        elif pc.get('registered'):self.registration_tool(pc,tool_pin)
         driver=self.local.root/'pc-provider'
         if driver.exists():
             present={str(p.relative_to(self.local.root)).replace('\\','/') for p in driver.rglob('*') if p.is_file() or p.is_symlink()}
             e.require(present<=set(old['files'] if old else {}),'An unknown PC provider is already present; it was preserved.')
         if old:
-            if old['bundle']!=bundle.pin:
+            if old['bundle']!=bundle.pin or old.get('activation_mode','active')!=('active' if runtime_active else 'inactive'):
                 e.require(backup,'Updating a different checked package requires the confirmed recoverable workflow.')
-                return self.update(bundle,pc,pair,address,port,old,tool)
+                return self.update(bundle,pc,pair,address,port,old,tool,runtime_active=runtime_active,tool_pin=tool_pin)
             missing=[]
             for name,pin in old['files'].items():
                 path=self.local.root/e.relative(name)
@@ -359,12 +443,12 @@ class LocalInstall:
                 helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint(pair['pair_id'])
                 checkpoint.begin('repair',[checkpoint.operation(path,[helper.file_value(raw)]) for path,raw in missing],[],bool(pc.get('registered')),target=bundle.pin)
             for path,raw in missing:e.put(path,raw)
-            if not pc.get('registered'):
-                self.local.register(tool,'adddriver')
+            if runtime_active and not pc.get('registered'):
+                self.local.register(self.local.verify_tool(pc,tool_pin),'adddriver')
                 e.require(self.local.inventory()['registered'],'The repaired provider registration could not be confirmed.')
-            return {'reason':'repaired' if missing or not pc.get('registered') else 'current',
-                    'changed':bool(missing) or not pc.get('registered'),'automatic_restart':False}
-        edits=SettingsChange(e,self.settings_path(),{SETTINGS_SECTION:{'enableStreamBridge':True,
+            changed=bool(missing) or runtime_active and not pc.get('registered')
+            return {'reason':'repaired' if changed else 'current','changed':changed,'automatic_restart':False}
+        edits=SettingsChange(e,self.settings_path(),{SETTINGS_SECTION:{'enableStreamBridge':runtime_active,
               'controlListenAddress':private_ipv4(address),'controlPort':port}})
         edits.planned() # All settings validation before first payload write.
         undo=[];settings=None;registered=False
@@ -380,7 +464,7 @@ class LocalInstall:
             _,_,baseline=edits.planned()
             receipt={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
                      'settings':{'path':str(self.settings_path()),'baseline':baseline},'registered_before':bool(pc.get('registered')),
-                     'pair':pair['pair_id'],'vrpathreg':tool_pin}
+                     'pair':pair['pair_id'],'vrpathreg':tool_pin,**({'activation_mode':'inactive'} if not runtime_active else {})}
             planned_ops.append(checkpoint.operation(self.receipt,[helper.file_value(e.encoded(receipt))]))
             settings=[checkpoint.setting(self.settings_path(),SETTINGS_SECTION,k,[{'present':True,'value':v}]) for k,v in edits.edits[SETTINGS_SECTION].items()]
             checkpoint.begin('install',planned_ops,settings,bool(pc.get('registered')),target=bundle.pin)
@@ -389,21 +473,23 @@ class LocalInstall:
                 path=self.local.root/e.relative(name);e.put(path,raw);undo.append((path,raw))
             settings=edits.apply()
             e.put(key,pair_raw);undo.append((key,pair_raw));e.put(active,active_raw);undo.append((active,active_raw))
-            if not pc.get('registered'):
-                self.local.register(tool,'adddriver');registered=True
+            if runtime_active and not pc.get('registered'):
+                self.local.register(self.local.verify_tool(pc,tool_pin),'adddriver');registered=True
                 e.require(self.local.inventory()['registered'],'The PC provider registration could not be confirmed.')
             value={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
-                   'settings':settings,'registered_before':bool(pc.get('registered')),'pair':pair['pair_id'],'vrpathreg':tool_pin}
+                   'settings':settings,'registered_before':bool(pc.get('registered')),'pair':pair['pair_id'],'vrpathreg':tool_pin,
+                   **({'activation_mode':'inactive'} if not runtime_active else {})}
+            if not runtime_active and pc.get('registered'):self.registration(pc,False,tool_pin)
             e.put(self.receipt,e.encoded(value))
         except BaseException:
-            if not pc.get('registered'):
-                self.local.register(tool,'removedriver')
+            if runtime_active and not pc.get('registered'):
+                self.local.register(self.local.verify_tool(pc,tool_pin),'removedriver')
             if settings:SettingsChange.restore(e,settings)
             for path,raw in reversed(undo):e.remove_owned(path,raw)
             raise
         return {'reason':'installed','changed':True,'automatic_restart':False}
 
-    def update(self,bundle,pc,pair,address,port,old,tool):
+    def update(self,bundle,pc,pair,address,port,old,tool,*,runtime_active=True,tool_pin=None):
         """Retain the initial uninstall baseline and checkpoint this update."""
         e=self.e;helper=load_helper(e,'steam_link_setup_checkpoint')
         e.require(not blocked_version_update(bundle.pc.get('version'),old.get('version')),
@@ -421,7 +507,7 @@ class LocalInstall:
         settings_path=self.settings_path();before=e.read(settings_path,2*1024*1024)
         preferences=e.parse(before)
         replacement=e.parse(e.encoded(old))
-        desired={SETTINGS_SECTION:{'enableStreamBridge':True,'controlListenAddress':private_ipv4(address),'controlPort':port}}
+        desired={SETTINGS_SECTION:{'enableStreamBridge':runtime_active,'controlListenAddress':private_ipv4(address),'controlPort':port}}
         for section,spec in old['settings']['baseline'].items():
             current=preferences.get(section)
             e.require(type(current)is dict and all(key in current and type(current[key])is type(entry['installed']) and
@@ -430,7 +516,9 @@ class LocalInstall:
                 current[key]=desired[section][key]
                 replacement['settings']['baseline'][section]['keys'][key]['installed']=current[key]
         replacement.update(bundle=bundle.pin,files={n:bundle.value['files'][n] for n in PC_FILES},
-                           vrpathreg=bundle.pc['runtime_files']['vrpathreg'])
+                           vrpathreg=tool_pin or bundle.pc['runtime_files']['vrpathreg'])
+        replacement.pop('activation_mode',None)
+        if not runtime_active:replacement['activation_mode']='inactive'
         replacement.pop('version',None);replacement.update(version_fields(bundle.pc))
         receipt_before=e.read(self.receipt,2*1024*1024,private=True);receipt_after=e.encoded(replacement)
         checkpoint=self.checkpoint(pair['pair_id'])
@@ -444,8 +532,9 @@ class LocalInstall:
         e.put(settings_path,e.encoded(preferences),before)
         if os.name!='nt':os.chmod(settings_path,mode)
         e.put(self.receipt,receipt_after,receipt_before)
-        if not pc.get('registered'):
-            self.local.register(tool,'adddriver')
+        if not runtime_active and pc.get('registered'):self.registration(pc,False,old['vrpathreg'])
+        elif runtime_active and not pc.get('registered'):
+            self.local.register(self.local.verify_tool(pc,tool_pin),'adddriver')
             e.require(self.local.inventory()['registered'],'The updated provider registration could not be confirmed.')
         return {'reason':'updated','changed':True,'automatic_restart':False}
 
@@ -463,6 +552,7 @@ class LocalInstall:
                       'The PC removal receipt is missing; existing provider files or registration were preserved.')
             return {'reason':'not_installed','automatic_restart':False}
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before removing the connection.')
+        if pc.get('registered'):self.registration_tool(pc,state['vrpathreg'])
         helper=load_helper(e,'steam_link_setup_checkpoint')
         known={item['path']:item for item in pending['operations']} if pending else {}
         active=self.local.root/'pairings/active.json'
@@ -480,7 +570,6 @@ class LocalInstall:
             current=helper.read_value(e,path);item=known.get(str(path))
             e.require(e.sha(e.read(path))==pin['sha256'] or item and current in [item['before'],*item['after']],
                       'Changed provider files preserved.')
-        tool=self.local.verify_tool(pc,state['vrpathreg'])
         # Validate conditional settings restoration before unregistering anything.
         raw=e.read(Path(state['settings']['path']),2*1024*1024);current=e.parse(raw)
         for section,spec in state['settings']['baseline'].items():
@@ -505,7 +594,7 @@ class LocalInstall:
             settings=[checkpoint.setting(self.settings_path(),section,key,[{'present':entry['present'],'value':entry['value']}])
                       for section,spec in state['settings']['baseline'].items() for key,entry in spec['keys'].items()]
             checkpoint.begin('uninstall',operations,settings,bool(pc.get('registered')),target=target)
-        if pc.get('registered'):self.local.register(tool,'removedriver')
+        if pc.get('registered'):self.registration(pc,False,state['vrpathreg'])
         e.require(not self.local.inventory().get('registered'),'The owned PC driver registration could not be removed.')
         path=Path(state['settings']['path']);mode=stat.S_IMODE(path.stat().st_mode)
         if e.encoded(current)!=raw:e.put(path,e.encoded(current),raw)
@@ -543,12 +632,15 @@ class FrameTransaction:
 
     def validate_state(self,v):
         e=self.e
-        e.require(type(v)is dict and set(v)-{'version'}=={'schema','home','root','bundle','phase','operations','settings','pair'} and
+        e.require(type(v)is dict and set(v)-{'version','activation_mode'}=={'schema','home','root','bundle','phase','operations','settings','pair'} and
                   v['schema']==RECEIPT and v['home']==str(self.home) and v['root']==str(self.root) and
-                  v['phase'] in ('pending','installed','removing') and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
+                  v['phase'] in ('pending','installed','removing','finalizing','finalizing-remove') and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
                   re.fullmatch('[0-9a-f]{32}',v['pair']) and type(v['operations'])is list and
                   len(v['operations'])<=96,'Unknown Frame installation journal preserved.')
         version_fields(v)
+        e.require(v.get('activation_mode','active') in ('active','inactive'),'Unknown Frame activation state preserved.')
+        e.require(not v['phase'].startswith('finalizing') or v.get('activation_mode')=='inactive',
+                  'Unknown Frame finalization authority preserved.')
         allowed={self.home/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf',
                  self.home/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json',
                  self.home/'.config/SteamFrameNativePassthrough/control.json',
@@ -614,11 +706,12 @@ class FrameTransaction:
             path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             os.symlink(value['target'],path)
 
-    def begin(self,bundle,operations,settings,pair,*,version=None):
+    def begin(self,bundle,operations,settings,pair,*,version=None,activation_mode='active'):
         e=self.e;e.require(self.state() is None,'A previous Frame connection must be repaired or removed first.')
         value={'schema':RECEIPT,'home':str(self.home),'root':str(self.root),'bundle':bundle,
                'phase':'pending','operations':operations,'settings':settings,'pair':pair}
         if version is not None:value['version']=patch_version(version)
+        if activation_mode=='inactive':value['activation_mode']='inactive'
         e.put(self.path,e.encoded(value)) # Durable rollback authority before activation.
         try:
             for operation in operations:self.replace(operation)
@@ -785,6 +878,14 @@ class FrameInstall:
                 value=checkpoint.value()
                 if value is None:return super().restore()
                 owner.camera_checkpoint_preflight(checkpoint,value)
+                state=owner.camera_state(value)
+                if state and owner.camera_cleanup_mode(state)=='offline':
+                    owner.e.require(not any(item['section']=='camera' for item in value['settings']),
+                        'A legacy live camera override needs cold recovery; existing ownership records were retained.')
+                    # Restore exact files now; their original startup hook owns
+                    # the pending lease before VR starts. No unknown API call.
+                    owner.camera_helper().prepare_offline_restore(owner.root)
+                    return super().restore()
                 with owner.camera_context(checkpoint=value) as camera:
                     if camera:
                         owner.camera_call(camera,'restore_owned')
@@ -821,6 +922,7 @@ class FrameInstall:
                 for candidate in op.get('camera_intermediates',[]):
                     if candidate and candidate['kind']=='file':candidate={**candidate,'mode':op['mode']}
                     if candidate not in choices:choices.append(candidate)
+            if op.get('inactive_cleanup') is True and None not in choices:choices.append(None)
             entries.append(checkpoint.operation(Path(op['path']),choices))
         entries.append(checkpoint.operation(self.tx.path,transaction_values))
         entries_settings=[] if settings.get('policy')==SESSION_POLICY else [checkpoint.setting(Path(settings['path']),section,key,[{'present':entry['present'],'value':entry['value']}]
@@ -853,13 +955,19 @@ class FrameInstall:
             except (OSError,ValueError):good=False
         return good,original
 
+    def snapshot(self,bundle):
+        return runtime_snapshot(self.e,bundle.frame['runtime_files'],{'steamvr':self.steamvr,'home':self.home,'system':Path('/')},
+            side='frame',versions=self.e.runtime_versions(self.steamvr))
+
     def inventory(self,bundle):
-        state=self.tx.state();compatible,_=self.runtime(bundle)
+        state=self.tx.state();snapshot=self.snapshot(bundle);compatible=all(item['matches'] for item in snapshot.values())
+        admitted=native_admitted('frame',snapshot)
         current=state is not None and state['bundle']==bundle.pin and state['phase']=='installed'
         if current:
             try:current=all(self.tx.current(Path(o['path']))==o['after'] for o in state['operations'])
             except (OSError,ValueError):current=False
-        return {**version_status(state,bundle.frame),'architecture':self.machine(),'runtime_compatible':compatible,
+        return {**version_status(state,bundle.frame),**activation_status(admitted,state),'runtime_snapshot':snapshot,
+                'architecture':self.machine(),'runtime_compatible':compatible,
                 'runtime_versions':self.e.runtime_versions(self.steamvr),
                 'installed':state is not None,'files_current':current,
                 'recovery_pending':(self.root/'setup-restore.json').exists() or (self.root/'lifecycle.json').exists(),
@@ -967,7 +1075,11 @@ class FrameInstall:
         e=self.e;state=state or self.camera_state(checkpoint)
         operations={op['path']:op for op in state['operations']} if state else {}
         config_op=operations.get(str(self.root/CAMERA_CONFIG));source_op=operations.get(str(self.root/CAMERA_TOOL))
-        if config_op and source_op:
+        if state and state.get('activation_mode')=='inactive' and (not config_op or config_op['after'] is None):
+            e.require(not os.path.lexists(self.root/'camera-session-lease.json'),
+                      'An unexpected camera lease was preserved; recovery is required before removal.')
+            yield None;return
+        if config_op and source_op and config_op['after'] is not None:
             def admitted(path,observed):
                 op=operations[str(path)]
                 if observed in (op['before'],op['after']):return True
@@ -1093,16 +1205,178 @@ class FrameInstall:
                         'present':entry['present'],'value':entry['value'],'installed':True}
         return e.encoded(value)
 
+    def observed_camera_library(self,bundle,snapshot):
+        provider=snapshot['openvr']
+        if provider['matches']:return None
+        self.e.require(provider['format_valid'] and 64<=provider.get('bytes',0)<=2*1024*1024,
+            'The native OpenVR library is missing or damaged.')
+        pin=bundle.frame['runtime_files']['openvr'];base={'steamvr':self.steamvr,'home':self.home,'system':Path('/')}[pin['base']]
+        return {'path':str(base/self.e.relative(pin['path'])),'bytes':provider['bytes'],'sha256':provider['sha256']}
+
+    def inactive_files(self,bundle,pair,address,port):
+        return {self.root/LIBRARY:bundle.files['frame/'+LIBRARY],
+            self.root/'libsfnp_stream_launch.so':bundle.files['frame/libsfnp_stream_launch.so'],
+            self.root/'receiver.conf':MARKER+private_ipv4(address).encode()+b'\n'+str(port).encode()+b'\n',
+            self.root/'pairings'/ (pair['pair_id']+'.json'):self.e.encoded(pair),
+            self.root/'pairings/active.json':self.e.encoded({'schema':self.e.ACTIVE,'pair_id':pair['pair_id']}),
+            **{self.root/Path(name).relative_to('frame'):bundle.files[name] for name in TOOLS|PROFILES}}
+
+    def activation_paths(self):
+        return {self.root/name for name in ('receiver.enable','launch.conf','coverage.spv',CAMERA_CONFIG)}|{
+            self.config/'vulkan/implicit_layer.d'/MANIFEST,
+            self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf',
+            self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK}
+
+    def inactive_plan(self,bundle,pair,address,port):
+        e=self.e;operations=self.legacy_operations()
+        for path,raw in self.inactive_files(bundle,pair,address,port).items():operations.append(self.tx.operation(path,raw))
+        for path in sorted(self.activation_paths()):operations.append(self.tx.operation(path,None))
+        before,_,baseline=SettingsChange(e,self.settings_path(),{'camera':{'forceSceneAlphaBlending':True}}).planned()
+        return operations,{'path':str(self.settings_path()),'baseline':baseline,'policy':SESSION_POLICY},(before,before)
+
+    def camera_cleanup_mode(self,state):
+        operations={op['path']:op for op in state['operations']}
+        config=operations.get(str(self.root/CAMERA_CONFIG))
+        if not config or config['after'] is None:return 'none'
+        if not os.path.lexists(self.root/CAMERA_CONFIG):
+            self.e.require(not os.path.lexists(self.root/'camera-session-lease.json'),
+                'The camera configuration is missing while an owned lease remains; recovery records were preserved.')
+            # Exact checkpoint staging below still validates the saved config
+            # and any legacy migration before restoring it. No API is needed
+            # merely to classify an already removed, lease-free component.
+            return 'none'
+        module=self.camera_helper();value,sha=module.load_config(self.root);pin=value['library']
+        try:
+            raw,_=self.e.read_public_reference(Path(pin['path']),pin['bytes'])
+            if len(raw)==pin['bytes'] and self.e.sha(raw)==pin['sha256']:return 'live'
+        except (OSError,ValueError):pass
+        with module.locked(self.root):pending=module.cleanup_pending(self.root,value,sha)
+        return 'offline' if pending else 'none'
+
+    def inactive_update(self,bundle,pair,address,port,current):
+        """Own the payload while removing every native activation transactionally."""
+        e=self.e;mode=self.camera_cleanup_mode(current);wanted=self.inactive_files(bundle,pair,address,port)
+        wanted.update({path:None for path in self.activation_paths()})
+        cleanup={self.root/CAMERA_CONFIG,self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK}
+        if mode=='offline':
+            for path in cleanup:
+                op=next(item for item in current['operations'] if item['path']==str(path))
+                wanted[path]=base64.b64decode(op['after']['bytes'],validate=True)
+        operations=e.parse(e.encoded(current))['operations'];by_path={op['path']:op for op in operations};changes=[]
+        for path,raw in wanted.items():
+            observed=self.tx.current(path);desired=None if raw is None else {'kind':'file','bytes':base64.b64encode(raw).decode()}
+            if str(path) not in by_path:
+                op=self.tx.operation(path,raw);operations.append(op);by_path[str(path)]=op
+            by_path[str(path)]['after']=desired
+            if observed!=desired or mode=='offline' and path in cleanup:
+                change={**by_path[str(path)],'before':observed}
+                if mode=='offline' and path in cleanup:change['inactive_cleanup']=True
+                changes.append(change)
+        pending={**current,'bundle':bundle.pin,'operations':operations,'activation_mode':'inactive','phase':'pending'}
+        pending.pop('version',None);pending.update(version_fields(bundle.frame));committed={**pending,'phase':'installed'}
+        helper=load_helper(e,'steam_link_setup_checkpoint')
+        previous=e.read(self.tx.path,64*1024*1024,private=True)
+        final=e.parse(e.encoded(committed))
+        if mode=='offline':
+            for op in final['operations']:
+                if Path(op['path']) in cleanup:op['after']=None
+        self.backup('update',changes,current['settings'],[helper.file_value(e.encoded(pending)),helper.file_value(e.encoded(committed)),helper.file_value(e.encoded(final))],target=bundle.pin)
+        e.put(self.tx.path,e.encoded(pending),previous)
+        if mode=='offline':self.camera_helper().prepare_offline_restore(self.root)
+        elif any(op['path']==str(self.root/CAMERA_CONFIG) and op['after'] is not None for op in current['operations']):
+            with self.camera_context(state=current) as camera:
+                if camera:self.camera_call(camera,'restore_owned')
+        # Opt-out precedes replacing payload; an old renderer cannot renew this
+        # source across the coordinated restart or borrow a previous shader.
+        changes.sort(key=lambda op:op['path']!=str(self.root/'receiver.enable'))
+        for op in changes:self.tx.replace(op)
+        self.system('daemon-reload')
+        return {'reason':'prepared-update','pair_id':pair['pair_id'],'activation_mode':'inactive',
+            'camera_cleanup_pending':mode=='offline','automatic_restart':False,'manual_restart_required':True,'coverage_operational':False}
+
+    def finalize_inactive(self):
+        state=self.tx.state()
+        if not state or state.get('activation_mode')!='inactive':return {'reason':'not_pending'}
+        config=next((op for op in state['operations'] if op['path']==str(self.root/CAMERA_CONFIG)),None)
+        if not config or config['after'] is None:return {'reason':'complete'}
+        finalizing=state['phase'].startswith('finalizing')
+        if not finalizing:
+            self.e.require(self.camera_helper().offline_cleanup_ready(self.root),
+                'The owned camera recovery is still pending. The Frame interface remains running; retry after checking startup.')
+        else:
+            self.e.require(not any(os.path.lexists(self.root/name) for name in ('camera-session-lease.json','camera-session.pause')),
+                'The camera recovery changed during finalization; existing files were preserved.')
+        before=self.e.read(self.tx.path,64*1024*1024,private=True)
+        cleanup={str(self.root/CAMERA_CONFIG),str(self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK)}
+        removing=state['phase'] in ('removing','finalizing-remove')
+        if not finalizing:
+            # Persist completion authority before the first deletion. Recovery
+            # admits this exact intermediate while retaining the original Undo.
+            state['phase']='finalizing-remove' if removing else 'finalizing'
+            checkpoint=self.checkpoint();value=checkpoint.value()
+            self.e.require(value is not None,'Missing camera finalization checkpoint preserved.')
+            entry=next(item for item in value['operations'] if item['path']==str(self.tx.path))
+            helper=load_helper(self.e,'steam_link_setup_checkpoint')
+            journal=helper.file_value(self.e.encoded(state))
+            replaced=False
+            for index,candidate in enumerate(entry['after']):
+                if candidate and candidate['kind']=='file' and self.e.parse(base64.b64decode(candidate['bytes'])).get('phase')=='pending':
+                    entry['after'][index]=journal;replaced=True;break
+            if not replaced and journal not in entry['after']:entry['after'].append(journal)
+            self.e.require(len(entry['after'])<=3,'Unknown camera finalization checkpoint preserved.')
+            prior=self.e.read(checkpoint.path,64*1024*1024,private=True)
+            self.e.put(checkpoint.path,self.e.encoded(value),prior)
+            self.e.put(self.tx.path,self.e.encoded(state),before)
+            before=self.e.read(self.tx.path,64*1024*1024,private=True)
+        for op in state['operations']:
+            if (removing or op['path'] in cleanup) and op['after'] is not None:
+                self.tx.replace({**op,'before':op['after'],'after':None});op['after']=None
+        self.system('daemon-reload')
+        if removing:self.e.remove_owned(self.tx.path,before)
+        else:
+            state['phase']='installed'
+            self.e.put(self.tx.path,self.e.encoded(state),before)
+        return {'reason':'complete'}
+
+    def offline_remove(self,state,operations,*,backup,target):
+        """Keep only a verified offline cleanup until the coordinated restart."""
+        e=self.e;helper=load_helper(e,'steam_link_setup_checkpoint')
+        cleanup={str(self.root/CAMERA_CONFIG),str(self.root/CAMERA_TOOL),
+            str(self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK)}
+        changes=[];staged=[]
+        for operation in operations.values():
+            observed=self.tx.current(Path(operation['path']))
+            after=observed if operation['path'] in cleanup else operation['after']
+            if operation['path']==str(self.root/CAMERA_TOOL):
+                raw=getattr(self,'_camera_source',None) or local_camera_source()
+                after={'kind':'file','bytes':base64.b64encode(raw).decode()}
+            op={key:operation[key] for key in ('path','before','mode')};op['after']=after
+            staged.append(op)
+            change={**op,'before':observed}
+            if operation['path'] in cleanup:change['inactive_cleanup']=True
+            changes.append(change)
+        pending={**state,'phase':'removing','activation_mode':'inactive','operations':staged}
+        before=e.read(self.tx.path,64*1024*1024,private=True)
+        if backup:self.backup('uninstall',changes,state['settings'],[helper.file_value(e.encoded(pending)),None],target=target)
+        e.put(self.tx.path,e.encoded(pending),before)
+        self.camera_helper().prepare_offline_restore(self.root)
+        changes.sort(key=lambda op:op['path']!=str(self.root/'receiver.enable'))
+        for op in changes:self.tx.replace(op)
+        self.system('daemon-reload')
+        return {'reason':'prepared-uninstall','activation_mode':'inactive','camera_cleanup_pending':True,
+            'automatic_restart':False,'manual_restart_required':True}
+
     def camera_dropin(self):
         # Valve already starts vrstartup in ExecStartPre. Conditions precede
         # every pre-start command, including the vendor list we must preserve.
         return ('[Service]\nExecCondition=-/usr/bin/python3 -I -B '+self.systemd(str(self.root/CAMERA_TOOL))+
                 ' startup --root '+self.systemd(str(self.root))+'\n').encode()
 
-    def plan(self,bundle,pair,address,port,*,live=False):
+    def plan(self,bundle,pair,address,port,*,live=False,runtime_consent=None):
         e=self.e;bundle.admit('Windows')
         e.require(self.machine().lower() in ('aarch64','arm64'),'The selected device is not a supported Steam Frame.')
-        good,original=self.runtime(bundle);e.require(good and original is not None,'The Frame runtime does not match this package.')
+        snapshot=self.snapshot(bundle);runtime_active=runtime_admission(e,bundle,'frame',snapshot,runtime_consent)
+        _,original=self.runtime(bundle)
         if not live:self.cold()
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
         address=private_ipv4(address)
@@ -1110,6 +1384,7 @@ class FrameInstall:
                   pair['schema']==e.PAIR and pair['role']=='receiver' and pair['protocol_major']==1 and
                   re.fullmatch('[0-9a-f]{32}',pair['pair_id']) and re.fullmatch('[0-9a-f]{64}',pair['key_hex']),
                   'Invalid private pairing data.')
+        if not runtime_active:return self.inactive_plan(bundle,pair,address,port)
         for path in (self.root,self.root/'libsfnp_stream_launch.so',self.root/LIBRARY):
             # The tiny native launcher consumes four bounded printable paths.
             e.require(path.is_absolute() and not any(ord(c)<=32 or ord(c)>126 or c in ':=' for c in str(path)),
@@ -1147,21 +1422,28 @@ class FrameInstall:
         # Keep the original key-level history, but own no persistent True.
         # The separate helper owns short-lived native settings leases instead.
         receipt={'path':str(settings),'baseline':baseline,'policy':SESSION_POLICY}
-        operations.append(self.tx.operation(self.root/CAMERA_CONFIG,self.camera_config(bundle,receipt)))
+        operations.append(self.tx.operation(self.root/CAMERA_CONFIG,self.camera_config(bundle,receipt,library=self.observed_camera_library(bundle,snapshot))))
         operations.append(self.tx.operation(self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK,self.camera_dropin()))
         return operations,receipt,(before,before)
 
-    def install(self,bundle,pair,address,port,*,backup=False,live=False):
+    def install(self,bundle,pair,address,port,*,backup=False,live=False,runtime_consent=None):
         e=self.e;current=self.tx.state()
+        bundle.admit('Windows');snapshot=self.snapshot(bundle)
+        runtime_active=runtime_admission(e,bundle,'frame',snapshot,runtime_consent)
         e.require(not blocked_version_update(bundle.frame.get('version'),current.get('version') if current else None),
                   'The installed Frame patch is newer or the package is unversioned; downgrade was not applied.')
         if current:
             e.require(current['phase']=='installed' and current['pair']==pair['pair_id'],
                       'Repair or remove the previous Frame transaction before replacing it.')
-            if current['bundle']!=bundle.pin:
+            config=next((op['after'] for op in current['operations'] if op['path']==str(self.root/CAMERA_CONFIG)),None)
+            expected=self.camera_config(bundle,current['settings'],previous=current,
+                library=self.observed_camera_library(bundle,snapshot)) if runtime_active else None
+            provider_changed=runtime_active and (not config or config.get('kind')!='file' or
+                base64.b64decode(config['bytes'],validate=True)!=expected)
+            if current['bundle']!=bundle.pin or provider_changed or current.get('activation_mode','active')!=('active' if runtime_active else 'inactive'):
                 e.require(backup and live,'Updating a different Frame package requires the confirmed recoverable workflow.')
-                return self.update(bundle,pair,address,port,current)
-            if self.inventory(bundle)['files_current']:return {'reason':'current','automatic_restart':False}
+                return self.update(bundle,pair,address,port,current,runtime_consent=runtime_consent)
+            if self.inventory(bundle)['files_current']:return {'reason':'current','activation_mode':'active' if runtime_active else 'inactive','automatic_restart':False}
             if not live:self.cold(steam=True)
             missing=[]
             for operation in current['operations']:
@@ -1175,16 +1457,18 @@ class FrameInstall:
                 self.backup('repair',missing,current['settings'],[helper.read_value(e,self.tx.path)],target=bundle.pin)
             for operation in missing:self.tx.replace(operation)
             self.system('daemon-reload')
-            return {'reason':'repaired','automatic_restart':False,'manual_restart_required':True}
-        operations,settings,(before,after)=self.plan(bundle,pair,address,port,live=live)
+            return {'reason':'repaired','activation_mode':'active' if runtime_active else 'inactive',
+                    'automatic_restart':False,'manual_restart_required':True}
+        operations,settings,(before,after)=self.plan(bundle,pair,address,port,live=live,runtime_consent=runtime_consent)
         if backup:
             helper=load_helper(e,'steam_link_setup_checkpoint')
             transaction={**version_fields(bundle.frame),'schema':RECEIPT,'home':str(self.home),'root':str(self.root),'bundle':bundle.pin,
                          'phase':'pending','operations':operations,'settings':settings,'pair':pair['pair_id']}
+            if not runtime_active:transaction['activation_mode']='inactive'
             pending=helper.file_value(e.encoded(transaction));transaction['phase']='installed'
             self.backup('install',operations,settings,[pending,helper.file_value(e.encoded(transaction)),None],target=bundle.pin)
         self.prepare_camera_target(settings)
-        self.tx.begin(bundle.pin,operations,settings,pair['pair_id'],version=bundle.frame.get('version'))
+        self.tx.begin(bundle.pin,operations,settings,pair['pair_id'],version=bundle.frame.get('version'),activation_mode='active' if runtime_active else 'inactive')
         try:
             settings_path=Path(settings['path']);mode=stat.S_IMODE(settings_path.stat().st_mode) if settings_path.exists() else 0o600
             if after!=before:
@@ -1195,14 +1479,14 @@ class FrameInstall:
             self.undo(live=live)
             raise
         return {'reason':'prepared','pair_id':pair['pair_id'],'automatic_restart':False,
-                'manual_restart_required':True,'coverage_operational':False}
+                'activation_mode':'active' if runtime_active else 'inactive','manual_restart_required':True,'coverage_operational':False}
 
-    def update(self,bundle,pair,address,port,current):
+    def update(self,bundle,pair,address,port,current,*,runtime_consent=None):
         """Replace owned payloads live while retaining the initial predecessors."""
-        e=self.e;bundle.admit('Windows');compatible,original=self.runtime(bundle)
+        e=self.e;bundle.admit('Windows');snapshot=self.snapshot(bundle)
+        runtime_active=runtime_admission(e,bundle,'frame',snapshot,runtime_consent);_,original=self.runtime(bundle)
         e.require(not blocked_version_update(bundle.frame.get('version'),current.get('version')),
                   'The installed Frame patch is newer or the package is unversioned; downgrade was not applied.')
-        e.require(compatible and original is not None,'The Frame runtime does not match this package.')
         e.require(self.machine().lower() in ('aarch64','arm64'),'The selected device is not a supported Steam Frame.')
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
         address=private_ipv4(address)
@@ -1213,6 +1497,7 @@ class FrameInstall:
             e.require(observed==op['after'] or observed is None and op['before'] is None and
                       op['after'] is not None and op['after']['kind']=='file',
                       'Changed Frame files were preserved; only owned components can be updated.')
+        if not runtime_active:return self.inactive_update(bundle,pair,address,port,current)
         # A retired receiver installed after the original bridge receipt must
         # not become an untracked second layer. Refuse before staging or writes;
         # the checked legacy removal path can revoke it independently first.
@@ -1241,11 +1526,17 @@ class FrameInstall:
         wanted={self.root/LIBRARY:bundle.files['frame/'+LIBRARY],
                 self.root/'libsfnp_stream_launch.so':bundle.files['frame/libsfnp_stream_launch.so'],
                 self.root/'receiver.conf':MARKER+address.encode()+b'\n'+str(port).encode()+b'\n',
-                self.root/CAMERA_CONFIG:self.camera_config(bundle,settings,previous=None if settings_moved else current),
+                self.root/CAMERA_CONFIG:self.camera_config(bundle,settings,previous=None if settings_moved else current,
+                    library=self.observed_camera_library(bundle,snapshot)),
                 self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK:self.camera_dropin()}
         wanted.update({self.root/name:raw for name,raw in outputs.items()})
         wanted.update({self.root/Path(name).relative_to('frame'):bundle.files[name]
                        for name in TOOLS|PROFILES})
+        if current.get('activation_mode')=='inactive':
+            wanted.update({self.root/'receiver.enable':MARKER,
+                self.root/'launch.conf':b'SFNP_STREAM_LAUNCH/1\n'+str(self.steamvr/bundle.frame['runtime_files']['vrlink']['path']).encode()+b'\n'+str(self.root/'libsfnp_stream_launch.so').encode()+b'\n'+str(self.root/LIBRARY).encode()+b'\n',
+                self.config/'vulkan/implicit_layer.d'/MANIFEST:e.encoded(layer_manifest(self.root/LIBRARY)),
+                self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf':self.dropin()})
         operations=e.parse(e.encoded(current))['operations'];by_path={op['path']:op for op in operations};changes=[]
         for path,raw in wanted.items():
             observed=self.tx.current(path);desired={'kind':'file','bytes':base64.b64encode(raw).decode()}
@@ -1265,6 +1556,7 @@ class FrameInstall:
                 observed=self.tx.current(path)
                 if observed!=op['after']:changes.append({**op,'before':observed})
         pending={**current,'bundle':bundle.pin,'operations':operations,'settings':settings,'phase':'pending'}
+        pending.pop('activation_mode',None)
         pending.pop('version',None);pending.update(version_fields(bundle.frame))
         committed={**pending,'phase':'installed'};helper=load_helper(e,'steam_link_setup_checkpoint')
         previous=e.read(self.tx.path,64*1024*1024,private=True)
@@ -1274,7 +1566,7 @@ class FrameInstall:
         # A generation/backup failure must not pause an otherwise valid session.
         if current['settings'].get('policy')==SESSION_POLICY or settings_moved:
             with self.camera_context(state=current) as camera:
-                self.camera_call(camera,'restore_owned')
+                if camera:self.camera_call(camera,'restore_owned')
         self.prepare_camera_target(settings)
         for op in changes:self.tx.replace(op)
         if current['settings'].get('policy')!=SESSION_POLICY and not settings_moved:
@@ -1328,6 +1620,10 @@ class FrameInstall:
                 self.e.require(observed in candidates,'Changed Frame uninstall files were preserved before removal.')
                 operation.update(before=observed,owned_intermediates=candidates)
         if legacy:operations.update({op['path']:op for op in legacy['operations']})
+        if state and self.camera_cleanup_mode(state)=='offline':
+            self.e.require(state['settings'].get('policy')==SESSION_POLICY and not (legacy and legacy['camera']),
+                'A legacy live camera override needs cold recovery; existing ownership records were retained.')
+            return self.offline_remove(state,operations,backup=backup,target=target)
         if backup:
             settings=state['settings'] if state else {'path':str(self.settings_path()),'policy':SESSION_POLICY}
             self.backup('uninstall',list(operations.values()),settings,[None],camera_override=legacy['camera'] if legacy else None,target=target)
@@ -1444,10 +1740,11 @@ def remote_request(engine,request,*,unit=None):
     if command in ('bridge-restore','bridge-undo','bridge-prepare'):
         provider=view.frame['runtime_files']['openvr']
         base={'steamvr':unit.steamvr,'home':unit.home,'system':Path('/')}[provider['base']]
-        path=base/e.relative(provider['path']);raw,_=e.read_public_reference(path,provider['bytes'])
-        e.require(len(raw)==provider['bytes'] and e.sha(raw)==provider['sha256'],
-                  'The native camera provider does not match the checked package.')
-        unit._camera_payload=(source,{'path':str(path),'bytes':provider['bytes'],'sha256':provider['sha256']})
+        path=base/e.relative(provider['path'])
+        try:raw,_=e.read_public_reference(path,provider['bytes'])
+        except (OSError,ValueError):raw=None
+        if raw is not None and len(raw)==provider['bytes'] and e.sha(raw)==provider['sha256']:
+            unit._camera_payload=(source,{'path':str(path),'bytes':provider['bytes'],'sha256':provider['sha256']})
     if command=='bridge-restore':
         continuation=request.get('continuation',False)
         removing=request.get('removing',False)
@@ -1467,6 +1764,7 @@ def remote_request(engine,request,*,unit=None):
         state=unit.tx.state()
         return {**result,'installed':state is not None,'installed_version':patch_version(state.get('version')) if state else None}
     if command=='bridge-checkpoint-finish':unit.checkpoint().finish(restored=request.get('restored') is True);return {'reason':'complete'}
+    if command=='bridge-finalize-inactive':return unit.finalize_inactive()
     if command=='bridge-undo':return unit.undo(backup=request.get('automated') is True,live=request.get('automated') is True,
                                                purge_legacy=request.get('automated') is True,target=view.pin)
     if command=='bridge-commit':unit.tx.commit();return {'reason':'committed','automatic_restart':False}
@@ -1483,7 +1781,7 @@ def remote_request(engine,request,*,unit=None):
         e.put(root/'stream-bridge-bundle.json',e.encoded(manifest))
         bundle=Bundle(root,e)
         if command=='bridge-prepare':return unit.install(bundle,request['pairing'],request['address'],request['port'],
-            backup=request.get('automated') is True,live=request.get('automated') is True)
+            backup=request.get('automated') is True,live=request.get('automated') is True,runtime_consent=request.get('runtime_consent'))
         raise e.SetupError('Unknown fixed Frame operation.')
 
 
@@ -1595,6 +1893,7 @@ class Automation:
         pc=local.inventory();self.pc=pc
         self.runtime=load_helper(engine,'steam_link_setup_pc').Lifecycle(engine,local,pc['steamvr'])
         self.error=engine.SetupError;self.baseline=None;self.restore_baseline=None
+        self.runtime_approval=None;self.approval_ready=False;self.inactive=False
 
     def phase(self,stage):
         self.context['stage']=stage
@@ -1610,10 +1909,35 @@ class Automation:
         with terminal_scope(self.e,self.ui,self.remote):return self.remote.call(request(self.bundle,command,**values))
 
     def begin(self):
+        if self.context.get('operation_action') in ('install','update','repair'):self.require_runtime_approval(consume=True)
         self.pc=self.local.inventory();self.runtime.snapshot()
         self.phase('startup_baseline');self.baseline=self.call('bridge-health-baseline')
         self.call('bridge-runtime-snapshot')
         self.local.apply_started=True
+
+    def runtime_view(self):
+        pc=self.local.inventory();frame=self.call('bridge-inventory')
+        return {'bundle':self.bundle.pin,'pc':self.installed.snapshot(self.bundle,pc),'frame':frame['runtime_snapshot']},pc,frame
+
+    def confirm_runtime(self):
+        observed,pc,frame=self.runtime_view()
+        if not all(item['matches'] for side in ('pc','frame') for item in observed[side].values()):
+            show=getattr(self.ui,'untested_runtime',None)
+            if show:show(pc=pc.get('runtime_versions'),frame=frame.get('runtime_versions'))
+            if not self.ui.confirm('bridge_untested_confirm'):return False
+            latest,_,_=self.runtime_view()
+            self.e.require(latest==observed,'The runtime changed during confirmation. Check both devices and confirm again.')
+        self.runtime_approval=observed;self.approval_ready=True
+        return True
+
+    def require_runtime_approval(self,*,consume=False):
+        observed,_,_=self.runtime_view()
+        if not self.approval_ready or self.runtime_approval!=observed:
+            if not self.confirm_runtime():raise KeyboardInterrupt()
+        if consume:self.approval_ready=False
+
+    def consent(self,side):
+        return {'bundle':self.bundle.pin,'snapshot':self.runtime_approval[side]}
 
     def stop_pc(self):
         self.phase('runtime_stop');self.runtime.stop()
@@ -1628,9 +1952,10 @@ class Automation:
               'key_hex':secrets.token_hex(32),'role':'producer','protocol_major':1}
         address=local_address(self.address)
         self.phase('frame_prepare')
-        self.call('bridge-prepare',pairing={**pair,'role':'receiver'},address=address,port=47631,automated=True)
+        prepared=self.call('bridge-prepare',pairing={**pair,'role':'receiver'},address=address,port=47631,automated=True,runtime_consent=self.consent('frame'))
         self.phase('pc_install')
-        self.installed.install(self.bundle,self.local.inventory(),pair,address,47631,backup=True)
+        self.installed.install(self.bundle,self.local.inventory(),pair,address,47631,backup=True,runtime_consent=self.consent('pc'))
+        self.inactive=prepared.get('activation_mode')=='inactive' or self.installed.state().get('activation_mode')=='inactive'
         self.phase('frame_commit');self.call('bridge-commit')
 
     def restart_prepared(self):
@@ -1658,8 +1983,7 @@ class Automation:
             if result['registered'] is not None:
                 pc=self.local.inventory();desired=result['registered']
                 if bool(pc.get('registered'))!=desired:
-                    tool=self.local.verify_tool(pc,self.bundle.pc['runtime_files']['vrpathreg'])
-                    self.local.register(tool,'adddriver' if desired else 'removedriver')
+                    self.installed.registration(pc,desired,self.bundle.pc['runtime_files']['vrpathreg'])
                 self.e.require(bool(self.local.inventory().get('registered'))==desired,
                                'The original PC driver registration could not be restored.')
         except Exception as error:
@@ -1673,6 +1997,7 @@ class Automation:
         inherit their Undo predecessors. Original runtime baselines survive;
         only the eventual new package receives a restart and picture question.
         """
+        if self.context.get('operation_action')!='uninstall':self.require_runtime_approval()
         if self.context.get('operation_action')=='uninstall':
             self.phase('preflight')
             self.runtime.snapshot();self.runtime.stop()
@@ -1730,10 +2055,12 @@ class Automation:
         # health and its two actual service instances are freshly running.
         if restored:self.e.require(self.pc_recovery_error is None,
                                   'The original Frame interface is running, but PC recovery is incomplete. Retry can continue recovery.')
+        if not restored:self.call('bridge-finalize-inactive')
         self.call('bridge-runtime-restored',health_ok=True)
         self.call('bridge-checkpoint-finish',restored=restored)
         self.installed.checkpoint().finish(restored=restored);self.runtime.finish()
-        if not restored:self.e.remember_frame(self.local,self.address,self.login)
+        if not restored:
+            self.e.remember_frame(self.local,self.address,self.login)
 
     def failure(self,error,*,recovery):
         record_failure(self.context['log'],self.e,self.context['stage'],error)
@@ -1870,7 +2197,9 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
             try:
                 peer=factory(candidate,args.user,interactive=interactive)
                 observed=peer.call(request(bundle,'bridge-inventory'))
-                if observed.get('architecture') in ('aarch64','arm64') and (observed.get('runtime_compatible') or observed.get('installed') or observed.get('legacy_installed')):
+                snapshot=observed.get('runtime_snapshot',{})
+                present=snapshot and all(snapshot.get(role,{}).get('format_valid') for role in ('vrlink','compositor','fragment'))
+                if observed.get('architecture') in ('aarch64','arm64') and (present or observed.get('runtime_compatible') or observed.get('installed') or observed.get('legacy_installed')):
                     selected=True
                     return peer,observed
             except (OSError,ValueError) as error:
@@ -1904,9 +2233,11 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     versions={'pc':pc_versions,'frame':frame_versions}
     downgrade=any(blocked_version_update(v['target_version'],v['installed_version']) for v in versions.values())
     if log:log.event('preflight','result',status='ok',versions=versions)
+    pc_snapshot=installed.snapshot(bundle,pc);pc_admitted=pc_snapshot['vrlink']['matches']
     report={'schema':SCHEMA,'bridge_available':available,'automatic_restart':False,'version_update_blocked':downgrade,
             'version':bundle.value.get('version'),'target_versions':{k:v['target_version'] for k,v in versions.items()},
-            'pc':{'compatible':installed.check(bundle,pc),'runtime_versions':pc.get('runtime_versions'),**pc_versions},'frame':frame}
+            'pc':{'compatible':installed.check(bundle,pc),'runtime_versions':pc.get('runtime_versions'),
+                  'runtime_snapshot':pc_snapshot,**activation_status(pc_admitted,state),**pc_versions},'frame':frame}
     if args.check or args.dry_run:
         print(json.dumps(report,sort_keys=True));return 0
     def display_inventory(current_pc,current_frame):
@@ -1914,9 +2245,11 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         observed_pc=version_status(installed.state(),bundle.pc)
         ui.inventory(pc={'steamvr':str(current_pc.get('steamvr') or ''),'platform':current_pc.get('platform'),
                          'runtime_versions':current_pc.get('runtime_versions'),
-                         'compatible':installed.check(bundle,current_pc),**observed_pc},
+                         'compatible':installed.check(bundle,current_pc),
+                         **activation_status(installed.snapshot(bundle,current_pc)['vrlink']['matches'],installed.state()),**observed_pc},
                      frame={**frame_versions} if current_frame is None else {key:current_frame.get(key) for key in
-                         ('installed','installed_version','legacy_installed','runtime_compatible','runtime_versions','enabled','recovery_pending')}|{
+                         ('installed','installed_version','legacy_installed','runtime_compatible','runtime_versions','enabled','recovery_pending',
+                          'runtime_admitted','activation_mode','admission_reason')}|{
                          'host':str(address),'target_version':bundle.frame.get('version')},
                      report={'bridge_available':available,'automatic_restart':False})
     def refresh_inventory():
@@ -1938,7 +2271,9 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
     if pending and frame is not None:actions.insert(0,'rollback')
     if frame is not None and (pending or state or frame.get('installed') or frame.get('legacy_installed')):actions.insert(0,'uninstall')
-    if available and not downgrade and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
+    frame_snapshot=frame.get('runtime_snapshot',{}) if frame is not None else {}
+    frame_present=frame_snapshot and all(frame_snapshot.get(role,{}).get('format_valid') for role in ('vrlink','compositor','fragment'))
+    if available and not downgrade and frame is not None and pc_snapshot['vrlink']['format_valid'] and (frame_present or frame.get('runtime_compatible')):
         if state is None:actions.insert(0,'install')
         elif state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
         else:actions.insert(0,'update')
@@ -1980,11 +2315,16 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         if not confirm('bridge_confirm'):return 0
     context['operation_action']=action
     ports=Automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
+    if action in ('install','update','repair') and not ports.confirm_runtime():return 0
     flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
+    def completed(result):
+        if result==0:
+            refresh_inventory()
+            if ports.inactive:ui.say('bridge_untested_installed')
+        return result
     if pending and action in ('install','update','repair','uninstall'):
         result=flow.run(action,reconcile=True)
-        if result==0:refresh_inventory()
-        return result
+        return completed(result)
     if pending or action=='rollback':
         ui.say('bridge_recovery_pending')
         if not flow.recover():return 2
@@ -1993,5 +2333,4 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         if action=='rollback':refresh_inventory()
         return 0 if action=='rollback' else -1
     result=flow.run(action)
-    if result==0:refresh_inventory()
-    return result
+    return completed(result)
