@@ -3,6 +3,26 @@
 `run.py` exercises the actual process worker cycle and its authenticated local
 image-route lifecycle. It does not start the background worker or a Steam process.
 
+`--handoff-only` exercises the exact decoded-picture handoff through two actual
+Process instances, executable-pinned Unix channels, real AU signing/inspection,
+SCM_RIGHTS image sharing and the production LeaseWriter/LeaseReader. A native
+DQ thread stays blocked while the consumer reports its exact mask storage as
+unpublished. Only the matching reverse Ready receipt releases it. Different
+binding/source/frame/capture/kernel identities and stale epochs/sequences cannot
+grant readiness. Signed `None` releases without asking for GPU mask publication.
+The fixture also covers a complete certificate/capture burst in one worker
+cycle, requeue, source revocation, transport loss, unpaired bypass, and an
+explicitly counted emergency timeout. The final GPU consumer publication is a
+test port; the actual same-queue copy/barrier/native draw is exercised separately
+by the Renderer/Pool fixture.
+
+`--handoff-control early-receipt`, `single-packet`, and `stale-receipt` each remove
+one production condition. The runner requires failure at the corresponding
+publication, burst, or exact-identity assertion. `--sanitized` adds ASan/UBSan;
+`--output` retains source hashes and logs while temporary compiler output is
+removed after the child exits. Existing native-decode handoff checks separately
+prove callback placement after the provider mutex, original-call count and errno.
+
 `artifacts.py` adds the real installed-file boundary. It compiles
 `stream_bridge_process.cpp` and calls its production `readCoverageFragmentCold`
 function with locally generated private shaders.
