@@ -294,4 +294,114 @@ class Controls(unittest.TestCase):
                 with tool.NativeCamera(self.config['library']):pass
 
 
+class InactiveSettingsControls(unittest.TestCase):
+    """The native runtime and its obsolete config are independent files."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='sfnp-inactive-camera-');self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name);self.home.chmod(0o700)
+        self.root = self.home / 'owned';self.root.mkdir(mode=0o700)
+        self.active = self.home / '.config/openvr/config/steamvr.vrsettings'
+        self.obsolete = self.home / '.local/share/Steam/config/steamvr.vrsettings'
+        self.registry = self.home / '.config/openvr/openvrpaths.vrpath'
+        for path in (self.active, self.obsolete):
+            path.parent.mkdir(parents=True, mode=0o700)
+        self.active.write_bytes(tool.encoded({'camera':{'keep':7}, 'actual':True}))
+        self.active.chmod(0o640)
+        self.obsolete.write_bytes(tool.encoded({'camera':{tool.KEY:True, 'keep':8}}))
+        self.obsolete.chmod(0o640)
+        self.config = {'schema':tool.CONFIG_SCHEMA, 'settings':str(self.obsolete),
+            'library':{'path':str(self.root / 'libopenvr_api.so'), 'bytes':249168, 'sha256':'ab'*32},
+            'legacy_migration':{'id':'11'*32, 'section_present':False,
+                'present':False, 'value':None, 'installed':True}}
+        self.write_config()
+        self.write_registry([str(self.active.parent), str(self.obsolete.parent)])
+        self.env = mock.patch.dict(os.environ, {'VR_CONFIG_PATH':'', 'VR_PATHREG_OVERRIDE':'', 'XDG_CONFIG_HOME':''})
+        self.env.start();self.addCleanup(self.env.stop)
+        self.native = mock.patch.object(tool.NativeCamera, '__enter__', side_effect=AssertionError('inactive recovery must not call any native API'))
+        self.native.start();self.addCleanup(self.native.stop)
+        self.active_before = self.active.read_bytes()
+    def write_config(self):
+        path=self.root/tool.CONFIG;path.write_bytes(tool.encoded(self.config));path.chmod(0o600)
+    def write_registry(self, paths):
+        self.registry.write_bytes(tool.encoded({'jsonid':'vrpathreg','version':1,'config':paths}))
+        self.registry.chmod(0o600)
+    def restore(self):return tool.restore_inactive(self.root,self.active,home=self.home)
+    def authority(self, before=True, desired=None):
+        return {'schema':'sfnp-camera-override-authority-v1','settings':str(self.obsolete),
+            'before':before,'desired':desired,'section_present':False}
+    def lease(self, write_intent=False):
+        _,sha=tool.load_config(self.root)
+        value={'schema':tool.LEASE_SCHEMA,'config_sha256':sha,'helper_pid':os.getpid(),
+            'helper_start_ticks':tool.own_start(os.getpid()),'override':False if write_intent else True,
+            'effective':False if write_intent else True,'section_present':True,'write_intent':write_intent,
+            'settings_signature':tool.signature(self.obsolete.stat()),'restore_signature':None}
+        path=self.root/tool.LEASE;path.write_bytes(tool.encoded(value));path.chmod(0o600)
+    def test_registry_front_is_active_even_with_historical_second_path(self):
+        self.assertEqual(tool.resolve_settings(self.home),self.active)
+        self.write_registry([str(self.obsolete.parent),str(self.active.parent)])
+        with self.assertRaisesRegex(tool.SafetyError,'active OpenVR'):self.restore()
+    def test_registry_and_config_env_priority_match_native(self):
+        with mock.patch.dict(os.environ,{'VR_CONFIG_PATH':str(self.active.parent),'VR_PATHREG_OVERRIDE':str(self.home/'missing')}):
+            self.assertEqual(tool.resolve_settings(self.home),self.active)
+        alternate=self.home/'alternate';alternate.mkdir(mode=0o700)
+        other=alternate/'paths.json';other.write_bytes(self.registry.read_bytes())
+        with mock.patch.dict(os.environ,{'VR_PATHREG_OVERRIDE':str(other),'XDG_CONFIG_HOME':str(self.home/'missing')}):
+            self.assertEqual(tool.resolve_settings(self.home),self.active)
+        with mock.patch.dict(os.environ,{'XDG_CONFIG_HOME':str(self.home/'.config')}):
+            self.assertEqual(tool.resolve_settings(self.home),self.active)
+    def test_pending_old_wrong_target_restores_without_api_or_waiting_on_active_file(self):
+        tool.migration_begin(self.root,self.config)
+        self.assertEqual(self.restore(),{'status':'restored','persisted':True})
+        self.assertIsNone(tool.settings(self.obsolete)[1])
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+        self.assertEqual(json.loads(self.obsolete.read_text()),{'camera':{'keep':8}})
+        self.assertEqual(json.loads((self.root/tool.MIGRATION).read_text())['phase'],'consumed')
+        self.assertTrue((self.root/tool.PAUSE).exists())
+        self.assertEqual(self.restore(),{'status':'unchanged','persisted':True})
+    def test_false_baseline_and_writeless_true_lease_are_restored_offline(self):
+        self.config['legacy_migration'].update(section_present=True,present=True,value=False)
+        self.write_config();self.lease()
+        self.restore()
+        self.assertIs(tool.settings(self.obsolete)[1],False)
+        self.assertFalse((self.root/tool.LEASE).exists())
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_native_write_intent_lease_cannot_be_inferred_from_inactive_file(self):
+        self.lease(write_intent=True);before=self.obsolete.read_bytes()
+        with self.assertRaisesRegex(tool.SafetyError,'live restoration'):self.restore()
+        with self.assertRaisesRegex(tool.SafetyError,'live restoration'):
+            tool.apply_owned_inactive(self.root,self.authority(),self.active,home=self.home)
+        self.assertEqual(self.obsolete.read_bytes(),before);self.assertEqual(self.active.read_bytes(),self.active_before)
+        self.assertTrue((self.root/tool.LEASE).exists())
+        self.assertFalse((self.root/tool.PAUSE).exists())
+    def test_inactive_checkpoint_delta_and_undo_preserve_actual_native_settings(self):
+        self.assertEqual(tool.apply_owned_inactive(self.root,self.authority(),self.active,home=self.home),
+            {'status':'restored','persisted':True})
+        tool.apply_owned_inactive(self.root,self.authority(None,True),self.active,home=self.home)
+        self.assertIs(tool.settings(self.obsolete)[1],True)
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+        with self.assertRaisesRegex(tool.SafetyError,'checkpoint'):
+            tool.apply_owned_inactive(self.root,self.authority(None,True),self.active,home=self.home)
+    def test_only_known_historical_target_and_current_registry_are_authority(self):
+        with self.assertRaisesRegex(tool.SafetyError,'active OpenVR'):
+            tool.restore_inactive(self.root,self.obsolete,home=self.home)
+        self.config['settings']=str(self.active);self.write_config()
+        with self.assertRaisesRegex(tool.SafetyError,'historical'):self.restore()
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_unknown_changed_pending_value_or_signature_preserves_receipts(self):
+        tool.migration_begin(self.root,self.config)
+        self.obsolete.write_bytes(tool.encoded({'camera':{tool.KEY:True},'changed':1}))
+        before=self.obsolete.read_bytes()
+        with self.assertRaisesRegex(tool.SafetyError,'pending migration'):self.restore()
+        self.assertEqual(self.obsolete.read_bytes(),before)
+        self.assertEqual(json.loads((self.root/tool.MIGRATION).read_text())['phase'],'pending')
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_invalid_missing_first_or_symlink_registry_never_falls_back_to_history(self):
+        for paths in ([],['relative'],[str(self.home/'missing'),str(self.obsolete.parent)],['x']*33):
+            self.write_registry(paths)
+            with self.assertRaises((tool.SafetyError,FileNotFoundError)):self.restore()
+        self.registry.unlink();other=self.home/'other';other.write_text('{}');self.registry.symlink_to(other)
+        with self.assertRaisesRegex(tool.SafetyError,'symlink'):self.restore()
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+
+
 if __name__=='__main__':unittest.main()

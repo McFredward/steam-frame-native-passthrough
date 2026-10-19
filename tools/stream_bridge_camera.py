@@ -184,6 +184,34 @@ def settings(path):
     return value, section.get(KEY), raw, info
 
 
+def resolve_settings(home=None):
+    """Resolve the active OpenVR config; later registry entries are history.
+
+    Match CVRPathRegistry_Public::GetPaths/GetConfigPath: VR_CONFIG_PATH has
+    priority, then the selected registry's first config path. Never guess a
+    Steam-directory fallback when the current registry cannot be verified.
+    """
+    home = absolute(str(Path.home() if home is None else home))
+    selected = os.environ.get('VR_CONFIG_PATH', '')
+    if not selected:
+        override = os.environ.get('VR_PATHREG_OVERRIDE', '')
+        xdg = os.environ.get('XDG_CONFIG_HOME', '')
+        registry = (absolute(override) if override else
+            (absolute(xdg) if xdg else home / '.config') / 'openvr/openvrpaths.vrpath')
+        raw, _ = read_file(registry, MAX_JSON);value = parsed(raw)
+        require(type(value) is dict, 'invalid OpenVR registry preserved')
+        paths = value.get('config')
+        require(type(paths) is list and 1 <= len(paths) <= 32
+            and all(type(item) is str and 1 <= len(item) <= 1024 for item in paths),
+            'bounded nonempty OpenVR config history required')
+        selected = paths[0]
+    directory = absolute(selected);no_links(directory)
+    info = directory.stat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+        and not info.st_mode & 0o022, 'ordinary owned OpenVR config directory required')
+    return directory / 'steamvr.vrsettings'
+
+
 def own_start(pid):
     try:
         raw = Path('/proc/' + str(pid) + '/stat').read_text()
@@ -465,6 +493,81 @@ def migration_finish(root, old, marker):
     require(current == marker, 'changed migration authority preserved')
     done = dict(marker);done['phase'] = 'consumed'
     replace(root / MIGRATION, encoded(done), raw)
+
+
+def inactive_config(root, active_settings, home):
+    """Prove the historical wrong target is not the current native config."""
+    root = private_root(root);config, sha = load_config(root)
+    home = absolute(str(Path.home() if home is None else home))
+    active = absolute(str(active_settings))
+    require(active == resolve_settings(home), 'active OpenVR config changed or was not verified')
+    target = absolute(config['settings'])
+    require(target == home / '.local/share/Steam/config/steamvr.vrsettings'
+        and target != active, 'only the known inactive historical camera target is permitted')
+    # Both files must exist independently; read_file rejects symlinks/hardlinks.
+    settings(active);settings(target)
+    return root, config, sha
+
+
+def inactive_lease(root, sha):
+    if not (root / LEASE).exists():return None
+    lease, raw = load_lease(root, sha)
+    # A write through the native API may have affected the real active file.
+    # Its original runtime baseline cannot be inferred from an unused file.
+    require(lease['write_intent'] is False and lease['effective'] is True,
+        'native camera write authority requires live restoration')
+    return raw
+
+
+def restore_inactive(root, active_settings, *, home=None):
+    """Quiesce a proven unused legacy config without touching the native API."""
+    root, config, sha = inactive_config(root, active_settings, home)
+    changed = False
+    with locked(root):
+        # Recheck the native registry after waiting for the session owner.
+        inactive_config(root, active_settings, home)
+        lease_raw = inactive_lease(root, sha)
+        pause(root, sha)
+        old = config.get('legacy_migration')
+        if old:
+            marker, _ = migration_state(root, old)
+            if not marker or marker['phase'] != 'consumed':
+                _, current, _, _ = settings(absolute(config['settings']))
+                require(current is old['value'] or current is True,
+                    'changed inactive camera override preserved')
+                marker = migration_begin(root, config)
+                if marker:
+                    restore_offline(config, old['value'], old['section_present'], owned_true=True)
+                    migration_finish(root, old, marker);changed = True
+        if lease_raw is not None:
+            remove_owned(root / LEASE, lease_raw);changed = True
+    return {'status':'restored' if changed else 'unchanged', 'persisted':True}
+
+
+def apply_owned_inactive(root, authority, active_settings, *, home=None):
+    """Restore an exact checkpoint delta in the unused historical file only."""
+    root, config, sha = inactive_config(root, active_settings, home)
+    require(type(authority) is dict and set(authority) == {'schema', 'settings', 'before', 'desired', 'section_present'}
+        and authority['schema'] == 'sfnp-camera-override-authority-v1'
+        and authority['settings'] == config['settings']
+        and all(authority[k] is None or type(authority[k]) is bool for k in ('before', 'desired'))
+        and type(authority['section_present']) is bool, 'unknown installer camera authority')
+    with locked(root):
+        inactive_config(root, active_settings, home)
+        lease_raw = inactive_lease(root, sha)
+        pause(root, sha)
+        path = absolute(config['settings']);value, current, raw, _ = settings(path)
+        require(current is authority['before'], 'changed inactive camera checkpoint preserved')
+        desired = authority['desired']
+        if current is not desired:
+            if desired is None:
+                value[SECTION].pop(KEY)
+                if not value[SECTION] and not authority['section_present']:value.pop(SECTION)
+            else:value.setdefault(SECTION, {})[KEY] = desired
+            replace(path, encoded(value), raw, private=False)
+            require(settings(path)[1] is desired, 'inactive camera checkpoint restoration not confirmed')
+        if lease_raw is not None:remove_owned(root / LEASE, lease_raw)
+    return {'status':'unchanged' if current is desired else 'restored', 'persisted':True}
 
 
 def startup(root, *, running=runtime_running, alive=owner_alive):
