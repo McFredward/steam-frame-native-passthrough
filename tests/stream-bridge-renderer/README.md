@@ -103,8 +103,10 @@ successful guarded queue submission, and each bounded draw-refusal category.
 Two causal controls mislabel `None` as a mask or pending storage as ready; both
 must fail. Sixty-four pending startup pipelines produce one deduplicated refusal
 message and cannot consume the later exact-shader/companion admission messages.
-Hot paths only update fixed atomic counters. The existing cold worker emits
-changed milestones or logarithmic progress, at most 48 two-line snapshots per renderer.
+Hot paths only update fixed atomic counters. The cold worker samples diagnostics
+at most every five seconds, reports healthy progress at most every thirty seconds,
+and reports new fault counters at most every five seconds. There is no lifetime
+cutoff: a long-lived Frame compositor must still report later failures.
 Queue acceptance still does not prove GPU completion or a visible headset image.
 
 The focused test also records a legal native command buffer before any correct

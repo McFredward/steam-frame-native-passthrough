@@ -57,8 +57,10 @@ replace serialized2ms sleeps. Old/malformed local protocols are refused.
 ## Diagnostics and verification limits
 
 Cold counters distinguish opaque/transparent/mixed R8 without image capture.
-Renderer progress excludes unrelated native draw count and has bounded changed
-five-second snapshots, avoiding the former startup-only diagnostic blind spot.
+Renderer progress excludes unrelated native draw count. Current diagnostics
+sample on the cold worker at most every five seconds, report healthy progress
+at most every thirty seconds, and report new faults at most every five seconds
+without a lifetime cutoff. This replaces the original finite snapshot budget.
 Native hot callbacks update fixed counters only.
 
 Native handoff lock/errno/lifecycle checks, actual authenticated local IPC and
@@ -359,3 +361,52 @@ has entered its condition-variable wait rather than manually repairing it.
 Software and sanitizer results accompany the package; a new headset run is
 still required. These fixes prove avoidable source waits, not a retrospective
 identification of the two emergency timeouts in the previous aggregate logs.
+
+## Process churn and long-running diagnostics (dev Frame 0.2.12)
+
+The October 19 23:23–23:28 paired capture uses game Build714 and **installed
+Frame patch0.2.10**, confirmed from installation records and the loaded library
+hash. It does not test the0.2.11 terminal-negative handoff repair. The PC
+`vrserver.txt` supplied with that capture ends at21:02, so it cannot establish
+the current sender's coverage overhead or explain its live resets. Current
+game/compositor and freshly collected Frame logs remain usable independently.
+
+At23:24:20.260 the native Frame receiver reports a video frame outside its
+backtrack window and requests a stream reset. The camera depth-mesh queue
+disconnects about40ms later and reconnects after roughly1.27s. Recoverable FEC
+retry lines elsewhere are not additional proven resets. Separately, the camera
+helper exits at23:25:05,23:25:32 and23:26:51 with the old generic refusal message
+and is subsequently recreated. Its old message does not distinguish process
+inspection, native settings failure, lease change or IPC closure. These are
+observed interruptions; their common cause is not established.
+
+Source inspection and a regression reproduce an unnecessary camera revocation:
+while inspecting `/proc`, an unrelated same-user process can exit between stat,
+comm and start-tick reads. Linux can return ESRCH as well as ENOENT. The helper
+previously treated ESRCH as a fatal runtime-inspection failure during its health
+poll. Only these two disappearance errors on an individual process candidate
+are now skipped. A vanished runtime is excluded, so a real compositor/server
+generation change still revokes before any native settings read. Permission,
+I/O and unknown failures remain refused; an unknown helper identity cannot
+create or adopt a camera lease. This is a source-proven defect, not proof that
+ESRCH caused the three historical generic exits.
+
+The helper now reports a bounded fixed phase, allowlisted reason and safe errno
+category. Arbitrary exception text, paths, configuration values and keys are
+not logged. The existing warning budget stays unchanged. Separately, the old
+renderer exhausted its192 lifetime snapshots before the game started, hiding
+the actual interruption interval. Its cold report policy now throttles before
+sampling GPU-pool statistics, reports healthy progress every30s and growing
+failure counters at most every5s, and remains available for a long-lived
+compositor. Rendering admission and native hot callbacks are unchanged.
+
+Production helper/pipe health cases reproduce the old failure, preserve a live
+session across unrelated churn, and reject actual runtime loss and unreadable
+state. Report-policy tests cover four hours of simulated2ms cold ticks, actual
+sampling counts, repeated faults and causal controls for the former cutoff and
+missing sampling throttle. These are software results, not an uninterrupted
+headset result. No Frame files or services were changed during log collection.
+
+This candidate changes only the Frame component to0.2.12. PC patch0.2.11 and
+installer0.2.12 remain independently versioned. It is published on **dev only**;
+main and release authorization remain unchanged pending maintainer testing.
