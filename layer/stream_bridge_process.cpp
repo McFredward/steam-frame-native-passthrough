@@ -143,8 +143,8 @@ void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
     p.sourceNotices[state][reason]|=bit;++p.sourceNoticeLines;
     constexpr const char* names[]{"disabled","waiting-native-source","waiting-local-image-route","negotiating",
         "peer-confirmed","source-proof-lost","sender-unavailable","pairing-refused","source-refused"};
-        std::fprintf(stderr,"[Steam Link Native Passthrough] receiver %s; control=%s; reason=%s; pool=%llu; admission=%llu; snapshots=%llu/%llu/%llu; capture-lost=%llu\n",
-        names[state],sb::controlStatusName(notice.control),native::runtimeReasonName(notice.reason),
+        std::fprintf(stderr,"[Steam Link Native Passthrough] receiver %s; control=%s; reason=%s; last-native-reset=%s; pool=%llu; admission=%llu; snapshots=%llu/%llu/%llu; capture-lost=%llu\n",
+        names[state],sb::controlStatusName(notice.control),native::runtimeReasonName(notice.reason),native::resetReasonName(notice.lastNativeReset),
         static_cast<unsigned long long>(notice.source.outputPoolGeneration),static_cast<unsigned long long>(notice.source.stream.generation),
         static_cast<unsigned long long>(notice.statistics.accepted),static_cast<unsigned long long>(notice.statistics.dropped),
         static_cast<unsigned long long>(notice.statistics.rejected),static_cast<unsigned long long>(notice.statistics.captureDropped));

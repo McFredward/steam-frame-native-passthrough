@@ -43,6 +43,7 @@ struct RuntimeNotice {
     stream_bridge::ControlStatus control=stream_bridge::ControlStatus::Disabled;
     RuntimeReason reason=RuntimeReason::None;
     SnapshotStats statistics{};
+    ResetReason lastNativeReset=ResetReason::None;
 };
 struct RuntimeCallbacks {
     // Synchronous worker calls. Borrowed certificate/bytes are valid only until
