@@ -149,7 +149,15 @@ void submitting(){Fixture f;warmSlots(f);check(f.upload(9),"initialized next sou
 }
 void concurrentReuse(){Fixture f;warmSlots(f);std::atomic<std::uint64_t> published{8};std::atomic<bool> start{false},done{false},invalid{false};std::atomic<unsigned> held{0};
     std::thread cold([&]{while(!start.load())std::this_thread::yield();for(std::uint64_t id=9;id<=4096;++id){if(!f.upload(id)){invalid=true;break;}f.pool.drainUploads(f.vk.queue);f.vk.signal();f.pool.reapCold();published.store(id,std::memory_order_release);}done=true;});
+    // Establish one owned claim BEFORE releasing the worker, so even a
+    // single-core scheduler proves overlapping lifetime rather than racing
+    // the main thread against completion of the whole short cold loop.
+    auto initial=f.pool.acquire(f.frame(8));if(!initial)invalid=true;else ++held;
     start=true;
+    while(!done.load(std::memory_order_acquire)&&published.load(std::memory_order_acquire)<24)std::this_thread::yield();
+    auto retained=f.pool.acquire(f.frame(8));if(!retained||retained.slot!=initial.slot||retained.generation!=initial.generation||retained.set!=initial.set)invalid=true;
+    if(retained)f.pool.releaseRecorded(retained);
+    if(initial)f.pool.releaseRecorded(initial);
     while(!done.load(std::memory_order_acquire)){const auto id=published.load(std::memory_order_acquire);auto first=f.pool.acquire(f.frame(id));if(!first)continue;
         ++held;const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);
         while(!done.load(std::memory_order_acquire)&&published.load(std::memory_order_acquire)<id+16&&std::chrono::steady_clock::now()<until)std::this_thread::yield();
