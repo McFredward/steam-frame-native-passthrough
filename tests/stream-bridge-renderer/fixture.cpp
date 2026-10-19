@@ -283,8 +283,9 @@ void idleStartup(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
   check(f.vk.khrCalls==kh+unsigned(mode==2),"idle KHR path keeps its distinct native function");
   f.vk.failOriginal=true;const auto failed=f.vk.forwarded.size();check(call()==VK_ERROR_DEVICE_LOST,"idle native queue error returned unchanged");forward(failed);f.vk.failOriginal=false;
   auto stats=f.renderer.statsCold();check(!stats.metadata&&!stats.pictures&&!stats.selected&&!stats.coreSubmits&&!stats.submits2&&!stats.guardAttempts&&!stats.opaqueSubmits,"idle startup does not enter mask dispatch or claim opaque fallback activity");
-  f.publish();const auto pending=f.vk.forwarded.size();check(call()==VK_SUCCESS,"unmatched pending mask does not modify idle native route");forward(pending);
-  stats=f.renderer.statsCold();check(stats.pending==1&&!stats.copying&&!stats.ready,"metadata without a guarded recording cannot enqueue GPU uploads on idle native submissions");
+  f.publish();const auto pending=f.vk.forwarded.size();check(call()==VK_SUCCESS,"authenticated pending mask copies without changing the original native route");
+  check(f.vk.forwarded.size()==pending+2&&f.vk.forwarded.back().infos==(mode?static_cast<const void*>(&info2):static_cast<const void*>(&info))&&f.vk.forwarded.back().count==1&&f.vk.forwarded.back().fence==f.vk.appFence,"authenticated copy precedes the unchanged native submit without a guard prefix");
+  stats=f.renderer.statsCold();check(!stats.pending&&stats.copying==1&&!stats.ready,"authenticated coverage can finish its copy before any guarded recording or camera acknowledgment");
   consumer.picture(consumer.owner,f.picture);const auto draw=f.record();check(draw.ready,"first exact pending picture can create guarded recording without a startup GPU prewarm");f.vk.appMasks[number(f.cb)]={draw.coverage};
   check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1&&f.vk.sampledMasks.back()==std::vector<std::uint8_t>(32,127),"first actual guarded submit enqueues exact copy and samples correct current coverage");
   f.connection->store(false);check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"after first coverage, disabled source must zero a reused flags0 recording rather than return to idle bypass");
@@ -293,6 +294,38 @@ void idleStartup(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
   check(f.renderer.submit2(f.vk.queue,1,&replay,f.vk.appFence,mode==2)==VK_SUCCESS&&f.vk.reads.back()==0,"tracking loss retains mandatory zeroing for previously guarded Submit2 recordings");
  }
  {Integration f(vs,ps,1,true,true,false,false,false);f.vk.ordinaryMarks[number(f.cb)]=0x7b;f.vk.blockPipeline=true;VkPipeline other=handle<VkPipeline>(0x61);std::thread cold([&]{f.renderer.graphicsCreated(VK_NULL_HANDLE,f.native.graphics,nullptr,other);});const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(!f.vk.insidePipeline.load()&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();const bool locked=f.vk.insidePipeline.load();const auto before=f.vk.forwarded.size();const auto result=f.submit(false);f.vk.blockPipeline=false;cold.join();check(locked,"idle contention control reaches actual native pipeline creation");check(result==VK_SUCCESS&&f.vk.forwarded.size()==before+1&&f.vk.forwarded.back().count==1,"idle native submit stays transparent even while actual cold pipeline preparation holds renderer mutex");}
+}
+void cameraPending(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ for(unsigned mode=0;mode<3;++mode){Integration f(vs,ps,1,true,true,false,false,false);cameraReady=false;
+  f.vk.ordinaryMarks[number(f.cb)]=0x61;
+  VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&f.cb;
+  VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=f.cb;cb.deviceMask=1;
+  VkSubmitInfo2 info2{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info2.commandBufferInfoCount=1;info2.pCommandBufferInfos=&cb;
+  const auto call=[&]{return mode?f.renderer.submit2(f.vk.queue,1,&info2,f.vk.appFence,mode==2):f.renderer.submit(f.vk.queue,1,&info,f.vk.appFence);};
+  const auto publish=[&](std::uint8_t marker){
+   ++f.picture.metadata.descriptor.sourceFrame;f.picture.metadata.lease.sequence=++leaseSequence;
+   f.picture.metadata.lease.slot=unsigned(f.picture.metadata.descriptor.sourceFrame%stream_bridge_coverage_gpu::MaximumSlots);
+   sb::CertifiedAccessUnit certificate;certificate.descriptor=f.picture.metadata.descriptor;certificate.binding=f.picture.metadata.binding;certificate.coverageEncoding=sb::CoverageEncoding::Raw;certificate.coverage.assign(32,marker);
+   consumer.coverage(consumer.owner,certificate);consumer.picture(consumer.owner,f.picture);
+  };
+  const auto idle=f.vk.forwarded.size();check(call()==VK_SUCCESS,"pre-camera no-coverage native call succeeds");
+  check(f.vk.forwarded.size()==idle+1&&f.vk.forwarded.back().infos==(mode?static_cast<const void*>(&info2):static_cast<const void*>(&info)),"no authenticated coverage adds no GPU copy work before camera acknowledgment");
+  for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSlots;++n)publish(static_cast<std::uint8_t>(n+1));
+  auto stats=f.renderer.statsCold();check(stats.pending==stream_bridge_coverage_gpu::MaximumSlots&&!stats.copying&&!stats.ready&&!stats.uploadRefused,"delayed camera acknowledgment can fill the entire finite pending coverage pool");
+  check(!f.record().ready,"camera-not-ready still forbids every masked recording");
+  const auto before=f.vk.forwarded.size(),executed=f.vk.executedCommands.size();
+  check(call()==VK_SUCCESS,"native submit succeeds while camera acknowledgment is withheld");
+  stats=f.renderer.statsCold();check(!stats.pending&&stats.copying==stream_bridge_coverage_gpu::MaximumSlots&&!stats.ready,"every authenticated pending mask drains before the first camera grant without requiring a masked recording");
+  check(f.vk.forwarded.size()==before+stream_bridge_coverage_gpu::MaximumSlots+1,"full pending pool submits only its exact copies plus the original native call");
+  const auto& native=f.vk.forwarded.back();check(native.queue==f.vk.queue&&native.count==1&&native.infos==(mode?static_cast<const void*>(&info2):static_cast<const void*>(&info))&&native.fence==f.vk.appFence&&native.sync2==bool(mode),"pre-camera drain preserves exact original native pointer/count/queue/fence/dispatch");
+  check(f.vk.executedCommands.size()==executed+stream_bridge_coverage_gpu::MaximumSlots+1&&f.vk.executedCommands.back()==f.cb&&!stats.guardAttempts&&!stats.selected,"pre-camera copies never insert zero/one guards or replace native rendering");
+  f.vk.signal();consumer.tick(consumer.owner);stats=f.renderer.statsCold();
+  check(stats.ready==stream_bridge_coverage_gpu::MaximumSlots&&!stats.pending&&!stats.copying&&!stats.quarantined,"actual copy-fence completion makes the whole pre-camera pool reusable");
+  cameraGrant=2;cameraReady=true;publish(201);
+  stats=f.renderer.statsCold();check(stats.uploadAccepted==stream_bridge_coverage_gpu::MaximumSlots+1&&!stats.uploadRefused&&stats.pending==1,"new current coverage uploads after camera grant instead of starving behind obsolete pending frames");
+  const auto draw=f.record();check(draw.ready,"new camera grant records the new exact source after a full pre-grant pool");f.vk.appMasks[number(f.cb)]={draw.coverage};
+  check(call()==VK_SUCCESS&&f.vk.reads.back()==1&&f.vk.sampledMasks.back()==std::vector<std::uint8_t>(32,201),"recovered native draw samples the new frame mask, never a stale pre-camera mask");
+ }
 }
 void descriptorIsolation(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  Integration f(vs,ps,1);const auto otherPool=handle<VkDescriptorPool>(0x86000);const auto otherSet=handle<VkDescriptorSet>(0x84000);f.allocateSet(otherSet,otherPool);
@@ -548,6 +581,7 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
 }
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
  if(argc==5&&std::strcmp(argv[4],"camera-epoch")==0)cameraEpoch(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"camera-pending")==0){cameraPending(vs,ps);idleStartup(vs,ps);cameraEpoch(vs,ps);}
  else if(argc==5&&std::strcmp(argv[4],"resource-pressure")==0){for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);}
  else if(argc==5&&std::strncmp(argv[4],"pressure-",9)==0){const auto mode=unsigned(argv[4][9]-'0');check(mode<7&&argv[4][10]=='\0',"bounded pressure case");if(mode<6)resourcePressure(vs,ps,mode);else resourceTelemetry(vs,ps);}
  else if(argc==5&&std::strcmp(argv[4],"descriptor-isolation")==0){descriptorIsolation(vs,ps);descriptorStream(vs,ps);}
@@ -558,5 +592,5 @@ int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inpu
  else if(argc==5&&std::strcmp(argv[4],"reservation-recovery")==0)reservationRecovery(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"continuous")==0)continuous(vs,ps);
  else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else {cameraEpoch(vs,ps);for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);idleStartup(vs,ps);integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);continuous(vs,ps);}
+ else {cameraEpoch(vs,ps);cameraPending(vs,ps);for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);idleStartup(vs,ps);integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);continuous(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

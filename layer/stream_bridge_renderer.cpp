@@ -63,7 +63,7 @@ struct Renderer::Impl {
     // Monotonic for this native device lifetime. Before any masked recording
     // can exist, native startup submits need no owned GPU commands at all.
     // Never clear on source loss/reset: a flags=0 CB may still retain coverage.
-    std::atomic<bool> guardedRecordingPossible{false};
+    std::atomic<bool> guardedRecordingPossible{false},uploadsPending{false};
     mutable std::mutex gate;VkDevice device{};PFN_vkGetDeviceProcAddr gdpa{};VkPhysicalDeviceMemoryProperties memory{};
     std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,coveragePrepared=false,registered=false,count1Authorized=false;
     gpu::Pool pool;journal::Journal definitions{1,{},journal::PendingCount1::RetainFacts};
@@ -254,7 +254,9 @@ struct Renderer::Impl {
             if(certificate.coverageEncoding==sb::CoverageEncoding::Rle){for(std::size_t n=1;n<certificate.coverage.size();n+=2){low=std::min(low,certificate.coverage[n]);high=std::max(high,certificate.coverage[n]);}}
             else {const auto bounds=std::minmax_element(bytes.begin(),bytes.end());low=*bounds.first;high=*bounds.second;}
             if(low==255)++p.counts.maskOpaque;else if(!high)++p.counts.maskTransparent;else ++p.counts.maskMixed;
-            if(p.pool.upload({certificate.binding,certificate.descriptor},d.codedWidth,d.codedHeight,{bytes.data(),bytes.size()}))++p.counts.uploadAccepted;
+            if(p.pool.upload({certificate.binding,certificate.descriptor},d.codedWidth,d.codedHeight,{bytes.data(),bytes.size()})){
+                ++p.counts.uploadAccepted;p.uploadsPending.store(true,std::memory_order_release);
+            }
             else ++p.counts.uploadRefused;
         }catch(...){++p.counts.maskRejected;}
     }
@@ -546,9 +548,12 @@ void Renderer::commandReset(VkCommandBuffer value) noexcept{
 void Renderer::trackingLost() noexcept{impl_->lost.store(true,std::memory_order_release);}
 VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* infos,VkFence fence) noexcept{
     auto&p=*impl_;if(!p.QueueSubmit)return VK_ERROR_INITIALIZATION_FAILED;
+    // Authenticated coverage may arrive before the independent camera A ack.
+    // Submit its owned copies without requiring a prior masked recording, so
+    // finite Pending slots can complete and be reused while the camera warms.
+    if(p.coveragePrepared&&queue==p.queue&&p.uploadsPending.exchange(false,std::memory_order_acq_rel))p.pool.drainUploads(queue);
     if(!p.coveragePrepared||queue!=p.queue||!p.guardedRecordingPossible.load(std::memory_order_acquire))return p.QueueSubmit(queue,count,infos,fence);
     ++p.counts.coreSubmits;
-    p.pool.drainUploads(queue);
     // Same native queue owner, bounded stack-only scratch, original semaphores,
     // pNext and fence retained. A leading immutable zero command makes even a
     // reused flags=0 CB fail closed. Only current exact leases get a one guard.
@@ -614,9 +619,9 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
 }
 VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2* infos,VkFence fence,bool khr) noexcept{
     auto&p=*impl_;const auto forward=khr?p.QueueSubmit2KHR:p.QueueSubmit2;if(!forward)return VK_ERROR_EXTENSION_NOT_PRESENT;
+    if(p.coveragePrepared&&queue==p.queue&&p.uploadsPending.exchange(false,std::memory_order_acq_rel))p.pool.drainUploads(queue);
     if(!p.coveragePrepared||queue!=p.queue||!p.guardedRecordingPossible.load(std::memory_order_acquire))return forward(queue,count,infos,fence);
     ++p.counts.submits2;
-    p.pool.drainUploads(queue);
     std::array<VkSubmitInfo2,65> submits{};std::array<VkCommandBufferSubmitInfo,1024> commands{};
     const VkCommandBufferSubmitInfo zero{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,p.zero,1};
     submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submits[0].commandBufferInfoCount=1;submits[0].pCommandBufferInfos=&zero;
