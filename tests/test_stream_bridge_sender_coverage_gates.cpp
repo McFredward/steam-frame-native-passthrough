@@ -27,6 +27,12 @@ void run(){
     counters.constantBytes(128);counters.source(2160,2160,28);counters.output(1152,4608,103);
     snapshot=counters.snapshot();check(snapshot.lastConstantBytes==128&&snapshot.lastSourceWidth==2160&&snapshot.lastSourceHeight==2160&&snapshot.lastSourceFormat==28
         &&snapshot.lastOutputWidth==1152&&snapshot.lastOutputHeight==4608&&snapshot.lastOutputFormat==103,"cold description copies only the already observed public D3D metadata");
+    counters.readback(0,125,82,19);counters.readback(0x887a000au,170,104,6);counters.readback(0x80070057u,90,35,2);
+    snapshot=counters.snapshot();check(snapshot.readbackReady==1&&snapshot.readbackBusy==1&&snapshot.readbackErrors==1,
+        "GPU pending is distinct from successful readback and API/device failures");
+    check(snapshot.lastReadbackResult==0x80070057u&&snapshot.lastCopyAgeUs==90&&snapshot.maxCopyAgeUs==170
+        &&snapshot.lastSubmissionAgeUs==35&&snapshot.lastReadbackUs==2&&snapshot.maxReadbackUs==19,
+        "cold readback status retains native HRESULT and bounded stage lifetime measurements");
     std::atomic<std::uint64_t> full{std::numeric_limits<std::uint64_t>::max()-1};CoverageGateCounters::increment(full);
     check(full.load()==std::numeric_limits<std::uint64_t>::max(),"diagnostic counter can reach its bound without wrapping");CoverageGateCounters::increment(full);
     check(full.load()==std::numeric_limits<std::uint64_t>::max(),"bounded counter never wraps at saturation");

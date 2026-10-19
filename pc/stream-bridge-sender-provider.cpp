@@ -280,6 +280,11 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[2])),static_cast<unsigned long long>(stats.refusals[top[2]]),
                 stats.lastConstantBytes,stats.lastSourceWidth,stats.lastSourceHeight,stats.lastSourceFormat,stats.lastOutputWidth,stats.lastOutputHeight,stats.lastOutputFormat,
                 static_cast<unsigned long long>(stats.nativeMaps),static_cast<unsigned long long>(stats.inventoryRefreshes));report(text);
+            std::snprintf(text,sizeof text,
+                "coverage readback: ready=%llu, busy=%llu, errors=%llu, last-hr=0x%08x; copy-age-us=%llu/max%llu, submit-age-us=%llu, read-us=%llu/max%llu",
+                static_cast<unsigned long long>(stats.readbackReady),static_cast<unsigned long long>(stats.readbackBusy),static_cast<unsigned long long>(stats.readbackErrors),stats.lastReadbackResult,
+                static_cast<unsigned long long>(stats.lastCopyAgeUs),static_cast<unsigned long long>(stats.maxCopyAgeUs),static_cast<unsigned long long>(stats.lastSubmissionAgeUs),
+                static_cast<unsigned long long>(stats.lastReadbackUs),static_cast<unsigned long long>(stats.maxReadbackUs));report(text);
             // Public COM table metadata only; never query a new immediate
             // context here, since even a diagnostic getter may change dispatch.
             std::snprintf(text,sizeof text,

@@ -32,6 +32,28 @@ bool submittedSharedResource(ID3D11Resource* native,ID3D11Texture2D* held,
     return textureShape(native,shape)&&textureShape(held,shape)
         &&allocationHandle(native,submitted.handle)&&allocationHandle(held,submitted.handle);
 }
+void copyCoverageBeforeNative(ID3D11DeviceContext* context,ID3D11Resource* nativeDestination,
+    ID3D11Resource* nativeSource,ID3D11Resource* readback,ID3D11Resource* coverage,NativeCopy nativeCopy)noexcept{
+    if(readback&&coverage)nativeCopy(context,readback,coverage);
+    nativeCopy(context,nativeDestination,nativeSource);
+}
+HRESULT readCoverageNonblocking(ID3D11DeviceContext* context,ID3D11Resource* readback,
+    std::uint32_t width,std::uint32_t height,std::uint8_t* destination,std::size_t capacity,
+    NativeMap nativeMap,NativeUnmap nativeUnmap)noexcept{
+    if(!context||!readback||!width||!height||!destination||!nativeMap||!nativeUnmap||
+        std::size_t(width)>capacity/height)return E_INVALIDARG;
+    D3D11_MAPPED_SUBRESOURCE data{};
+    const auto result=nativeMap(context,readback,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&data);
+    if(FAILED(result))return result;
+    const bool valid=data.pData&&data.RowPitch>=width;
+    if(valid)for(std::uint32_t y=0;y<height;++y){
+        const auto* row=static_cast<const std::uint8_t*>(data.pData)+std::size_t(y)*data.RowPitch;
+        auto* out=destination+std::size_t(y)*width;
+        for(std::uint32_t x=0;x<width;++x)out[x]=std::uint8_t(255-row[x]);
+    }
+    nativeUnmap(context,readback,0);
+    return valid?S_OK:E_INVALIDARG;
+}
 bool createTransmittanceBlend(ID3D11Device* device,ID3D11BlendState** output)noexcept{
     if(!device||!output)return false;
     D3D11_BLEND_DESC desc{};auto& rt=desc.RenderTarget[0];rt.BlendEnable=TRUE;

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <chrono>
 
 namespace stream_bridge::sender {
 namespace {
@@ -16,6 +17,8 @@ using Map=HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,
 using Unmap=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT);
 using Copy=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,ID3D11Resource*);
 constexpr unsigned StageCount=4,MaxOpened=64*3;
+std::uint64_t clockMicros()noexcept{return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+std::uint64_t elapsedMicros(std::uint64_t start,std::uint64_t end)noexcept{return start&&end>=start?end-start:0;}
 struct MultithreadScope{ID3D11Multithread* value;explicit MultithreadScope(ID3D11Multithread* p):value(p){if(value)value->Enter();}~MultithreadScope(){if(value)value->Leave();}};
 }
 struct CoverageContextFacade::Impl {
@@ -127,7 +130,7 @@ struct SenderCoverage::Impl {
     std::array<Opened,MaxOpened> opened{};std::uint64_t inventoryEpoch=0;
     struct Constant {ID3D11Resource* resource=nullptr;void* pointer=nullptr;std::array<std::uint8_t,128> bytes{};std::uint64_t present=0;bool valid=false;};
     std::array<Constant,4> constants{};
-    struct Stage {std::uint64_t contract=0;ID3D11Texture2D* texture=nullptr;IUnknown* input=nullptr;std::uint64_t present=0,submission=0,encoderGeneration=0;void* encoder=nullptr;std::uint32_t pid=0;};
+    struct Stage {std::uint64_t contract=0,copyMicros=0,submissionMicros=0;ID3D11Texture2D* texture=nullptr;IUnknown* input=nullptr;std::uint64_t present=0,submission=0,encoderGeneration=0;void* encoder=nullptr;std::uint32_t pid=0;};
     std::array<Stage,StageCount> stages{};
     static std::atomic<Impl*> instance;
     Impl(DirectModeBoundary& d,NvencBoundary& b,ControlRuntime& c):direct(d),boundary(b),control(c){}
@@ -145,7 +148,7 @@ struct SenderCoverage::Impl {
         // The exact CopyResource receipt is consumed once, before Encode. It is
         // subsequently addressed only by accepted NVENC submission identity.
         Stage* found=nullptr;for(auto& slot:s.stages)if(slot.present&&!slot.submission&&same(slot.input,static_cast<IUnknown*>(e.resource))){if(found)return;found=&slot;}
-        if(found){found->submission=e.submission;found->encoderGeneration=e.encoderGeneration;found->encoder=e.encoder;s.gates.signal(CoverageSignal::MatchedInputs);}
+        if(found){found->submissionMicros=clockMicros();found->submission=e.submission;found->encoderGeneration=e.encoderGeneration;found->encoder=e.encoder;s.gates.signal(CoverageSignal::MatchedInputs);}
         else s.gates.refuse(CoverageGate::InputReceipt);
     }
     static void inputRetire(const NvencOutputEvidence& e,void* opaque){
@@ -153,50 +156,52 @@ struct SenderCoverage::Impl {
         for(auto& slot:s.stages)if(slot.submission==e.submission&&slot.encoderGeneration==e.encoderGeneration&&slot.encoder==e.encoder){release(slot.input);slot.present=slot.submission=slot.encoderGeneration=0;slot.encoder=nullptr;}
     }
     static bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8_t>& output,void* opaque){
-        auto& s=*static_cast<Impl*>(opaque);if(!e.exactInput||!e.submission||e.width>8192||e.height>8192)return false;
+        auto& s=*static_cast<Impl*>(opaque);if(!e.exactInput||!e.submission||e.width>8192||e.height>8192)return s.gates.refuse(CoverageGate::InputReceipt);
         FrameDescriptor descriptor{e.submission,e.encoderGeneration,static_cast<std::uint16_t>(e.width),static_cast<std::uint16_t>(e.height)};
         // Reconfigure can Encode/Lock before the cold worker replaces control.
         // The old paired control binding is not new-generation mask permission.
         // Certificate-only discovery must remain possible to bootstrap that
         // fresh handshake, without reading/compressing any coverage staging.
-        if(!e.coverageSessionAuthorized)return s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);
-        std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||!s.enabled)return false;
-        std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;std::uint64_t maskContract=0;
+        if(!e.coverageSessionAuthorized){s.gates.refuse(CoverageGate::CoverageSession);const bool certified=s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;}
+        std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock)return s.gates.refuse(CoverageGate::Lock);if(!s.enabled)return s.gates.refuse(CoverageGate::Prepared);
+        std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;std::uint64_t maskContract=0;bool matched=false;
         for(auto& slot:s.stages)if(slot.submission==e.submission&&slot.encoderGeneration==e.encoderGeneration&&slot.encoder==e.encoder&&slot.texture&&slot.present){
-            D3D11_MAPPED_SUBRESOURCE data{};
+            matched=true;
             // Format permission comes from the live kernel-validated app.
             // Fully opaque eyes are legitimate; sparse pixel samples cannot
             // establish the semantics of an entire submitted texture.
             if(!s.sourceContract.current(slot.contract,slot.pid)){
-                s.gates.refuse(CoverageGate::SourceContract);break;
+                s.gates.refuse(CoverageGate::SourceRevoked);break;
             }
             pixels.resize(std::size_t(s.width)*s.height);
-            const auto result=forwardMap(s.context,slot.texture,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&data);
-            if(SUCCEEDED(result)){
-                bool valid=data.pData&&data.RowPitch>=s.width;
-                if(valid)for(unsigned y=0;y<s.height;++y){auto* row=static_cast<const std::uint8_t*>(data.pData)+std::size_t(y)*data.RowPitch;auto* out=pixels.data()+std::size_t(y)*s.width;for(unsigned x=0;x<s.width;++x)out[x]=std::uint8_t(255-row[x]);}
-                forwardUnmap(s.context,slot.texture,0);
-                if(valid){maskPid=slot.pid;maskContract=slot.contract;}else pixels.clear();
-            }else{s.gates.refuse(CoverageGate::Readback);pixels.clear();}
+            const auto started=clockMicros();
+            const auto result=readCoverageNonblocking(s.context,slot.texture,s.width,s.height,pixels.data(),pixels.size(),forwardMap,forwardUnmap);
+            s.gates.readback(static_cast<std::uint32_t>(result),elapsedMicros(slot.copyMicros,started),
+                elapsedMicros(slot.submissionMicros,started),elapsedMicros(started,clockMicros()));
+            if(SUCCEEDED(result)){maskPid=slot.pid;maskContract=slot.contract;}
+            else{s.gates.refuse(CoverageGate::Readback);pixels.clear();}
             break; // Never block or substitute a later staging frame.
         }
+        if(!matched)s.gates.refuse(CoverageGate::StageReceipt);
         // Do not hold the GPU metadata mutex while scanning/compressing the
         // CPU copy or authenticating it. Native Draw must never wait for RLE.
         lock.unlock();
         if(!pixels.empty()){
             std::vector<std::uint8_t> rle;
-            if(encodeCoverageRle({pixels.data(),pixels.size()},rle)&&s.sourceContract.current(maskContract,maskPid)
-                &&s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::Rle,{rle.data(),rle.size()},output)){
+            if(!encodeCoverageRle({pixels.data(),pixels.size()},rle))s.gates.refuse(CoverageGate::RleEncode);
+            else if(!s.sourceContract.current(maskContract,maskPid))s.gates.refuse(CoverageGate::SourceRevoked);
+            else if(!s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::Rle,{rle.data(),rle.size()},output))s.gates.refuse(CoverageGate::FrameCertificate);
+            else{
                 // Local EOF can revoke the format during compression or MAC.
                 // Only publish the still-current capture; no stale mask leaves
                 // this callback even when its original GPU readback was valid.
-                if(!s.sourceContract.current(maskContract,maskPid)){output.clear();s.gates.refuse(CoverageGate::SourceContract);return false;}
+                if(!s.sourceContract.current(maskContract,maskPid)){output.clear();s.gates.refuse(CoverageGate::SourceRevoked);return false;}
                 s.lastPid=maskPid;s.state=7;s.gates.signal(CoverageSignal::CertifiedMasks);return true;
             }
         }
         // Discovery/coded-boundary certificate without a mask is useful and
         // explicitly does NOT permit transparent rendering on the receiver.
-        return s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);
+        const bool certified=s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;
     }
     static void STDMETHODCALLTYPE forwardDraw(ID3D11DeviceContext* context,UINT count,UINT start){
         auto& s=*instance.load();bits<NativeDraw>(s.facade.originalFunction(13))(context,count,start);
@@ -333,17 +338,26 @@ struct SenderCoverage::Impl {
         forwardUnmap(ctx,resource,sub);
     }
     static void STDMETHODCALLTYPE copy(ID3D11DeviceContext* ctx,ID3D11Resource* destination,ID3D11Resource* source){
-        auto& s=*instance.load();forwardCopy(ctx,destination,source);const auto* frame=DirectModeBoundary::currentFrame();
+        auto& s=*instance.load();const auto* frame=DirectModeBoundary::currentFrame();
         const bool caller=s.site(__builtin_return_address(0),0xa217fb);if(caller)s.gates.signal(CoverageSignal::NativeCopies);
-        if(ctx!=s.context||!s.enabled||!caller||!frame){if(caller)s.gates.refuse(ctx!=s.context?CoverageGate::Context:CoverageGate::DirectFrame);return;}
-        std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.gates.refuse(CoverageGate::Lock);return;}
-        if(!s.prepared||s.invalid||frame->presentSerial!=s.activeSerial||frame->presentSerial==s.failedSerial||frame->registryEpoch!=s.activeEpoch||!same(source,s.nativeOutput)||s.drawBits!=((1u<<(2*frame->layerCount))-1)){s.gates.refuse(CoverageGate::CopyPair);return;}
+        // Every refusal still forwards the native operation exactly once.
+        // No source, destination, format or resource content is rewritten.
+        if(ctx!=s.context||!s.enabled||!caller||!frame){if(caller)s.gates.refuse(ctx!=s.context?CoverageGate::Context:CoverageGate::DirectFrame);forwardCopy(ctx,destination,source);return;}
+        std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.gates.refuse(CoverageGate::Lock);forwardCopy(ctx,destination,source);return;}
+        if(!s.prepared||s.invalid||frame->presentSerial!=s.activeSerial||frame->presentSerial==s.failedSerial||frame->registryEpoch!=s.activeEpoch||!same(source,s.nativeOutput)||s.drawBits!=((1u<<(2*frame->layerCount))-1)){s.gates.refuse(CoverageGate::CopyPair);forwardCopy(ctx,destination,source);return;}
         // Frozen slots cannot be evicted by a resource pointer reused later.
         Stage* free=nullptr;for(auto& slot:s.stages){if(!slot.submission&&same(slot.input,destination)){release(slot.input);slot.present=0;}if(!slot.present&&!free)free=&slot;}
-        if(!free){s.gates.refuse(CoverageGate::StageFull);return;}
-        if(!s.sourceContract.current(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);return;}
-        MultithreadScope protect(s.multithread);forwardCopy(ctx,free->texture,s.target);
-        free->contract=s.activeContract;free->input=identity(destination);if(!free->input)return;free->present=frame->presentSerial;free->pid=s.activePid;s.gates.signal(CoverageSignal::CapturedCopies);
+        if(!free){s.gates.refuse(CoverageGate::StageFull);forwardCopy(ctx,destination,source);return;}
+        if(!s.sourceContract.current(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);forwardCopy(ctx,destination,source);return;}
+        auto* input=identity(destination);if(!input){s.gates.refuse(CoverageGate::InputReceipt);forwardCopy(ctx,destination,source);return;}
+        MultithreadScope protect(s.multithread);const auto captured=clockMicros();
+        // Queue our readback BEFORE the exact native encoder-input handoff.
+        // Previously it was later GPU work, so a completed native bitstream
+        // did not imply that this independent copy had even been submitted.
+        // Map success remains mandatory: ordering is not a guessed GPU fence.
+        copyCoverageBeforeNative(ctx,destination,source,free->texture,s.target,forwardCopy);
+        free->contract=s.activeContract;free->copyMicros=captured;free->submissionMicros=0;free->input=input;
+        free->present=frame->presentSerial;free->pid=s.activePid;s.gates.signal(CoverageSignal::CapturedCopies);
     }
 };
 std::atomic<SenderCoverage::Impl*> SenderCoverage::Impl::instance{nullptr};

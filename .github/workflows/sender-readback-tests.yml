@@ -1,0 +1,57 @@
+name: Native coverage readback ordering
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'tests/test_stream_bridge_sender_readback_gpu.cpp'
+      - '.github/workflows/sender-readback-tests.yml'
+  pull_request:
+    paths:
+      - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'tests/test_stream_bridge_sender_readback_gpu.cpp'
+      - '.github/workflows/sender-readback-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gpu-readback:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production nonblocking GPU readback and old-order causal control
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          mkdir build
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I. tests/test_stream_bridge_sender_readback_gpu.cpp pc/stream-bridge-sender-provider-coverage-render.cpp /Fe:build\readback.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
+          if errorlevel 1 exit /b 1
+          python -c "from pathlib import Path; p=Path('pc/stream-bridge-sender-provider-coverage-render.cpp'); s=p.read_text(); a='    if(readback'+chr(38)+chr(38)+'coverage)nativeCopy(context,readback,coverage);\n    nativeCopy(context,nativeDestination,nativeSource);'; b='    nativeCopy(context,nativeDestination,nativeSource);\n    if(readback'+chr(38)+chr(38)+'coverage)nativeCopy(context,readback,coverage);'; assert s.count(a)==1; Path('build/old-order.cpp').write_text(s.replace(a,b))"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I. /Ipc tests/test_stream_bridge_sender_readback_gpu.cpp build/old-order.cpp /Fe:build\old-order.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
+          if errorlevel 1 exit /b 1
+      - name: Verify current-frame nonblocking availability with real full-size GPU resources
+        shell: cmd
+        run: |
+          build\readback.exe >build\readback.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\readback.log
+          exit /b %SFNP_RESULT%
+      - name: Require old colour-first order to expose the actual GPU readiness gap
+        shell: cmd
+        run: |
+          build\old-order.exe >build\old-order.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\old-order.log
+          if "%SFNP_RESULT%"=="0" exit /b 1
+          findstr /c:"production-Map-hr=0x887a000a" build\old-order.log >nul
+          if errorlevel 1 exit /b 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-size-native-readback-evidence
+          path: build/*.log
