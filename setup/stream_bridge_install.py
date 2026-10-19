@@ -1022,7 +1022,7 @@ class ReadOnlyView:
 def remote_request(engine,request,*,unit=None):
     e=engine;unit=unit or FrameInstall(e)
     command=request['command']
-    if command in ('bridge-inventory','bridge-health-baseline','bridge-health'):
+    if command in ('bridge-inventory','bridge-health-baseline','bridge-health','bridge-runtime-restart'):
         view=ReadOnlyView(e,request['manifest'])
         if command=='bridge-inventory':return unit.inventory(view)
         tool=request.get('health_source');name='frame/tools/compositor_startup_health.py';pin=view.value['files'][name]
@@ -1030,11 +1030,13 @@ def remote_request(engine,request,*,unit=None):
         source=base64.b64decode(tool,validate=True)
         e.require(len(source)==pin['bytes'] and e.sha(source)==pin['sha256'],'The startup checker changed.')
         observer=StartupHealth(load_module(source,'sfnp_install_health'),unit.home)
-        return observer.baseline() if command=='bridge-health-baseline' else observer.check(request['baseline'])
+        if command=='bridge-health-baseline':return observer.baseline()
+        if command=='bridge-health':return observer.check(request['baseline'])
     if command in ('bridge-runtime-snapshot','bridge-runtime-restart','bridge-runtime-restored'):
         lifecycle=load_helper(e,'steam_link_setup_frame').FrameLifecycle(e,unit.root)
         if command=='bridge-runtime-snapshot':return lifecycle.snapshot()
-        if command=='bridge-runtime-restart':return lifecycle.restart(restoring=request.get('restoring') is True)
+        if command=='bridge-runtime-restart':return lifecycle.restart(restoring=request.get('restoring') is True,
+            health_receipt=observer.baseline())
         return lifecycle.restored(health_ok=request.get('health_ok') is True)
     if command=='bridge-restore':
         result=unit.checkpoint().restore();unit.system('daemon-reload');return result
@@ -1144,7 +1146,7 @@ def request(bundle,command,**values):
     if command=='bridge-prepare':
         result['files']={name:{**bundle.value['files'][name],
             'data':base64.b64encode(raw).decode()} for name,raw in bundle.files.items()}
-    if command in ('bridge-health-baseline','bridge-health'):
+    if command in ('bridge-health-baseline','bridge-health','bridge-runtime-restart'):
         result['health_source']=base64.b64encode(bundle.files['frame/tools/compositor_startup_health.py']).decode()
     return result
 
@@ -1206,7 +1208,8 @@ class Automation:
         # The maintainer wants the PC runtime left closed after Apply. Steam
         # Link/game launch owns its later startup. Only rollback restores the
         # PC's original on/off state through runtime.restore().
-        self.phase('runtime_start');self.call('bridge-runtime-restart')
+        self.phase('runtime_start');result=self.call('bridge-runtime-restart')
+        if type(result.get('health_receipt'))is dict:self.baseline=result['health_receipt']
 
     def prepared_health(self):
         self.phase('startup_health');result=self.call('bridge-health',baseline=self.baseline)
@@ -1234,8 +1237,12 @@ class Automation:
             record_failure(self.context['log'],self.e,'rollback',error)
 
     def restart_original(self):
-        self.phase('runtime_start');self.restore_baseline=self.call('bridge-health-baseline')
-        self.call('bridge-runtime-restart',restoring=True)
+        self.phase('runtime_start')
+        if self.restore_baseline is None:self.restore_baseline=self.call('bridge-health-baseline')
+        result=self.call('bridge-runtime-restart',restoring=True)
+        # The durable activation owns the pre-restart observation. Reusing it
+        # after a lost reply/new RPC must not wait for another fresh invocation.
+        if type(result.get('health_receipt'))is dict:self.restore_baseline=result['health_receipt']
         if self.pc_recovery_error is None:
             try:self.runtime.restore()
             except Exception as error:
