@@ -12,6 +12,7 @@ on:
       - 'tools/package_setup_inspection.py'
       - 'tools/package_setup_manager.py'
       - 'tools/native_passthrough_setup.py'
+      - 'tests/test_native_passthrough_setup.py'
       - 'tools/package_setup_dependencies.py'
       - 'tools/package_setup_textual.py'
       - 'packaging/setup-*.json'
@@ -47,6 +48,7 @@ on:
       - 'tools/package_setup_inspection.py'
       - 'tools/package_setup_manager.py'
       - 'tools/native_passthrough_setup.py'
+      - 'tests/test_native_passthrough_setup.py'
       - 'tools/package_setup_dependencies.py'
       - 'tools/package_setup_textual.py'
       - 'packaging/setup-*.json'
@@ -113,6 +115,7 @@ jobs:
       - name: Actual wizard, temporary remote agent, and bootstrap fixtures
         run: |
           bash -n get.sh get-preview.sh setup/patch-steam-link.sh
+          python -B tests/test_native_passthrough_setup.py
           python -B tests/test_steam_link_setup.py
           python -B tests/test_stream_bridge_install.py
           python -B tests/test_setup_session.py
