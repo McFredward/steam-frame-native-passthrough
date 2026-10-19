@@ -18,7 +18,9 @@ struct RuntimeFailureSnapshot {
 // DirectMode callbacks. A codec/source change revokes the old channel first.
 class SenderRuntime {
 public:
-    explicit SenderRuntime(NvencBoundary& boundary):boundary_(boundary){}
+    using Clock=std::uint64_t(*)(void*);
+    explicit SenderRuntime(NvencBoundary& boundary,Clock clock=nullptr,void* context=nullptr)
+        :boundary_(boundary),clock_(clock),clockContext_(context){}
     void configure(const ControlRequest&); // Cold owner, before starting worker.
     void tick(); // Existing provider worker; nonblocking, no render callbacks.
     void stop();
@@ -33,7 +35,11 @@ private:
     EncoderState encoder_{};RuntimeState state_=RuntimeState::Off;
     RuntimeFailureSnapshot failure_{};
     void fail(RuntimeFailure,Status=Status::Ok,bool hasProtocolStatus=false);
-    bool attempted_=false,probeRequested_=false;std::uint64_t nextProbe_=0;
+    bool attempted_=false,probeRequested_=false,discoveryPending_=false;std::uint64_t nextProbe_=0;
+    Clock clock_=nullptr;void* clockContext_=nullptr;
+    std::uint64_t retryAt_=0;std::uint32_t retryDelay_=250;bool retryTransport_=false;
+    std::uint64_t now()const;
+    void scheduleTransportRetry();
 };
 const char* runtimeStateName(RuntimeState)noexcept;
 const char* runtimeFailureName(RuntimeFailure)noexcept;

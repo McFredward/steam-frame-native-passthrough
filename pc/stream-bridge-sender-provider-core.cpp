@@ -319,12 +319,18 @@ NVENCSTATUS NVENCAPI NvencBoundary::destroy(void* encoder){
     }
     return result;
 }
-bool NvencBoundary::requestDiscovery(void* encoder,const LocalConfig& config,const VerifiedChannel& channel,PayloadSealer sealer){
+DiscoveryAdmission NvencBoundary::tryRequestDiscovery(void* encoder,const LocalConfig& config,const VerifiedChannel& channel,PayloadSealer sealer){
     std::lock_guard<std::mutex> guard(mutex_);auto s=find(encoder);
-    if(!enabled_||!s||s->output||!s->initialized||!s->hevc)return false;
+    if(!enabled_||!s||!s->initialized||!s->hevc)return DiscoveryAdmission::Refused;
+    // LockBitstream output is borrowed until native Unlock. Classify this under
+    // the same mutex as discovery admission, avoiding a liveLeases() TOCTOU.
+    if(s->output)return DiscoveryAdmission::Busy;
     const bool okay=s->adapter.request(config,channel,source(*s),sealer)==SenderStatus::WaitingPeer;
-    if(okay)s->channel=channel;
-    return okay;
+    if(okay){s->channel=channel;s->probeQueued=false;s->probeSequence=0;s->probeToken={};}
+    return okay?DiscoveryAdmission::Ready:DiscoveryAdmission::Refused;
+}
+bool NvencBoundary::requestDiscovery(void* encoder,const LocalConfig& config,const VerifiedChannel& channel,PayloadSealer sealer){
+    return tryRequestDiscovery(encoder,config,channel,sealer)==DiscoveryAdmission::Ready;
 }
 Status NvencBoundary::receiveControl(void* encoder,Bytes payload,const VerifiedChannel& channel){
     std::lock_guard<std::mutex> guard(mutex_);auto s=find(encoder);
@@ -337,7 +343,7 @@ void NvencBoundary::setInputObserver(InputObserver value){std::lock_guard<std::m
 void NvencBoundary::setOutputAugmenter(OutputAugmenter value){std::lock_guard<std::mutex> guard(mutex_);augmenter_=value;}
 ReconfigureStats NvencBoundary::reconfigureStats()const{std::lock_guard<std::mutex> guard(mutex_);return reconfigureStats_;}
 std::array<EncoderState,4> NvencBoundary::encoderStates()const{std::lock_guard<std::mutex> guard(mutex_);std::array<EncoderState,4> result{};for(unsigned i=0;i<sessions_.size();++i)result[i]={sessions_[i].encoder,sessions_[i].generation,sessions_[i].initialized&&sessions_[i].hevc,sessions_[i].adapter.mutualConfirmed(),sessions_[i].adapter.probeObserved(),sessions_[i].width,sessions_[i].height,sessions_[i].encoded};return result;}
-void NvencBoundary::revokeDiscovery(void* encoder,std::uint64_t generation){std::lock_guard<std::mutex> guard(mutex_);if(auto s=find(encoder);s&&s->generation==generation)s->adapter.stop();}
+void NvencBoundary::revokeDiscovery(void* encoder,std::uint64_t generation){std::lock_guard<std::mutex> guard(mutex_);if(auto s=find(encoder);s&&s->generation==generation){s->adapter.stop();s->probeQueued=false;s->probeSequence=0;s->probeToken={};}}
 void NvencBoundary::stop(){std::lock_guard<std::mutex> guard(mutex_);enabled_=false;for(auto& s:sessions_)revoke(s);}
 bool NvencBoundary::wrapped()const{std::lock_guard<std::mutex> guard(mutex_);return installed_;}
 std::uint64_t NvencBoundary::generation(void* e)const{std::lock_guard<std::mutex> guard(mutex_);for(const auto& s:sessions_)if(s.encoder==e&&e)return s.generation;return 0;}
