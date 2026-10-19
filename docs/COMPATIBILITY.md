@@ -45,20 +45,17 @@ background-sampling shaders and every material family are not certified.
 
 Software checks exercise production native dispatch, source/texture ownership,
 authenticated control, accepted access units, receiver leases and guarded GPU
-coverage. Recent paired hardware logs demonstrate successful reconnects and game
-source activation. The latest paired run produced only15 masks, with1,691
-nonblocking reads still pending on the GPU. The Frame decoded/uploaded14 masks
-and selected22 draws, but accepted no guarded submission. Thus successful
-transport/upload does not yet establish final sampling. The headset still showed
-opaque black instead of the room. Moving readback before the encoder input was
-insufficient on the captured NVIDIA system. The next correction explicitly
-submits coverage work, checks its own completion event, and restores support for
-canonical Vulkan timeline submits. New bounded submit/collect reasons distinguish
-legal-submit admission from exact-source lifetime failures. See the
-[readback review](research/readback-order-20261019.md) and
+coverage. The latest paired run is the first user-confirmed visible room picture
+for the independent-mask route, but it repeatedly alternates with opaque black.
+The sender now reads and certifies masks without pending GPU readbacks, and the
+Frame accepts actual canonical timeline submits and guarded draws. The remaining
+pool review found that transient worker contention could permanently consume
+mask capacity: six of eight slots were quarantined during the captured run.
+See the [paired flicker review](research/coverage-pool-flicker-20261019.md),
+[readback history](research/readback-order-20261019.md) and
 [source-format review](research/source-format-opt-in-20261019.md).
-A successful final full-resolution headset picture and simultaneous local Steam
-menu/game mixed reality remain unconfirmed.
+Stable final full-resolution headset output, sharpness and simultaneous local
+Steam menu/game mixed reality remain unconfirmed.
 
 The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)
 are historical results of a different, retired method. They must not be presented
