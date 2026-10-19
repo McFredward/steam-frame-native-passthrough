@@ -109,6 +109,7 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'missing'):self.build(release=True,validation_receipts=[partial])
         full=self.validation();raw,receipt=self.build(release=True,validation_receipts=[full])
         self.assertTrue(receipt['native_installable']);self.assertFalse(receipt['hardware_verified'])
+        self.assertTrue(receipt['online_bootstrap_currently_accepts_schema'])
         with zipfile.ZipFile(io.BytesIO(raw)) as z:self.assertEqual(json.loads(z.read('stream-bridge-bundle.json'))['readiness'],'release')
 
     def test_mismatched_receipt_does_not_admit_release(self):

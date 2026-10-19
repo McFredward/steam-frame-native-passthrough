@@ -175,7 +175,7 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
         'The Linux PC sender is not included. Native-derived shaders are generated locally, never shipped.\n'+
         'Setup closes only verified PC SteamVR processes and leaves PC SteamVR closed. It restarts/checks the Frame interface and asks you to confirm the picture.\n'+
         'A failed start restores the exact original operation checkpoint and restarts the original Frame interface. Incomplete recovery offers Retry.\n'+
-        'Use the explicit preview launcher for this package.\n').encode()
+        'Use the current guided paired setup. There is no Frame-only atlas fallback.\n').encode()
     engine.require(len(files)<4096 and sum(map(len,files.values()))<=MAX_EXPANDED,'Setup package exceeds its bounded inventory.')
     outer={'schema':BOOTSTRAP,'readiness':bundle['readiness'],'windows_python':'setup/runtime/python/python.exe',
            'files':{name:pin(raw) for name,raw in sorted(files.items())}}
@@ -193,7 +193,7 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
              'source_revision':profile['source_revision'],'runtime_profile':pin(raw_profile),
              'source_pins':profile['source_pins'],'artifacts':profile['artifacts'],
              'validation_receipts':receipts,'hardware_verified':False,
-             'online_bootstrap_currently_accepts_schema':False,'device_actions':False,
+             'online_bootstrap_currently_accepts_schema':bool(release),'device_actions':False,
              'temporary_contract_tree_removed':True}
     return raw,receipt
 
