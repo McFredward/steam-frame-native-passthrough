@@ -16,10 +16,16 @@ struct Draw {
 };
 struct MemoryPreparation {int duplicate=-1;std::uint64_t device=0,inode=0;};
 enum class DrawRefusal:std::uint8_t {Unavailable,Busy,Command,Epoch,Pipeline,Ineligible,Descriptor,Image,ExactPicture,ReadyMask,Capacity,Count};
+enum class CollectRefusal:std::uint8_t {Command,Empty,Ineligible,Epoch,Lease,Descriptor,Image,Memory,Capacity,Count};
+enum class SubmitRefusal:std::uint8_t {Busy,Bounds,Shape,Extension,Flags,Count};
 struct RendererStats {
     std::uint64_t metadata=0,maskNone=0,maskDecoded=0,maskRejected=0,uploadAccepted=0,uploadRefused=0,pictures=0;
     std::uint64_t begins=0,draws=0,selected=0,guardAttempts=0,guardAccepted=0,guardRefused=0,opaqueSubmits=0;
     std::array<std::uint64_t,static_cast<std::size_t>(DrawRefusal::Count)> drawRefusals{};
+    std::array<std::uint64_t,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
+    std::array<std::uint64_t,static_cast<std::size_t>(SubmitRefusal::Count)> submitRefusals{};
+    std::uint64_t collects=0,collected=0,coreSubmits=0,submits2=0;
+    std::uint32_t firstNextType=0,firstRefusedNextType=0;
     std::uint32_t pending=0,copying=0,ready=0,quarantined=0,pipelines=0;
     std::uint64_t poolUploaded=0,poolRefused=0;
     bool prepared=false,lost=false;

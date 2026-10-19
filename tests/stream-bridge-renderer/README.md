@@ -26,6 +26,29 @@ A causal control reinstates the old whole-pool quarantine and must fail the
 fresh-picture assertion. Actual failed copy/tail-fence quarantine remains
 independent. `--fallback-recovery-only` selects just these recovery cases.
 
+`--timeline-only` reproduces the production renderer's former blanket refusal
+of a legal `VkTimelineSemaphoreSubmitInfo`: a current selected recording never
+reached a guarded submit. The renderer now shares the original transaction's
+pure canonical-extension validator, without linking its retired runtime. The
+extension must be the sole chain element, have value counts matching the
+original semaphore counts and provide non-null arrays for nonzero counts.
+Tests retain the original extension pointer, values, semaphore metadata, native
+command order and fence byte for byte. The leading zero submit has no waits,
+signals or extension; adding an immutable one command does not change the
+native semaphore counts. Malformed, chained, unknown and protected extensions
+stay opaque and cannot poison the next valid picture. A causal control restores
+the blanket refusal and must fail. This is proof of a legal software call shape,
+not proof that a hardware compositor uses that extension.
+
+Separate atomic submit diagnostics report the first observed/refused numeric
+extension types, unsupported submit reasons and pre-submit collection failures.
+The latter distinguish missing/empty recordings, ineligible commands, stale
+epochs, expired source leases and descriptor/image/memory/capacity mismatches.
+An accepted timeline extension never replaces those exact source checks. The
+focused cases also invalidate a genuinely selected recording before submission
+and confirm opaque rendering with the appropriate first refusal. Core/KHR
+Submit2 admission is unchanged, with added extension/flag observations only.
+
 `--telemetry-only` executes the production diagnostics without changing image
 admission. It distinguishes authenticated maskless discovery from decoded R8
 coverage, accepted uploads from pending/copying/ready storage, unique delivered
@@ -35,7 +58,7 @@ Two causal controls mislabel `None` as a mask or pending storage as ready; both
 must fail. Sixty-four pending startup pipelines produce one deduplicated refusal
 message and cannot consume the later exact-shader/companion admission messages.
 Hot paths only update fixed atomic counters. The existing cold worker emits
-changed milestones or logarithmic progress, at most 48 lines per renderer.
+changed milestones or logarithmic progress, at most 48 two-line snapshots per renderer.
 Queue acceptance still does not prove GPU completion or a visible headset image.
 
 The focused test also records a legal native command buffer before any correct
