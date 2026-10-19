@@ -57,7 +57,8 @@ struct Fake{
     std::array<std::array<std::uint8_t,4096>,nd::MaxBuffers> memory{};
     unsigned ioctlCalls=0,mapCalls=0,unmapCalls=0,closeCalls=0,reads=0,dataReads=0;
     int result=0,error=EOVERFLOW,receivedErrno=0;std::uint32_t dequeue=0;
-    bool readFails=false,mapFails=false,zeroCopyDuringQbuf=false;
+    bool readFails=false,dataReadFails=false,mapFails=false,zeroCopyDuringQbuf=false;
+    nd::DecodeProvider* inspectDuringQbuf=nullptr;nd::SnapshotStats duringCounts{};bool duringGap=false;
     bool requireCaptureSink=false;unsigned sinkCalls=0;nd::CaptureObservation lastSink{};
     nd::DecodeProvider* revokeDuringQbuf=nullptr;
 } fake;
@@ -65,12 +66,16 @@ bool copy(void* output,std::uintptr_t source,std::size_t n,void*) noexcept{
     ++fake.reads;errno=EDOM;
     if(fake.readFails||source<4096||n>4096)return false;
     const auto* start=reinterpret_cast<const std::uint8_t*>(fake.memory.data());
-    if(source>=reinterpret_cast<std::uintptr_t>(start)&&source<reinterpret_cast<std::uintptr_t>(start)+sizeof fake.memory)++fake.dataReads;
+    if(source>=reinterpret_cast<std::uintptr_t>(start)&&source<reinterpret_cast<std::uintptr_t>(start)+sizeof fake.memory){++fake.dataReads;if(fake.dataReadFails)return false;}
     std::memcpy(output,reinterpret_cast<const void*>(source),n);return true;
 }
 int originalIoctl(int fd,unsigned long request,...){
     ++fake.ioctlCalls;fake.receivedErrno=errno;va_list args;va_start(args,request);void* p=va_arg(args,void*);va_end(args);
     check(fd==23||fd==24,"original fd exact");
+    if(request==VIDIOC_QBUF&&fake.inspectDuringQbuf){
+        fake.duringCounts=fake.inspectDuringQbuf->stats();nd::CaptureObservation event{};
+        while(fake.inspectDuringQbuf->pollCapture(event))fake.duringGap|=event.kind==nd::CaptureKind::InputGap;
+    }
     if(fake.result==0){
         if(request==VIDIOC_S_FMT)static_cast<v4l2_format*>(p)->fmt.pix_mp.num_planes=1;
         if(request==VIDIOC_QUERYBUF){auto& b=*static_cast<v4l2_buffer*>(p);b.m.planes[0].length=4096;b.m.planes[0].m.mem_offset=b.index*4096;}
@@ -162,6 +167,37 @@ void boundsAndLoss(){
     setup(*p);map(*p,0);fake.revokeDuringQbuf=p.get();queue(*p,0);noObservation(*p,"late successful QBUF cannot revive stopped generation");
     check(!p->knownIoctl(base+0x31e0c,VIDIOC_QBUF),"stop keeps unknown calls on original tail route");
 }
+void exactSuccessfulGaps(){
+    auto p=provider();check(p->setCaptureSink([](const nd::CaptureObservation& fact,void*) noexcept{++fake.sinkCalls;fake.lastSink=fact;},nullptr),"gap fixture sink registered");
+    setup(*p);for(unsigned i=0;i<4;++i)map(*p,i);
+    nd::CaptureObservation event{};while(p->pollCapture(event)){}
+    queue(*p,0);queue(*p,1);const auto originalCalls=fake.ioctlCalls,sinks=fake.sinkCalls;
+    fake.inspectDuringQbuf=p.get();queue(*p,2);
+    check(fake.duringCounts.dropped==0&&!fake.duringGap,"snapshot loss is never published while original QBUF is still running");
+    check(fake.ioctlCalls==originalCalls+1&&p->stats().dropped==1,"successful original OUTPUT transfers exactly one missing-byte counter");
+    check(p->pollCapture(event)&&event.kind==nd::CaptureKind::InputGap&&event.inputLoss==nd::InputLoss::SnapshotFull
+        &&event.lossSequence==1&&event.fd==23&&event.sourcePoolGeneration&&event.index==2
+        &&event.nativeTimestampToken==0x12345678&&event.dmabufFd==-1&&!event.capturePoolGeneration,
+        "full snapshot slot publishes exact successful source pool token and loss sequence without a CAPTURE lease");
+    check(fake.sinkCalls==sinks,"INPUT gap never enters the synchronous CAPTURE-lease sink");
+    fake.result=-1;queue(*p,3);check(p->stats().dropped==1&&!p->pollCapture(event),"failed native full-slot QBUF creates neither loss nor recovery authority");
+    fake.result=0;fake.inspectDuringQbuf=nullptr;poll(*p,0);poll(*p,0);
+    fake.dataReadFails=true;queue(*p,3);
+    check(p->stats().rejected==1&&p->pollCapture(event)&&event.kind==nd::CaptureKind::InputGap
+        &&event.inputLoss==nd::InputLoss::CopyRejected&&event.lossSequence==1&&event.index==3,
+        "known scalar ownership plus failed byte copy gives exact post-success gap without reading other memory");
+    dequeue(*p,3);fake.result=-1;queue(*p,3);check(p->stats().rejected==1&&!p->pollCapture(event),"native-rejected copy failure publishes no successful gap");
+    fake.result=0;fake.dataReadFails=false;dequeue(*p,2);
+    Buffer malformed(2);malformed.b.timestamp.tv_usec=1;p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&malformed.b);
+    check(p->stats().rejected==2&&!p->pollCapture(event),"unknown timestamp shape is a hard unattributed counter never a fabricated gap");
+    // Bounded metadata queue overflow remains explicit and hard refused by the
+    // worker, even though native video continues unchanged.
+    setup(*p);map(*p,0);map(*p,1);map(*p,2);while(p->pollCapture(event)){}
+    queue(*p,0);queue(*p,1);
+    for(unsigned i=0;i<65;++i){dequeue(*p,2);queue(*p,2);}
+    check(p->stats().captureDropped==1,"known gap ring overflow is bounded and explicitly reported as lost evidence");
+}
+
 void unsafeShapes(){
     auto p=provider();setup(*p);map(*p,0);Buffer b(0);
     for(unsigned which=0;which<6;++which){
@@ -222,5 +258,5 @@ void captureOwnership(){
     check(p->setCaptureSink(nullptr,nullptr),"sink can detach only after stopped native ownership");
 }
 }
-int main(){try{identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
 #endif

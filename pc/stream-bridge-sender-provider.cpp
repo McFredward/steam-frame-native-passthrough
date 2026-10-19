@@ -286,6 +286,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 stats.contextHookSlots,unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextFacadeSlots,stats.nativeDispatchMutations);report(text);
         };
         std::uint32_t reportedFailures=0;
+        unsigned recoveryReports=0;bool recoveringTransport=false;
         const auto reportFailure=[&]{
             const auto failure=runtime_.lastFailure();
             if(failure.reason==stream_bridge::sender::RuntimeFailure::None)return;
@@ -310,7 +311,19 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 }
             }catch(...){sourceIpc_.stop();coverage_.stop();runtime_.stop();report("worker refused; ordinary video");break;}
             const auto* coverageState=coverage_.stateName();if(request_.explicitlyEnabled&&coverageState!=lastCoverage){lastCoverage=coverageState;reportState(coverageState);}
-            if(runtime_.state()!=last){last=runtime_.state();reportState(stream_bridge::sender::runtimeStateName(last));}
+            if(runtime_.state()!=last){
+                using State=stream_bridge::sender::RuntimeState;
+                if(last==State::Failed&&(runtime_.state()==State::Preparing||runtime_.state()==State::WaitingPeer)
+                    &&runtime_.lastFailure().reason==stream_bridge::sender::RuntimeFailure::TransportLost){
+                    recoveringTransport=true;
+                    if(recoveryReports<8){report("sender recovery: fresh transport started; waiting for new authenticated video proof");++recoveryReports;}
+                }
+                if(recoveringTransport&&runtime_.state()==State::ProbeObserved){
+                    recoveringTransport=false;
+                    if(recoveryReports<8){report("sender recovery: fresh paired session and coded-AU proof confirmed");++recoveryReports;}
+                }
+                last=runtime_.state();reportState(stream_bridge::sender::runtimeStateName(last));
+            }
             if(request_.explicitlyEnabled){reportReconfigure(false);reportCoverage(false);reportFailure();}
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(8),[this]{return stopped_;});
         }

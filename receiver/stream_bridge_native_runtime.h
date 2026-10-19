@@ -29,10 +29,20 @@ enum class RuntimeState:std::uint8_t {
     Disabled,WaitingNativeSource,WaitingImageRoute,Negotiating,PeerConfirmed,SourceLost,
     SenderUnavailable,PairingRefused,SourceRefused
 };
+enum class RuntimeReason:std::uint8_t {
+    None,NativeSourceChanged,ImageRouteLost,TransportLost,ControlRefused,
+    SnapshotGap,CopyGap,UnknownSnapshotLoss,UnknownCopyLoss,CaptureEventsLost,
+    InvalidGap,NativeSourceRetired,CapturePoolReset,InvalidCapture,InvalidInput,
+    DuplicateInputToken,PendingCapacity,QuarantineCapacity,InvalidCertificate,
+    SendReceiptMismatch,OutboundProofRefused,RandomRefused,GenerationExhausted,Exception
+};
+const char* runtimeReasonName(RuntimeReason) noexcept;
 struct RuntimeNotice {
     RuntimeState state=RuntimeState::Disabled;
     SourceIdentity source{};
     stream_bridge::ControlStatus control=stream_bridge::ControlStatus::Disabled;
+    RuntimeReason reason=RuntimeReason::None;
+    SnapshotStats statistics{};
 };
 struct RuntimeCallbacks {
     // Synchronous worker calls. Borrowed certificate/bytes are valid only until
@@ -71,7 +81,7 @@ struct SourceProvider {
 // production never accepts an arbitrary SourceProvider from a network packet.
 class ReceiverWorker {
 public:
-    static constexpr std::size_t PendingCapacity=32;
+    static constexpr std::size_t PendingCapacity=32,RetiredPoolCapacity=64;
     ReceiverWorker();~ReceiverWorker();
     ReceiverWorker(const ReceiverWorker&)=delete;
     ReceiverWorker& operator=(const ReceiverWorker&)=delete;

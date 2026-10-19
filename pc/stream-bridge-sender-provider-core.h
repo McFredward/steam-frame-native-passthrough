@@ -47,6 +47,7 @@ struct ReconfigureStats {
 struct EncoderState{void* encoder=nullptr;std::uint64_t generation=0;bool hevc=false,peerConfirmed=false,probeObserved=false;std::uint32_t width=0,height=0;bool encoded=false;};
 // Public NVENC ABI boundary. No private Steam object layout or function jump.
 // Single process-lifetime instance; factory tables may retain these callbacks.
+enum class DiscoveryAdmission { Ready, Busy, Refused };
 class NvencBoundary {
 public:
     explicit NvencBoundary(const std::array<std::uint8_t,32>& verifiedModuleHash);
@@ -55,6 +56,7 @@ public:
     NVENCSTATUS create(NvencFactory,NV_ENCODE_API_FUNCTION_LIST*);
     // Authenticated local authority only. The explicit provider worker starts
     // discovery after private pairing and an actual supported encoder exist.
+    DiscoveryAdmission tryRequestDiscovery(void* encoder,const LocalConfig&,const VerifiedChannel&,PayloadSealer sealer={});
     bool requestDiscovery(void* encoder,const LocalConfig&,const VerifiedChannel&,PayloadSealer sealer={});
     Status receiveControl(void* encoder,Bytes,const VerifiedChannel&);
     bool requestProbe(void* encoder,std::uint64_t generation,std::uint64_t sequence,const Nonce&);

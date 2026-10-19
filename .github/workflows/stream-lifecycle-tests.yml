@@ -7,11 +7,13 @@ on:
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'pc/stream-bridge-sender-provider-runtime.*'
       - 'receiver/stream_bridge_native_runtime.*'
+      - 'receiver/stream_bridge_native_decode.*'
       - 'receiver/stream_bridge_local.*'
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'tests/test_stream_bridge_control.cpp'
       - 'tests/test_stream_bridge_sender_provider*.cpp'
       - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'tests/stream_bridge_native_decode_test.cpp'
       - 'tests/stream_bridge_local_test.cpp'
       - 'tests/test_stream_bridge_sender_coverage_gates.cpp'
       - 'cmake/StreamBridge.cmake'
@@ -22,11 +24,13 @@ on:
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'pc/stream-bridge-sender-provider-runtime.*'
       - 'receiver/stream_bridge_native_runtime.*'
+      - 'receiver/stream_bridge_native_decode.*'
       - 'receiver/stream_bridge_local.*'
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'tests/test_stream_bridge_control.cpp'
       - 'tests/test_stream_bridge_sender_provider*.cpp'
       - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'tests/stream_bridge_native_decode_test.cpp'
       - 'tests/stream_bridge_local_test.cpp'
       - 'tests/test_stream_bridge_sender_coverage_gates.cpp'
       - 'cmake/StreamBridge.cmake'
@@ -56,6 +60,6 @@ jobs:
       - name: Build the affected production control and encoder boundaries
         run: |
           cmake -S . -B build/lifecycle -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
-          cmake --build build/lifecycle --parallel 4 --target test_stream_bridge_control test_stream_bridge_native_runtime test_stream_bridge_local test_stream_bridge_sender_provider test_stream_bridge_sender_provider_input test_stream_bridge_sender_provider_runtime test_stream_bridge_sender_coverage_gates
+          cmake --build build/lifecycle --parallel 4 --target test_stream_bridge_control test_stream_bridge_native_runtime test_stream_bridge_native_decode test_stream_bridge_local test_stream_bridge_sender_provider test_stream_bridge_sender_provider_input test_stream_bridge_sender_provider_runtime test_stream_bridge_sender_coverage_gates
       - name: Exercise actual TCP admission, reconfiguration and frame receipts
-        run: ctest --test-dir build/lifecycle --output-on-failure --parallel 4 -R '^stream_bridge_(control|native_runtime|local|sender_coverage_gates|sender_provider(_input|_runtime)?)$'
+        run: ctest --test-dir build/lifecycle --output-on-failure --parallel 4 -R '^stream_bridge_(control|native_runtime|native_decode|local|sender_coverage_gates|sender_provider(_input|_runtime)?)$'

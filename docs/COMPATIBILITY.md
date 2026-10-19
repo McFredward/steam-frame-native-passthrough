@@ -45,13 +45,14 @@ background-sampling shaders and every material family are not certified.
 
 Software checks exercise production native dispatch, source/texture ownership,
 authenticated control, accepted access units, receiver leases and guarded GPU
-coverage. Actual hardware now demonstrates all four native D3D hooks remaining
-installed and 22 sender-certified masks in the 2026-10-19 run. That run still did
-not establish the intended full-resolution output: a packed swap-descriptor word
-was being rejected as an invalid sample count. The bounded correction is checked
-against the pinned native ABI and focused software tests; a new visual pass is
-still required. Simultaneous local Steam menu/game mixed reality also remains
-an explicit hardware check.
+coverage. Hardware has demonstrated native D3D attachment, peer authentication
+and coded-AU roundtrips. The latest paired Build 710 run lost its auxiliary
+connection before the game source appeared, and stayed in ordinary opaque video.
+It does not establish full-resolution passthrough. The
+[startup recovery review](research/startup-transport-recovery-20261019.md)
+distinguishes the captured sequence from source-proven recovery defects and
+focused software checks. A headset picture pass and simultaneous local Steam
+menu/game mixed reality remain unconfirmed.
 
 The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)
 are historical results of a different, retired method. They must not be presented

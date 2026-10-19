@@ -35,7 +35,8 @@ struct Files{
     ~Files(){std::error_code ignored;std::filesystem::remove_all(path,ignored);}
 };
 void run(){
-    Files files;NvencBoundary boundary({{1}});SenderRuntime runtime(boundary);ControlRuntime reverse;
+    Files files;NvencBoundary boundary({{1}});std::uint64_t clock=10000;
+    SenderRuntime runtime(boundary,[](void* p){return *static_cast<std::uint64_t*>(p);},&clock);ControlRuntime reverse;
     ControlRequest request;request.role=Role::Producer;request.buildId=712;request.pairingsDirectory=files.path/"producer";std::strcpy(request.address.data(),"127.0.0.1");
     runtime.configure(request);runtime.tick();check(runtime.state()==RuntimeState::Off&&runtime.control().localPort()==0,"actual runtime defaults off without opening socket");
     request.explicitlyEnabled=true;runtime.configure(request);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder&&runtime.control().localPort()==0,"no real encoder cannot prepare discovery");
@@ -46,7 +47,7 @@ void run(){
     ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder&&runtime.control().localPort()==0,"Init alone cannot open listener before an actual accepted encode");
     auto submit=[&](){NV_ENC_REGISTER_RESOURCE r{};r.version=NV_ENC_REGISTER_RESOURCE_VER;r.resourceType=NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;r.resourceToRegister=reinterpret_cast<void*>(0x60);r.width=r.height=128;r.bufferFormat=NV_ENC_BUFFER_FORMAT_NV12;r.bufferUsage=NV_ENC_INPUT_IMAGE;table.nvEncRegisterResource(handle,&r);NV_ENC_MAP_INPUT_RESOURCE m{};m.version=NV_ENC_MAP_INPUT_RESOURCE_VER;m.registeredResource=r.registeredResource;table.nvEncMapInputResource(handle,&m);NV_ENC_PIC_PARAMS p{};p.version=NV_ENC_PIC_PARAMS_VER;p.inputBuffer=m.mappedResource;p.outputBitstream=output;p.inputWidth=p.inputHeight=128;p.bufferFmt=NV_ENC_BUFFER_FORMAT_NV12;p.inputTimeStamp=7;table.nvEncEncodePicture(handle,&p);};
     submit();runtime.tick();check(runtime.state()==RuntimeState::WaitingPeer&&runtime.control().localPort()!=0,"actual HEVC Init triggers cold paired runtime/listener");
-    const auto stableGeneration=boundary.generation(handle);const auto stablePort=runtime.control().localPort();
+    const auto stableGeneration=boundary.generation(handle);auto stablePort=runtime.control().localPort();
     unsigned qosCalls=0;
     auto qos=[&](){
         ++qosCalls;config.rcParams.averageBitRate=10000000+qosCalls*1000;config.rcParams.maxBitRate=12000000+qosCalls*1000;
@@ -80,6 +81,59 @@ void run(){
         &&!lost.hasProtocolStatus&&lost.encoder.generation==stableGeneration&&lost.encoder.hevc&&lost.encoder.encoded,
         "real reverse EOF preserves exact pre-revocation transport and encoder facts");
     NV_ENC_LOCK_BITSTREAM fallback{};fallback.version=NV_ENC_LOCK_BITSTREAM_VER;fallback.outputBitstream=output;table.nvEncLockBitstream(handle,&fallback);check(fallback.bitstreamBufferPtr==au.data()&&fallback.bitstreamSizeInBytes==au.size(),"lost paired peer leaves ordinary actual native AU pointer and size intact");table.nvEncUnlockBitstream(handle,output);
+    const auto oldBinding=authority.channel.binding;
+    for(unsigned i=0;i<1000;++i)runtime.tick();
+    check(runtime.state()==RuntimeState::Failed&&runtime.control().localPort()==0,
+        "transport failure remains opaque with no rapid socket reopen before bounded retry");
+    clock+=249;runtime.tick();check(runtime.state()==RuntimeState::Failed,"retry waits for its own bounded cadence");
+    clock+=1;runtime.tick();stablePort=runtime.control().localPort();
+    check(runtime.state()==RuntimeState::WaitingPeer&&stablePort!=0&&runtime.encoder().generation==stableGeneration,
+        "fresh private listener recovers after EOF without changing native encoder generation");
+    check(!runtime.control().peerVerified()&&!runtime.encoder().peerConfirmed&&!runtime.encoder().probeObserved,
+        "reopening transport restores no former handshake or probe authority");
+    auto freshReceiverHandshake=[&](){
+        rr.port=stablePort;++rr.video.connection[0];++rr.video.generation;reverse.prepare(rr);pump();
+        reverse.configuredLocal(receiverLocal);authority={rr.video.connection,rr.video.generation,{}};
+        check(receiver.beginAuthenticated(authority,receiverLocal,reverse.receiverVerifier(),reverse.verifierContext()),
+            "new receiver source begins from a fresh authenticated video context");
+        for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){
+            check(receiveVideo()==rx::Result::Handshake,"reconnect uses native AU for every fresh handshake step");
+            Message reply;check(receiver.nextOutbound(reply)==Status::Ok&&reply.kind==kind,"fresh reconnect reply ordering");
+            AuthPayload body{};encode(reply,body);std::uint64_t retryTicket=0;
+            check(reverse.queueControl({body.data(),body.size()},retryTicket),"new reconnect reply enters actual TCP");pump();
+            SendReceipt receipt;check(reverse.pollSent(receipt)&&receipt.ticket==retryTicket,"fresh reconnect socket receipt");
+            check(receiver.markOutboundSent(reply,authority)==Status::Ok,"reconnect only advances after actual send");
+        }
+        pump();check(runtime.state()==RuntimeState::Confirmed&&receiver.snapshot().peerConfirmed,
+            "same unchanged encoder recovers through complete new mutual authentication");
+    };
+    freshReceiverHandshake();
+    const auto secondBinding=authority.channel.binding;
+    check(secondBinding!=oldBinding,"first recovery receives a fresh binding");
+    // Lose the control connection after Commit queued a probe but BEFORE the
+    // next native Lock can deliver it. An old queued probe must not poison the
+    // next session on the same encoder.
+    NV_ENC_LOCK_BITSTREAM crossing{};crossing.version=NV_ENC_LOCK_BITSTREAM_VER;crossing.outputBitstream=output;
+    check(table.nvEncLockBitstream(handle,&crossing)==NV_ENC_SUCCESS&&crossing.bitstreamBufferPtr!=au.data(),
+        "real native output may still borrow the unacknowledged probe when EOF arrives");
+    const auto* crossingBytes=static_cast<const std::uint8_t*>(crossing.bitstreamBufferPtr);
+    const std::vector<std::uint8_t> crossingCopy(crossingBytes,crossingBytes+crossing.bitstreamSizeInBytes);
+    reverse.stop();for(unsigned i=0;i<80;++i)runtime.tick();
+    check(runtime.state()==RuntimeState::Failed,"loss before the queued probe revokes the new session");
+    clock+=250;runtime.tick();stablePort=runtime.control().localPort();
+    check(runtime.state()==RuntimeState::Preparing&&runtime.encoder().generation==stableGeneration,
+        "same encoder recovery defers atomically while native code still borrows the old AU");
+    for(unsigned i=0;i<200;++i)runtime.tick();
+    check(runtime.state()==RuntimeState::Preparing&&runtime.control().localPort()==stablePort
+        &&!std::memcmp(crossingBytes,crossingCopy.data(),crossingCopy.size()),
+        "EOF/reconnect preserves every old borrowed byte and does not repeatedly reopen control");
+    table.nvEncUnlockBitstream(handle,output);runtime.tick();
+    check(runtime.state()==RuntimeState::WaitingPeer,"old native Unlock enables fresh discovery without another reset");
+    freshReceiverHandshake();
+    check(authority.channel.binding!=oldBinding&&authority.channel.binding!=secondBinding,"reconnect cannot reuse either earlier paired channel binding");
+    check(receiveVideo()==rx::Result::MetadataObserved&&receiver.nextEcho(echo),"reconnected source needs a fresh native AU probe");
+    encodeProbe(echo,encoded);check(reverse.queueControl({encoded.data(),encoded.size()},ticket),"new probe echo enters actual reverse socket");
+    pump();check(runtime.state()==RuntimeState::ProbeObserved,"reconnected source proves a new exact coded AU roundtrip");
     const auto previous=runtime.encoder().generation;NV_ENC_RECONFIGURE_PARAMS rc{};rc.version=NV_ENC_RECONFIGURE_PARAMS_VER;reconfigureResult=NV_ENC_ERR_INVALID_PARAM;table.nvEncReconfigureEncoder(handle,&rc);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder&&!runtime.control().peerVerified()&&runtime.control().localPort()==0,"real source reconfiguration tears down authenticated transport immediately");
     ip.encodeGUID=NV_ENC_CODEC_H264_GUID;table.nvEncInitializeEncoder(handle,&ip);runtime.tick();check(runtime.state()==RuntimeState::WaitingEncoder,"non-HEVC source remains ordinary after reconfiguration");
     ip.encodeGUID=NV_ENC_CODEC_HEVC_GUID;table.nvEncInitializeEncoder(handle,&ip);submit();runtime.tick();check(runtime.encoder().generation>previous&&runtime.state()==RuntimeState::WaitingPeer,"new actual codec epoch gets fresh session and must reconfirm");
@@ -97,10 +151,17 @@ void run(){
     check(table.nvEncLockBitstream(handle,&leased)==NV_ENC_SUCCESS&&leased.bitstreamBufferPtr!=au.data()&&boundary.liveLeases()==1,
         "actual augmented output stays borrowed while a new cold admission is attempted");
     runtime.configure(request);runtime.tick();const auto denied=runtime.lastFailure();
-    check(runtime.state()==RuntimeState::Failed&&denied.reason==RuntimeFailure::RequestDiscovery
-        &&denied.control==ControlStatus::Listening&&denied.liveOutputLeases==1&&denied.encoder.generation==boundary.generation(handle),
-        "actual leased output refusal reports discovery admission and outstanding native lease count");
-    table.nvEncUnlockBitstream(handle,output);
+    check(runtime.state()==RuntimeState::Preparing&&denied.reason==RuntimeFailure::None
+        &&runtime.control().status()==ControlStatus::Listening&&boundary.liveLeases()==1,
+        "actual borrowed native output defers discovery atomically without permanent failure");
+    const auto deferredPort=runtime.control().localPort();
+    const auto* borrowed=leased.bitstreamBufferPtr;std::vector<std::uint8_t> held(static_cast<const std::uint8_t*>(borrowed),static_cast<const std::uint8_t*>(borrowed)+leased.bitstreamSizeInBytes);
+    for(unsigned i=0;i<200;++i)runtime.tick();
+    check(runtime.state()==RuntimeState::Preparing&&runtime.control().localPort()==deferredPort
+        &&!std::memcmp(borrowed,held.data(),held.size()),"waiting admission keeps the listener and every borrowed byte unchanged");
+    table.nvEncUnlockBitstream(handle,output);runtime.tick();
+    check(runtime.state()==RuntimeState::WaitingPeer&&runtime.control().localPort()==deferredPort,
+        "native Unlock alone allows deferred admission without configure or a source change");
     runtime.configure(request);runtime.tick();
     const int raw=socket(AF_INET,SOCK_STREAM,0);check(raw>=0,"actual invalid-control peer socket");
     sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(runtime.control().localPort());inet_pton(AF_INET,"127.0.0.1",&address.sin_addr);
@@ -110,6 +171,9 @@ void run(){
     close(raw);
     check(runtime.lastFailure().reason==RuntimeFailure::TransportAuthenticationRefused&&runtime.lastFailure().control==ControlStatus::AuthenticationRefused,
         "actual MAC failure is classified separately from EOF and disabled transport");
+    clock+=60000;for(unsigned i=0;i<200;++i)runtime.tick();
+    check(runtime.state()==RuntimeState::Failed&&runtime.lastFailure().reason==RuntimeFailure::TransportAuthenticationRefused,
+        "invalid authentication never receives transport retry permission");
     runtime.configure(request);runtime.tick();rr.port=runtime.control().localPort();++rr.video.connection[0];++rr.video.generation;reverse.prepare(rr);
     for(unsigned i=0;i<80;++i){reverse.tick();runtime.tick();}
     reverse.configuredLocal(receiverLocal);authority={rr.video.connection,rr.video.generation,{}};
@@ -125,7 +189,7 @@ void run(){
         &&runtime.lastFailure().protocol!=Status::Ok&&runtime.lastFailure().control==ControlStatus::TransportConnected,
         "actual authenticated invalid protocol records the exact receive-control status before socket cleanup");
     reverse.stop();
-    runtime.stop();runtime.tick();check(runtime.state()==RuntimeState::Off&&runtime.control().localPort()==0,"explicit stop never autonomously restarts control");table.nvEncDestroyEncoder(handle);boundary.stop();
+    runtime.stop();clock+=60000;for(unsigned i=0;i<200;++i)runtime.tick();check(runtime.state()==RuntimeState::Off&&runtime.control().localPort()==0,"explicit stop never autonomously restarts control");table.nvEncDestroyEncoder(handle);boundary.stop();
     check(runtime.lastFailure().reason==RuntimeFailure::None,"explicit stop clears prior session diagnostic state");
 }
 }

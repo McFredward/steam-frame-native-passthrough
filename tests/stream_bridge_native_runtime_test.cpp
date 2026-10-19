@@ -31,7 +31,7 @@ struct Event {nd::Observation fact{};std::vector<std::uint8_t> coded;};
 struct Fixture {
     Files files;std::deque<Event> input;std::deque<nd::CaptureObservation> capture;
     nd::SnapshotStats counts{};unsigned polls=0,capturePolls=0,randomCalls=0,certified=0,decoded=0;
-    bool randomFails=false,routeReady=true;std::uint64_t clock=100;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
+    bool randomFails=false,routeReady=true,publishGapAfterEmptyPoll=false;std::uint64_t clock=100;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
     nd::DecodedFrame lastDecoded{};nd::CertifiedFrame lastCertified{};sb::CertifiedAccessUnit retained{};
     sb::ControlRuntime producer;nd::ReceiverWorker worker;sb::Handshake sender;
     sb::LocalConfig local{};sb::LocalSendAuthority authority{};std::uint64_t content=0,sourceFrame=1000;
@@ -49,7 +49,10 @@ struct Fixture {
     static bool poll(nd::Observation& out,std::uint8_t* destination,std::size_t capacity,void* v) noexcept {
         auto& f=*static_cast<Fixture*>(v);++f.polls;if(f.input.empty())return false;const auto& front=f.input.front();if(front.coded.size()>capacity)return false;
         out=front.fact;std::copy(front.coded.begin(),front.coded.end(),destination);f.input.pop_front();return true;}
-    static bool pollCapture(nd::CaptureObservation& out,void* v) noexcept {auto& f=*static_cast<Fixture*>(v);++f.capturePolls;if(f.capture.empty())return false;out=f.capture.front();f.capture.pop_front();return true;}
+    static bool pollCapture(nd::CaptureObservation& out,void* v) noexcept {auto& f=*static_cast<Fixture*>(v);++f.capturePolls;if(f.capture.empty()){
+        if(f.publishGapAfterEmptyPoll){f.publishGapAfterEmptyPoll=false;++f.counts.dropped;
+            f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,300,7,0,0,nd::InputLoss::SnapshotFull,f.counts.dropped});}
+        return false;}out=f.capture.front();f.capture.pop_front();return true;}
     static nd::SnapshotStats stats(void* v) noexcept{return static_cast<Fixture*>(v)->counts;}
     static bool random(void* out,std::size_t n,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.randomCalls;if(f.randomFails)return false;std::memset(out,static_cast<int>(f.randomCalls),n);return true;}
     static void onCertified(const nd::CertifiedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.certified;f.lastCertified=frame;f.retained=*frame.certificate;f.lastCertified.certificate=&f.retained;}
@@ -113,10 +116,22 @@ void unprovedInputs(){
     bad.capture.push_back({nd::CaptureKind::Decoded,23,73,0,21,7,21,1});bad.pump();check(bad.decoded==0,"uncertified ordinary output cannot become a selected frame");
     f.enqueue(ordinary,22);f.pump();check(f.certified==0,"ordinary unpatched Steam Link remains unobserved");
 }
+void ordinaryWithoutCapture(){
+    Fixture f;f.negotiate();const auto before=f.certified;
+    // Public stateful V4L2 explicitly allows OUTPUTs with no CAPTURE result.
+    // These ordinary AUs have no authenticated picture receipt to retain.
+    for(unsigned i=0;i<nd::ReceiverWorker::PendingCapacity+8;++i){f.enqueue(ordinary,100+i);f.pump();}
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.certified==before,
+        "ordinary no-CAPTURE inputs never exhaust certified pending receipts");
+    f.enqueue(f.certifiedFrame(),200);f.pump();f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,200,7,21,200});f.pump();
+    check(f.certified==before+1&&f.decoded==4,"fresh exact certified picture survives an arbitrary ordinary input run");
+}
+
 void lifecycleAndLoss(){
     Fixture f;f.negotiate();const auto before=f.certified;
     f.capture.push_back({nd::CaptureKind::Reset,23,-1,0,0,7,22,0});f.pump();
-    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed,"capture-only reallocation does not fabricate native stream reconnect");
+    check(f.worker.status().state==nd::RuntimeState::SourceLost&&f.worker.status().reason==nd::RuntimeReason::CapturePoolReset,
+        "capture-only reset revokes previous authority before a fresh same-pool admission");
     f.capture.push_back({nd::CaptureKind::SourceReset,23,-1,0,0,7,23,0});f.pump();
     check(f.worker.status().state==nd::RuntimeState::SourceLost,"actual OUTPUT retirement revokes source immediately");
     f.enqueue(ordinary,90);f.pump();check(f.certified==before&&f.randomCalls==1,"same revoked pool cannot resurrect trust or spin retries");
@@ -127,10 +142,139 @@ void lifecycleAndLoss(){
     Fixture rejected;rejected.negotiate();++rejected.counts.rejected;rejected.pump();check(rejected.worker.status().state==nd::RuntimeState::SourceLost,"failed coded ownership copy invalidates pending token association");
     Fixture eof;eof.negotiate();eof.producer.stop();eof.pump();check(eof.worker.status().state==nd::RuntimeState::SenderUnavailable,"actual reverse transport EOF revokes confirmed session");
 }
+void knownGapRecovery(){
+    Fixture f;f.negotiate();const auto old=f.worker.status().source;const auto port=f.producer.localPort();
+    const auto oldCertificate=f.certifiedFrame();f.enqueue(f.certifiedFrame(),40);f.pump();
+    const auto before=f.certified,decoded=f.decoded;
+    ++f.counts.dropped;f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,41,7,0,0,nd::InputLoss::SnapshotFull,1});f.pump();
+    check(f.worker.status().state==nd::RuntimeState::SourceLost&&f.worker.status().reason==nd::RuntimeReason::SnapshotGap
+        &&f.worker.status().statistics.dropped==1,"exact successful lost QBUF identifies bounded recoverable source gap");
+    check(f.invalidations.empty()||f.invalidations.back().kind!=nd::CaptureKind::InputGap,"OUTPUT gap is never misreported as CAPTURE lease");
+    f.relisten(port);f.clock+=250;f.enqueue(ordinary,42);f.pump();
+    check(f.randomCalls==2&&f.worker.status().source.stream.connection!=old.stream.connection
+        &&f.worker.status().source.stream.generation>old.stream.generation,"known source gap creates a new nonce and generation before any image proof");
+    f.enqueue(oldCertificate,43);f.pump();check(f.certified==before,"old session certificate cannot cross source-gap re-admission");
+    for(std::uint32_t token=50;token<53;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
+    check(f.sender.confirmed()&&f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.decoded==decoded+3,
+        "source gap recovers only after actual new HELLO ACK COMMIT probe and exact decoded receipts");
+    const auto fresh=f.certified;
+    for(unsigned token:{40U,41U,43U}){
+        f.enqueue(f.certifiedFrame(),token);f.pump();
+        for(unsigned late=0;late<2;++late){f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,900+late});f.pump();}
+        f.enqueue(f.certifiedFrame(),token);f.pump();
+    }
+    check(f.certified==fresh&&f.decoded==decoded+3,"old pending gap and unverified tokens stay quarantined despite multiple late native completions");
+    f.enqueue(f.certifiedFrame(),60);f.pump();f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,60,7,21,60});f.pump();
+    check(f.decoded==decoded+4,"fresh unrelated picture retains complete exact pipeline after recovery");
+    Fixture raced;raced.negotiate();raced.publishGapAfterEmptyPoll=true;raced.worker.tick();
+    check(raced.worker.status().reason==nd::RuntimeReason::SnapshotGap,"gap published after first empty drain is never mistaken for unknown counter loss");
+    raced.worker.tick();check(raced.worker.status().reason==nd::RuntimeReason::SnapshotGap,"later counter snapshot finds its already-covered gap cursor");
+    Fixture unknown;unknown.negotiate();++unknown.counts.dropped;unknown.pump();unknown.clock+=10000;
+    unknown.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,80,7,0,0,nd::InputLoss::SnapshotFull,1});unknown.pump();
+    unknown.enqueue(ordinary,81);unknown.pump();check(unknown.randomCalls==1&&unknown.worker.status().reason==nd::RuntimeReason::UnknownSnapshotLoss,
+        "late gap cannot resurrect already hard-refused unknown loss");
+    unknown.enqueue(ordinary,82,8);unknown.pump();check(unknown.randomCalls==1,"unattributed global loss cannot be erased by an unrelated or later pool");
+    Fixture overflow;overflow.negotiate();++overflow.counts.captureDropped;
+    ++overflow.counts.dropped;overflow.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,90,7,0,0,nd::InputLoss::SnapshotFull,1});overflow.pump();
+    overflow.clock+=10000;overflow.enqueue(ordinary,91);overflow.pump();
+    check(overflow.randomCalls==1&&overflow.worker.status().reason==nd::RuntimeReason::CaptureEventsLost,"capture queue overflow stays hard refused despite a known gap");
+    Fixture missing;missing.negotiate();missing.counts.dropped=2;
+    missing.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,100,7,0,0,nd::InputLoss::SnapshotFull,2});missing.pump();
+    check(missing.worker.status().state==nd::RuntimeState::SourceLost&&missing.randomCalls==1,"noncontiguous gap sequence never proves the omitted input token");
+}
+
+void routeQuarantineAndBackoff(){
+    Fixture f;f.negotiate();const auto port=f.producer.localPort();
+    f.routeReady=false;f.enqueue(ordinary,70);f.pump();++f.counts.dropped;
+    f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,71,7,0,0,nd::InputLoss::SnapshotFull,1});f.pump();
+    f.relisten(port);f.routeReady=true;f.pump();f.enqueue(ordinary,80);f.pump();
+    for(std::uint32_t token=81;token<84;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed,"route regain requires a fresh actual certified handshake");
+    const auto before=f.certified;
+    ++f.counts.dropped;f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,1,6,0,0,nd::InputLoss::SnapshotFull,2});f.pump();
+    for(unsigned token:{70U,71U}){f.enqueue(f.certifiedFrame(),token);f.pump();}
+    check(f.certified==before&&f.worker.status().state==nd::RuntimeState::PeerConfirmed,
+        "older pool gap never clears newer paused-route token quarantine or resets active admission");
+    Fixture unknown;unknown.negotiate();const auto unknownPort=unknown.producer.localPort();unknown.routeReady=false;unknown.pump();
+    ++unknown.counts.rejected;unknown.pump();unknown.relisten(unknownPort);unknown.routeReady=true;unknown.pump();
+    unknown.enqueue(ordinary,90);unknown.pump();check(unknown.randomCalls==1,"unknown loss during paused route cannot be hidden by route baseline replacement");
+    Fixture retry;retry.negotiate();const auto retryPort=retry.producer.localPort();
+    ++retry.counts.dropped;retry.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,100,7,0,0,nd::InputLoss::SnapshotFull,1});retry.pump();
+    retry.relisten(retryPort);retry.clock+=249;
+    ++retry.counts.dropped;retry.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,101,7,0,0,nd::InputLoss::SnapshotFull,2});retry.pump();
+    retry.clock+=1;retry.enqueue(ordinary,102);retry.pump();
+    check(retry.randomCalls==2,"additional known gap cannot postpone an already scheduled bounded transport retry");
+    Fixture reset;reset.negotiate();const auto resetPort=reset.producer.localPort();const auto previous=reset.worker.status().source;
+    reset.capture.push_back({nd::CaptureKind::Reset,23,-1,0,0,7,22,0});reset.pump();reset.relisten(resetPort);reset.clock+=250;
+    reset.enqueue(ordinary,110);reset.pump();
+    for(std::uint32_t token=111;token<114;++token){reset.enqueue(reset.certifiedDiscovery(),token);reset.pump();
+        reset.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,22,token});reset.pump();}
+    check(reset.worker.status().state==nd::RuntimeState::PeerConfirmed&&reset.worker.status().source.stream.connection!=previous.stream.connection,
+        "known capture-pool reset recovers only by fresh full admission, never old session authority");
+    Fixture recycled;recycled.negotiate();recycled.capture.push_back({nd::CaptureKind::SourceReset,23,-1,0,0,7,23,0});recycled.pump();
+    const auto recyclePort=recycled.producer.localPort();recycled.relisten(recyclePort);
+    recycled.enqueue(ordinary,120,8);recycled.input.back().fact.fd=24;recycled.pump();
+    recycled.capture.push_back({nd::CaptureKind::SourceReset,24,-1,0,0,8,24,0});recycled.pump();recycled.relisten(recyclePort);
+    recycled.enqueue(ordinary,121,9);recycled.input.back().fact.fd=25;recycled.pump();
+    check(recycled.randomCalls==3,"exact native OUTPUT retirements release bounded tracking for later decoder file descriptors");
+    recycled.enqueue(ordinary,122,7);recycled.pump();check(recycled.randomCalls==3,"exact retired source epoch cannot reenter after fd tracking was released");
+    Fixture concurrent;concurrent.negotiate();concurrent.enqueue(ordinary,140);concurrent.pump();
+    concurrent.capture.push_back({nd::CaptureKind::SourceReset,24,-1,0,0,20,21,0});concurrent.pump();
+    const auto concurrentCertified=concurrent.certified;
+    concurrent.enqueue(concurrent.certifiedFrame(),140);concurrent.pump();
+    concurrent.enqueue(concurrent.certifiedFrame(),141);concurrent.pump();
+    concurrent.capture.push_back({nd::CaptureKind::Decoded,23,73,0,141,7,21,141});concurrent.pump();
+    check(concurrent.certified==concurrentCertified+1&&concurrent.decoded==4&&concurrent.worker.status().state==nd::RuntimeState::PeerConfirmed,
+        "retiring newer decoder B never clears older live decoder A quarantine or prevents its fresh exact frames");
+    concurrent.enqueue(ordinary,142,20);concurrent.input.back().fact.fd=24;concurrent.pump();
+    check(concurrent.randomCalls==1,"retired decoder B cannot reactivate from a stale observation");
+    Fixture bounded;bounded.negotiate();
+    for(std::size_t i=0;i<nd::ReceiverWorker::RetiredPoolCapacity+1;++i){bounded.capture.push_back({nd::CaptureKind::SourceReset,static_cast<int>(24+i),-1,0,0,100+i,200+i,0});bounded.pump();}
+    check(bounded.worker.status().state==nd::RuntimeState::SourceLost&&bounded.worker.status().reason==nd::RuntimeReason::QuarantineCapacity,
+        "per-fd source-retirement tombstones refuse on bounded capacity without unsafe eviction");
+    const auto boundedCalls=bounded.randomCalls;bounded.enqueue(ordinary,150,1000);bounded.input.back().fact.fd=26;bounded.pump();
+    bounded.enqueue(ordinary,151,1001);bounded.pump();
+    check(bounded.randomCalls==boundedCalls,"retirement capacity exhaustion remains globally refused across other fd and new-pool inputs");
+}
+
+void liveDecoderSwitch(){
+    Fixture f;f.negotiate();const auto port=f.producer.localPort();
+    f.enqueue(f.certifiedFrame(),40);f.pump();const auto before=f.certified;
+    f.relisten(port);f.enqueue(ordinary,50,20);f.input.back().fact.fd=24;f.pump();
+    for(unsigned token=51;token<54;++token){f.enqueue(f.certifiedDiscovery(),token,20);f.input.back().fact.fd=24;f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,24,74,0,token,20,21,token});f.pump();}
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.worker.status().source.decoderFd==24,"second still-live decoder gets its own actual full admission");
+    f.relisten(port);f.enqueue(ordinary,60);f.pump();
+    for(unsigned token=61;token<64;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
+    const auto fresh=f.certified;f.enqueue(f.certifiedFrame(),40);f.pump();
+    f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+    check(f.certified==fresh&&fresh==before+6&&f.decoded==9,
+        "switching live decoder A B A quarantines old A pending token before dropping its prior session");
+}
+
+void sameFdPoolOrdering(){
+    Fixture f;f.negotiate();const auto port=f.producer.localPort();
+    f.enqueue(f.certifiedFrame(),40);f.pump();
+    // The provider's successful new-pool input may become visible after this
+    // tick's first capture drain, before its SourceReset event is next drained.
+    f.relisten(port);f.enqueue(ordinary,50,8);f.pump();
+    check(f.randomCalls==2&&f.worker.status().source.outputPoolGeneration==8
+        &&f.worker.status().state==nd::RuntimeState::Negotiating,
+        "new same-fd pool retires prior pending before advancing quarantine metadata");
+    for(unsigned token=51;token<54;++token){f.enqueue(f.certifiedDiscovery(),token,8);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,8,22,token});f.pump();}
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed,"genuinely new same-fd pool remains live after source-event scheduling boundary");
+    const auto count=f.certified;f.enqueue(ordinary,60,7);f.pump();
+    check(f.certified==count&&f.worker.status().source.outputPoolGeneration==8,"delayed old same-fd pool never rolls back the newer quarantine");
+}
+
 void ambiguityAndBound(){
     Fixture f;f.start();f.enqueue(f.certifiedDiscovery(),30);f.pump();check(f.certified==1,"first unique token admitted");
     f.enqueue(ordinary,30);f.pump();check(f.worker.status().state==nd::RuntimeState::SourceLost,"same live native token never aliases a newer source frame");
-    Fixture full;full.start();for(unsigned i=0;i<nd::ReceiverWorker::PendingCapacity+1;++i){full.enqueue(ordinary,100+i);full.pump();}
+    Fixture full;full.negotiate();for(unsigned i=0;i<nd::ReceiverWorker::PendingCapacity+1;++i){full.enqueue(full.certifiedFrame(),100+i);full.pump();}
     check(full.worker.status().state==nd::RuntimeState::SourceLost,"in-flight table capacity refuses without eviction");
     Fixture random;random.randomFails=true;random.start();random.enqueue(ordinary,70);random.pump();
     check(random.worker.status().state==nd::RuntimeState::SourceRefused&&random.certified==0,"failed source-session OS randomness never uses weak ID fallback");
@@ -139,8 +283,8 @@ void ambiguityAndBound(){
 }
 void imageRouteAdmission(){
     Fixture waiting;waiting.routeReady=false;waiting.start();
-    check(waiting.worker.status().state==nd::RuntimeState::WaitingImageRoute&&waiting.randomCalls==0&&waiting.polls==0,
-        "unprepared final image route starts no source identity, full-cap control or repeating source copies");
+    check(waiting.worker.status().state==nd::RuntimeState::WaitingImageRoute&&waiting.randomCalls==0&&waiting.polls>0,
+        "unprepared final image route starts no source identity or control while retiring observed native tokens");
     waiting.routeReady=true;waiting.pump();check(waiting.randomCalls==0&&waiting.input.empty(),"first route readiness discards held stale snapshots and waits for new native input");
     waiting.enqueue(ordinary,30);waiting.pump();check(waiting.randomCalls==1&&waiting.worker.status().state==nd::RuntimeState::Negotiating,"new actual QBUF alone begins ready-route capacity/auth admission");
     Fixture missing;auto r=missing.request();r.imageRoutePrepared=nullptr;check(missing.worker.prepare(r,missing.provider()),"missing route proof stays configured ordinary");
@@ -221,4 +365,4 @@ void transportRecoveryRejectsOldProof(){
         "transport retry never retries authenticated-control rejection or grants pixels");
 }
 }
-int main(){try{offAndPreparation();realVideoAndCapture();unprovedInputs();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
