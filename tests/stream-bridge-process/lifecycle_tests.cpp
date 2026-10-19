@@ -83,5 +83,26 @@ void sourceLossReconnect(){
     local::LeaseReference next;check(p.writer.reference(capture,next)&&next.epoch>fresh.epoch,"successive source losses still allow a future admission epoch");
     close(fd);
 }
+void telemetry(){
+    renderer::Process p;p.kind=renderer::ProcessKind::Compositor;
+    native::CertifiedFrame callback;renderer::certified(callback,&p);
+    check(p.flow[unsigned(renderer::Flow::CertifiedCallback)]==1&&p.flow[unsigned(renderer::Flow::CertifiedQueued)]==0,
+        "an unconfirmed certificate callback never counts as locally queued metadata");
+    native::DecodedFrame decoded;renderer::decoded(decoded,&p);
+    check(p.flow[unsigned(renderer::Flow::DecodedCallback)]==1&&p.flow[unsigned(renderer::Flow::DecodedQueued)]==0,
+        "an unconfirmed decoded callback never counts as a queued picture");
+    local::Message invalid;invalid.peerConfirmed=true;invalid.kind=local::Kind::Certified;
+    renderer::consume(p,invalid);
+    check(p.flow[unsigned(renderer::Flow::CertifiedReceived)]==1&&p.flow[unsigned(renderer::Flow::AuthenticationRefused)]==1&&p.flow[unsigned(renderer::Flow::Authenticated)]==0,
+        "invalid detached metadata is separately counted without image authority");
+    invalid.kind=local::Kind::Decoded;renderer::consume(p,invalid);
+    check(p.flow[unsigned(renderer::Flow::DecodedReceived)]==1&&p.flow[unsigned(renderer::Flow::CertificateMiss)]==1&&p.flow[unsigned(renderer::Flow::PicturesRetained)]==0,
+        "decoded packet without exact certificate never counts as a retained local picture");
+    renderer::reportFlowCold(p);const auto first=p.flowLines;
+    for(unsigned i=0;i<4096;++i)renderer::reportFlowCold(p);
+    check(first==1&&p.flowLines==first,"unchanged local flow never repeats cold status");
+    for(unsigned bit=1;bit<64;++bit){p.flow[unsigned(renderer::Flow::CertifiedCallback)]=std::uint64_t(1)<<bit;renderer::reportFlowCold(p);}
+    check(p.flowLines==48,"changed local status has an absolute per-process line bound");
 }
-int main(){try{noConsumers();consumerAdmission();sourceLossReconnect();std::printf("%u actual process lifecycle checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+}
+int main(){try{noConsumers();consumerAdmission();sourceLossReconnect();telemetry();std::printf("%u actual process lifecycle checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

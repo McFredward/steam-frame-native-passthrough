@@ -15,6 +15,15 @@ struct Draw {
     bool ready=false;
 };
 struct MemoryPreparation {int duplicate=-1;std::uint64_t device=0,inode=0;};
+enum class DrawRefusal:std::uint8_t {Unavailable,Busy,Command,Epoch,Pipeline,Ineligible,Descriptor,Image,ExactPicture,ReadyMask,Capacity,Count};
+struct RendererStats {
+    std::uint64_t metadata=0,maskNone=0,maskDecoded=0,maskRejected=0,uploadAccepted=0,uploadRefused=0,pictures=0;
+    std::uint64_t begins=0,draws=0,selected=0,guardAttempts=0,guardAccepted=0,guardRefused=0,opaqueSubmits=0;
+    std::array<std::uint64_t,static_cast<std::size_t>(DrawRefusal::Count)> drawRefusals{};
+    std::uint32_t pending=0,copying=0,ready=0,quarantined=0,pipelines=0;
+    std::uint64_t poolUploaded=0,poolRefused=0;
+    bool prepared=false,lost=false;
+};
 class Renderer {
 public:
     Renderer();~Renderer();
@@ -57,6 +66,9 @@ public:
     // never wait; unsupported shape/route must keep ordinary native rendering.
     VkResult submit(VkQueue,std::uint32_t,const VkSubmitInfo*,VkFence) noexcept;
     VkResult submit2(VkQueue,std::uint32_t,const VkSubmitInfo2*,VkFence,bool khr=false) noexcept;
+    // Cold diagnostics only. Counts are observations, never image authority;
+    // a queued upload or recorded guard is not a successful native submission.
+    RendererStats statsCold()const noexcept;
     void stopCold() noexcept;
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

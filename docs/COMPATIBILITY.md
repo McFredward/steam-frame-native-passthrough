@@ -45,12 +45,16 @@ background-sampling shaders and every material family are not certified.
 
 Software checks exercise production native dispatch, source/texture ownership,
 authenticated control, accepted access units, receiver leases and guarded GPU
-coverage. Recent paired hardware logs demonstrate successful reconnects, game
-source activation and several certified masks reaching exact decoded-image
-leases in the compositor. The headset still showed opaque black instead of the
-room. The subsequent fixes replace a retired pixel-based format heuristic and
-prevent an unsupported graphics batch from permanently blocking later masks.
-See the [source-format review](research/source-format-opt-in-20261019.md).
+coverage. Recent paired hardware logs demonstrate successful reconnects and game
+source activation, but only17 mask-bearing access units for1,705 matched inputs
+in the latest run. Decoded-picture lease mappings also exist for maskless
+discovery frames; they do not prove a coverage upload or selected draw. The
+headset still showed opaque black instead of the room. After replacing the
+retired pixel-format heuristic and fixing permanent graphics-batch quarantine,
+the next correction schedules the R8 readback before the native encoder-input
+handoff. New bounded counters separate GPU readiness, transport and selected
+rendering. See the [readback review](research/readback-order-20261019.md) and
+[source-format review](research/source-format-opt-in-20261019.md).
 A successful final full-resolution headset picture and simultaneous local Steam
 menu/game mixed reality remain unconfirmed.
 

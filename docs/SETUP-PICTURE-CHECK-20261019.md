@@ -5,6 +5,12 @@ picture. The Textual installer therefore presents three distinct answers after
 the prepared startup: **Yes**, **No**, and **Cancel setup**. This is separate
 from the ordinary Apply confirmation.
 
+The picture question is a centered popup above the existing setup page, with
+a translucent surrounding backdrop. The page remains visible underneath. On
+short terminals, the explanation scrolls inside the popup while all three
+answer buttons stay within its bounds. Resizing does not dismiss or change the
+question.
+
 - **Yes** permits the successful operation to finish and release its recovery
   checkpoints.
 - **No** performs another bounded, read-only startup/health observation. Even a

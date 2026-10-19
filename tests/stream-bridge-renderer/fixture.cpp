@@ -101,7 +101,7 @@ struct Integration {
  VkPipeline publicPipeline=handle<VkPipeline>(0x60);
  VkDevice device=handle<VkDevice>(1);VkCommandBuffer cb=handle<VkCommandBuffer>(0x71000);VkImage image=handle<VkImage>(0x72000);VkImageView view=handle<VkImageView>(0x73000);VkDescriptorSet set=handle<VkDescriptorSet>(0x74000);VkDeviceMemory imported=handle<VkDeviceMemory>(0x75000);
  std::shared_ptr<std::atomic<bool>> connection=std::make_shared<std::atomic<bool>>(true);int file=-1;sr::LocalPicture picture;VkBuffer guard=VK_NULL_HANDLE;
- Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true,bool failCoverage=false,bool customAllocator=false){
+ Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true,bool failCoverage=false,bool customAllocator=false,bool prime=true,unsigned pendingPipelines=0){
   leaseCurrent=true;leaseSequence=71;vk.fences[number(vk.appFence)]=false;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
   VkPhysicalDeviceMemoryProperties m{};m.memoryTypeCount=1;m.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   check(renderer.prepareCold(device,m,Driver::get,native.device,VK_API_VERSION_1_1,0)==coverageReadable,"actual renderer cold prepare requires only exact coverage artifact");check(!consumer.owner,"pool preparation alone cannot advertise actual selected-image renderer");
@@ -113,6 +113,7 @@ struct Integration {
   }
   auto& definitions=renderer.definitions();check(definitions.createSet(native.nativeSet,native.set0,VK_SUCCESS),"actual native set definitions");check(definitions.createLayout(native.graphics.layout,native.layout,VK_SUCCESS),"actual native layout definitions");check(definitions.createRenderPass(native.graphics.renderPass,native.pass,VK_SUCCESS),"actual native renderpass definitions");
   VkShaderModuleCreateInfo shader{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};shader.codeSize=vs.size()*4;shader.pCode=vs.data();renderer.shaderCreated(native.stages[1].module,shader);shader.codeSize=ps.size()*4;shader.pCode=ps.data();
+  for(unsigned n=0;n<pendingPipelines;++n)renderer.graphicsCreated(VK_NULL_HANDLE,native.graphics,nullptr,publicPipeline);
   if(useColdProof)renderer.shaderCreated(native.stages[0].module,shader);
   else check(definitions.createShader(native.stages[0].module,shader,VK_SUCCESS),"unpromoted exact native FS recorded without interface authority");
   native.colorBlend.blendEnable=VK_FALSE;
@@ -124,13 +125,14 @@ struct Integration {
   char path[]="/tmp/sfnp-renderer-fixture-XXXXXX";file=mkstemp(path);check(file>=0,"owned kernel-object fixture fd");unlink(path);struct stat st{};check(!fstat(file,&st),"exact kernel object observed");VkImportMemoryFdInfoKHR fd{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};fd.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;fd.fd=file;VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocate.pNext=&fd;allocate.allocationSize=32;auto preparation=renderer.memoryPreparing(allocate);check(preparation.duplicate>=0,"fd duplicated BEFORE original consumes it");renderer.memoryAllocated(imported,allocate,preparation,VK_SUCCESS);renderer.imageBound(image,imported,0);
   VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};ci.image=image;ci.viewType=VK_IMAGE_VIEW_TYPE_2D;ci.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};renderer.viewCreated(view,ci);writeView(view);
   picture.metadata.kind=local::Kind::Decoded;picture.metadata.descriptor={7,9,16,2};picture.metadata.binding[0]=31;picture.metadata.lease.kernel={std::uint64_t(st.st_dev),std::uint64_t(st.st_ino)};picture.metadata.lease.sequence=71;picture.metadata.peerConfirmed=true;picture.leases=std::make_shared<local::LeaseReader>();picture.connection=connection;
-  sb::CertifiedAccessUnit certificate;certificate.descriptor=picture.metadata.descriptor;certificate.binding=picture.metadata.binding;certificate.coverageEncoding=sb::CoverageEncoding::Raw;certificate.coverage.assign(32,127);consumer.coverage(consumer.owner,certificate);consumer.picture(consumer.owner,picture);
+  if(prime){publish();consumer.picture(consumer.owner,picture);
   // Uploads become acquirable only after the ORIGINAL admitted queue drains
   // them and its real (fake-public-API) upload fence has signalled.
-  renderer.submit(vk.queue,0,nullptr,VK_NULL_HANDLE);vk.signal();consumer.tick(consumer.owner);
+  renderer.submit(vk.queue,0,nullptr,VK_NULL_HANDLE);vk.signal();consumer.tick(consumer.owner);}
   renderer.commandAllocated(handle<VkCommandBuffer>(0x70fff),VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);renderer.commandAllocated(cb,VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);
  }
  ~Integration(){renderer.stopCold();if(file>=0)close(file);}
+ void publish(sb::CoverageEncoding encoding=sb::CoverageEncoding::Raw,unsigned size=32){sb::CertifiedAccessUnit certificate;certificate.descriptor=picture.metadata.descriptor;certificate.binding=picture.metadata.binding;certificate.coverageEncoding=encoding;certificate.coverage.assign(encoding==sb::CoverageEncoding::None?0:size,127);consumer.coverage(consumer.owner,certificate);}
  void writeView(VkImageView selected){VkDescriptorImageInfo imageInfo{};imageInfo.imageView=selected;imageInfo.imageLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};write.dstSet=set;write.dstBinding=9;write.descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;write.descriptorCount=1;write.pImageInfo=&imageInfo;renderer.descriptorWrites(1,&write,0,nullptr);}
  sr::Draw record(VkCommandBufferUsageFlags flags=0){VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=flags;renderer.commandBegin(cb,&begin);renderer.pipelineBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,publicPipeline);renderer.setsBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,0,1,&set,0);auto result=renderer.beforeDraw(cb);if(result.control){guard=handle<VkBuffer>(vk.setBuffer.at(number(result.control)));vk.appControl[number(cb)]=number(guard);vk.appOffset[number(cb)]=vk.setOffset.at(number(result.control));}return result;}
  sr::Draw freshFrame(){
@@ -145,6 +147,40 @@ struct Integration {
  }
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
+void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ {Integration f(vs,ps,1,true,true,false,false,false,64);check(f.renderer.statsCold().pipelines==1,"repeated pending startup pipelines do not prevent later exact admission");}
+ {Integration f(vs,ps,3,true,true,false,false,false);
+  f.publish(sb::CoverageEncoding::None);auto s=f.renderer.statsCold();
+  check(s.metadata==1&&s.maskNone==1&&!s.maskDecoded&&!s.uploadAccepted&&!s.poolUploaded,"maskless discovery metadata cannot count as a decoded or uploaded mask");
+  f.publish(sb::CoverageEncoding::Raw,31);s=f.renderer.statsCold();
+  check(s.metadata==2&&s.maskRejected==1&&!s.maskDecoded&&!s.poolUploaded,"invalid authenticated mask bytes have a distinct decode refusal");
+  f.publish();consumer.picture(consumer.owner,f.picture);consumer.picture(consumer.owner,f.picture);s=f.renderer.statsCold();
+  check(s.maskDecoded==1&&s.uploadAccepted==1&&s.poolUploaded==1&&s.pending==1&&!s.copying&&!s.ready&&s.pictures==1,"decoded accepted pending upload and unique delivered picture are separate facts");
+  check(!f.record().ready,"pending upload cannot count as a selected ready mask");s=f.renderer.statsCold();
+  check(s.drawRefusals[std::size_t(sr::DrawRefusal::ReadyMask)]==1&&!s.selected&&!s.guardAccepted,"missing GPU readiness has its own draw refusal and no invented display success");
+  f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);s=f.renderer.statsCold();check(!s.pending&&s.copying==1&&!s.ready,"accepted native upload submit is copying until its actual fence completes");
+  f.vk.signal();consumer.tick(consumer.owner);check(f.record().ready,"real completed upload remains selectable");s=f.renderer.statsCold();
+  check(s.ready==1&&s.selected==1&&!s.guardAttempts&&!s.guardAccepted,"recording selected coverage is not a successful native submission");
+  check(f.submit(false)==VK_SUCCESS,"current coverage submit accepted");s=f.renderer.statsCold();
+  check(s.guardAttempts==1&&s.guardAccepted==1&&!s.guardRefused,"only original successful guarded submit increments accepted counter");
+  f.vk.failOriginal=true;check(f.submit(false)==VK_ERROR_DEVICE_LOST,"actual native submit refusal remains unchanged");s=f.renderer.statsCold();
+  check(s.guardAttempts==2&&s.guardAccepted==1&&s.guardRefused==1&&s.quarantined==1,"failed original submit is distinct and genuine GPU quarantine remains present");
+ }
+ {Integration f(vs,ps,3,true,true,false,false,false);
+  check(!f.record().ready,"legal early native recording has no speculative image or mask");
+  f.publish();consumer.picture(consumer.owner,f.picture);f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);f.vk.signal();consumer.tick(consumer.owner);
+  check(f.submit(false)==VK_SUCCESS&&f.vk.reads.empty(),"known limit cached early CB stays native when the correct mask arrives later");
+  auto s=f.renderer.statsCold();check(s.ready==1&&s.pictures==1&&s.draws==1&&!s.selected&&!s.guardAccepted&&s.drawRefusals[std::size_t(sr::DrawRefusal::ExactPicture)]==1,"telemetry exposes ready mask plus early-record miss without claiming a late bind");
+  check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"actual native re-record is still necessary and restores current exact coverage");
+  for(unsigned n=0;n<4096;++n)consumer.tick(consumer.owner); // Unchanged cold snapshots emit no repeated status.
+ }
+ {Integration f(vs,ps);f.renderer.beforeDraw(handle<VkCommandBuffer>(0xdead));f.renderer.beforeDraw(handle<VkCommandBuffer>(0x70fff));f.record(VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);
+  f.record();f.renderer.pipelineBound(f.cb,VK_PIPELINE_BIND_POINT_GRAPHICS,handle<VkPipeline>(0xbeef));f.renderer.beforeDraw(f.cb);
+  f.record();f.writeView(handle<VkImageView>(0xdead));f.renderer.beforeDraw(f.cb);
+  auto s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Command)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Epoch)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Ineligible)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Pipeline)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Descriptor)]==1,"unknown CB epoch pipeline eligibility and descriptor misses remain distinct");
+  f.writeView(f.view);f.renderer.imageDestroyed(f.image);f.renderer.beforeDraw(f.cb);s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Image)]==1,"retired imported image has a distinct draw refusal");
+ }
+}
 void fallbackRecovery(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  for(unsigned mode=0;mode<6;++mode){
   Integration f(vs,ps);const auto initial=f.record();check(initial.ready,"initial supported coverage recording");
@@ -215,7 +251,8 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
 }
 }
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
- if(argc==5&&std::strcmp(argv[4],"fallback-recovery")==0)fallbackRecovery(vs,ps);
+ if(argc==5&&std::strcmp(argv[4],"telemetry")==0)telemetry(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"fallback-recovery")==0)fallbackRecovery(vs,ps);
  else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else {integration(vs,ps);fallbackRecovery(vs,ps);}
+ else {integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

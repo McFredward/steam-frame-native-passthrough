@@ -12,7 +12,7 @@ enum class CoverageGate : unsigned {
     None,Device,Context,Caller,DirectFrame,Lock,Prepared,DrawShape,FrameEpoch,
     ConstantBuffer,EyeSelector,SourceView,SourceShape,SharedResource,AmbiguousSource,
     RepeatedSource,MixedProcess,InteriorCopy,OutputDepth,OutputShape,BlendDraw,
-    CopyPair,StageFull,InputReceipt,RawWitness,Readback,Inventory,Encoder,SourceContract,Count
+    CopyPair,StageFull,InputReceipt,RawWitness,Readback,Inventory,Encoder,SourceContract,CoverageSession,StageReceipt,RleEncode,FrameCertificate,SourceRevoked,Count
 };
 inline const char* coverageGateName(CoverageGate gate)noexcept{
     switch(gate){
@@ -30,7 +30,9 @@ inline const char* coverageGateName(CoverageGate gate)noexcept{
     case CoverageGate::StageFull:return "staging-capacity";case CoverageGate::InputReceipt:return "input-receipt";
     case CoverageGate::RawWitness:return "source-alpha-witness";case CoverageGate::Readback:return "readback";
     case CoverageGate::Inventory:return "source-inventory";case CoverageGate::Encoder:return "native-encoder";
-    case CoverageGate::SourceContract:return "source-format-contract";default:return "unknown";}
+    case CoverageGate::SourceContract:return "source-format-contract";
+    case CoverageGate::CoverageSession:return "coverage-session";case CoverageGate::StageReceipt:return "staging-receipt";
+    case CoverageGate::RleEncode:return "coverage-rle";case CoverageGate::FrameCertificate:return "frame-certificate";case CoverageGate::SourceRevoked:return "source-format-revoked";default:return "unknown";}
 }
 enum class CoverageSignal : unsigned {
     HookDraws,NativeDraws,SourceFrames,ConstantMaps,ConstantCaptures,EyeDraws,
@@ -49,6 +51,9 @@ struct CoverageGateStats {
     // CopyResource on the retained context's currently published vtable.
     // Approximate diagnostics only; these fields never authorize a frame.
     std::uint32_t contextHookSlots=0,contextOriginalSlots=0,contextFacadeSlots=0,nativeDispatchMutations=0;
+    std::uint64_t readbackReady=0,readbackBusy=0,readbackErrors=0,
+        lastCopyAgeUs=0,maxCopyAgeUs=0,lastSubmissionAgeUs=0,lastReadbackUs=0,maxReadbackUs=0;
+    std::uint32_t lastReadbackResult=0;
     bool contextTableReadable=false,contextTableStable=false,nativeDeviceSame=false;
 };
 class CoverageGateCounters {
@@ -66,6 +71,14 @@ public:
     void constantBytes(std::uint32_t bytes)noexcept{constant_.store(bytes,std::memory_order_relaxed);}
     void source(std::uint32_t width,std::uint32_t height,std::uint32_t format)noexcept{sourceWidth_.store(width,std::memory_order_relaxed);sourceHeight_.store(height,std::memory_order_relaxed);sourceFormat_.store(format,std::memory_order_relaxed);}
     void output(std::uint32_t width,std::uint32_t height,std::uint32_t format)noexcept{outputWidth_.store(width,std::memory_order_relaxed);outputHeight_.store(height,std::memory_order_relaxed);outputFormat_.store(format,std::memory_order_relaxed);}
+    void readback(std::uint32_t result,std::uint64_t copyAgeUs,std::uint64_t submissionAgeUs,std::uint64_t durationUs)noexcept{
+        // Public DXGI_ERROR_WAS_STILL_DRAWING; this header is also built on Linux.
+        increment(!(result&0x80000000u)?readbackReady_:(result==0x887a000au?readbackBusy_:readbackErrors_));
+        readbackResult_.store(result,std::memory_order_relaxed);
+        copyAge_.store(copyAgeUs,std::memory_order_relaxed);submissionAge_.store(submissionAgeUs,std::memory_order_relaxed);
+        readbackDuration_.store(durationUs,std::memory_order_relaxed);
+        maximum(maxCopyAge_,copyAgeUs);maximum(maxReadbackDuration_,durationUs);
+    }
     CoverageGateStats snapshot()const noexcept{
         CoverageGateStats out;std::uint64_t* const values[]{&out.hookDraws,&out.nativeDraws,&out.sourceFrames,&out.constantMaps,&out.constantCaptures,
             &out.eyeDraws,&out.completePairs,&out.nativeCopies,&out.capturedCopies,&out.matchedInputs,&out.certifiedMasks,
@@ -75,9 +88,16 @@ public:
         for(unsigned i=0;i<refusals_.size();++i)out.refusals[i]=refusals_[i].load(std::memory_order_relaxed);
         out.lastRefusal=static_cast<CoverageGate>(last_.load(std::memory_order_relaxed));out.lastConstantBytes=constant_.load(std::memory_order_relaxed);
         out.lastSourceWidth=sourceWidth_.load(std::memory_order_relaxed);out.lastSourceHeight=sourceHeight_.load(std::memory_order_relaxed);out.lastSourceFormat=sourceFormat_.load(std::memory_order_relaxed);
-        out.lastOutputWidth=outputWidth_.load(std::memory_order_relaxed);out.lastOutputHeight=outputHeight_.load(std::memory_order_relaxed);out.lastOutputFormat=outputFormat_.load(std::memory_order_relaxed);return out;
+        out.lastOutputWidth=outputWidth_.load(std::memory_order_relaxed);out.lastOutputHeight=outputHeight_.load(std::memory_order_relaxed);out.lastOutputFormat=outputFormat_.load(std::memory_order_relaxed);out.readbackReady=readbackReady_.load(std::memory_order_relaxed);out.readbackBusy=readbackBusy_.load(std::memory_order_relaxed);out.readbackErrors=readbackErrors_.load(std::memory_order_relaxed);
+        out.lastReadbackResult=readbackResult_.load(std::memory_order_relaxed);out.lastCopyAgeUs=copyAge_.load(std::memory_order_relaxed);out.maxCopyAgeUs=maxCopyAge_.load(std::memory_order_relaxed);
+        out.lastSubmissionAgeUs=submissionAge_.load(std::memory_order_relaxed);out.lastReadbackUs=readbackDuration_.load(std::memory_order_relaxed);out.maxReadbackUs=maxReadbackDuration_.load(std::memory_order_relaxed);return out;
     }
 private:
+    static void maximum(std::atomic<std::uint64_t>& value,std::uint64_t sample)noexcept{
+        auto current=value.load(std::memory_order_relaxed);if(sample>current)value.compare_exchange_strong(current,sample,std::memory_order_relaxed,std::memory_order_relaxed);
+    }
+    std::atomic<std::uint64_t> readbackReady_{},readbackBusy_{},readbackErrors_{},copyAge_{},maxCopyAge_{},submissionAge_{},readbackDuration_{},maxReadbackDuration_{};
+    std::atomic<std::uint32_t> readbackResult_{};
     // Contention can lose diagnostic samples; snapshots are intentionally not
     // coherent frame proofs. No caller may use them to authorize rendering.
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(CoverageSignal::Count)> signals_{};

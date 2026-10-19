@@ -6,11 +6,13 @@ prove UI behavior, not headset rendering or successful device installation.
 from __future__ import annotations
 
 import asyncio
+import html
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import subprocess
 import sys
@@ -41,6 +43,55 @@ async def until(pilot, predicate):
 
 
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_picture_popup_retains_setup_background_and_controls_when_resized(self):
+        for lang in ("en", "de"):
+            for original in (False, True):
+                with self.subTest(lang=lang, original=original):
+                    observed = []
+
+                    def backend():
+                        p = UI.active_presenter()
+                        p.inventory(report={"pc": {"compatible": True, "installed": True},
+                                            "frame": {"runtime_compatible": True, "installed": True,
+                                                      "host": "192.168.0.25"}})
+                        p.stage("startup_health")
+                        observed.append(p.confirm("bridge_original_picture" if original else "bridge_picture"))
+                        return 130
+
+                    app = UI.SetupApp(backend, lang)
+                    async with app.run_test(size=(100, 36)) as pilot:
+                        await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+                        underlying = app.screen_stack[0]
+                        brand = underlying.query_one("#brand", Static)
+                        for width, height in ((100, 36), (80, 24), (60, 24), (42, 16), (100, 36)):
+                            await pilot.resize_terminal(width, height)
+                            await pilot.pause()
+                            self.assertIs(app.screen_stack[0], underlying)
+                            self.assertIs(underlying.query_one("#brand", Static), brand)
+                            self.assertEqual(len(app.screen_stack), 2)
+                            self.assertGreater(app.screen.styles.background.a, 0)
+                            self.assertLess(app.screen.styles.background.a, 1)
+                            dialog = app.screen.query_one("#confirm-dialog").region
+                            self.assertGreater(dialog.x, 0)
+                            self.assertGreater(dialog.y, 0)
+                            self.assertLess(dialog.right, width)
+                            self.assertLess(dialog.bottom, height)
+                            self.assertLessEqual(abs((dialog.x + dialog.right) - width), 1)
+                            self.assertLessEqual(abs((dialog.y + dialog.bottom) - height), 1)
+                            for button in app.screen.query(Button):
+                                self.assertTrue(dialog.contains_region(button.region), button.id)
+                            self.assertEqual(app.focused.id, "picture-no")
+                            if width == 100:
+                                # Test actual composed output, not merely the
+                                # continued existence of an obscured widget.
+                                visible = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", app.export_screenshot())).split())
+                                self.assertIn("NATIVE PASSTHROUGH", visible)
+                                self.assertIn("THIS PC" if lang == "en" else "DIESER PC", visible)
+                        await pilot.press("escape")
+                        await until(pilot, lambda: app.backend_finished)
+                        self.assertEqual(observed, [None])
+                    app.backend.join()
+
     async def test_picture_no_rechecks_actual_workflow_and_explicit_undo_requires_original_picture(self):
         class Ports:
             error = ValueError

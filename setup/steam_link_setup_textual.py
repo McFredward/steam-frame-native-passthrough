@@ -174,6 +174,9 @@ class PictureScreen(ModalScreen[Optional[bool]]):
     def on_mount(self):
         self.query_one("#picture-no", Button).focus()
 
+    def on_resize(self, event: events.Resize):
+        self.set_class(event.size.height < 24, "short")
+
     @on(Button.Pressed)
     def answer(self, event: Button.Pressed):
         self.dismiss({"picture-yes": True, "picture-no": False}.get(event.button.id))
@@ -522,11 +525,14 @@ class SetupApp(App[int]):
     SetupApp.compact #devices { min-height: 4; }
     SetupApp.narrow #devices { layout: vertical; }
     SetupApp.narrow .device { width: 1fr; margin: 0; }
-    ConfirmScreen, InputScreen, SSHInputScreen { align: center middle; background: #030811cc; }
+    ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen { align: center middle; background: #030811cc; }
     #confirm-dialog, #input-dialog, #ssh-dialog { width: 70; max-width: 94%; height: auto; max-height: 90%; padding: 1 2; border: round #61bfd4; background: #122336; }
     #confirm-title, #input-title, #ssh-title { color: #8de2ec; text-style: bold; height: auto; margin-bottom: 1; }
     #ssh-question { height: auto; margin-bottom: 1; }
     #confirm-copy { height: auto; max-height: 16; }
+    PictureScreen.short #confirm-dialog { height: 90%; }
+    PictureScreen.short #confirm-copy { height: 1fr; min-height: 1; }
+    PictureScreen Button { min-width: 6; }
     #confirm-question { height: auto; text-style: bold; margin: 1 0; }
     .plan-copy { height: auto; color: #bdd0e1; }
     #confirm-buttons, #input-buttons, #ssh-buttons { height: auto; align-horizontal: right; margin-top: 1; }

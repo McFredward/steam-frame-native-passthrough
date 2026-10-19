@@ -26,6 +26,24 @@ A causal control reinstates the old whole-pool quarantine and must fail the
 fresh-picture assertion. Actual failed copy/tail-fence quarantine remains
 independent. `--fallback-recovery-only` selects just these recovery cases.
 
+`--telemetry-only` executes the production diagnostics without changing image
+admission. It distinguishes authenticated maskless discovery from decoded R8
+coverage, accepted uploads from pending/copying/ready storage, unique delivered
+pictures from repeated notifications, recording-time selection from original
+successful guarded queue submission, and each bounded draw-refusal category.
+Two causal controls mislabel `None` as a mask or pending storage as ready; both
+must fail. Sixty-four pending startup pipelines produce one deduplicated refusal
+message and cannot consume the later exact-shader/companion admission messages.
+Hot paths only update fixed atomic counters. The existing cold worker emits
+changed milestones or logarithmic progress, at most 48 lines per renderer.
+Queue acceptance still does not prove GPU completion or a visible headset image.
+
+The focused test also records a legal native command buffer before any correct
+picture/mask arrives, then supplies and completes that exact upload. Reusing the
+earlier ordinary recording remains opaque; a genuine native re-record selects
+the now-ready mask. This is an explicitly reproduced current limitation, not a
+late-binding fix or evidence that the actual compositor uses this call order.
+
 The documented native 29-binding scalar Set0 is replayed with the exact private
 original shaders. The production successful-shader callback must prove the
 original fragment's constant-zero image accesses and promote pending count1
