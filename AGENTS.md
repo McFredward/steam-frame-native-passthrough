@@ -1,8 +1,9 @@
 # Working on Steam Link Native Passthrough
 
-- Integrate on `dev`; publish the validated final development state to `main`
-  when requested. The maintainer explicitly authorized that publication on
-  2026-10-17. Keep upstream history and attribution; worker branches stay local.
+- Integrate and push only on `dev`. The maintainer's 2026-10-19 blackout-test
+  instruction supersedes the previous publication authorization: do not update
+  `main` until the maintainer explicitly approves another release. Keep upstream
+  history and attribution; worker branches stay local.
   Use separate worktrees and disjoint file ownership.
 - Commit as `McFredward <frederik@lissek.info>`. Speak German to the maintainer;
   source, comments and developer documentation are English.
