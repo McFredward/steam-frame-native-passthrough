@@ -34,6 +34,7 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
   "$sender_protocol/bridge/stream_bridge_protocol.cpp" \
   "$sender_protocol/bridge/stream_bridge_auth.cpp" \
   "$sender_protocol/bridge/stream_bridge_frame.cpp" \
+  "$sender_protocol/bridge/stream_bridge_compression.cpp" \
   "$sender_protocol/bridge/stream_bridge_capacity.cpp" \
   "$sender_protocol/bridge/stream_bridge_credentials.cpp" \
   "$sender_protocol/bridge/stream_bridge_control.cpp" \

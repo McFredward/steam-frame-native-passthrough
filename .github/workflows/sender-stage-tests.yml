@@ -48,7 +48,7 @@ jobs:
           if not defined SFNP_VS exit /b 1
           call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
           if errorlevel 1 exit /b 1
-          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_stage_pipeline.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/hevc_bridge_sei.cpp /Fe:build\stage-pipeline.exe /Fo:build\ /link
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_stage_pipeline.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_compression.cpp bridge/hevc_bridge_sei.cpp /Fe:build\stage-pipeline.exe /Fo:build\ /link
           if errorlevel 1 exit /b 1
           build\stage-pipeline.exe >build\stage-pipeline.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"

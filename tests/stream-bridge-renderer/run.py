@@ -18,7 +18,7 @@ def main():
  for relative in files:
   original=root/relative;target=source/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,target);pins[relative]=hashlib.sha256(original.read_bytes()).hexdigest()
  renderer=source/'layer/stream_bridge_renderer.cpp';pool=source/'layer/stream_bridge_coverage_gpu.cpp'
- shared=[root/f for f in ['bridge/stream_bridge_frame.cpp','bridge/stream_bridge_auth.cpp','bridge/stream_bridge_protocol.cpp','bridge/hevc_bridge_sei.cpp']]
+ shared=[root/f for f in ['bridge/stream_bridge_frame.cpp','bridge/stream_bridge_compression.cpp','bridge/stream_bridge_auth.cpp','bridge/stream_bridge_protocol.cpp','bridge/hevc_bridge_sei.cpp']]
  args=[str(a.vs.resolve()),str(a.ps.resolve()),str(a.coverage.resolve())]
  if a.artifact_fallback_only:args+=['artifact-fallback']
  if a.fallback_recovery_only:args+=['fallback-recovery']

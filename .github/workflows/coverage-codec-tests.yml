@@ -1,0 +1,56 @@
+name: Lossless exact-coverage codec
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'bridge/stream_bridge_frame.*'
+      - 'bridge/stream_bridge_compression.*'
+      - 'bridge/stream_bridge_auth.*'
+      - 'third_party/lz4/**'
+      - 'tests/test_stream_bridge_compression.cpp'
+      - 'tests/test_stream_bridge_frame.cpp'
+      - '.github/workflows/coverage-codec-tests.yml'
+  pull_request:
+    paths:
+      - 'bridge/stream_bridge_frame.*'
+      - 'bridge/stream_bridge_compression.*'
+      - 'bridge/stream_bridge_auth.*'
+      - 'third_party/lz4/**'
+      - 'tests/test_stream_bridge_compression.cpp'
+      - 'tests/test_stream_bridge_frame.cpp'
+      - '.github/workflows/coverage-codec-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  codec:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build actual codec and exact-AU fixtures
+        shell: bash
+        run: |
+          cmake -S . -B build/codec -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/codec --config Release --parallel 4 --target test_stream_bridge_compression test_stream_bridge_frame
+          ctest --test-dir build/codec -C Release --output-on-failure -R '^stream_bridge_(compression|frame)$'
+      - name: Check bounded malformed blocks under ASan and UBSan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cmake -S . -B build/codec-asan -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer'
+          cmake --build build/codec-asan --parallel 4 --target test_stream_bridge_compression test_stream_bridge_frame
+          ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build/codec-asan --output-on-failure -R '^stream_bridge_(compression|frame)$'
+          build/codec/test_stream_bridge_compression --benchmark > build/codec-benchmark.log
+      - name: Preserve concise validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-coverage-codec-${{ matrix.os }}
+          path: |
+            build/codec/Testing/Temporary/LastTest.log
+            build/codec-asan/Testing/Temporary/LastTest.log
+            build/codec-benchmark.log
