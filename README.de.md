@@ -1,3 +1,5 @@
+**Aktuell nur für <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows-PCs mit <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA-GPU.**
+
 # Steam Link Native Passthrough
 
 <p align="center">
@@ -18,9 +20,7 @@
 > [!IMPORTANT]
 > **Steam Frame SteamVR 2.18.2 · Build 1791331621**
 >
-> **Aktuell nur für Windows-PCs mit NVIDIA-GPU.**
->
-> Experimentell. Der Installer prüft die Kompatibilität.
+> Der Installer prüft die Kompatibilität.
 
 Spiele unterstützte PC-VR-Spiele über Steam Link in deinem echten Zimmer.
 
@@ -66,7 +66,7 @@ und lass sie bis zum Abschluss eingeschaltet.
 Starte deinen Steam-Link-Stream und aktiviere natives Steam-Link-Passthrough im Spiel.
 Dieselbe Zeile bietet später **Update, Deinstallation oder Rücknahme** an.
 
-Experimentell: Gelegentliche Passthrough-Aussetzer und die gleichzeitige Darstellung
+Gelegentliche Passthrough-Aussetzer und die gleichzeitige Darstellung
 von Spiel und Steam-Menü werden noch untersucht.
 
 ## Für Entwickler
