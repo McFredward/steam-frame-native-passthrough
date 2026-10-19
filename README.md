@@ -18,7 +18,9 @@
 > [!IMPORTANT]
 > **Steam Frame SteamVR 2.18.2 · build 1791331621**
 >
-> **Experimental PC + Frame setup:** Windows · NVIDIA · HEVC. Exact runtime checks must pass.
+> **Currently supports Windows PCs with an NVIDIA GPU only.**
+>
+> Experimental. The installer checks compatibility.
 
 Play supported PC VR games in your real room over Steam Link.
 
@@ -57,15 +59,9 @@ Leave the Frame awake on the same network as your PC and stop the VR stream.
 irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.ps1 | iex
 ```
 
-**Bash — Linux inspection and Frame maintenance:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.sh | bash
-```
-
 The assistant finds the Frame, checks both devices and guides you through installation.
 It downloads its own tools; enter the Frame password when asked and keep it awake
-until setup finishes. A native Linux PC sender is not supported yet.
+until setup finishes.
 
 Start your Steam Link stream and enable native Steam Link passthrough in the game.
 Run the same command again to **update, uninstall or restore the previous setup**.
