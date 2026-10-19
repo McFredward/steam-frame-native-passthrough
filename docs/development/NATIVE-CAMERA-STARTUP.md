@@ -57,3 +57,34 @@ repeatedly restarting SteamVR or changing native camera formats. Any device
 experiment requires separately coordinated permission. The user's confirmed
 manual suspend/resume remains an observed workaround, not an automated repair
 or an explanation of the original trigger.
+
+## Bounded changes in 0.2.4
+
+The installed native unit definitions make `steam.service` depend on and start
+after `steamvr.service`. Setup previously restarted the client first and then
+restarted VR underneath it. The captured client exits during that sequence.
+Activation now stops the client only after files are staged, refreshes VR once,
+then starts its dependent client. There is no user prompt between those steps.
+Durable phases reconcile lost replies without replaying a completed restart;
+the pre-activation health observation is retained with that activation, including
+across a new setup process. Undo activates restored files with its own authority.
+This corrects the dependency order; it does not itself prove a repaired camera.
+
+Before this process has ever recorded a masked draw, Vulkan queue submission
+now passes the exact native call through without adding a zero-guard command.
+After any masked recording exists, the mandatory zero/loss guard remains active
+for the rest of the device lifetime. Disabling MR must not make cached guarded
+commands unsafe. No native camera format, camera service or DSP is changed.
+
+The optional startup observer now reports the four concrete camera failure
+signatures independently of UI readiness. It uses bounded current-start system
+journal, user-relay and compositor-log observations. The setup warns about
+camera faults before the visible Yes/No question, even when its UI is ready.
+Missing journal permission remains an observation limit, not permission to
+restart or roll back. Yes still means acceptance; No offers read-only checking
+and explicit Undo. No error message or running process verifies camera pixels.
+
+The global alpha preference remains required for native scene composition.
+This candidate does not introduce unreviewed in-process OpenVR initialization,
+automated suspend or camera/DSP repair. Its effect on the reported black/green
+startup camera requires a new hardware result after these software changes.
