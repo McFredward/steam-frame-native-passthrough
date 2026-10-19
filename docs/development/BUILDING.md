@@ -6,7 +6,8 @@ a device write or service restart.
 
 ## Portable modules and focused tests
 
-Use CMake 3.16+, C++17 and Python 3. `FRAME_STREAM_BRIDGE_ONLY=ON` selects the
+The commands below require CMake/CTest 3.20+, C++17 and Python 3.
+`FRAME_STREAM_BRIDGE_ONLY=ON` selects the
 current bridge without building the older diagnostic/atlas targets. For example:
 
 ```sh
