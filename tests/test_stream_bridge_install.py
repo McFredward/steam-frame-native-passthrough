@@ -37,7 +37,7 @@ class Tests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory(prefix='sfnp-install-fixture-');self.addCleanup(self.temp.cleanup)
         self.base=Path(self.temp.name);self.home=self.base/'pc';self.home.mkdir(mode=0o700)
         self.fhome=self.base/'frame';self.fhome.mkdir(mode=0o700)
-        self.env=mock.patch.dict(os.environ,{'LOCALAPPDATA':str(self.home/'AppData/Local'),'XDG_DATA_HOME':'','XDG_CONFIG_HOME':''})
+        self.env=mock.patch.dict(os.environ,{'LOCALAPPDATA':str(self.home/'AppData/Local'),'XDG_DATA_HOME':'','XDG_CONFIG_HOME':'','VR_CONFIG_PATH':'','VR_PATHREG_OVERRIDE':''})
         self.env.start();self.addCleanup(self.env.stop)
         self.runtime=self.base/'SteamVR';self.runtime.mkdir(mode=0o700)
         self.local=s.Local(self.home,'Windows',steamvr=self.runtime)
@@ -46,6 +46,8 @@ class Tests(unittest.TestCase):
         self.system=System(self.local.registry);self.local.runner=self.system
         self.settings=self.config/'steamvr.vrsettings';s.put(self.settings,s.encoded({'camera':{'other':7},b.SETTINGS_SECTION:{'controlPort':2222}}))
         self.fsettings=self.fhome/'.local/share/Steam/config/steamvr.vrsettings';s.put(self.fsettings,s.encoded({'camera':{'forceSceneAlphaBlending':False},'user':{'quality':3}}));os.chmod(self.fsettings,0o666)
+        self.fregistry=self.fhome/'.config/openvr/openvrpaths.vrpath'
+        s.put(self.fregistry,s.encoded({'config':[str(self.fsettings.parent)]}))
         self.froot=self.fhome/'.local/share/SteamLinkNativePassthrough/stream-bridge'
         self.fsvr=self.fhome/'SteamVR';self.fsvr.mkdir(mode=0o700)
         self.pair={'schema':s.PAIR,'pair_id':'12'*16,'key_hex':'23'*32,'role':'producer','protocol_major':1}
@@ -101,6 +103,100 @@ class Tests(unittest.TestCase):
                 module.restore_owned=run_restore;module.apply_owned_override=run_override
             return module
         patch=mock.patch.object(b,'load_module',side_effect=camera_module);patch.start();self.addCleanup(patch.stop)
+
+    def separate_native_settings(self):
+        old=self.fsettings
+        self.fsettings=self.fhome/'.config/openvr/config/steamvr.vrsettings'
+        s.put(self.fsettings,s.encoded({'camera':{'enableConstructRoomView':True},'user':{'quality':3}}))
+        s.put(self.fregistry,s.encoded({'config':[str(self.fsettings.parent),str(old.parent)]}),s.read(self.fregistry))
+        return old
+
+    def test_fresh_install_uses_active_first_native_config_not_historical_steam_path(self):
+        old=self.separate_native_settings();active=s.read(self.fsettings);inactive=s.read(old)
+        with self.fake_generation():
+            b.remote_request(s,b.request(self.bundle,'bridge-prepare',pairing={**self.pair,'role':'receiver'},
+                address='192.168.1.4',port=47631,automated=True),unit=self.unit)
+        state=self.unit.tx.state()
+        self.assertEqual(state['settings']['path'],str(self.fsettings))
+        self.assertEqual(s.parse(s.read(self.froot/b.CAMERA_CONFIG))['settings'],str(self.fsettings))
+        self.assertEqual(s.read(self.fsettings),active);self.assertEqual(s.read(old),inactive)
+        self.assertEqual(self.camera_native_calls,[])
+
+    def test_recovery_of_025_wrong_inactive_config_does_not_touch_real_native_file(self):
+        # Reproduce the real 0.2.5 journal using the old unused target, then
+        # expose the real public registry and an independently writing API.
+        raw=s.read(self.fsettings)
+        prefs=s.parse(raw);prefs['camera']['forceSceneAlphaBlending']=True
+        s.put(self.fsettings,s.encoded(prefs),raw)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        old=self.separate_native_settings();before=s.read(self.fsettings)
+        # Previous global-to-session migration had a pending, explicitly owned
+        # grant on the unused file; it must not authorize active-file writes.
+        config=s.parse(s.read(self.froot/b.CAMERA_CONFIG))
+        config['legacy_migration']={'id':'64'*32,'section_present':True,'present':False,'value':None,'installed':True}
+        path=self.froot/b.CAMERA_CONFIG;previous=s.read(path);s.put(path,s.encoded(config),previous)
+        state=s.parse(s.read(self.unit.tx.path))
+        for op in state['operations']:
+            if op['path']==str(path):op['after']['bytes']=base64.b64encode(s.encoded(config)).decode()
+        s.put(self.unit.tx.path,s.encoded(state),s.read(self.unit.tx.path))
+        # Exact current receipt/config must also be admitted by the existing
+        # checkpoint, as a genuine staged migration would have recorded them.
+        cp=self.unit.checkpoint();value=cp.value()
+        # 0.2.5 did not journal the runtime pause; retain that historical shape.
+        value['operations']=[op for op in value['operations'] if op['path']!=str(self.froot/'camera-session.pause')]
+        value['settings']=[cp.setting(old,'camera','forceSceneAlphaBlending',[{'present':True,'value':True},{'present':False,'value':None}])]
+        for op in value['operations']:
+            if op['path']==str(path):op['after'].append({**state['operations'][next(i for i,o in enumerate(state['operations']) if o['path']==str(path))]['after'],'mode':0o600})
+            if op['path']==str(self.unit.tx.path):op['after'][0]={'kind':'file','bytes':base64.b64encode(s.encoded(state)).decode(),'mode':0o600}
+        s.put(cp.path,s.encoded(value),s.read(cp.path))
+        helper=self.unit.camera_helper();helper.migration_begin(self.froot,config)
+        helper.pause(self.froot,'unused')
+        b.remote_request(s,b.request(self.bundle,'bridge-restore'),unit=self.unit)
+        self.assertEqual(s.read(self.fsettings),before)
+        self.assertEqual(self.camera_native_calls,[])
+        cp.verify_restored();cp.finish(restored=True)
+        self.assertFalse(self.unit.tx.path.exists())
+        with self.fake_generation():
+            b.remote_request(s,b.request(self.bundle,'bridge-prepare',pairing={**self.pair,'role':'receiver'},
+                address='192.168.1.4',port=47631,automated=True),unit=self.unit)
+        self.assertEqual(self.unit.tx.state()['settings']['path'],str(self.fsettings))
+        new=s.parse(s.read(self.froot/b.CAMERA_CONFIG))
+        self.assertNotIn('legacy_migration',new)
+        self.assertEqual(s.read(self.fsettings),before)
+        self.assertEqual(s.parse(s.read(self.froot/'camera-session.pause'))['settings'],str(self.fsettings))
+        helper.startup(self.froot,running=lambda:False)
+        self.assertFalse((self.froot/'camera-session.pause').exists())
+
+    def test_update_retargets_inactive_session_and_exact_undo_restores_pause_after_config(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();old=self.separate_native_settings();active=s.read(self.fsettings)
+        self.version_bundle(pc='0.2.5',frame='0.2.6')
+        with self.fake_generation():
+            b.remote_request(s,b.request(self.bundle,'bridge-prepare',pairing={**self.pair,'role':'receiver'},
+                address='192.168.1.4',port=47631,automated=True),unit=self.unit)
+        self.assertEqual(s.parse(s.read(self.froot/b.CAMERA_CONFIG))['settings'],str(self.fsettings))
+        self.assertEqual(s.parse(s.read(self.froot/'camera-session.pause'))['settings'],str(self.fsettings))
+        self.assertEqual(s.read(self.fsettings),active);self.assertEqual(self.camera_native_calls,[])
+        self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+        self.assertEqual(s.parse(s.read(self.froot/b.CAMERA_CONFIG))['settings'],str(old))
+        self.assertFalse((self.froot/'camera-session.pause').exists())
+        self.assertEqual(s.read(self.fsettings),active)
+
+    def test_legacy_target_update_uses_current_camera_helper_in_a_fresh_rpc_unit(self):
+        self.legacy_frame(original=None)
+        old=self.separate_native_settings();active=s.read(self.fsettings)
+        self.version_bundle(pc='0.2.5',frame='0.2.6')
+        unit=b.FrameInstall(s,home=self.fhome,steamvr=self.fsvr,root=self.froot,config=self.fhome/'.config',
+            run=self.unit.run,machine=lambda:'aarch64')
+        self.assertFalse(hasattr(unit,'_camera_payload'))
+        with self.fake_generation():
+            result=b.remote_request(s,b.request(self.bundle,'bridge-prepare',pairing={**self.pair,'role':'receiver'},
+                address='192.168.1.4',port=47631,automated=True),unit=unit)
+        self.assertEqual(result['reason'],'prepared-update')
+        self.assertEqual(unit.tx.state()['settings']['path'],str(self.fsettings))
+        self.assertEqual(s.read(self.fsettings),active);self.assertEqual(self.camera_native_calls,[])
+        self.assertNotIn('legacy_migration',s.parse(s.read(self.froot/b.CAMERA_CONFIG)))
 
     def make_bundle(self,readiness='release'):
         pins=lambda raw:{'bytes':len(raw),'sha256':s.sha(raw)}
@@ -538,7 +634,7 @@ class Tests(unittest.TestCase):
 
     def test_live_camera_refusal_keeps_static_files_for_recovery(self):
         self.legacy_frame();self.version_bundle(pc='0.2.4',frame='0.2.5');self.camera_refuse=True
-        with self.fake_generation(),self.assertRaisesRegex(s.SetupError,'could not be restored safely'):
+        with self.fake_generation(),self.assertRaisesRegex(s.SetupError,'legacy runtime restore not confirmed'):
             self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
         self.assertTrue((self.froot/b.CAMERA_CONFIG).exists())
         self.assertTrue((self.froot/b.CAMERA_TOOL).exists())
@@ -799,7 +895,7 @@ class Tests(unittest.TestCase):
                            f'p=pathlib.Path({str(starts)!r});p.write_text(p.read_text()+"start\\n" if p.exists() else "start\\n")\n'
                            'args=shlex.split(sys.argv[-1]);exec(compile(args[-1],"<fake-ssh>","exec"),{"__name__":"__main__"})\n')
         remote=b.Remote(s,'192.168.1.25')
-        env={'HOME':str(self.fhome),'XDG_DATA_HOME':'','XDG_CONFIG_HOME':''}
+        env={'HOME':str(self.fhome),'XDG_DATA_HOME':'','XDG_CONFIG_HOME':'','VR_CONFIG_PATH':'','VR_PATHREG_OVERRIDE':''}
         before={str(p):p.read_bytes() for p in self.fhome.rglob('*') if p.is_file()}
         with mock.patch.dict(os.environ,env),mock.patch.object(s,'ssh_args',return_value=[sys.executable,str(wrapper)]):
             try:

@@ -45,7 +45,9 @@ OpenSSH fallback when needed. You do not need to install Python or use `pip`.
 Use **arrow keys**, **Tab**, **Enter** or the mouse. The PC and Frame cards show
 what is actually installed. **Legacy patch only** identifies an old installation that can be migrated or
 removed. It does not enable a retired runtime path. Technical
-information and the exact log path are available in **Details**.
+information is available in **Details**. Press **F3** for selectable file paths
+and **Copy** / **Copy all**, or **F4** to copy the log path directly.
+**Ctrl+Shift+C** also copies the log path; **Ctrl+C** still aborts setup.
 
 ## Connect and apply
 
@@ -96,6 +98,11 @@ again. Closing a password prompt or cancelling an action confirmation alone
 does not authorize installation or uninstall.
 
 ## Logs and troubleshooting
+
+Press **F3** to choose and copy a log or recovery path. If the local clipboard
+is unavailable, the selected path remains visible in a read-only text field; use
+your terminal's selection and Copy command. A terminal may reserve right-click
+for its own menu, so right-click is not the installer's copy shortcut.
 
 Failures show the exact log path and any recovery-record locations. Interactive
 setup logs normally live under:

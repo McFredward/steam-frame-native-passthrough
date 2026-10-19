@@ -97,12 +97,12 @@ class Files(fixtures.Tests):
         installer=b.LocalInstall(s,self.local)
         installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
         with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
-        self.unit.tx.commit();updated=self.newer_bundle();choices=[];confirmations=[];commands=[];inventories=[]
+        self.unit.tx.commit();updated=self.newer_bundle();choices=[];confirmations=[];commands=[];inventories=[];messages=[]
         class Screen:
             def banner(inner,**kw):pass
             def status(inner,*a):pass
             def path(inner,*a,**kw):pass
-            def say(inner,key):pass
+            def say(inner,key):messages.append(key)
             def suspend(inner):return contextlib.nullcontext()
             def inventory(inner,**kw):inventories.append(kw)
             def choose_action(inner,actions,**kw):
@@ -129,6 +129,8 @@ class Files(fixtures.Tests):
         args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
         with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())),mock.patch.object(b,'local_address',return_value='192.168.1.4'),mock.patch.object(b,'load_helper',side_effect=helper),self.fake_generation():
             self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        self.assertIn('bridge_recovery_pending',messages)
+        self.assertNotIn('bridge_recovery_incomplete',messages)
         self.assertEqual(len(choices),1)
         self.assertEqual(confirmations,['bridge_confirm','bridge_original_picture','bridge_picture'])
         self.assertLess(commands.index('bridge-restore'),commands.index('bridge-prepare'))

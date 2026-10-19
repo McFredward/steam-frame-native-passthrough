@@ -383,7 +383,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Installed patch: Not checked",str(app.query_one("#frame-status",Static).render()))
                 self.assertNotIn("Not installed",str(app.query_one("#frame-status",Static).render()))
                 app.update_inventory(frame={"installed":True,"installed_version":None,"target_version":"0.2.0"})
-                self.assertIn("Installed patch: Unversioned",str(app.query_one("#frame-status",Static).render()))
+                self.assertIn("Installed patch: Version unknown",str(app.query_one("#frame-status",Static).render()))
                 for width,height in ((42,16),(100,36)):
                     await pilot.resize_terminal(width,height);await pilot.pause()
                     self.assertLessEqual(app.query_one("#frame-card").region.right,width)
@@ -808,7 +808,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
         app = UI.SetupApp(backend, "en")
         async with app.run_test(size=(100, 32)) as pilot:
             await until(pilot, lambda: app.prompt is not None)
-            self.assertIn("New connection installed", str(app.query_one("#pc-status", Static).render()))
+            self.assertIn("Patch installed", str(app.query_one("#pc-status", Static).render()))
             self.assertIn("Supported version", str(app.query_one("#pc-status", Static).render()))
             self.assertIn("192.168.0.25", str(app.query_one("#frame-status", Static).render()))
             for width, height in ((80, 24), (42, 16), (120, 40)):
@@ -887,9 +887,9 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             state = str(app.query_one("#frame-status", Static).render())
             self.assertIn("Supported version", state)
             self.assertIn("Legacy patch only", state)
-            self.assertIn("New connection not installed", state)
+            self.assertIn("Patch not installed", state)
             self.assertIn("Previous setup restored", str(app.query_one("#complete-title", Static).render()))
-            self.assertNotIn("New connection installed", str(app.query_one("#complete-title", Static).render()))
+            self.assertNotIn("Patch installed", str(app.query_one("#complete-title", Static).render()))
         app.backend.join()
 
     async def test_inline_ssh_password_is_masked_preserves_spaces_and_clears_on_submit(self):
@@ -1131,7 +1131,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             await until(pilot, lambda: app.backend_finished)
             title = str(app.query_one("#complete-title", Static).render())
             self.assertIn("Setup cancelled", title)
-            self.assertNotIn("New connection installed", title)
+            self.assertNotIn("Patch installed", title)
         app.backend.join()
 
     async def test_public_connection_problem_is_bounded_and_redacted(self):
