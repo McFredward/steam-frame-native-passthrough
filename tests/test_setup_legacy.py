@@ -61,6 +61,18 @@ class Tests(f.Tests):
   with mock.patch.object(self.unit.tx,'state',return_value=state):
    with self.assertRaisesRegex(s.SetupError,'restoring a retired patch was refused'):legacy.plan(self.unit)
   self.assertFalse(drop.exists());self.assertEqual(self.camera_native_calls,[])
+ def test_missing_camera_baseline_never_claims_a_complete_uninstall(self):
+  self.seed();(self.oldcfg/'camera-before.json').unlink()
+  with self.assertRaisesRegex(s.SetupError,'original camera preference was not recorded'):legacy.plan(self.unit)
+  self.assertTrue(self.olddrop.exists());self.assertEqual(self.camera_native_calls,[])
+ def test_orphan_camera_authority_never_disappears_behind_not_installed(self):
+  self.seed();(self.oldcfg/'install.json').unlink();self.olddrop.unlink();self.oldmanifest.unlink()
+  with self.assertRaisesRegex(s.SetupError,'no matching installation receipt'):legacy.plan(self.unit)
+  self.assertEqual(self.camera_native_calls,[])
+ def test_launch_hook_missing_from_receipt_refuses_instead_of_leaving_it_active(self):
+  self.seed();path=self.oldcfg/'install.json';raw=s.read(path);v=s.parse(raw);v['files'].pop(str(self.olddrop));s.put(path,s.encoded(v),raw)
+  with self.assertRaisesRegex(s.SetupError,'launch hook is missing'):legacy.plan(self.unit)
+  self.assertTrue(self.olddrop.exists());self.assertEqual(self.camera_native_calls,[])
 if __name__=='__main__':
  suite=unittest.TestSuite(Tests(name)for name in Tests.__dict__ if name.startswith('test_'))
  raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

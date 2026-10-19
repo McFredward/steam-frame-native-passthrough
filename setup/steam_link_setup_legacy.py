@@ -35,6 +35,8 @@ def plan(unit):
     if not os.path.lexists(receipt):
         e.require(not os.path.lexists(dropin) and not os.path.lexists(manifest),
             'Unknown old Frame activation was preserved; it could not be uninstalled safely.')
+        e.require(not os.path.lexists(config/'camera-before.json'),
+            'An old camera recovery record has no matching installation receipt; complete uninstall could not be verified.')
         paired=unit.tx.state()
         e.require(paired is None or not any(op['path'] in (str(dropin),str(manifest)) and op['before'] is not None
             for op in paired['operations']),
@@ -47,6 +49,8 @@ def plan(unit):
         value['manifest_link']==expected_link and type(value['package_sha256'])is str and
         re.fullmatch('[0-9a-f]{64}',value['package_sha256']) and type(value['files'])is dict and
         1<=len(value['files'])<=32,'The old Frame installation receipt was not recognized; existing files were preserved.')
+    e.require(str(dropin) in value['files'],
+        'The old Frame launch hook is missing from its ownership receipt; complete uninstall could not be verified.')
     paired=unit.tx.state();admitted={op['path']:op for op in paired['operations']} if paired else {}
     operations=[]
     for name,pin in value['files'].items():
@@ -79,6 +83,7 @@ def plan(unit):
             value['schema']=='sfnp-user-control-v1' and type(value['enabled'])is bool,
             'Unknown old Frame preferences were preserved.')
         operations.append(unit.tx.operation(control,None,expected=unit.tx.current(control)))
+    else:operations.append(unit.tx.operation(control,None))
     camera=None;camera_receipt=config/'camera-before.json'
     if os.path.lexists(camera_receipt):
         value=e.parse(e.read(camera_receipt,16384,private=True))
@@ -97,6 +102,8 @@ def plan(unit):
         camera={'schema':'sfnp-camera-override-authority-v1','settings':value['settings'],
             'before':current,'desired':desired,'section_present':'camera' in prefs}
         operations.append(unit.tx.operation(camera_receipt,None,expected=unit.tx.current(camera_receipt)))
+    else:e.require(unit.camera_value(unit.settings_path()) is not True,
+        'The original camera preference was not recorded; complete uninstall could not be verified safely.')
     operations.append(unit.tx.operation(receipt,None,expected=unit.tx.current(receipt)))
     e.require(len({op['path']for op in operations})==len(operations),
         'Duplicate old Frame uninstall operations were preserved.')
