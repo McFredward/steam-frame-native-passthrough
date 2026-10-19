@@ -7,10 +7,10 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
     $sfnpStage = $null
     $sfnpTls = [Net.ServicePointManager]::SecurityProtocol
     $sfnpRepo = 'McFredward/steam-link-native-passthrough'
-    $sfnpRepositoryCommit = 'b1324f8eb64b393ebb7964156ec04454f0abcca9'
+    $sfnpRepositoryCommit = '94a8ba1cce6b4e4b2797a516dbb22a9011fbd811'
     $sfnpRepositoryAsset = 'distribution/steam-link-native-passthrough.zip'
-    $sfnpRepositoryBytes = 18240505
-    $sfnpRepositorySha256 = '826a3224a1b40eaffa6e8bcd9bd3938f11fc83a5a290ebb536d68ad8779faf8c'
+    $sfnpRepositoryBytes = 18247040
+    $sfnpRepositorySha256 = '7ef0608af0a22477604d72da34b7d6a1faa34888e8f215a329f75c1723311729'
     $sfnpAsset = 'steam-link-native-passthrough-bridge-preview.zip'
     $sfnpEndpoint = '/releases/tags/stream-bridge-preview-v1'
     if ($sfnpInspection) {
@@ -215,7 +215,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
         $sfnpBridgePreview = -not ($sfnpInspection -or $sfnpManage)
         Require-Sfnp ($env:OS -eq 'Windows_NT') 'Use the Bash setup command on Linux.'
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        if ($sfnpBridgePreview) { Write-Host 'Steam Link Native Passthrough - downloading the paired bridge preview setup...' }
+        if ($sfnpBridgePreview) { Write-Host 'Steam Link Native Passthrough - downloading the guided PC and Frame setup...' }
         elseif ($sfnpManage) { Write-Host 'Steam Link Native Passthrough - downloading the check/removal assistant...' }
         elseif ($sfnpInspection) { Write-Host 'Steam Link Native Passthrough - downloading read-only inspection (no installation or restart)...' }
         else { Write-Host 'Steam Link Native Passthrough - downloading the guided setup...' }

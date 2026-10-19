@@ -51,10 +51,10 @@ import urllib.request
 import zipfile
 
 REPO = 'McFredward/steam-link-native-passthrough'
-REPOSITORY_COMMIT = 'b1324f8eb64b393ebb7964156ec04454f0abcca9'
+REPOSITORY_COMMIT = '94a8ba1cce6b4e4b2797a516dbb22a9011fbd811'
 REPOSITORY_ASSET = 'distribution/steam-link-native-passthrough.zip'
-REPOSITORY_BYTES = 18240505
-REPOSITORY_SHA256 = '826a3224a1b40eaffa6e8bcd9bd3938f11fc83a5a290ebb536d68ad8779faf8c'
+REPOSITORY_BYTES = 18247040
+REPOSITORY_SHA256 = '7ef0608af0a22477604d72da34b7d6a1faa34888e8f215a329f75c1723311729'
 INSPECTION_TAG = 'setup-inspection-v2'
 INSPECTION_ASSET = 'steam-link-native-passthrough-inspection.zip'
 MANAGER_TAG = 'setup-manager-v1'
@@ -240,7 +240,7 @@ def main():
     stage = None
     try:
         print('Steam Link Native Passthrough — downloading ' +
-              ('the paired bridge preview setup...' if bridge_preview else 'the check/removal assistant...' if maintenance else 'read-only inspection (no installation or restart)...' if inspection else 'the guided setup...'), flush=True)
+              ('the guided PC and Frame setup...' if bridge_preview else 'the check/removal assistant...' if maintenance else 'read-only inspection (no installation or restart)...' if inspection else 'the guided setup...'), flush=True)
         if bridge_preview:
             asset = repository_asset()
         else:
