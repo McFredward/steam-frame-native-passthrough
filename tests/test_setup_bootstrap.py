@@ -542,7 +542,7 @@ class BootstrapTests(unittest.TestCase):
         bridge_inner.write_bytes(repack(bridge.read_bytes(), {'stream-bridge-bundle.json':json.dumps(inner).encode()}))
         report = self.path / 'ps-result.json'
         script = self.path / 'check.ps1'
-        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload, $Manager, $ManagerPayload, $Bridge, $BridgePrototype, $BridgeInner, $Legacy)
+        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload, $Manager, $ManagerPayload, $Bridge, $BridgePrototype, $BridgeInner, $Legacy, $ExpectedUrl, $ExpectedSize, $ExpectedDigest)
 $ErrorActionPreference='Stop'
 $tokens=$null; $parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$parseErrors)
@@ -554,8 +554,8 @@ $pins=$ast.FindAll({ param($item) $item -is [Management.Automation.Language.Assi
 if ($pins.Count -ne $pinNames.Count) { throw 'Repository pins are ambiguous.' }
 foreach ($pin in $pins) { Invoke-Expression $pin.Extent.Text }
 $repository=Get-SfnpRepositoryAsset
-if ($repository.browser_download_url -cne ('https://raw.githubusercontent.com/'+$sfnpRepo+'/'+$sfnpRepositoryCommit+'/'+$sfnpRepositoryAsset) -or
-    $repository.size -ne 18203820 -or $repository.digest -cne 'sha256:6d8f6ec93cc80a2220892184966d4b9b4568ed86a9e51e09382570e53da6b2df') { throw 'Repository URL/size/hash pin differs.' }
+if ($repository.browser_download_url -cne $ExpectedUrl -or
+    $repository.size -ne [long]$ExpectedSize -or $repository.digest -cne $ExpectedDigest) { throw 'Repository URL/size/hash pin differs.' }
 $target=Join-Path $Output 'ps-valid'; [void][IO.Directory]::CreateDirectory($target)
 $runtime=Expand-SfnpPackage $Valid $target
 if ($runtime -ne 'setup/runtime/python/python.exe') { throw 'Wrong verified runtime.' }
@@ -597,8 +597,10 @@ foreach ($name in $unsafe) {
 }
 @{parsed=$true;exact_runtime=$runtime;prototype_refused=$true;unsafe_paths=$unsafe.Count;inspection_verified=$true;inspection_native_payload_refused=$true;bridge_verified=$true;bridge_prototypes_refused=$true;bridge_scope_separated=$true;scope='ActualPowerShellFunctions_NoNetwork_NoWindowsACL_NoDevice'} | ConvertTo-Json | Set-Content $Report
 ''')
+        expected_asset = bootstrap.repository_asset()
         result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script),
-                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload), str(manager), str(manager_payload), str(bridge), str(bridge_prototype), str(bridge_inner), str(legacy)],
+                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload), str(manager), str(manager_payload), str(bridge), str(bridge_prototype), str(bridge_inner), str(legacy),
+                                 expected_asset['browser_download_url'], str(expected_asset['size']), expected_asset['digest']],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
         self.assertEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
         data = json.loads(report.read_text(encoding='utf-8-sig'))
