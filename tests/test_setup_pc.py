@@ -256,7 +256,17 @@ class Tests(unittest.TestCase):
                 # process HANDLE. Release it while this fixture still owns the
                 # Popen object, before asking Windows to delete its image.
                 child._handle.Close()
-        target.unlink()
+        # The earlier rename proves our verification handles were released.
+        # A terminated executable can remain transiently mapped by Windows or
+        # its scanner even after the process object signals. Bound that separate
+        # teardown race; a leaked persistent handle must still fail this test.
+        deadline=time.monotonic()+3
+        while True:
+            try:
+                target.unlink();break
+            except PermissionError as error:
+                if error.winerror not in (5,32,33) or time.monotonic()>=deadline:raise
+                time.sleep(.025)
         self.assertFalse(target.exists(),'The copied image must be deletable before TemporaryDirectory cleanup')
 
 
