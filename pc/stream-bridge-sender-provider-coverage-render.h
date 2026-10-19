@@ -33,12 +33,4 @@ bool createTransmittanceBlend(ID3D11Device*,ID3D11BlendState**)noexcept;
 // An attached depth target is refused rather than writing it a second time.
 bool drawTransmittance(ID3D11DeviceContext*,ID3D11RenderTargetView*,
     ID3D11BlendState*,NativeDraw,UINT vertexCount,UINT startVertex)noexcept;
-// Copies only pixel centres strictly inside the actual submitted source ROI.
-// target is a same-format-family5x40 preallocated texture, rowIndex0..7.
-bool copySubmittedInterior(ID3D11DeviceContext*,ID3D11Texture2D* source,
-    float uMin,float vMin,float uMax,float vMax,ID3D11Texture2D* target,unsigned rowIndex)noexcept;
-// Consumes only completed original-public Map output for that immutable receipt.
-// Every selected eye/layer row needs an interior alpha witness; one raw eye
-// cannot admit another stale atlas eye. Empty/invalid metadata always refuses.
-bool sourceInteriorTranslucent(const D3D11_MAPPED_SUBRESOURCE&,unsigned sourceBits)noexcept;
 } // namespace stream_bridge::sender

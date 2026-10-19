@@ -170,15 +170,13 @@ foveation mapping. It never classifies RGB or changes the encoded image size.
 The native target and blend state are restored; an attached depth target is
 refused. The CPU result is `A = 255 - T`.
 
-A separate tiny5x5 grid per submitted layer/eye is copied from strictly interior
-pixel centres of the **actual source** RGBA/BGRA8 texture. The old v3 atlas always
-writes alpha1; at least one interior texel below1 **for every submitted eye/layer** is required to admit ordinary
-RGBA. Encoded-frame padding or samples outside submitted bounds do not establish
-that transition. A genuinely fully opaque source remains correctly opaque until
-such a witness exists. Typeless members of the same8-bit format family may be
-copied; unsupported formats/mips/arrays/MSAA refuse the route.
+The historical tiny5x5 interior-alpha format heuristic has been removed. A
+live kernel-validated application ordinary-RGBA format contract now admits source
+semantics; fully opaque eyes and small transparent regions remain valid. The
+exact capture freezes its PID/declaration epoch, and revocation is checked again
+before publishing a mask. See [the repair and scoped evidence](source-format-opt-in-20261019.md).
 
-The exact native CopyResource records an immutable R8+source-witness readback
+The exact native CopyResource records an immutable R8 readback
 in one of four bounded slots for its actual destination resource. Register →
 Map → accepted Encode freezes that slot under the encoder generation and unique
 submission identity. Lock may consume only the uniquely matching output/timestamp

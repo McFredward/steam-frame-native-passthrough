@@ -1,6 +1,5 @@
 #include "stream-bridge-sender-provider-coverage-render.h"
 #include <array>
-#include <cmath>
 namespace stream_bridge::sender {
 namespace {
 bool allocationHandle(ID3D11Resource* resource,std::uint64_t expected)noexcept{
@@ -57,26 +56,6 @@ bool drawTransmittance(ID3D11DeviceContext* context,ID3D11RenderTargetView* targ
     context->OMSetRenderTargets(restoredCount,originals.data(),nullptr);context->OMSetBlendState(originalBlend,factors,mask);
     if(originalBlend)originalBlend->Release();
     for(auto* rt:originals)if(rt)rt->Release();
-    return true;
-}
-bool copySubmittedInterior(ID3D11DeviceContext* context,ID3D11Texture2D* source,
-    float uMin,float vMin,float uMax,float vMax,ID3D11Texture2D* target,unsigned rowIndex)noexcept{
-    if(!context||!source||!target||rowIndex>=8||!std::isfinite(uMin)||!std::isfinite(uMax)||!std::isfinite(vMin)||!std::isfinite(vMax)||uMin<0||vMin<0||uMax>1||vMax>1||uMax<=uMin||vMax<=vMin)return false;
-    D3D11_TEXTURE2D_DESC from{},to{};source->GetDesc(&from);target->GetDesc(&to);
-    auto family=[](DXGI_FORMAT f){switch(f){case DXGI_FORMAT_R8G8B8A8_TYPELESS:case DXGI_FORMAT_R8G8B8A8_UNORM:case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:return 1;case DXGI_FORMAT_B8G8R8A8_TYPELESS:case DXGI_FORMAT_B8G8R8A8_UNORM:case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:return 2;default:return 0;}};
-    if(!family(from.Format)||family(from.Format)!=family(to.Format)||from.ArraySize!=1||from.MipLevels!=1||from.SampleDesc.Count!=1||to.Width!=5||to.Height!=40||to.ArraySize!=1||to.MipLevels!=1||to.SampleDesc.Count!=1)return false;
-    const auto minX=static_cast<int>(std::ceil(uMin*from.Width-.5f))+1,maxX=static_cast<int>(std::floor(uMax*from.Width-.5f))-1;
-    const auto minY=static_cast<int>(std::ceil(vMin*from.Height-.5f))+1,maxY=static_cast<int>(std::floor(vMax*from.Height-.5f))-1;
-    if(minX<0||minY<0||maxX<minX||maxY<minY||maxX>=static_cast<int>(from.Width)||maxY>=static_cast<int>(from.Height))return false;
-    for(unsigned y=0;y<5;++y)for(unsigned x=0;x<5;++x){const UINT sx=static_cast<UINT>(minX+(maxX-minX)*static_cast<int>(x)/4),sy=static_cast<UINT>(minY+(maxY-minY)*static_cast<int>(y)/4);D3D11_BOX pixel{sx,sy,0,sx+1,sy+1,1};context->CopySubresourceRegion(target,0,x,rowIndex*5+y,0,source,0,&pixel);}
-    return true;
-}
-bool sourceInteriorTranslucent(const D3D11_MAPPED_SUBRESOURCE& sample,unsigned bits)noexcept{
-    if(!sample.pData||sample.RowPitch<20||!bits||(bits&~255u))return false;
-    for(unsigned row=0;row<8;++row)if(bits&(1u<<row)){
-        bool found=false;for(unsigned y=0;y<5;++y)for(unsigned x=0;x<5;++x){const auto* pixel=static_cast<const std::uint8_t*>(sample.pData)+std::size_t(row*5+y)*sample.RowPitch+4*x;found|=pixel[3]<255;}
-        if(!found)return false;
-    }
     return true;
 }
 } // namespace stream_bridge::sender

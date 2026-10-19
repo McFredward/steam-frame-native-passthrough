@@ -1,0 +1,55 @@
+name: Native source format permission
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'pc/stream-bridge-source-contract.h'
+      - 'pc/stream-bridge-sender-provider-sourceipc.*'
+      - 'tests/test_stream_bridge_source_*'
+      - '.github/workflows/source-format-tests.yml'
+  pull_request:
+    paths:
+      - 'pc/stream-bridge-source-contract.h'
+      - 'pc/stream-bridge-sender-provider-sourceipc.*'
+      - 'tests/test_stream_bridge_source_*'
+      - '.github/workflows/source-format-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-permission:
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build actual native pipe and unchanged R8 alpha composition
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          mkdir build
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I. tests/test_stream_bridge_source_pipe_windows.cpp pc/stream-bridge-sender-provider-sourceipc.cpp /Fe:build\source-pipe.exe /Fo:build\ /link advapi32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I. tests/test_stream_bridge_sender_provider_coverage_gpu.cpp pc/stream-bridge-sender-provider-coverage-render.cpp /Fe:build\coverage.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
+          if errorlevel 1 exit /b 1
+      - name: Exercise kernel pipe PID, source readiness, EOF and reconnect
+        shell: cmd
+        run: |
+          build\source-pipe.exe >build\source-pipe.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\source-pipe.log
+          exit /b %SFNP_RESULT%
+      - name: Check unchanged actual GPU alpha zero fractional and fully opaque draws
+        shell: cmd
+        run: |
+          build\coverage.exe >build\coverage.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\coverage.log
+          exit /b %SFNP_RESULT%
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-source-format-evidence
+          path: build/*.log

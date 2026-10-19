@@ -16,25 +16,11 @@ float4 vs_main(uint id:SV_VertexID):SV_Position {float2 p=float2(-1.0,-1.0);if(i
 float4 ps_main():SV_Target {return value;}
 )";
 std::vector<unsigned char> read(ID3D11DeviceContext* c,ID3D11Texture2D* native,ID3D11Texture2D* staging){c->CopyResource(staging,native);D3D11_MAPPED_SUBRESOURCE m{};check(SUCCEEDED(c->Map(staging,0,D3D11_MAP_READ,0,&m)),"actual GPU readback");std::vector<unsigned char> r(Width*Height);for(UINT y=0;y<Height;++y)std::memcpy(r.data()+y*Width,static_cast<const unsigned char*>(m.pData)+y*m.RowPitch,Width);c->Unmap(staging,0);return r;}
-void witness(ID3D11Device* device,ID3D11DeviceContext* ctx){
- for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B8G8R8A8_UNORM}){
-  D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=32;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;desc.Format=format;desc.Usage=D3D11_USAGE_DEFAULT;
-  std::vector<unsigned char> pixels(32*32*4,255);for(unsigned y=0;y<32;++y)for(unsigned x=0;x<32;++x)if(x<4||x>=28||y<4||y>=28)pixels[4*(y*32+x)+3]=0;
-  D3D11_SUBRESOURCE_DATA input{pixels.data(),32*4,0};Com<ID3D11Texture2D> source;check(SUCCEEDED(device->CreateTexture2D(&desc,&input,source.out())),"real shared-like source texture");
-  desc.Width=5;desc.Height=40;Com<ID3D11Texture2D> samples;check(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,samples.out())),"bounded source probe target");desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;Com<ID3D11Texture2D> saved;check(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,saved.out())),"immutable source receipt staging");
-  check(copySubmittedInterior(ctx,source.p,.125f,.125f,.875f,.875f,samples.p,0),"source ROI copied in actual GPU coordinates");ctx->CopyResource(saved.p,samples.p);D3D11_MAPPED_SUBRESOURCE m{};check(SUCCEEDED(ctx->Map(saved.p,0,D3D11_MAP_READ,0,&m)),"actual source interior readback");check(!sourceInteriorTranslucent(m,1),"transparent pixels OUTSIDE submitted bounds cannot prove raw source");ctx->Unmap(saved.p,0);
-  pixels[4*(15*32+15)+3]=127;ctx->UpdateSubresource(source.p,0,nullptr,pixels.data(),128,0);check(copySubmittedInterior(ctx,source.p,.125f,.125f,.875f,.875f,samples.p,7),"last eye/layer source row copied");ctx->CopyResource(saved.p,samples.p);
-  pixels[4*(15*32+15)+3]=255;ctx->UpdateSubresource(source.p,0,nullptr,pixels.data(),128,0); // Later source cannot change this receipt.
-  check(SUCCEEDED(ctx->Map(saved.p,0,D3D11_MAP_READ,0,&m)),"immutable source witness mapped");check(sourceInteriorTranslucent(m,128),"actual fractional source alpha admits raw RGBA independently of RGB");check(!sourceInteriorTranslucent(m,1),"unrelated old row never supplies source witness");check(!sourceInteriorTranslucent(m,129),"one raw eye cannot admit a stale opaque-atlas peer eye");check(!sourceInteriorTranslucent(m,256)&&!sourceInteriorTranslucent(m,0),"overflow/empty eye mask refused");ctx->Unmap(saved.p,0);
-  check(!copySubmittedInterior(ctx,source.p,.2f,.2f,.2001f,.2001f,samples.p,0),"subpixel ROI refuses out-of-bounds witness");check(!copySubmittedInterior(ctx,source.p,0,0,1,1,samples.p,8),"ninth source row refused");
- }
-}
 void run(){
  Com<ID3D11Device> device;Com<ID3D11DeviceContext> ctx;D3D_FEATURE_LEVEL level{};
  auto result=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,device.out(),&level,ctx.out());
  if(FAILED(result))result=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,device.out(),&level,ctx.out());
  check(SUCCEEDED(result)&&level>=D3D_FEATURE_LEVEL_11_0,"actual D3D11 device");
- witness(device.p,ctx.p);
  Com<ID3DBlob> vsBytes,psBytes;check(SUCCEEDED(D3DCompile(Shader,sizeof Shader,nullptr,nullptr,nullptr,"vs_main","vs_5_0",0,0,vsBytes.out(),nullptr)),"own VS compiled");check(SUCCEEDED(D3DCompile(Shader,sizeof Shader,nullptr,nullptr,nullptr,"ps_main","ps_5_0",0,0,psBytes.out(),nullptr)),"own native-like PS compiled");
  Com<ID3D11VertexShader> vs;Com<ID3D11PixelShader> ps;device->CreateVertexShader(vsBytes->GetBufferPointer(),vsBytes->GetBufferSize(),nullptr,vs.out());device->CreatePixelShader(psBytes->GetBufferPointer(),psBytes->GetBufferSize(),nullptr,ps.out());check(vs.p&&ps.p,"actual shader objects");
  D3D11_TEXTURE2D_DESC td{};td.Width=Width;td.Height=Height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8_UNORM;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET;
