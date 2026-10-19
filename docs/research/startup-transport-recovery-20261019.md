@@ -36,6 +36,34 @@ the caller's bytes nor its lease are replaced. Revocation and successful fresh
 admission clear only owned queued-probe state. An undelivered probe from the old
 session can no longer poison the next session on the same encoder.
 
+## Receiver defects and repair
+
+The receiver reserved one of 32 certified-picture slots before checking an
+input's certificate. Ordinary/uncertified decoder inputs do not necessarily
+produce any CAPTURE output, so those slots could fill permanently even while
+ordinary video continued. Only cryptographically certified picture receipts now
+occupy that table. Unknown inputs retain a fixed 16-bit token quarantine for
+their exact physical decoder pool; a first completion cannot prove there are no
+additional outputs. Real pool retirement is tracked per file descriptor, never
+inferred globally from another decoder's newer generation.
+
+The decoder snapshot queue is intentionally bounded. When an original native
+QBUF succeeds but a byte snapshot was unavailable, the hook now publishes a
+bounded receipt for that exact fd, pool and token together with its loss counter.
+No gap or loss is reported before the original call succeeds. A known gap can
+revoke the current authority and permit a completely fresh admission; it cannot
+certify an image. The worker samples counters before draining these ordered
+receipts, so a concurrent publication cannot fabricate an unknown gap. Missing
+or malformed receipts, overflow and unattributed loss remain hard refusal.
+
+Image-route pauses drain and quarantine skipped inputs instead of hiding their
+losses with a replacement counter baseline. Reconnects quarantine pending old
+receipts, retain native output ownership, and require new source nonces and the
+complete existing video/control proof. Capture-pool reset, late old-pool events,
+multiple physical decoder pools and repeated gaps are covered explicitly. Cold
+reports now include the distinct refusal reason and bounded queue counters;
+the earlier generic source-loss message was insufficient to identify the branch.
+
 ## Focused verification
 
 The actual provider/control fixture uses real local TCP and the production NVENC
