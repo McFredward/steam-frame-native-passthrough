@@ -110,6 +110,8 @@ void telemetry(){
     check(first==1&&p.flowLines==first,"unchanged local flow never repeats cold status");
     for(unsigned bit=1;bit<64;++bit){p.flow[unsigned(renderer::Flow::CertifiedCallback)]=std::uint64_t(1)<<bit;renderer::reportFlowCold(p);}
     check(p.flowLines==48,"changed local status has an absolute per-process line bound");
+    renderer::recordHandoffDuration(p,11000);renderer::recordHandoffDuration(p,22000);renderer::recordHandoffDuration(p,50000);renderer::recordHandoffDuration(p,51000);renderer::recordHandoffDuration(p,2);
+    check(p.handoffMaxMicros==51000&&p.flow[unsigned(renderer::Flow::HandoffOverFrame)]==3&&p.flow[unsigned(renderer::Flow::HandoffOverTwoFrames)]==2&&p.flow[unsigned(renderer::Flow::HandoffOver50ms)]==1,"bounded handoff diagnostics retain high-water latency and strict threshold counts without changing readiness");
 }
 // Exercise the production Process and its actual authenticated local sockets.
 // Only the final consumer's owned-storage publication is a controllable port;
@@ -175,6 +177,26 @@ struct HandoffFixture {
     void waiting(){const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(1);while(!source.flow[unsigned(renderer::Flow::HandoffWait)].load()&&std::chrono::steady_clock::now()<end)std::this_thread::yield();check(source.flow[unsigned(renderer::Flow::HandoffWait)]==1,"exact native DQ handoff reaches asynchronous publication wait");}
     void receipt(local::Message message){message.kind=local::Kind::Ready;message.certifiedMetadata.clear();check(display.channel.enqueue(message),"receipt travels through actual authenticated reverse local channel");display.channel.tick();renderer::workCycle(source,sourceState);}
 };
+struct TransientPublication {
+    unsigned decoded=0,legacy=0;std::uintptr_t address=0;std::vector<std::uint8_t> pixels;sb::CoverageRange range;std::uint64_t frame=0;
+    static bool admitted(void*) noexcept{return true;}
+    static void legacyCallback(void* pointer,const sb::CertifiedAccessUnit&) noexcept{++static_cast<TransientPublication*>(pointer)->legacy;}
+    static void decodedCallback(void* pointer,const sb::CertifiedAccessUnit& certificate,sb::Bytes bytes,sb::CoverageRange range) noexcept{
+        auto& p=*static_cast<TransientPublication*>(pointer);++p.decoded;p.address=reinterpret_cast<std::uintptr_t>(bytes.data);p.pixels.assign(bytes.data,bytes.data+bytes.size);p.range=range;p.frame=certificate.descriptor.sourceFrame;
+    }
+};
+void decodedDispatch(){
+    HandoffFixture f(false);TransientPublication first,second;Publication fallback;
+    f.display.consumers[0]={&first,TransientPublication::legacyCallback,nullptr,nullptr,TransientPublication::admitted,nullptr,TransientPublication::decodedCallback};
+    f.display.consumers[1]={&second,TransientPublication::legacyCallback,nullptr,nullptr,TransientPublication::admitted,nullptr,TransientPublication::decodedCallback};
+    f.display.consumers[2]={&fallback,Publication::coverage,nullptr,nullptr,Publication::admitted};
+    const auto queued=f.queue(true,0,false);f.cycle();
+    check(first.decoded==1&&second.decoded==1&&!first.legacy&&!second.legacy&&fallback.certificates==1,"authenticated compositor expands once and dispatches decoded consumers without legacy redecoding while preserving legacy callbacks");
+    check(first.address&&first.address==second.address&&first.pixels==std::vector<std::uint8_t>(32,127)&&second.pixels==first.pixels&&first.frame==queued.descriptor.sourceFrame&&first.range.minimum==127&&first.range.maximum==127,"all synchronous consumers borrow the same transient exact authenticated pixel storage and range");
+    local::Message invalid;invalid.kind=local::Kind::Certified;invalid.peerConfirmed=true;invalid.source.stream=f.display.verifiedSource;invalid.certifiedMetadata={1};
+    renderer::consume(f.display,invalid);
+    check(first.decoded==1&&second.decoded==1&&fallback.certificates==1&&f.display.flow[unsigned(renderer::Flow::AuthenticationRefused)]==1,"malformed detached metadata never reaches either decoded or legacy consumer");
+}
 void exactHandoff(){
     HandoffFixture f;const auto decoded=f.queue();auto dq=f.start(decoded);f.waiting();
     f.cycle();check(f.publication.certificates==1&&f.source.flow[unsigned(renderer::Flow::ReadyReceived)]==0&&f.display.flow[unsigned(renderer::Flow::ReadyQueued)]==0,"active certificate and picture do not acknowledge unpublished exact mask storage");
@@ -247,4 +269,4 @@ void cameraPictureDemand(){
     check(f.display.camera.ready()&&f.display.cameraDemand,"same signed source can recover with a fresh exact decoded epoch instead of repeatedly revoking on its old mapping");
 }
 }
-int main(int argc,char** argv){try{const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();}exactHandoff();noneAndBurst();interruptedHandoff();cameraHandoff();cameraPictureDemand();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+int main(int argc,char** argv){try{const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();decodedDispatch();}exactHandoff();noneAndBurst();interruptedHandoff();cameraHandoff();cameraPictureDemand();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

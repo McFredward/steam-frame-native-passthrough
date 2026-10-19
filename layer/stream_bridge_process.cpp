@@ -21,7 +21,7 @@ namespace local=stream_bridge_local;
 namespace native=stream_bridge_native;
 namespace stream_bridge_renderer {
 namespace {
-enum class Flow:unsigned {CertifiedCallback,CertifiedQueued,CertifiedQueueRefused,DecodedCallback,ImageMiss,LeaseMiss,NativeStale,BindingMiss,DecodedQueued,DecodedQueueRefused,CertifiedReceived,Authenticated,AuthenticationRefused,DecodedReceived,CertificateMiss,ReceivedLeaseMiss,KernelMiss,PicturesRetained,ReadyQueued,ReadyReceived,HandoffWait,HandoffReady,HandoffTimeout,CameraActive,CameraNone,CameraSource,CameraChannel,CameraLease,CameraDeferred,Count};
+enum class Flow:unsigned {CertifiedCallback,CertifiedQueued,CertifiedQueueRefused,DecodedCallback,ImageMiss,LeaseMiss,NativeStale,BindingMiss,DecodedQueued,DecodedQueueRefused,CertifiedReceived,Authenticated,AuthenticationRefused,DecodedReceived,CertificateMiss,ReceivedLeaseMiss,KernelMiss,PicturesRetained,ReadyQueued,ReadyReceived,HandoffWait,HandoffReady,HandoffTimeout,CameraActive,CameraNone,CameraSource,CameraChannel,CameraLease,CameraDeferred,HandoffOverFrame,HandoffOverTwoFrames,HandoffOver50ms,Count};
 struct Process {
     std::mutex gate;std::condition_variable released;std::atomic<bool> peerConfirmed{false};int wake=-1;std::atomic<ProcessKind> kind{ProcessKind::Off};int directory=-1;
     std::filesystem::path root;std::array<ProcessConsumer,4> consumers{};
@@ -39,9 +39,17 @@ struct Process {
     std::array<std::array<std::uint32_t,24>,9> sourceNotices{};unsigned sourceNoticeLines=0; // Written only by the receiver worker.
     std::uint32_t channelNotices=0; // Written only by the local channel worker.
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(Flow::Count)> flow{};
+    std::atomic<std::uint64_t> handoffMaxMicros{0};
     std::uint64_t flowMilestones=0;unsigned flowLevel=0,flowLines=0; // Local worker only.
 };
 void count(Process& p,Flow flow){p.flow[static_cast<unsigned>(flow)].fetch_add(1,std::memory_order_relaxed);}
+void recordHandoffDuration(Process& p,std::uint64_t micros) noexcept{
+    auto maximum=p.handoffMaxMicros.load(std::memory_order_relaxed);
+    while(micros>maximum&&!p.handoffMaxMicros.compare_exchange_weak(maximum,micros,std::memory_order_relaxed)){}
+    if(micros>11000)count(p,Flow::HandoffOverFrame);
+    if(micros>22000)count(p,Flow::HandoffOverTwoFrames);
+    if(micros>50000)count(p,Flow::HandoffOver50ms);
+}
 void requestCamera(Process& p,bool wanted,Flow reason){
     if(wanted!=p.cameraWanted){p.cameraWanted=wanted;count(p,reason);}
     p.camera.request(wanted);
@@ -59,6 +67,8 @@ void reportFlowCold(Process& p){
         p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::CertifiedCallback),get(Flow::CertifiedQueued),get(Flow::CertifiedQueueRefused),get(Flow::DecodedCallback),get(Flow::DecodedQueued),get(Flow::DecodedQueueRefused),get(Flow::ImageMiss),get(Flow::LeaseMiss),get(Flow::NativeStale),get(Flow::BindingMiss),get(Flow::CertifiedReceived),get(Flow::Authenticated),get(Flow::AuthenticationRefused),get(Flow::DecodedReceived),get(Flow::PicturesRetained),get(Flow::CertificateMiss),get(Flow::ReceivedLeaseMiss),get(Flow::KernelMiss));
     std::fprintf(stderr,"[Steam Link Native Passthrough] paired decoder handoff %s: ready queued/received=%llu/%llu; waited/ready/emergency-timeout=%llu/%llu/%llu\n",
         p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::ReadyQueued),get(Flow::ReadyReceived),get(Flow::HandoffWait),get(Flow::HandoffReady),get(Flow::HandoffTimeout));
+    std::fprintf(stderr,"[Steam Link Native Passthrough] paired handoff latency %s: max-us=%llu; over-11ms/22ms/50ms=%llu/%llu/%llu; decoder callback only, not end-to-end latency\n",
+        p.kind==ProcessKind::Vrlink?"video":"compositor",static_cast<unsigned long long>(p.handoffMaxMicros.load(std::memory_order_relaxed)),get(Flow::HandoffOverFrame),get(Flow::HandoffOverTwoFrames),get(Flow::HandoffOver50ms));
     std::fprintf(stderr,"[Steam Link Native Passthrough] camera demand %s: active/none=%llu/%llu; revoked source/channel/lease=%llu/%llu/%llu; opaque deferred=%llu\n",
         p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::CameraActive),get(Flow::CameraNone),get(Flow::CameraSource),get(Flow::CameraChannel),get(Flow::CameraLease),get(Flow::CameraDeferred));
 }
@@ -98,6 +108,12 @@ bool sameLease(const local::LeaseReference&a,const local::LeaseReference&b) noex
 // Never wait on a compositor/render thread, a socket, or an unpaired stream.
 void handoff(const native::CaptureObservation& capture,void* context) noexcept {
     auto&p=*static_cast<Process*>(context);if(!p.peerConfirmed.load(std::memory_order_acquire))return;
+    struct Timing {
+        Process& process;std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
+        ~Timing(){const auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+            recordHandoffDuration(process,elapsed>0?std::uint64_t(elapsed):0);
+        }
+    } timing{p};
     try{
         native::wakePinnedReceiver();notify(p);
         std::unique_lock<std::mutex> lock(p.gate);
@@ -177,7 +193,11 @@ void consume(Process&p,local::Message& message){
             requestCamera(p,false,Flow::CameraSource);p.cameraPeer=false;p.cameraDemand=false;p.cameraDeferred=false;
             p.verifiedSource=message.source.stream;for(auto& old:p.masks)old={};for(auto& old:p.pictures)old={};p.currentLeases.reset();
         }
-        sb::CertifiedAccessUnit certificate;if(sb::inspectCoverageMetadata({message.certifiedMetadata.data(),message.certifiedMetadata.size()},p.verifier,certificate)!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor)){count(p,Flow::AuthenticationRefused);return;}
+        const bool wantsDecoded=std::any_of(p.consumers.begin(),p.consumers.end(),[](const auto& consumer){return consumer.owner&&consumer.decodedCoverage&&(!consumer.admitted||consumer.admitted(consumer.owner));});
+        sb::CertifiedAccessUnit certificate;std::vector<std::uint8_t> samples;sb::CoverageRange range;
+        const sb::Bytes metadata{message.certifiedMetadata.data(),message.certifiedMetadata.size()};
+        const auto status=wantsDecoded?sb::inspectCoverageMetadataDecoded(metadata,p.verifier,certificate,samples,range):sb::inspectCoverageMetadata(metadata,p.verifier,certificate);
+        if(status!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor)){count(p,Flow::AuthenticationRefused);return;}
         count(p,Flow::Authenticated);
         // Certificates may run ahead of the decoded picture being displayed.
         // In particular, future None metadata must not withdraw the global
@@ -186,7 +206,10 @@ void consume(Process&p,local::Message& message){
         p.cameraPeer=true;
         const auto index=message.descriptor.sourceFrame%p.masks.size();
         auto* target=&p.masks[index];*target=message;p.coverageNeeded[index]=certificate.coverageEncoding!=sb::CoverageEncoding::None;
-        for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))&&consumer.coverage)consumer.coverage(consumer.owner,certificate);
+        for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))){
+            if(wantsDecoded&&consumer.decodedCoverage)consumer.decodedCoverage(consumer.owner,certificate,{samples.data(),samples.size()},range);
+            else if(consumer.coverage)consumer.coverage(consumer.owner,certificate);
+        }
     }else if(message.kind==local::Kind::Decoded){
         count(p,Flow::DecodedReceived);
         bool certified=false,needsCoverage=false;for(std::size_t n=0;n<p.masks.size();++n){const auto& mask=p.masks[n];if(mask.peerConfirmed&&mask.binding==message.binding&&sameSource(mask.source.stream,message.source.stream)&&sameDescriptor(mask.descriptor,message.descriptor)&&mask.nativeTimestampToken==message.nativeTimestampToken&&mask.submittedContent==message.submittedContent){certified=true;needsCoverage=p.coverageNeeded[n];break;}}

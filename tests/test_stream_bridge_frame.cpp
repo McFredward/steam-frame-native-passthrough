@@ -71,6 +71,8 @@ void run(){
     check(result.originalAccessUnitVerified&&sb::serializeCoverageMetadata(result,detached),"actual native-AU-verified result exports exact signed mask metadata");
     sb::CertifiedAccessUnit local;
     check(sb::inspectCoverageMetadata(bytes(detached),s.observer,local)==sb::FrameStatus::Ok&&local.original.empty()&&!local.originalAccessUnitVerified,"local mask verification never manufactures video completeness");
+    sb::CoverageRange range;
+    check(sb::inspectCoverageMetadataDecoded(bytes(detached),s.observer,local,output,range)==sb::FrameStatus::Ok&&output==rawCoverage&&range.minimum==0&&range.maximum==255&&!local.originalAccessUnitVerified,"combined RLE metadata decoder publishes original fractional samples and range without AU authority");
     check(sb::decodeCertifiedCoverage(local,output)&&output==rawCoverage,"local detached mask samples exact");
     check(!sb::serializeCoverageMetadata(local,held),"detached local mask cannot be promoted to full source proof");
     for(std::size_t at=0;at<detached.size();++at){auto bad=detached;bad[at]^=0x40;sb::CertifiedAccessUnit unchanged;unchanged.descriptor.sourceFrame=557;
@@ -78,6 +80,9 @@ void run(){
 
     check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::Raw,bytes(rawCoverage),s.sender,held)==sb::FrameStatus::Ok,"uncompressed coverage accepted");
     check(sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok&&sb::decodeCertifiedCoverage(result,output)&&output==rawCoverage,"raw coverage exact");
+    check(sb::serializeCoverageMetadata(result,detached)&&sb::inspectCoverageMetadataDecoded(bytes(detached),s.observer,local,output,range)==sb::FrameStatus::Ok&&output==rawCoverage&&range.minimum==0&&range.maximum==255,"combined raw decoder copies coverage and range together exactly");
+    check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::None,{},s.sender,held)==sb::FrameStatus::Ok&&sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok&&sb::serializeCoverageMetadata(result,detached),"signed None metadata independently prepared");
+    check(sb::inspectCoverageMetadataDecoded(bytes(detached),s.observer,local,output,range)==sb::FrameStatus::Ok&&output.empty()&&local.coverageEncoding==sb::CoverageEncoding::None&&range.minimum==255&&range.maximum==0,"combined None clears obsolete transient pixels without granting a coverage range");
     for(auto malformed:std::vector<std::vector<std::uint8_t>>{{0,5},{255,0,255},{255,1},{1,1,1,2}}){output={17};
         check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::Rle,bytes(malformed),s.sender,output)==sb::FrameStatus::InvalidArgument&&output==std::vector<std::uint8_t>{17},"invalid RLE never publishes a frame");}
     for(auto d:std::vector<sb::FrameDescriptor>{{0,1,64,32},{1,0,64,32},{1,1,0,32},{1,1,8193,8192}}){output={18};

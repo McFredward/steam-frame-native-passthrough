@@ -175,16 +175,32 @@ struct Integration {
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
 void compressedCoverage(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
- Integration f(vs,ps,1,true,true,false,false,false);
  // Pattern includes both hard coverage boundaries and genuine fractional alpha.
  std::vector<std::uint8_t> expected(32);const std::array<std::uint8_t,4> values{{0,127,255,42}};
  for(unsigned i=0;i<expected.size();++i)expected[i]=values[i%values.size()];
+ {
+ Integration f(vs,ps,1,true,true,false,false,false);
  sb::CertifiedAccessUnit certificate;certificate.descriptor=f.picture.metadata.descriptor;certificate.binding=f.picture.metadata.binding;
  check(sb::encodeBestCoverage({expected.data(),expected.size()},true,certificate.coverageEncoding,certificate.coverage)&&certificate.coverageEncoding==sb::CoverageEncoding::RleLz4,"renderer fixture actually selects negotiated compressed fractional coverage");
  consumer.coverage(consumer.owner,certificate);consumer.picture(consumer.owner,f.picture);
  const auto draw=f.record();check(draw.ready,"compressed exact current mask reaches the original renderer on first use");f.vk.appMasks[number(f.cb)]={draw.coverage};
  check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1&&f.vk.sampledMasks.back()==expected,"native companion samples every decompressed R8 coverage value exactly without reducing extent or rounding alpha");
  check(f.renderer.statsCold().uploadAccepted==1&&!f.renderer.statsCold().uploadRefused,"compressed first-use mask preserves the existing exact-picture upload path");
+ }
+ {
+  // Process's authenticated expansion is synchronous transient input. The
+  // renderer copies it into owned staging instead of decoding it again.
+  Integration direct(vs,ps,1,true,true,false,false,false);sb::CertifiedAccessUnit verified;
+  verified.descriptor=direct.picture.metadata.descriptor;verified.binding=direct.picture.metadata.binding;
+  check(sb::encodeBestCoverage({expected.data(),expected.size()},true,verified.coverageEncoding,verified.coverage),"second compressed coverage source prepared");
+  std::vector<std::uint8_t> transient;sb::CoverageRange range;check(sb::decodeCertifiedCoverage(verified,transient,range)&&transient==expected,"transient fractional pixels expanded at trusted callback boundary");
+  check(consumer.decodedCoverage!=nullptr,"renderer advertises authenticated transient decoded coverage callback");
+  verified.coverage.clear();consumer.decodedCoverage(consumer.owner,verified,{transient.data(),transient.size()},range);transient.assign(32,255);
+  consumer.picture(consumer.owner,direct.picture);const auto decodedDraw=direct.record();check(decodedDraw.ready,"decoded callback does not repeat compressed parsing of discarded certificate payload");direct.vk.appMasks[number(direct.cb)]={decodedDraw.coverage};
+  check(direct.submit(false)==VK_SUCCESS&&direct.vk.sampledMasks.back()==expected,"owned GPU staging retains every fractional sample after transient decoded vector changes");
+  consumer.decodedCoverage(consumer.owner,verified,{expected.data(),expected.size()-1},range);
+  check(direct.renderer.statsCold().maskRejected==1&&direct.renderer.statsCold().uploadAccepted==1,"decoded byte count mismatch is refused before upload without inventing image authority");
+ }
 }
 void cameraEpoch(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  {Integration f(vs,ps,1);cameraReady=false;
@@ -395,14 +411,14 @@ void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint3
   check(!f.record().ready,"legal early native recording has no speculative image or mask");
   f.publish();consumer.picture(consumer.owner,f.picture);f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);f.vk.signal();consumer.tick(consumer.owner);
   check(f.submit(false)==VK_SUCCESS&&f.vk.reads.empty(),"known limit cached early CB stays native when the correct mask arrives later");
-  auto s=f.renderer.statsCold();check(s.pending==1&&!s.ready&&s.pictures==1&&s.draws==1&&!s.selected&&!s.guardAccepted&&s.drawRefusals[std::size_t(sr::DrawRefusal::ExactPicture)]==1,"telemetry exposes unsubmitted pending mask plus early-record miss without inventing a startup GPU copy or late bind");
+  auto s=f.renderer.statsCold();check(!s.pending&&s.ready==1&&s.pictures==1&&s.draws==1&&!s.selected&&!s.guardAccepted&&s.drawRefusals[std::size_t(sr::DrawRefusal::ExactPicture)]==1,"telemetry distinguishes the ordered completed startup upload from an early native recording that never acquired that mask");
   check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"actual native re-record is still necessary and restores current exact coverage");
   for(unsigned n=0;n<4096;++n)consumer.tick(consumer.owner); // Unchanged cold snapshots emit no repeated status.
  }
  {Integration f(vs,ps);f.renderer.beforeDraw(handle<VkCommandBuffer>(0xdead));f.renderer.beforeDraw(handle<VkCommandBuffer>(0x70fff));f.record(VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);
   f.record();f.renderer.pipelineBound(f.cb,VK_PIPELINE_BIND_POINT_GRAPHICS,handle<VkPipeline>(0xbeef));f.renderer.beforeDraw(f.cb);
   f.record();f.writeView(handle<VkImageView>(0xdead));f.renderer.beforeDraw(f.cb);
-  auto s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Command)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Epoch)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Ineligible)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Pipeline)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Descriptor)]==1,"unknown CB epoch pipeline eligibility and descriptor misses remain distinct");
+  auto s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Command)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Camera)]==1&&!s.drawRefusals[std::size_t(sr::DrawRefusal::Epoch)]&&s.drawRefusals[std::size_t(sr::DrawRefusal::Ineligible)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Pipeline)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Descriptor)]==1,"unknown and never-begun CB, pipeline, eligibility and descriptor misses retain their actual distinct safety gates");
   f.writeView(f.view);f.renderer.imageDestroyed(f.image);f.renderer.beforeDraw(f.cb);s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Image)]==1,"retired imported image has a distinct draw refusal");
  }
 }

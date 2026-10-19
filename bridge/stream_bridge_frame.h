@@ -24,6 +24,7 @@ struct CertifiedAccessUnit {
     std::array<std::uint8_t,FrameCertificateBytes> signedHeader{};
     bool originalAccessUnitVerified=false;
 };
+struct CoverageRange {std::uint8_t minimum=255,maximum=0;};
 enum class FrameStatus { Ok,NotFound,InvalidArgument,Malformed,LimitExceeded,
     DuplicateOwned,OriginalMismatch,CoverageMismatch,AuthenticationRefused };
 // On failure outputs remain unchanged. No source/native/GPU association is
@@ -36,10 +37,16 @@ FrameStatus inspectCertifiedFrame(Bytes observed,AuthSession&,CertifiedAccessUni
 // connect this to a selected picture. Never promote this into full-AU proof.
 bool serializeCoverageMetadata(const CertifiedAccessUnit&,std::vector<std::uint8_t>&);
 FrameStatus inspectCoverageMetadata(Bytes,AuthSession&,CertifiedAccessUnit&);
+// Authenticates before decoding and publishes all outputs transactionally.
+// Samples are transient caller-owned output, not a reusable authorization cache.
+// None succeeds with empty samples; it still never grants transparent rendering.
+FrameStatus inspectCoverageMetadataDecoded(Bytes,AuthSession&,CertifiedAccessUnit&,
+    std::vector<std::uint8_t>& samples,CoverageRange&);
 bool encodeCoverageRle(Bytes raw,std::vector<std::uint8_t>& output);
 // New encoding is opt-in only after mutual capability negotiation. All modes
 // preserve every fractional-alpha sample; the smallest complete form wins.
 // Compression/decompression runs on cold workers, never a compositor thread.
 bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,std::vector<std::uint8_t>& output);
 bool decodeCertifiedCoverage(const CertifiedAccessUnit&,std::vector<std::uint8_t>& output);
+bool decodeCertifiedCoverage(const CertifiedAccessUnit&,std::vector<std::uint8_t>& output,CoverageRange&);
 } // namespace stream_bridge

@@ -243,22 +243,29 @@ struct Renderer::Impl {
         for(auto& slot:pictures){const auto old=std::atomic_load_explicit(&slot,std::memory_order_acquire);
             if(old&&!current(*old))std::atomic_store_explicit(&slot,std::shared_ptr<const PreparedPicture>{},std::memory_order_release);}
     }
-    static void coverage(void* owner,const sb::CertifiedAccessUnit& certificate) noexcept{
+    static void decodedCoverage(void* owner,const sb::CertifiedAccessUnit& certificate,sb::Bytes bytes,sb::CoverageRange range) noexcept{
         auto&p=*static_cast<Impl*>(owner);++p.counts.metadata;p.retirePictures();
         const auto& d=certificate.descriptor;
         if(certificate.coverageEncoding==sb::CoverageEncoding::None){++p.counts.maskNone;return;}
-        try{std::vector<std::uint8_t> bytes;
-            if(!sb::decodeCertifiedCoverage(certificate,bytes)){++p.counts.maskRejected;return;}
+        try{
+            // Only Process's authenticated synchronous callback supplies this
+            // transient view. Its byte count still has to match this exact
+            // descriptor; content range never grants picture/lease authority.
+            if(!d.codedWidth||!d.codedHeight||!bytes.data||bytes.size!=std::size_t(d.codedWidth)*d.codedHeight||range.minimum>range.maximum){++p.counts.maskRejected;return;}
             ++p.counts.maskDecoded;
-            std::uint8_t low=255,high=0;
-            if(certificate.coverageEncoding==sb::CoverageEncoding::Rle){for(std::size_t n=1;n<certificate.coverage.size();n+=2){low=std::min(low,certificate.coverage[n]);high=std::max(high,certificate.coverage[n]);}}
-            else {const auto bounds=std::minmax_element(bytes.begin(),bytes.end());low=*bounds.first;high=*bounds.second;}
-            if(low==255)++p.counts.maskOpaque;else if(!high)++p.counts.maskTransparent;else ++p.counts.maskMixed;
-            if(p.pool.upload({certificate.binding,certificate.descriptor},d.codedWidth,d.codedHeight,{bytes.data(),bytes.size()})){
+            if(range.minimum==255)++p.counts.maskOpaque;else if(!range.maximum)++p.counts.maskTransparent;else ++p.counts.maskMixed;
+            if(p.pool.upload({certificate.binding,certificate.descriptor},d.codedWidth,d.codedHeight,bytes)){
                 ++p.counts.uploadAccepted;p.uploadsPending.store(true,std::memory_order_release);
             }
             else ++p.counts.uploadRefused;
         }catch(...){++p.counts.maskRejected;}
+    }
+    static void coverage(void* owner,const sb::CertifiedAccessUnit& certificate) noexcept{
+        if(certificate.coverageEncoding==sb::CoverageEncoding::None){decodedCoverage(owner,certificate,{},{});return;}
+        try{std::vector<std::uint8_t> bytes;sb::CoverageRange range;
+            if(sb::decodeCertifiedCoverage(certificate,bytes,range)){decodedCoverage(owner,certificate,{bytes.data(),bytes.size()},range);return;}
+        }catch(...){}
+        auto&p=*static_cast<Impl*>(owner);++p.counts.metadata;++p.counts.maskRejected;p.retirePictures();
     }
     static void picture(void* owner,const LocalPicture& value) noexcept{
         auto&p=*static_cast<Impl*>(owner);try{
@@ -394,7 +401,7 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
         }
         if(entry->coverage){
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
-            if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted,Impl::published});
+            if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted,Impl::published,Impl::decodedCoverage});
             coldNote("native exact-coverage pipeline prepared; original picture preserved");
         }else{if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);*entry={};coldNote("exact-coverage pipeline unavailable; ordinary native video retained");}
     }catch(...){/* The successfully created native pipeline remains unchanged. */}

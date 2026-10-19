@@ -129,7 +129,9 @@ bool serializeCoverageMetadata(const CertifiedAccessUnit& frame,std::vector<std:
     std::vector<std::uint8_t> result(frame.signedHeader.begin(),frame.signedHeader.end());
     result.insert(result.end(),frame.coverage.begin(),frame.coverage.end());output.swap(result);return true;
 }
-FrameStatus inspectCoverageMetadata(Bytes payload,AuthSession& auth,CertifiedAccessUnit& output){
+namespace {
+FrameStatus inspectMetadata(Bytes payload,AuthSession& auth,CertifiedAccessUnit& output,
+    std::vector<std::uint8_t>* samples,CoverageRange* range){
     if(!payload.data||payload.size>MaximumAccessUnitBytes)return FrameStatus::InvalidArgument;
     if(payload.size<FrameCertificateBytes)return FrameStatus::Malformed;
     const auto* h=payload.data;
@@ -144,10 +146,28 @@ FrameStatus inspectCoverageMetadata(Bytes payload,AuthSession& auth,CertifiedAcc
     if(auth.verifyFrameHeader({h,FrameSignedHeaderBytes},{h+FrameSignedHeaderBytes,AuthTagBytes},result.binding)!=AuthStatus::Ok)return FrameStatus::AuthenticationRefused;
     const auto coverageHash=hash(coverage);if(!equal({coverageHash.data(),coverageHash.size()},{h+112,32}))return FrameStatus::CoverageMismatch;
     // Authenticate the compressed bytes before any bounded decompression.
-    if(!coverageValid(d,result.coverageEncoding,coverage))return FrameStatus::Malformed;
+    // A compositor consumer can reuse this same expansion synchronously. Do
+    // not validate by decompressing and then discard those pixels to decode
+    // the same message again in every renderer callback.
+    std::vector<std::uint8_t> decoded;CoverageRange bounds;
+    if(samples&&range){
+        if(result.coverageEncoding!=CoverageEncoding::None){
+            result.coverage.assign(coverage.data,coverage.data+coverage.size);
+            if(!decodeCertifiedCoverage(result,decoded,bounds))return FrameStatus::Malformed;
+        }else if(coverage.size)return FrameStatus::Malformed;
+    }else if(!coverageValid(d,result.coverageEncoding,coverage))return FrameStatus::Malformed;
     std::copy_n(h,FrameCertificateBytes,result.signedHeader.begin());
-    if(coverage.size)result.coverage.assign(coverage.data,coverage.data+coverage.size);
+    if(coverage.size&&result.coverage.empty())result.coverage.assign(coverage.data,coverage.data+coverage.size);
+    if(samples&&range){samples->swap(decoded);*range=bounds;}
     output=std::move(result);return FrameStatus::Ok;
+}
+}
+FrameStatus inspectCoverageMetadata(Bytes payload,AuthSession& auth,CertifiedAccessUnit& output){
+    return inspectMetadata(payload,auth,output,nullptr,nullptr);
+}
+FrameStatus inspectCoverageMetadataDecoded(Bytes payload,AuthSession& auth,CertifiedAccessUnit& output,
+    std::vector<std::uint8_t>& samples,CoverageRange& range){
+    return inspectMetadata(payload,auth,output,&samples,&range);
 }
 bool encodeCoverageRle(Bytes raw,std::vector<std::uint8_t>& output){
     if(!raw.data||!raw.size||raw.size>MaximumCoverageBytes)return false;
@@ -170,6 +190,9 @@ bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,st
     encoding=selected;return true;
 }
 bool decodeCertifiedCoverage(const CertifiedAccessUnit& frame,std::vector<std::uint8_t>& output){
+    CoverageRange ignored;return decodeCertifiedCoverage(frame,output,ignored);
+}
+bool decodeCertifiedCoverage(const CertifiedAccessUnit& frame,std::vector<std::uint8_t>& output,CoverageRange& range){
     const auto& d=frame.descriptor;Bytes b{frame.coverage.data(),frame.coverage.size()};
     if(!descriptorValid(d)||frame.coverageEncoding==CoverageEncoding::None)return false;
     std::vector<std::uint8_t> rle;
@@ -178,8 +201,11 @@ bool decodeCertifiedCoverage(const CertifiedAccessUnit& frame,std::vector<std::u
         b={rle.data(),rle.size()};
     }else if(!coverageValid(d,frame.coverageEncoding,b))return false;
     std::vector<std::uint8_t> result;result.reserve(std::size_t(d.codedWidth)*d.codedHeight);
-    if(frame.coverageEncoding==CoverageEncoding::Raw)result=frame.coverage;
-    else for(std::size_t i=0;i<b.size;i+=2)result.insert(result.end(),b.data[i],b.data[i+1]);
-    output.swap(result);return true;
+    CoverageRange bounds;
+    if(frame.coverageEncoding==CoverageEncoding::Raw){
+        result.resize(b.size);
+        for(std::size_t i=0;i<b.size;++i){const auto sample=b.data[i];result[i]=sample;bounds.minimum=std::min(bounds.minimum,sample);bounds.maximum=std::max(bounds.maximum,sample);}
+    }else for(std::size_t i=0;i<b.size;i+=2){const auto sample=b.data[i+1];bounds.minimum=std::min(bounds.minimum,sample);bounds.maximum=std::max(bounds.maximum,sample);result.insert(result.end(),b.data[i],sample);}
+    output.swap(result);range=bounds;return true;
 }
 } // namespace stream_bridge

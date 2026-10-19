@@ -98,7 +98,7 @@ if(NOT MSVC)
 endif()
 
 if(BUILD_TESTING)
-    foreach(suite stream_bridge_protocol stream_bridge_auth stream_bridge_capacity stream_bridge_authenticated stream_bridge_frame stream_bridge_compression hevc_bridge_sei stream_bridge_sender stream_bridge_receiver stream_bridge_source_contract)
+    foreach(suite stream_bridge_protocol stream_bridge_auth stream_bridge_capacity stream_bridge_authenticated stream_bridge_frame stream_bridge_compression stream_bridge_decode_cost hevc_bridge_sei stream_bridge_sender stream_bridge_receiver stream_bridge_source_contract)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE sfnp_stream_bridge)
         if(NOT MSVC)

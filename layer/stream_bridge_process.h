@@ -19,6 +19,11 @@ struct ProcessConsumer {
     bool (*admitted)(void*) noexcept=nullptr;
     // Exact pre-draw retention; never depends on a future native image import.
     bool (*published)(void*,const LocalPicture&) noexcept=nullptr;
+    // Optional synchronous fast path. Process has authenticated this exact
+    // certificate and expanded its samples once. Bytes expire on return; the
+    // range is diagnostic content only, never frame/lease authorization.
+    void (*decodedCoverage)(void*,const stream_bridge::CertifiedAccessUnit&,
+        stream_bridge::Bytes,stream_bridge::CoverageRange) noexcept=nullptr;
 };
 bool prepareProcessCold() noexcept;
 bool enabled() noexcept;

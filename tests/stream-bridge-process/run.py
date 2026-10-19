@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--libraries", type=Path, required=True)
     parser.add_argument("--sanitized", action="store_true")
     parser.add_argument("--causal", action="store_true")
+    parser.add_argument("--decoded-control", action="store_true")
     parser.add_argument("--handoff-only", action="store_true")
     parser.add_argument("--handoff-control", choices=("early-receipt", "single-packet", "stale-receipt", "camera-receipt"))
     parser.add_argument("--camera-control", choices=("future-metadata", "early-none", "old-epoch"))
@@ -31,6 +32,11 @@ def main():
         if source.count(old) != 1:
             raise RuntimeError("process consumer gate changed; control needs review")
         source = source.replace(old, b"if(false){")
+    if args.decoded_control:
+        old = b"if(wantsDecoded&&consumer.decodedCoverage)"
+        if source.count(old) != 1:
+            raise RuntimeError("decoded dispatch causal anchor changed")
+        source = source.replace(old, b"if(false&&wantsDecoded&&consumer.decodedCoverage)")
     controls = {
         "early-receipt": (b"if(needsCoverage&&(!any||!all||!p.camera.ready()))continue;", b"(void)any;(void)all;",
                           "active certificate and picture do not acknowledge unpublished exact mask storage"),
@@ -61,7 +67,7 @@ def main():
         source = source.replace(old, new)
     print(json.dumps({"process_sha256": hashlib.sha256(source).hexdigest(),
                       "process_header_sha256": hashlib.sha256(header).hexdigest(),
-                      "causal": args.causal, "handoff_control": args.handoff_control, "camera_control": args.camera_control,
+                      "causal": args.causal, "decoded_control": args.decoded_control, "handoff_control": args.handoff_control, "camera_control": args.camera_control,
                       "sanitized": args.sanitized}), flush=True)
     with tempfile.TemporaryDirectory(prefix="sfnp-process-fixture-") as directory:
         temp = Path(directory)
@@ -96,7 +102,7 @@ def main():
                 "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
                 "local_transport_sha256": hashlib.sha256((root / "receiver/stream_bridge_local.cpp").read_bytes()).hexdigest(),
                 "sanitized": args.sanitized, "handoff_only": args.handoff_only,
-                "causal": args.causal, "handoff_control": args.handoff_control, "camera_control": args.camera_control,
+                "causal": args.causal, "decoded_control": args.decoded_control, "handoff_control": args.handoff_control, "camera_control": args.camera_control,
                 "exit_status": result.returncode,
                 "scope": "Actual Process source, authenticated Unix channels, AU signing/inspection and shared exact leases; final GPU consumer publication is an explicit test port. Not a Frame picture test.",
                 "cache": "TemporaryDirectory removes owned executables after child processes are reaped.",
@@ -104,6 +110,9 @@ def main():
         if args.causal:
             if result.returncode != 1 or "last consumer disappearance immediately revokes old picture connection" not in result.stdout:
                 raise RuntimeError("missing-consumer causal mutation was not caught at intended assertion")
+        elif args.decoded_control:
+            if result.returncode != 1 or "authenticated compositor expands once and dispatches decoded consumers" not in result.stdout:
+                raise RuntimeError("decoded reuse causal mutation was not caught at intended assertion")
         elif args.handoff_control:
             if result.returncode != 1 or controls[args.handoff_control][2] not in result.stdout:
                 raise RuntimeError("handoff causal mutation was not caught at intended assertion: " + args.handoff_control)
