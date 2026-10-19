@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import select
 import socket
+import string
 import struct
 import subprocess
 import sys
@@ -543,6 +544,14 @@ class Presentation(unittest.TestCase):
         self.assertIn('manually', ui.TEXT['en']['remove_pending'])
         self.assertIn('manuell', ui.TEXT['de']['remove_pending'])
 
+    def test_localized_format_fields_match_for_every_installer_message(self):
+        formatter = string.Formatter()
+        for key in ui.TEXT['en']:
+            with self.subTest(message=key):
+                fields = lambda value: sorted(field for _, field, _, _ in formatter.parse(value)
+                                              if field is not None)
+                self.assertEqual(fields(ui.TEXT['en'][key]), fields(ui.TEXT['de'][key]))
+
     def test_pipe_has_plain_bounded_output_and_no_progress_thread(self):
         p = presenter()
         p.banner()
@@ -552,7 +561,7 @@ class Presentation(unittest.TestCase):
         text = p.stream.getvalue()
         self.assertNotIn('\r', text)
         self.assertNotIn('\x1b', text)
-        self.assertIn('nothing will be installed', text)
+        self.assertIn('no patch will be installed', text)
         self.assertLess(len(text), 600)
         self.assertIsNone(p._thread)
         box = [line for line in text.splitlines() if line.startswith(('  +', '  |'))]
