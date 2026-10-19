@@ -732,6 +732,10 @@ def restore_owned(root, *, api_factory=NativeCamera, persist_timeout=3.0):
 
 def serve(root, *, input_stream=None, output_stream=None, api_factory=NativeCamera):
     root = private_root(root);config, sha = load_config(root)
+    # A retained installer pause must not repeatedly initialize OpenVR merely
+    # to refuse the session afterwards. Recheck after API setup for races.
+    with locked(root):
+        unpaused(root);settings(absolute(config['settings']))
     input_stream = sys.stdin.buffer if input_stream is None else input_stream
     output_stream = sys.stdout if output_stream is None else output_stream
     def reply(value):output_stream.write(value + '\n');output_stream.flush()

@@ -119,6 +119,35 @@ class Controls(unittest.TestCase):
         self.assertTrue((self.root / tool.PAUSE).exists());self.assertFalse((self.root / tool.LEASE).exists())
         with self.assertRaisesRegex(tool.SafetyError,'paused'):session.enable()
         self.assertIs(self.camera.value,False)
+    def test_paused_serve_never_constructs_or_initializes_native_api(self):
+        _,sha=tool.load_config(self.root);tool.pause(self.root,sha)
+        factory=mock.Mock(side_effect=AssertionError('paused native initialization forbidden'))
+        output=io.StringIO()
+        with self.assertRaisesRegex(tool.SafetyError,'paused'):
+            tool.serve(self.root,input_stream=io.BytesIO(b'E 1\n'),output_stream=output,api_factory=factory)
+        factory.assert_not_called();self.assertEqual(output.getvalue(),'')
+        self.assertFalse((self.root/tool.LEASE).exists())
+    def test_unknown_config_or_invalid_settings_refuse_before_api_factory(self):
+        factory=mock.Mock(side_effect=AssertionError('invalid session native initialization forbidden'))
+        for invalid in ('schema','private-mode','settings'):
+            with self.subTest(invalid=invalid):
+                self.write_config();self.write_settings({'camera':{tool.KEY:False}})
+                if invalid=='schema':
+                    self.config['schema']='unknown';self.write_config();self.config['schema']=tool.CONFIG_SCHEMA
+                elif invalid=='private-mode':(self.root/tool.CONFIG).chmod(0o644)
+                else:self.write_settings({'camera':{tool.KEY:'unknown'}})
+                with self.assertRaises(tool.SafetyError):
+                    tool.serve(self.root,input_stream=io.BytesIO(b''),output_stream=io.StringIO(),api_factory=factory)
+        factory.assert_not_called();self.assertFalse((self.root/tool.LEASE).exists())
+    def test_pause_created_during_native_setup_is_still_refused_by_locked_guard(self):
+        def factory(pin):
+            _,sha=tool.load_config(self.root);tool.pause(self.root,sha)
+            return self.camera
+        output=io.StringIO()
+        with self.assertRaisesRegex(tool.SafetyError,'paused'):
+            tool.serve(self.root,input_stream=io.BytesIO(b'E 1\n'),output_stream=output,api_factory=factory)
+        self.assertTrue(self.camera.closed);self.assertEqual(self.camera.calls,[])
+        self.assertEqual(output.getvalue(),'');self.assertFalse((self.root/tool.LEASE).exists())
     def test_live_restore_refuses_unpersisted_native_change_retains_receipt(self):
         session = self.session();session.enable();self.camera.persist = False
         with self.assertRaisesRegex(tool.SafetyError,'persistence'):tool.restore_owned(self.root,api_factory=self.factory,persist_timeout=0)
