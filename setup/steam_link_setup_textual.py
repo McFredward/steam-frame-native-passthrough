@@ -152,6 +152,36 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class PictureScreen(ModalScreen[Optional[bool]]):
+    """Yes confirms the image, No requests checks, Cancel retains recovery."""
+    BINDINGS = [Binding("escape", "cancel", show=False), Binding("ctrl+c", "cancel", show=False),
+                Binding("left,up", "app.focus_previous", show=False), Binding("right,down", "app.focus_next", show=False)]
+
+    def __init__(self, question: str, words, *, original=False):
+        super().__init__()
+        self.question, self.words, self.original = question, words, original
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Static(self.question, id="confirm-title", markup=False)
+            with VerticalScroll(id="confirm-copy"):
+                yield Static(self.words("bridge_original_picture_help" if self.original else "bridge_picture_help"), classes="plan-copy", markup=False)
+            with Horizontal(id="confirm-buttons"):
+                yield Button(self.words("picture_cancel"), id="picture-cancel")
+                yield Button(self.words("picture_no"), id="picture-no")
+                yield Button(self.words("picture_yes"), id="picture-yes", variant="primary")
+
+    def on_mount(self):
+        self.query_one("#picture-no", Button).focus()
+
+    @on(Button.Pressed)
+    def answer(self, event: Button.Pressed):
+        self.dismiss({"picture-yes": True, "picture-no": False}.get(event.button.id))
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class InputScreen(ModalScreen[str]):
     BINDINGS = [Binding("escape", "cancel", show=False), Binding("ctrl+c", "cancel", show=False)]
 
@@ -409,7 +439,7 @@ class TextualPresenter:
                            lambda value: self.app.resolve_prompt(value, expected=prompt)), "")
 
     def choose_action(self, actions, recommended=None):
-        known = ("install", "update", "repair", "uninstall", "check", "exit", "retry", "back", "rollback", "continue", "manual")
+        known = ("install", "update", "repair", "uninstall", "check", "exit", "retry", "verify", "back", "rollback", "continue", "manual")
         if (type(actions) not in (list, tuple) or len(actions) > len(known)
                 or any(type(a) is not str or a not in known for a in actions)
                 or len(set(actions)) != len(actions)):
@@ -419,8 +449,11 @@ class TextualPresenter:
         return self._wait(lambda prompt: self.app.show_actions(actions, recommended), None)
 
     def confirm(self, key):
+        if key in ("bridge_picture", "bridge_original_picture"):
+            return self._wait(lambda prompt: self.app.push_screen(PictureScreen(self.text(key), self.text, original=key=="bridge_original_picture"),
+                              lambda value: self.app.resolve_prompt(value, expected=prompt)), None)
         plan = self.app.plan
-        if key in ("bridge_picture", "bridge_started"):
+        if key == "bridge_started":
             plan = self.text("bridge_health_ok")
         elif key in ("bridge_recover_confirm", "bridge_continue"):
             plan = self.text("bridge_stop_first")
@@ -759,7 +792,7 @@ class SetupApp(App[int]):
         if self.backend_finished:
             self.exit(self.backend_result)
             return
-        if isinstance(self.screen, (ConfirmScreen, InputScreen, SSHInputScreen)):
+        if isinstance(self.screen, (ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen)):
             self.screen.action_cancel()
             return
         if self.prompt is not None:
@@ -780,7 +813,7 @@ class SetupApp(App[int]):
             return
         self.stop_requested = True
         prompt = self.prompt
-        if isinstance(self.screen, (ConfirmScreen, InputScreen, SSHInputScreen)):
+        if isinstance(self.screen, (ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen)):
             self.screen.action_cancel()
         if prompt is not None:
             self.resolve_prompt(prompt.cancel, expected=prompt)

@@ -33,6 +33,7 @@ struct SourceIpcState {Nonce binding{};std::uint64_t generation=0;bool compatibl
 class SourceIpcPermission {
 public:
     void reset()noexcept{client_={};server_=0;binding_={};generation_=0;}
+    std::uint32_t process()const noexcept{return generation_?client_.processId:0;}
     SourceIpcMessage update(const SourceIpcRequest& client,std::uint32_t server,
         const SourceIpcState& current,bool prepared)noexcept{
         if(client.processId!=client_.processId||client.nonce!=client_.nonce||server!=server_){
@@ -50,7 +51,8 @@ private:
 class SourceIpcServer {
 public:
     using Prepared=bool(*)(std::uint32_t,void*);
-    explicit SourceIpcServer(Prepared,void*);~SourceIpcServer();
+    using Changed=void(*)(std::uint32_t,void*) noexcept;
+    explicit SourceIpcServer(Prepared,void*,Changed=nullptr);~SourceIpcServer();
     void tick(const SourceIpcState&)noexcept; // Existing cold provider worker only.
     void stop()noexcept;
 private:struct Impl;std::unique_ptr<Impl> impl_;

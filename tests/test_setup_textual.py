@@ -27,6 +27,9 @@ SPEC = importlib.util.spec_from_file_location("_sfnp_setup_textual", ROOT / "set
 UI = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = UI
 SPEC.loader.exec_module(UI)
+FLOW_SPEC = importlib.util.spec_from_file_location("_sfnp_textual_workflow", ROOT / "setup/steam_link_setup_workflow.py")
+FLOW = importlib.util.module_from_spec(FLOW_SPEC)
+FLOW_SPEC.loader.exec_module(FLOW)
 
 
 async def until(pilot, predicate):
@@ -38,6 +41,73 @@ async def until(pilot, predicate):
 
 
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_picture_no_rechecks_actual_workflow_and_explicit_undo_requires_original_picture(self):
+        class Ports:
+            error = ValueError
+            def __init__(self): self.events = []
+            def begin(self): self.events.append("begin")
+            def stop_pc(self): self.events.append("stop_pc")
+            def prepare(self, action): self.events.append("prepare")
+            def restart_prepared(self): self.events.append("restart_prepared")
+            def prepared_health(self): self.events.append("prepared_health"); return {"software_ready": True}
+            def restore_files(self): self.events.append("restore_files")
+            def restart_original(self): self.events.append("restart_original")
+            def original_health(self): self.events.append("original_health"); return {"software_ready": True}
+            def finish(self, *, restored): self.events.append("finished_original" if restored else "finished_prepared")
+            def failure(self, error, *, recovery): self.events.append("failure")
+
+        ports = Ports()
+        app = UI.SetupApp(lambda: FLOW.Workflow(ports, UI.active_presenter()).run("update"), "en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+            await pilot.pause()
+            self.assertEqual(app.focused.id, "picture-no")
+            self.assertEqual({str(b.label) for b in app.screen.query(Button)}, {"Yes", "No", "Cancel setup"})
+            await pilot.press("enter")
+            await until(pilot, lambda: ports.events.count("prepared_health") == 2 and app.prompt is not None and not isinstance(app.screen, UI.PictureScreen))
+            self.assertNotIn("restore_files", ports.events)
+            self.assertEqual(ports.events.count("restart_prepared"), 1)
+            self.assertEqual(app.query_one(OptionList).highlighted, 0)
+            self.assertIn("Retry verification", str(app.query_one(OptionList).get_option_at_index(0).prompt))
+            # First retry is entirely observational, with a new picture answer.
+            await pilot.press("enter")
+            await until(pilot, lambda: ports.events.count("prepared_health") == 3 and isinstance(app.screen, UI.PictureScreen))
+            self.assertNotIn("restore_files", ports.events)
+            await pilot.press("enter")  # No a second time.
+            await until(pilot, lambda: ports.events.count("prepared_health") == 4 and not isinstance(app.screen, UI.PictureScreen))
+            await pilot.press("down", "enter")  # Explicit Restore previous setup.
+            await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen) and app.screen.original)
+            self.assertEqual(ports.events.count("restart_original"), 1)
+            self.assertNotIn("finished_original", ports.events)
+            self.assertNotIn("finished_prepared", ports.events)
+            await pilot.press("right", "enter")  # Yes, original picture is usable.
+            await until(pilot, lambda: app.prompt is not None and not isinstance(app.screen, UI.PictureScreen))
+            self.assertEqual(ports.events.count("finished_original"), 1)
+            await pilot.press("down", "enter")  # Exit rather than repeating Update.
+            await until(pilot, lambda: app.backend_finished)
+            self.assertEqual(app.backend_result, 2)
+        app.backend.join()
+
+    async def test_picture_cancel_is_distinct_from_no_in_both_languages(self):
+        for lang in ("en", "de"):
+            observed = []
+            def backend():
+                p = UI.active_presenter()
+                observed.append(p.confirm("bridge_picture"))
+                return 130
+            app = UI.SetupApp(backend, lang)
+            async with app.run_test(size=(60, 24)) as pilot:
+                await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
+                await pilot.pause()
+                self.assertEqual(app.focused.id, "picture-no")
+                for button in app.screen.query(Button):
+                    self.assertLessEqual(button.region.right, app.size.width)
+                await pilot.press("left", "enter")
+                await until(pilot, lambda: app.backend_finished)
+                self.assertEqual(observed, [None])
+                self.assertFalse(app.stop_requested)
+            app.backend.join()
+
     async def test_arrow_navigation_and_cancel_is_default(self):
         observed = []
 
@@ -490,11 +560,11 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
 
         app = UI.SetupApp(backend, "de")
         async with app.run_test(size=(80, 24)) as pilot:
-            await until(pilot, lambda: isinstance(app.screen, UI.ConfirmScreen))
+            await until(pilot, lambda: isinstance(app.screen, UI.PictureScreen))
             await pilot.pause()
             await pilot.press("ctrl+c")
             await until(pilot, lambda: app.backend_finished)
-            self.assertEqual(observed, [False, True])
+            self.assertEqual(observed, [None, True])
             self.assertEqual(app.backend_result, 130)
             self.assertIn("Einrichtung abgebrochen", str(app.query_one("#complete-title", Static).render()))
             self.assertIn("nicht automatisch zurückgenommen", str(app.query_one("#notice", Static).render()))

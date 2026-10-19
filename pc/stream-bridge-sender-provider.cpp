@@ -114,7 +114,8 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
     vr::IVRDriverContext* context_=nullptr;vr::IVRDriverLog* log_=nullptr;
     stream_bridge::sender::SenderRuntime runtime_{boundary()};stream_bridge::ControlRequest request_{};
     stream_bridge::sender::SenderCoverage coverage_{directMode(),boundary(),runtime_.control()};
-    stream_bridge::sender::SourceIpcServer sourceIpc_{[](std::uint32_t pid,void* context){return static_cast<Provider*>(context)->coverage_.ready(pid);},this};
+    stream_bridge::sender::SourceIpcServer sourceIpc_{[](std::uint32_t pid,void* context){return static_cast<Provider*>(context)->coverage_.ready(pid);},this,
+        [](std::uint32_t pid,void* context)noexcept{static_cast<Provider*>(context)->coverage_.sourceProcess(pid);}};
     void** directSlots_=nullptr;std::array<void*,8> directOriginal_{},directWrapped_{};
     void report(const char* status){if(log_){char text[384]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
     bool configure(){

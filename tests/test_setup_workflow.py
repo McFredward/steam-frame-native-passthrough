@@ -46,6 +46,53 @@ class Files(fixtures.Tests):
         self.assertNotIn('finished_prepared',ports.events)
         self.assertNotIn('finished_original',ports.events)
 
+    def test_picture_no_preserves_real_changes_until_explicit_undo_and_original_image_confirmation(self):
+        installer=b.LocalInstall(s,self.local);ports=Ports();ui=UI(['rollback','exit'],picture=False)
+        original_pc=s.parse(s.read(self.settings));original_frame=s.parse(s.read(self.fsettings))
+        questions=[];offered=[];before_undo=[]
+        def prepare(action):
+            ports.mark('prepare_'+action)
+            installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+            with self.fake_generation():
+                self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+            self.unit.tx.commit()
+        def restore():
+            ports.mark('restore_files')
+            installer.checkpoint().restore();installer.checkpoint().verify_restored()
+            self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+        def confirm(key):
+            questions.append(key)
+            self.assertTrue(installer.checkpoint().path.exists())
+            self.assertTrue(self.unit.checkpoint().path.exists())
+            if key=='bridge_original_picture':
+                self.assertEqual(s.parse(s.read(self.settings)),original_pc)
+                self.assertEqual(s.parse(s.read(self.fsettings)),original_frame)
+                self.assertIn('restart_original',ports.events)
+                self.assertIn('original_health',ports.events)
+                self.assertNotIn('finished_original',ports.events)
+                return True
+            return False
+        def choose(actions,recommended=None):
+            offered.append(actions)
+            if 'rollback' in actions:
+                # Assertions belong outside Workflow's ordinary failure handler;
+                # a fixture assertion must not be mistaken for recovery consent.
+                before_undo.append((ports.events.count('prepared_health'),'restore_files' in ports.events,
+                                    installer.state() is not None,(self.froot/b.LIBRARY).exists()))
+            return next(ui.choices)
+        def finish(restored=False):
+            self.assertTrue(restored)
+            self.assertEqual(questions,['bridge_picture','bridge_original_picture'])
+            installer.checkpoint().finish(restored=True);self.unit.checkpoint().finish(restored=True)
+            ports.mark('finished_original')
+        ports.prepare=prepare;ports.restore_files=restore;ports.finish=finish;ui.confirm=confirm;ui.choose_action=choose
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),2)
+        self.assertEqual(offered,[['verify','rollback','exit'],['retry','exit']])
+        self.assertEqual(before_undo,[(2,False,True,True)])
+        self.assertEqual(ports.events.count('restart_original'),1)
+        self.assertFalse(installer.checkpoint().path.exists());self.assertFalse(self.unit.checkpoint().path.exists())
+        self.assertIn('bridge_rolled_back',ui.messages)
+
     def test_confirmed_update_survives_recovery_and_installs_the_new_package(self):
         installer=b.LocalInstall(s,self.local)
         installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
@@ -83,7 +130,7 @@ class Files(fixtures.Tests):
         with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())),mock.patch.object(b,'local_address',return_value='192.168.1.4'),mock.patch.object(b,'load_helper',side_effect=helper),self.fake_generation():
             self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
         self.assertEqual(len(choices),1)
-        self.assertEqual(confirmations,['bridge_confirm','bridge_picture'])
+        self.assertEqual(confirmations,['bridge_confirm','bridge_original_picture','bridge_picture'])
         self.assertLess(commands.index('bridge-restore'),commands.index('bridge-prepare'))
         self.assertEqual(installer.state()['bundle'],updated.pin)
         self.assertEqual(self.unit.tx.state()['bundle'],updated.pin)
@@ -374,7 +421,7 @@ class Files(fixtures.Tests):
 class UI:
     def __init__(self,choices=(),picture=True):self.choices=iter(choices);self.messages=[];self.picture=picture;self.stopped=False
     def say(self,key):self.messages.append(key)
-    def confirm(self,key):return self.picture
+    def confirm(self,key):return True if key=='bridge_original_picture' else self.picture
     def choose_action(self,actions,recommended=None):return next(self.choices,'exit')
     def cancelled(self):return self.stopped
 
@@ -518,9 +565,72 @@ class Workflow(unittest.TestCase):
         self.assertIn('bridge_rolled_back',ui.messages)
         self.assertEqual(ports.events[-4:],['restore_files','restart_original','original_health','finished_original'])
 
-    def test_bad_picture_restores_without_manual_kill(self):
-        ports=Ports();ui=UI(picture=False);self.assertEqual(flow.Workflow(ports,ui).run('repair'),2)
+    def test_bad_picture_offers_read_only_checks_and_explicit_restore_without_manual_kill(self):
+        ports=Ports();ui=UI(['rollback','exit'],picture=False)
+        offered=[]
+        def choose(actions,recommended=None):
+            offered.append((actions,recommended,ports.events[:]))
+            return next(ui.choices)
+        ui.choose_action=choose
+        self.assertEqual(flow.Workflow(ports,ui).run('repair'),2)
+        self.assertEqual(offered[0][:2],(['verify','rollback','exit'],'verify'))
+        self.assertEqual(offered[0][2].count('prepared_health'),2)
+        self.assertNotIn('restore_files',offered[0][2])
+        self.assertNotIn('restart_original',offered[0][2])
         self.assertIn('finished_original',ports.events)
+
+    def test_no_then_retry_rechecks_without_restarting_and_requires_a_new_yes(self):
+        ports=Ports();ui=UI(['verify']);answers=iter([False,True]);questions=[]
+        def confirm(key):questions.append(key);return next(answers)
+        ui.confirm=confirm
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),0)
+        self.assertEqual(questions,['bridge_picture','bridge_picture'])
+        self.assertEqual(ports.events.count('prepared_health'),3)
+        self.assertEqual(ports.events.count('restart_prepared'),1)
+        self.assertNotIn('restore_files',ports.events)
+        self.assertIn('finished_prepared',ports.events)
+
+    def test_no_and_failed_recheck_never_automatically_restarts_or_restores(self):
+        for result in (False,{'status':'not-ready','software_ready':False},OSError('read-only connection failed')):
+            with self.subTest(result=type(result).__name__):
+                ports=Ports();ui=UI(['exit'],picture=False);attempts=[]
+                def health():
+                    ports.mark('prepared_health');attempts.append(1)
+                    if len(attempts)==1:return True
+                    if isinstance(result,Exception):raise result
+                    return result
+                ports.prepared_health=health
+                self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+                self.assertEqual(len(attempts),2)
+                self.assert_retained_cancellation(ports,ui)
+                self.assertIn('bridge_picture_checks_unconfirmed',ui.messages)
+                self.assertEqual(ports.events.count('restart_prepared'),1)
+
+    def test_cancel_picture_is_not_no_and_never_checks_or_restores_again(self):
+        ports=Ports();ui=UI();ui.confirm=lambda key:None
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+        self.assertEqual(ports.events.count('prepared_health'),1)
+        self.assert_retained_cancellation(ports,ui)
+
+    def test_restore_keeps_records_until_original_picture_is_confirmed(self):
+        ports=Ports(prepared=False);ui=UI(['verify','exit']);answers=iter([False,True]);questions=[]
+        def picture(key):
+            self.assertNotIn('finished_original',ports.events)
+            questions.append(key);return next(answers)
+        ui.confirm=picture
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),2)
+        self.assertEqual(questions,['bridge_original_picture','bridge_original_picture'])
+        self.assertEqual(ports.events.count('original_health'),3)
+        self.assertEqual(ports.events.count('restart_original'),1)
+        self.assertEqual(ports.events.count('finished_original'),1)
+
+    def test_restore_with_bad_original_picture_cannot_claim_completed_or_discard_records(self):
+        ports=Ports(prepared=False);ui=UI(['exit']);ui.confirm=lambda key:False
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),130)
+        self.assertNotIn('finished_original',ports.events)
+        self.assertNotIn('bridge_rolled_back',ui.messages)
+        self.assertEqual(ports.events.count('restart_original'),1)
+        self.assertEqual(ports.events.count('original_health'),2)
 
     def test_failed_restore_offers_retry_and_cannot_claim_rolled_back(self):
         ports=Ports(prepared=False);ports.fail_restore=1;ui=UI(['retry','exit'])

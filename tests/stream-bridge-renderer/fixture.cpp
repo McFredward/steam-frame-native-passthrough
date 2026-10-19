@@ -28,7 +28,7 @@
 namespace sr=stream_bridge_renderer;namespace sb=stream_bridge;namespace local=stream_bridge_local;
 namespace {
 std::vector<std::uint32_t> words(const char* path){std::ifstream f(path,std::ios::binary|std::ios::ate);check(bool(f),"private source opens");const auto n=f.tellg();check(n>0&&n<65536&&n%4==0,"bounded private words");std::vector<std::uint32_t> out(std::size_t(n)/4);f.seekg(0);f.read(reinterpret_cast<char*>(out.data()),n);check(bool(f),"private source fully read");return out;}
-sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords;std::atomic<bool> leaseCurrent{true};bool coverageReadable=true;
+sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords;std::atomic<bool> leaseCurrent{true};std::atomic<std::uint64_t> leaseSequence{71};bool coverageReadable=true;
 struct Driver:Fake {
  struct Update{std::uint64_t buffer;VkDeviceSize offset;float value;bool fill=false;};
  std::map<std::uint64_t,std::vector<Update>> commands;
@@ -37,6 +37,7 @@ struct Driver:Fake {
  std::vector<VkPipeline> createdPipelines,destroyedPipelines;
  VkSemaphore wait=handle<VkSemaphore>(0x9871),signalSemaphore=handle<VkSemaphore>(0x9872);VkFence appFence=handle<VkFence>(0x9998);
  bool failOriginal=false,failCoverage=false;unsigned forwardOriginal=0,waitPreserved=0,signalPreserved=0,barrierReads=0,khrCalls=0;
+ std::atomic<bool> blockPipeline{false},insidePipeline{false};
  static Driver* self;Driver(){self=this;Fake::active=this;}
  static VkResult VKAPI_CALL beginCommand(VkCommandBuffer cb,const VkCommandBufferBeginInfo* i){++self->calls;check(i->flags==VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT||i->flags==VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,"owned guard immutable-SIMULT or upload one-time");self->commands[number(cb)].clear();return VK_SUCCESS;}
  static void VKAPI_CALL bufferUpdate(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,VkDeviceSize size,const void* bytes){check(offset%256==0&&size==4,"one immutable aligned guard float");float v;std::memcpy(&v,bytes,4);check(v==0||v==1,"guard only boolean");self->commands[number(cb)].push_back({number(buffer),offset,v,false});}
@@ -54,7 +55,7 @@ struct Driver:Fake {
  }
  static VkResult VKAPI_CALL createShader(VkDevice,const VkShaderModuleCreateInfo* ci,const VkAllocationCallbacks*,VkShaderModule* out){check(ci&&ci->codeSize&&ci->pCode,"production shader creation uses owned words");*out=self->make<VkShaderModule>();return VK_SUCCESS;}
  static void VKAPI_CALL destroyShader(VkDevice,VkShaderModule,const VkAllocationCallbacks*){}
- static VkResult VKAPI_CALL createPipelines(VkDevice,VkPipelineCache,std::uint32_t n,const VkGraphicsPipelineCreateInfo* ci,const VkAllocationCallbacks*,VkPipeline* out){check(n==1&&ci->stageCount==2,"production bounded original pipeline clone");if(self->failCoverage){*out={};return VK_ERROR_OUT_OF_DEVICE_MEMORY;}*out=self->make<VkPipeline>();self->createdPipelines.push_back(*out);return VK_SUCCESS;}
+ static VkResult VKAPI_CALL createPipelines(VkDevice,VkPipelineCache,std::uint32_t n,const VkGraphicsPipelineCreateInfo* ci,const VkAllocationCallbacks*,VkPipeline* out){check(n==1&&ci->stageCount==2,"production bounded original pipeline clone");self->insidePipeline=true;while(self->blockPipeline.load())std::this_thread::yield();self->insidePipeline=false;if(self->failCoverage){*out={};return VK_ERROR_OUT_OF_DEVICE_MEMORY;}*out=self->make<VkPipeline>();self->createdPipelines.push_back(*out);return VK_SUCCESS;}
  static void VKAPI_CALL destroyPipeline(VkDevice,VkPipeline value,const VkAllocationCallbacks*){check(std::find(self->destroyedPipelines.begin(),self->destroyedPipelines.end(),value)==self->destroyedPipelines.end(),"pipeline destroyed only once");self->destroyedPipelines.push_back(value);}
  static VkResult VKAPI_CALL createLayout(VkDevice,const VkPipelineLayoutCreateInfo* ci,const VkAllocationCallbacks*,VkPipelineLayout* out){check(ci->setLayoutCount==3,"native+mask+guard descriptor layouts");*out=self->make<VkPipelineLayout>();return VK_SUCCESS;}
  static void VKAPI_CALL destroyLayout(VkDevice,VkPipelineLayout,const VkAllocationCallbacks*){}
@@ -87,7 +88,7 @@ bool readCoverageFragmentCold(std::vector<std::uint32_t>& out)noexcept{if(!cover
 }
 namespace stream_bridge_local {
 struct LeaseReader::Impl{};LeaseReader::LeaseReader():impl_(new Impl){}LeaseReader::~LeaseReader()=default;
-bool LeaseReader::mapReadOnly(int)noexcept{return true;}bool LeaseReader::current(const LeaseReference& v)const noexcept{return leaseCurrent&&v.sequence==71;}void LeaseReader::reset()noexcept{}
+bool LeaseReader::mapReadOnly(int)noexcept{return true;}bool LeaseReader::current(const LeaseReference& v)const noexcept{return leaseCurrent&&v.sequence==leaseSequence;}void LeaseReader::reset()noexcept{}
 }
 namespace stream_bridge_native {
 struct NativeImages::Impl{};NativeImages::NativeImages():impl_(new Impl){}NativeImages::NativeImages(ExportPreparation,void*):NativeImages(){}NativeImages::~NativeImages()=default;
@@ -101,7 +102,7 @@ struct Integration {
  VkDevice device=handle<VkDevice>(1);VkCommandBuffer cb=handle<VkCommandBuffer>(0x71000);VkImage image=handle<VkImage>(0x72000);VkImageView view=handle<VkImageView>(0x73000);VkDescriptorSet set=handle<VkDescriptorSet>(0x74000);VkDeviceMemory imported=handle<VkDeviceMemory>(0x75000);
  std::shared_ptr<std::atomic<bool>> connection=std::make_shared<std::atomic<bool>>(true);int file=-1;sr::LocalPicture picture;VkBuffer guard=VK_NULL_HANDLE;
  Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true,bool failCoverage=false,bool customAllocator=false){
-  leaseCurrent=true;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
+  leaseCurrent=true;leaseSequence=71;vk.fences[number(vk.appFence)]=false;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
   VkPhysicalDeviceMemoryProperties m{};m.memoryTypeCount=1;m.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   check(renderer.prepareCold(device,m,Driver::get,native.device,VK_API_VERSION_1_1,0)==coverageReadable,"actual renderer cold prepare requires only exact coverage artifact");check(!consumer.owner,"pool preparation alone cannot advertise actual selected-image renderer");
   if(imageCount==1){
@@ -132,8 +133,56 @@ struct Integration {
  ~Integration(){renderer.stopCold();if(file>=0)close(file);}
  void writeView(VkImageView selected){VkDescriptorImageInfo imageInfo{};imageInfo.imageView=selected;imageInfo.imageLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};write.dstSet=set;write.dstBinding=9;write.descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;write.descriptorCount=1;write.pImageInfo=&imageInfo;renderer.descriptorWrites(1,&write,0,nullptr);}
  sr::Draw record(VkCommandBufferUsageFlags flags=0){VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=flags;renderer.commandBegin(cb,&begin);renderer.pipelineBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,publicPipeline);renderer.setsBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,0,1,&set,0);auto result=renderer.beforeDraw(cb);if(result.control){guard=handle<VkBuffer>(vk.setBuffer.at(number(result.control)));vk.appControl[number(cb)]=number(guard);vk.appOffset[number(cb)]=vk.setOffset.at(number(result.control));}return result;}
+ sr::Draw freshFrame(){
+  ++picture.metadata.descriptor.sourceFrame;picture.metadata.lease.sequence=++leaseSequence;
+  sb::CertifiedAccessUnit certificate;certificate.descriptor=picture.metadata.descriptor;certificate.binding=picture.metadata.binding;certificate.coverageEncoding=sb::CoverageEncoding::Raw;certificate.coverage.assign(32,127);
+  consumer.coverage(consumer.owner,certificate);consumer.picture(consumer.owner,picture);
+  renderer.submit(vk.queue,0,nullptr,VK_NULL_HANDLE);vk.signal();consumer.tick(consumer.owner);
+  // Keep the earlier native recording alive: its immutable descriptor storage
+  // must remain retained even though that unsupported submit got only zero.
+  cb=handle<VkCommandBuffer>(number(cb)+1);renderer.commandAllocated(cb,VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);
+  return record();
+ }
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
+void fallbackRecovery(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ for(unsigned mode=0;mode<6;++mode){
+  Integration f(vs,ps);const auto initial=f.record();check(initial.ready,"initial supported coverage recording");
+  if(mode==0){
+   VkProtectedSubmitInfo extension{VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO};extension.protectedSubmit=VK_FALSE;
+   VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.pNext=&extension;info.commandBufferCount=1;info.pCommandBuffers=&f.cb;
+   check(f.renderer.submit(f.vk.queue,1,&info,f.vk.appFence)==VK_SUCCESS,"unsupported core pNext forwards successful native submit");
+  }else if(mode==1||mode==2){
+   VkProtectedSubmitInfo extension{VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO};extension.protectedSubmit=VK_FALSE;
+   VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=f.cb;
+   VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.pNext=&extension;info.commandBufferInfoCount=1;info.pCommandBufferInfos=&cb;
+   check(f.renderer.submit2(f.vk.queue,1,&info,f.vk.appFence,mode==2)==VK_SUCCESS,"unsupported core or KHR submit2 forwards successful native submit");
+  }else if(mode==3){
+   std::array<VkSubmitInfo,129> infos{};for(auto& info:infos)info.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   infos.front().commandBufferCount=1;infos.front().pCommandBuffers=&f.cb;
+   check(f.renderer.submit(f.vk.queue,infos.size(),infos.data(),f.vk.appFence)==VK_SUCCESS,"unsupported large batch forwards successful native submit");
+  }else if(mode==4){
+   // The first submit tentatively collects an exact lease. A later extension
+   // must discard every prepared one guard, including this earlier prefix.
+   VkProtectedSubmitInfo extension{VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO};extension.protectedSubmit=VK_FALSE;
+   std::array<VkSubmitInfo,2> infos{};for(auto& info:infos)info.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   infos.front().commandBufferCount=1;infos.front().pCommandBuffers=&f.cb;infos.back().pNext=&extension;
+   check(f.renderer.submit(f.vk.queue,infos.size(),infos.data(),f.vk.appFence)==VK_SUCCESS,"unsupported suffix forwards original supported prefix without one guard");
+  }else{
+   // A legal cold pipeline creation can own the renderer mutex while the
+   // native queue owner submits. Only that submitted batch may become opaque.
+   f.vk.blockPipeline=true;VkPipeline other=handle<VkPipeline>(0x61);
+   std::thread cold([&]{f.renderer.graphicsCreated(VK_NULL_HANDLE,f.native.graphics,nullptr,other);});
+   while(!f.vk.insidePipeline.load())std::this_thread::yield();
+   const auto result=f.submit(false);f.vk.blockPipeline=false;cold.join();
+   check(result==VK_SUCCESS,"contended native submit never waits for cold renderer ownership");
+  }
+  check(f.vk.reads.back()==0,"unsupported native batch contains zero guard and no prepared one guard");
+  const auto fresh=f.freshFrame();
+  check(fresh.ready&&fresh.coverage!=initial.coverage,"fresh coverage survives unsupported batch without recycling retained native recording");
+  check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"subsequent supported fresh picture immediately restores exact coverage");
+ }
+}
 void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  {coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");
   const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");
@@ -166,6 +215,7 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
 }
 }
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
- if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else integration(vs,ps);
+ if(argc==5&&std::strcmp(argv[4],"fallback-recovery")==0)fallbackRecovery(vs,ps);
+ else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
+ else {integration(vs,ps);fallbackRecovery(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

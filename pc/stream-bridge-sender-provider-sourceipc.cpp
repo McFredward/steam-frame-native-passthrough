@@ -6,13 +6,14 @@
 #include <cwchar>
 namespace stream_bridge::sender {
 struct SourceIpcServer::Impl {
-    Prepared prepared;void* context;HANDLE pipe=INVALID_HANDLE_VALUE;OVERLAPPED connect{},read{},write{};
+    Prepared prepared;void* context;Changed changed;std::uint32_t published=0;HANDLE pipe=INVALID_HANDLE_VALUE;OVERLAPPED connect{},read{},write{};
     bool connecting=false,reading=false,writing=false,connected=false,cancelling=false,accepted=false;unsigned writes=0;
     SourceIpcMessage request{},reply{},previous{};SourceIpcRequest client{};SourceIpcPermission permission{};std::uint8_t unexpected=0;
-    Impl(Prepared p,void* c):prepared(p),context(c){connect.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);read.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);write.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);}
+    Impl(Prepared p,void* c,Changed notify):prepared(p),context(c),changed(notify){connect.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);read.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);write.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);}
+    void publish(std::uint32_t pid){if(published!=pid){published=pid;if(changed)changed(pid,context);}}
     bool done(OVERLAPPED& op,DWORD& bytes){return GetOverlappedResult(pipe,&op,&bytes,FALSE)!=0;}
     bool pending(OVERLAPPED& op){DWORD bytes=0;if(done(op,bytes))return false;return GetLastError()==ERROR_IO_INCOMPLETE;}
-    void cancel(){permission.reset();if(pipe==INVALID_HANDLE_VALUE)return;cancelling=true;CancelIoEx(pipe,nullptr);DisconnectNamedPipe(pipe);}
+    void cancel(){permission.reset();publish(0);if(pipe==INVALID_HANDLE_VALUE)return;cancelling=true;CancelIoEx(pipe,nullptr);DisconnectNamedPipe(pipe);}
     void reap(){
         if(!cancelling)return;
         if((connecting&&pending(connect))||(reading&&pending(read))||(writing&&pending(write)))return;
@@ -54,13 +55,14 @@ struct SourceIpcServer::Impl {
         if(!accepted||cancelling)return;
         if(writing){if(done(write,bytes)){writing=false;if(bytes!=128){cancel();return;}}else{if(GetLastError()!=ERROR_IO_INCOMPLETE){writing=false;cancel();}return;}}
         const auto next=permission.update(client,GetCurrentProcessId(),state,prepared(client.processId,context));
+        publish(permission.process());
         if(writes&&next==previous)return;
         if(writes>=256){cancel();return;} // Bounded connection telemetry, no timer.
         reply=next;previous=next;ResetEvent(write.hEvent);writing=true;++writes;
         if(!WriteFile(pipe,reply.data(),128,&bytes,&write)&&GetLastError()!=ERROR_IO_PENDING){writing=false;cancel();}
     }
 };
-SourceIpcServer::SourceIpcServer(Prepared p,void* context):impl_(new Impl(p,context)){}
+SourceIpcServer::SourceIpcServer(Prepared p,void* context,Changed notify):impl_(new Impl(p,context,notify)){}
 SourceIpcServer::~SourceIpcServer(){stop();(void)impl_.release();} // Pending OS buffers stay alive through process exit.
 void SourceIpcServer::tick(const SourceIpcState& state)noexcept{try{impl_->tick(state);}catch(...){impl_->cancel();}}
 void SourceIpcServer::stop()noexcept{impl_->cancel();impl_->reap();}

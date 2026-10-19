@@ -15,6 +15,17 @@ independent shared-UBO offsets, and both core and KHR submit dispatch. A batch o
 on the final bounded chunk. Two semantic controls remove current-lease checking
 or the leading zero command; both must fail a positive/negative assertion.
 
+Unsupported submit extensions, oversized batches and contention with cold
+pipeline creation turn only that batch opaque. Its scratch one-guards are
+discarded and the original command buffers follow an immutable zero guard.
+Their recording references keep sampled mask descriptors alive until the native
+application completes and resets/retires those recordings. Follow-up checks
+submit a fresh exact picture without recycling that retained storage, including
+core/KHR Submit2 and an unsupported suffix after an otherwise supported prefix.
+A causal control reinstates the old whole-pool quarantine and must fail the
+fresh-picture assertion. Actual failed copy/tail-fence quarantine remains
+independent. `--fallback-recovery-only` selects just these recovery cases.
+
 The documented native 29-binding scalar Set0 is replayed with the exact private
 original shaders. The production successful-shader callback must prove the
 original fragment's constant-zero image accesses and promote pending count1

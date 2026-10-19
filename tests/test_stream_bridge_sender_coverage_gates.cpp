@@ -23,7 +23,7 @@ void run(){
     snapshot=counters.snapshot();
     for(unsigned i=1;i<static_cast<unsigned>(CoverageGate::Count);++i)check(snapshot.refusals[i]==1,"cold snapshot preserves separate actual refusal populations");
     counters.signal(static_cast<CoverageSignal>(999));counters.refuse(static_cast<CoverageGate>(999));
-    check(counters.snapshot().lastRefusal==CoverageGate::Encoder&&snapshot.refusals[0]==0,"invalid diagnostic selectors cannot index outside fixed storage or replace prior reason");
+    check(counters.snapshot().lastRefusal==snapshot.lastRefusal&&snapshot.refusals[0]==0,"invalid diagnostic selectors cannot index outside fixed storage or replace prior reason");
     counters.constantBytes(128);counters.source(2160,2160,28);counters.output(1152,4608,103);
     snapshot=counters.snapshot();check(snapshot.lastConstantBytes==128&&snapshot.lastSourceWidth==2160&&snapshot.lastSourceHeight==2160&&snapshot.lastSourceFormat==28
         &&snapshot.lastOutputWidth==1152&&snapshot.lastOutputHeight==4608&&snapshot.lastOutputFormat==103,"cold description copies only the already observed public D3D metadata");

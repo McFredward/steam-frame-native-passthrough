@@ -45,13 +45,13 @@ background-sampling shaders and every material family are not certified.
 
 Software checks exercise production native dispatch, source/texture ownership,
 authenticated control, accepted access units, receiver leases and guarded GPU
-coverage. Hardware has demonstrated native D3D attachment, peer authentication
-and coded-AU roundtrips. The latest paired Build 710 run lost its auxiliary
-connection before the game source appeared, and stayed in ordinary opaque video.
-It does not establish full-resolution passthrough. The
-[startup recovery review](research/startup-transport-recovery-20261019.md)
-distinguishes the captured sequence from source-proven recovery defects and
-focused software checks. A headset picture pass and simultaneous local Steam
+coverage. Recent paired hardware logs demonstrate successful reconnects, game
+source activation and several certified masks reaching exact decoded-image
+leases in the compositor. The headset still showed opaque black instead of the
+room. The subsequent fixes replace a retired pixel-based format heuristic and
+prevent an unsupported graphics batch from permanently blocking later masks.
+See the [source-format review](research/source-format-opt-in-20261019.md).
+A successful final full-resolution headset picture and simultaneous local Steam
 menu/game mixed reality remain unconfirmed.
 
 The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)

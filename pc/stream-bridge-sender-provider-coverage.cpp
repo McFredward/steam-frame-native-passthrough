@@ -1,5 +1,6 @@
 #include "stream-bridge-sender-provider-coverage.h"
 #include "stream-bridge-sender-provider-coverage-render.h"
+#include "stream-bridge-source-contract.h"
 #include <d3d11_4.h>
 #include <cstring>
 #include <cmath>
@@ -118,15 +119,15 @@ struct SenderCoverage::Impl {
     ID3D11Device* pendingDevice=nullptr;ID3D11Device* device=nullptr;ID3D11DeviceContext* context=nullptr;
     void* nativeDevicePointer=nullptr; // Comparison only; never dereferenced as a guessed interface.
     ID3D11Multithread* multithread=nullptr;CoverageContextFacade facade;
-    std::array<ID3D11Texture2D*,2> witnessTargets{};
+    SourceContract sourceContract;
     ID3D11Texture2D* target=nullptr;ID3D11RenderTargetView* targetView=nullptr;ID3D11BlendState* blend=nullptr;
-    std::uint32_t width=0,height=0;std::uint64_t activeSerial=0,activeEpoch=0;unsigned drawBits=0;std::array<unsigned,2> witnessBits{};bool invalid=false;
+    std::uint32_t width=0,height=0;std::uint64_t activeSerial=0,activeEpoch=0;unsigned drawBits=0;std::uint64_t activeContract=0;bool invalid=false;
     IUnknown* nativeOutput=nullptr;std::uint32_t activePid=0;
     struct Opened {vr::SharedTextureHandle_t handle=0;std::uint64_t generation=0;std::uint32_t pid=0;ID3D11Texture2D* texture=nullptr;};
     std::array<Opened,MaxOpened> opened{};std::uint64_t inventoryEpoch=0;
     struct Constant {ID3D11Resource* resource=nullptr;void* pointer=nullptr;std::array<std::uint8_t,128> bytes{};std::uint64_t present=0;bool valid=false;};
     std::array<Constant,4> constants{};
-    struct Stage {std::array<ID3D11Texture2D*,2> witnesses{};std::array<unsigned,2> witnessBits{};ID3D11Texture2D* texture=nullptr;IUnknown* input=nullptr;std::uint64_t present=0,submission=0,encoderGeneration=0;void* encoder=nullptr;std::uint32_t pid=0;};
+    struct Stage {std::uint64_t contract=0;ID3D11Texture2D* texture=nullptr;IUnknown* input=nullptr;std::uint64_t present=0,submission=0,encoderGeneration=0;void* encoder=nullptr;std::uint32_t pid=0;};
     std::array<Stage,StageCount> stages{};
     static std::atomic<Impl*> instance;
     Impl(DirectModeBoundary& d,NvencBoundary& b,ControlRuntime& c):direct(d),boundary(b),control(c){}
@@ -160,36 +161,39 @@ struct SenderCoverage::Impl {
         // fresh handshake, without reading/compressing any coverage staging.
         if(!e.coverageSessionAuthorized)return s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||!s.enabled)return false;
-        std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;
+        std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;std::uint64_t maskContract=0;
         for(auto& slot:s.stages)if(slot.submission==e.submission&&slot.encoderGeneration==e.encoderGeneration&&slot.encoder==e.encoder&&slot.texture&&slot.present){
             D3D11_MAPPED_SUBRESOURCE data{};
-            // The legacy atlas writes alpha1 even in its background. Only an
-            // actual submitted SOURCE interior texel below1 admits raw RGBA.
-            // Encoded-frame padding and native sampling outside bounds cannot
-            // serve as this witness. The tiny copies share this exact receipt.
-            bool rawWitness=(slot.witnessBits[0]|slot.witnessBits[1])!=0;
-            for(unsigned kind=0;kind<2;++kind)if(slot.witnessBits[kind]){
-                D3D11_MAPPED_SUBRESOURCE sample{};
-                if(SUCCEEDED(forwardMap(s.context,slot.witnesses[kind],0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&sample))){
-                    rawWitness=rawWitness&&sourceInteriorTranslucent(sample,slot.witnessBits[kind]);
-                    forwardUnmap(s.context,slot.witnesses[kind],0);
-                }else rawWitness=false;
+            // Format permission comes from the live kernel-validated app.
+            // Fully opaque eyes are legitimate; sparse pixel samples cannot
+            // establish the semantics of an entire submitted texture.
+            if(!s.sourceContract.current(slot.contract,slot.pid)){
+                s.gates.refuse(CoverageGate::SourceContract);break;
             }
-            if(!rawWitness){s.gates.refuse(CoverageGate::RawWitness);break;}
             pixels.resize(std::size_t(s.width)*s.height);
             const auto result=forwardMap(s.context,slot.texture,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&data);
             if(SUCCEEDED(result)){
                 bool valid=data.pData&&data.RowPitch>=s.width;
                 if(valid)for(unsigned y=0;y<s.height;++y){auto* row=static_cast<const std::uint8_t*>(data.pData)+std::size_t(y)*data.RowPitch;auto* out=pixels.data()+std::size_t(y)*s.width;for(unsigned x=0;x<s.width;++x)out[x]=std::uint8_t(255-row[x]);}
                 forwardUnmap(s.context,slot.texture,0);
-                if(valid)maskPid=slot.pid;else pixels.clear();
+                if(valid){maskPid=slot.pid;maskContract=slot.contract;}else pixels.clear();
             }else{s.gates.refuse(CoverageGate::Readback);pixels.clear();}
             break; // Never block or substitute a later staging frame.
         }
         // Do not hold the GPU metadata mutex while scanning/compressing the
         // CPU copy or authenticating it. Native Draw must never wait for RLE.
         lock.unlock();
-        if(!pixels.empty()){std::vector<std::uint8_t> rle;if(encodeCoverageRle({pixels.data(),pixels.size()},rle)&&s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::Rle,{rle.data(),rle.size()},output)){s.lastPid=maskPid;s.state=7;s.gates.signal(CoverageSignal::CertifiedMasks);return true;}}
+        if(!pixels.empty()){
+            std::vector<std::uint8_t> rle;
+            if(encodeCoverageRle({pixels.data(),pixels.size()},rle)&&s.sourceContract.current(maskContract,maskPid)
+                &&s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::Rle,{rle.data(),rle.size()},output)){
+                // Local EOF can revoke the format during compression or MAC.
+                // Only publish the still-current capture; no stale mask leaves
+                // this callback even when its original GPU readback was valid.
+                if(!s.sourceContract.current(maskContract,maskPid)){output.clear();s.gates.refuse(CoverageGate::SourceContract);return false;}
+                s.lastPid=maskPid;s.state=7;s.gates.signal(CoverageSignal::CertifiedMasks);return true;
+            }
+        }
         // Discovery/coded-boundary certificate without a mask is useful and
         // explicitly does NOT permit transparent rendering on the receiver.
         return s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);
@@ -232,19 +236,11 @@ struct SenderCoverage::Impl {
         // No in-flight readback is reused at another size. Retiring submitted
         // generations happens through the NVENC owner before resize admission.
         for(const auto& slot:stages)if(slot.submission)return false;
-        prepared=false;preparedPid=0;state=4;release(targetView);release(target);for(auto& slot:stages){release(slot.texture);release(slot.input);for(auto& witness:slot.witnesses)release(witness);slot={};}
-        for(auto& witness:witnessTargets)release(witness);
+        prepared=false;preparedPid=0;state=4;release(targetView);release(target);for(auto& slot:stages){release(slot.texture);release(slot.input);slot={};}
         D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_RENDER_TARGET;
         if(FAILED(device->CreateTexture2D(&desc,nullptr,&target))||FAILED(device->CreateRenderTargetView(target,nullptr,&targetView)))return false;
         desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         for(auto& slot:stages)if(FAILED(device->CreateTexture2D(&desc,nullptr,&slot.texture)))return false;
-        for(unsigned kind=0;kind<2;++kind){
-            desc.Width=5;desc.Height=40;desc.Format=kind?DXGI_FORMAT_B8G8R8A8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
-            for(auto& slot:stages)if(FAILED(device->CreateTexture2D(&desc,nullptr,&slot.witnesses[kind])))return false;
-            desc.Usage=D3D11_USAGE_DEFAULT;desc.CPUAccessFlags=0;
-            if(FAILED(device->CreateTexture2D(&desc,nullptr,&witnessTargets[kind])))return false;
-            desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-        }
         if(!blend&&!createTransmittanceBlend(device,&blend))return false;
         width=w;height=h;activeSerial=0;release(nativeOutput);prepared=true;return true;
     }
@@ -271,7 +267,7 @@ struct SenderCoverage::Impl {
         if(!prepared)return gates.refuse(CoverageGate::Prepared);
         if(count!=4||start)return gates.refuse(CoverageGate::DrawShape);
         if(frame.registryEpoch!=inventoryEpoch||frame.presentSerial==failedSerial)return gates.refuse(CoverageGate::FrameEpoch);
-        if(activeSerial!=frame.presentSerial){activeSerial=frame.presentSerial;activeEpoch=frame.registryEpoch;drawBits=0;witnessBits={};invalid=false;activePid=0;release(nativeOutput);const float one[4]{1,1,1,1};ctx->ClearRenderTargetView(targetView,one);}
+        if(activeSerial!=frame.presentSerial){activeSerial=frame.presentSerial;activeEpoch=frame.registryEpoch;drawBits=0;activeContract=0;invalid=false;activePid=0;release(nativeOutput);const float one[4]{1,1,1,1};ctx->ClearRenderTargetView(targetView,one);}
         if(invalid||activeEpoch!=frame.registryEpoch)return gates.refuse(CoverageGate::FrameEpoch);
         ID3D11Buffer* buffer=nullptr;ctx->PSGetConstantBuffers(2,1,&buffer);Constant* cb=nullptr;for(auto& entry:constants)if(entry.valid&&entry.present==frame.presentSerial&&same(entry.resource,buffer))cb=&entry;release(buffer);if(!cb)return gates.refuse(CoverageGate::ConstantBuffer);
         float eyeValue=0;std::memcpy(&eyeValue,cb->bytes.data()+76,sizeof eyeValue);if(!std::isfinite(eyeValue)||(eyeValue!=0&&eyeValue!=1))return gates.refuse(CoverageGate::EyeSelector);const unsigned eye=static_cast<unsigned>(eyeValue);
@@ -282,15 +278,15 @@ struct SenderCoverage::Impl {
         const bool rgba=viewDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM||viewDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
         const bool bgra=viewDesc.Format==DXGI_FORMAT_B8G8R8A8_UNORM||viewDesc.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         if((!rgba&&!bgra)||sourceDesc.ArraySize!=1||sourceDesc.MipLevels!=1||sourceDesc.SampleDesc.Count!=1||viewDesc.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D||viewDesc.Texture2D.MostDetailedMip){release(resource);return gates.refuse(CoverageGate::SourceShape);}
-        unsigned sourceBit=0,sourceIndex=0;std::uint32_t pid=0;vr::VRTextureBounds_t bounds{};
-        for(unsigned layer=0;layer<frame.layerCount;++layer){const auto& requested=frame.layers[layer][eye];SharedTextureShape shape{};if(!decodeSwapTextureSetDesc(requested.description,shape))continue;for(const auto& known:opened)if(known.handle==requested.submitted.hTexture&&known.generation==requested.swapGeneration&&submittedSharedResource(resource,known.texture,{known.handle,known.generation,known.pid},{requested.submitted.hTexture,requested.swapGeneration,requested.processId},shape)){if(sourceBit){release(resource);return gates.refuse(CoverageGate::AmbiguousSource);}sourceIndex=2*layer+eye;sourceBit=1u<<sourceIndex;pid=requested.processId;bounds=requested.submitted.bounds;}}
+        unsigned sourceBit=0;std::uint32_t pid=0;
+        for(unsigned layer=0;layer<frame.layerCount;++layer){const auto& requested=frame.layers[layer][eye];SharedTextureShape shape{};if(!decodeSwapTextureSetDesc(requested.description,shape))continue;for(const auto& known:opened)if(known.handle==requested.submitted.hTexture&&known.generation==requested.swapGeneration&&submittedSharedResource(resource,known.texture,{known.handle,known.generation,known.pid},{requested.submitted.hTexture,requested.swapGeneration,requested.processId},shape)){if(sourceBit){release(resource);return gates.refuse(CoverageGate::AmbiguousSource);}sourceBit=1u<<(2*layer+eye);pid=requested.processId;}}
         if(!sourceBit){release(resource);return gates.refuse(CoverageGate::SharedResource);}
         if(drawBits&sourceBit){release(resource);return gates.refuse(CoverageGate::RepeatedSource);}
         if(activePid&&activePid!=pid){release(resource);return gates.refuse(CoverageGate::MixedProcess);}
-        const unsigned kind=bgra?1:0;
-        ID3D11Texture2D* sourceForCopy=nullptr;resource->QueryInterface(IID_ID3D11Texture2D,reinterpret_cast<void**>(&sourceForCopy));
-        const bool copied=copySubmittedInterior(ctx,sourceForCopy,bounds.uMin,bounds.vMin,bounds.uMax,bounds.vMax,witnessTargets[kind],sourceIndex);
-        release(sourceForCopy);release(resource);if(!copied)return gates.refuse(CoverageGate::InteriorCopy);witnessBits[kind]|=sourceBit;
+        const auto declared=sourceContract.snapshot(pid);
+        if(!drawBits)activeContract=declared;
+        else if(activeContract!=declared)activeContract=0;
+        release(resource);
 
         ID3D11RenderTargetView* out=nullptr;ID3D11DepthStencilView* depth=nullptr;ctx->OMGetRenderTargets(1,&out,&depth);if(depth){release(depth);release(out);return gates.refuse(CoverageGate::OutputDepth);}
         ID3D11Resource* outputResource=nullptr;if(out)out->GetResource(&outputResource);release(out);
@@ -345,7 +341,9 @@ struct SenderCoverage::Impl {
         // Frozen slots cannot be evicted by a resource pointer reused later.
         Stage* free=nullptr;for(auto& slot:s.stages){if(!slot.submission&&same(slot.input,destination)){release(slot.input);slot.present=0;}if(!slot.present&&!free)free=&slot;}
         if(!free){s.gates.refuse(CoverageGate::StageFull);return;}
-        MultithreadScope protect(s.multithread);forwardCopy(ctx,free->texture,s.target);for(unsigned kind=0;kind<2;++kind)if(s.witnessBits[kind])forwardCopy(ctx,free->witnesses[kind],s.witnessTargets[kind]);free->witnessBits=s.witnessBits;free->input=identity(destination);if(!free->input)return;free->present=frame->presentSerial;free->pid=s.activePid;s.gates.signal(CoverageSignal::CapturedCopies);
+        if(!s.sourceContract.current(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);return;}
+        MultithreadScope protect(s.multithread);forwardCopy(ctx,free->texture,s.target);
+        free->contract=s.activeContract;free->input=identity(destination);if(!free->input)return;free->present=frame->presentSerial;free->pid=s.activePid;s.gates.signal(CoverageSignal::CapturedCopies);
     }
 };
 std::atomic<SenderCoverage::Impl*> SenderCoverage::Impl::instance{nullptr};
@@ -365,12 +363,13 @@ void SenderCoverage::tick()noexcept{
         EncoderState actual{};unsigned count=0;for(const auto& e:encoders)if(e.encoder&&e.hevc){actual=e;++count;}
         if(count!=1){s.gates.refuse(CoverageGate::Encoder);s.prepared=false;s.preparedPid=0;s.state=4;return;}
         if(s.width!=actual.width||s.height!=actual.height||!s.target){if(!s.allocate(actual.width,actual.height)){s.gates.refuse(CoverageGate::Prepared);s.state=5;return;}}
-        s.prepared=s.target&&s.targetView&&s.blend;for(const auto& slot:s.stages)s.prepared=s.prepared&&slot.texture&&slot.witnesses[0]&&slot.witnesses[1];
+        s.prepared=s.target&&s.targetView&&s.blend;for(const auto& slot:s.stages)s.prepared=s.prepared&&slot.texture;
         s.refresh(inventory);
     }catch(...){s.prepared=false;s.state=5;}
 }
+void SenderCoverage::sourceProcess(std::uint32_t pid)noexcept{impl_->sourceContract.publish(pid);}
 void SenderCoverage::stop()noexcept{
-    auto& s=*impl_;s.enabled=false;s.prepared=false;s.lastPid=0;s.preparedPid=0;s.state=8;
+    auto& s=*impl_;s.sourceContract.publish(0);s.enabled=false;s.prepared=false;s.lastPid=0;s.preparedPid=0;s.state=8;
     std::lock_guard<std::mutex> lock(s.mutex);s.stopped=true;
     s.facade.restore();
     // No COM or staging release while a cached callback/borrowed AU can exist.

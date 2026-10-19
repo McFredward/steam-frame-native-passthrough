@@ -142,6 +142,18 @@ class Menus(unittest.TestCase):
         self.assertFalse(presenter.confirm('bridge_confirm'))
         self.assertEqual(stream.getvalue(), '')
 
+    def test_picture_question_keeps_no_separate_from_cancel_on_plain_input(self):
+        for answer,expected in [('',False),('yes',True),('JA',True),('no',False),('nein',False),('cancel',None),('abbrechen',None)]:
+            with self.subTest(answer=answer):
+                presenter,stream=self.make([answer])
+                self.assertIs(presenter.confirm('bridge_picture'),expected)
+                self.assertIn('Choose No',stream.getvalue().replace('\n',' '))
+                self.assertNotIn('\x1b',stream.getvalue())
+        presenter,stream=self.make()
+        presenter.prompting=False
+        self.assertIsNone(presenter.confirm('bridge_picture'))
+        self.assertEqual(stream.getvalue(),'')
+
     def test_terminal_needs_both_ttys_and_keyboard_permission(self):
         presenter, _ = self.make()
         presenter.interactive = True
@@ -264,6 +276,12 @@ class ActualPty(unittest.TestCase):
         self.assertFalse(self.run_menu('p.confirm_uninstall()', b'\r'))
         self.assertTrue(self.run_menu('p.confirm_uninstall()', b'\x1b[B\r'))
         self.assertFalse(self.run_menu('p.confirm("bridge_confirm")', b'\x1b'))
+
+    def test_actual_picture_yes_no_and_cancel_have_distinct_results(self):
+        self.assertIs(self.run_menu('p.confirm("bridge_picture")',b'\r'),False)
+        self.assertIs(self.run_menu('p.confirm("bridge_picture")',b'\x1b[B\r'),True)
+        self.assertIsNone(self.run_menu('p.confirm("bridge_picture")',b'\x1b[A\r'))
+        self.assertIsNone(self.run_menu('p.confirm("bridge_picture")',b'\x1b'))
 
     def test_actual_reader_failure_restores_terminal_and_cancels(self):
         self.assertIsNone(self.run_menu('p.choose_action(["check","install"],"check")', b'', failed_reader=True))

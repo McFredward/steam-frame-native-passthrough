@@ -12,7 +12,7 @@ enum class CoverageGate : unsigned {
     None,Device,Context,Caller,DirectFrame,Lock,Prepared,DrawShape,FrameEpoch,
     ConstantBuffer,EyeSelector,SourceView,SourceShape,SharedResource,AmbiguousSource,
     RepeatedSource,MixedProcess,InteriorCopy,OutputDepth,OutputShape,BlendDraw,
-    CopyPair,StageFull,InputReceipt,RawWitness,Readback,Inventory,Encoder,Count
+    CopyPair,StageFull,InputReceipt,RawWitness,Readback,Inventory,Encoder,SourceContract,Count
 };
 inline const char* coverageGateName(CoverageGate gate)noexcept{
     switch(gate){
@@ -29,7 +29,8 @@ inline const char* coverageGateName(CoverageGate gate)noexcept{
     case CoverageGate::BlendDraw:return "coverage-draw";case CoverageGate::CopyPair:return "copy-pair";
     case CoverageGate::StageFull:return "staging-capacity";case CoverageGate::InputReceipt:return "input-receipt";
     case CoverageGate::RawWitness:return "source-alpha-witness";case CoverageGate::Readback:return "readback";
-    case CoverageGate::Inventory:return "source-inventory";case CoverageGate::Encoder:return "native-encoder";default:return "unknown";}
+    case CoverageGate::Inventory:return "source-inventory";case CoverageGate::Encoder:return "native-encoder";
+    case CoverageGate::SourceContract:return "source-format-contract";default:return "unknown";}
 }
 enum class CoverageSignal : unsigned {
     HookDraws,NativeDraws,SourceFrames,ConstantMaps,ConstantCaptures,EyeDraws,
@@ -113,6 +114,7 @@ public:
     SenderCoverage& operator=(const SenderCoverage&)=delete;
     bool configure(std::uintptr_t verifiedNativeModule)noexcept;
     void tick()noexcept;
+    void sourceProcess(std::uint32_t processId)noexcept; // Cold live-app format lease; zero revokes.
     void stop()noexcept;
     bool ready(std::uint32_t processId)const noexcept;
     bool operational(std::uint32_t processId)const noexcept;
