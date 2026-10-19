@@ -1,5 +1,3 @@
-**Currently supports <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows PCs with an <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA GPU only.**
-
 # Steam Link Native Passthrough
 
 <p align="center">
@@ -18,6 +16,8 @@
 </p>
 
 > [!IMPORTANT]
+> **Currently supports <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows PCs with an <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA GPU only.**
+>
 > **Steam Frame SteamVR 2.18.2 · build 1791331621**
 >
 > The installer checks compatibility.
