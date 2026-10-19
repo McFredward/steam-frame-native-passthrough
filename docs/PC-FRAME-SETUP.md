@@ -83,6 +83,17 @@ appropriate actions, including **Update**, **Repair**, **Uninstall** and
 **Restore previous setup** (Undo). A current installation needs no changes.
 Changed or unknown files are preserved rather than silently replaced.
 
+**Uninstall** restores ordinary, unpatched Steam Link on the PC and Frame. It
+also removes a recorded older Frame-only receiver instead of reactivating it,
+and restores the camera preference saved before that receiver was installed.
+An unknown or externally changed component is reported; the assistant must not
+claim a complete uninstall while it remains. Recovery backups and logs are inert.
+
+**Restore previous setup** is different: it undoes the latest setup operation
+and can restore a previously installed patch. **Update** installs the current
+version directly, reconciling interrupted setup records without an intermediate
+restart and picture question for an older version.
+
 A normal failed install or startup triggers recovery of the previous owned
 files/settings and a restart of the original Frame interface. **Previous setup
 restored** means that recovery succeeded; it does not mean the new connection

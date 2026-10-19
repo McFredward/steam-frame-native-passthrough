@@ -76,7 +76,9 @@ Kompatibilitätsprüfung scheitern lassen; natives Passthrough bleibt dann aus,
 bis ein kompatibles Patch-Update verfügbar ist.
 
 [Deinstallation, Rücknahme, Logs und Wiederherstellung](PC-FRAME-SETUP.md#update-uninstall-and-undo)
-sind im Detail beschrieben. Strg+C bricht ohne automatische Rücknahme ab; bewahre
+sind im Detail beschrieben. **Deinstallieren** entfernt unsere aktuellen und
+erfassten älteren Patches; **Rücknahme** stellt den Zustand vor der letzten
+Einrichtung wieder her. Strg+C bricht ohne automatische Rücknahme ab; bewahre
 die angezeigten Log- und Wiederherstellungspfade auf. Eine Rücknahme ist erst
 fertig, wenn der vorherige Zustand geprüft und die Frame-Oberfläche wieder aktiv ist.
 

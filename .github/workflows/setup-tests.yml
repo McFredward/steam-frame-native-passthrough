@@ -23,6 +23,7 @@ on:
       - 'tests/test_setup_log.py'
       - 'tests/test_setup_tui.py'
       - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_legacy.py'
       - 'tests/test_camera_setup_feedback.py'
       - 'tools/stream_bridge_camera.py'
       - 'tests/test_stream_bridge_camera.py'
@@ -63,6 +64,7 @@ on:
       - 'tests/test_setup_log.py'
       - 'tests/test_setup_tui.py'
       - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_legacy.py'
       - 'tests/test_camera_setup_feedback.py'
       - 'tools/stream_bridge_camera.py'
       - 'tests/test_stream_bridge_camera.py'
@@ -130,6 +132,7 @@ jobs:
           python -B tests/test_setup_log.py
           python -B tests/test_setup_tui.py
           python -B tests/test_setup_frame.py
+          python -B tests/test_setup_legacy.py
           python -B tests/test_camera_setup_feedback.py
           python -B tests/test_stream_bridge_camera.py
           python -B tests/test_setup_pc.py

@@ -81,7 +81,9 @@ refuses native passthrough rather than certifying an unknown runtime. Update the
 companion when a compatible release becomes available.
 
 For [Uninstall, Undo, logs and recovery](PC-FRAME-SETUP.md#update-uninstall-and-undo),
-use the same assistant. Ctrl+C stops setup without an automatic rollback; keep
+use the same assistant. **Uninstall** removes our current and recorded older
+patches; **Undo** restores the setup before the latest operation. Ctrl+C stops
+setup without an automatic rollback; keep
 the displayed recovery paths for the next run. Undo is complete only after the
 previous owned state and running Frame interface have been verified.
 
