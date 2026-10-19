@@ -12,7 +12,7 @@ add_library(VkLayer_steam_link_bridge SHARED
     layer/stream_bridge_process.cpp layer/stream_bridge_coverage_gpu.cpp
     receiver/stream_bridge_native_runtime.cpp receiver/stream_bridge_native_decode.cpp
     receiver/stream_bridge_native_loader.cpp receiver/stream_bridge_native_images.cpp
-    receiver/stream_bridge_local.cpp)
+    receiver/stream_bridge_local.cpp receiver/stream_bridge_camera_client.cpp)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     enable_language(ASM)
     target_sources(VkLayer_steam_link_bridge PRIVATE receiver/stream_bridge_native_decode_entry.S)
@@ -33,3 +33,11 @@ target_compile_definitions(sfnp_stream_launch PRIVATE FRAME_LAUNCH_RELEASE_BRIDG
 target_compile_options(sfnp_stream_launch PRIVATE -Wall -Wextra -Wpedantic -Werror -fvisibility=hidden)
 target_link_options(sfnp_stream_launch PRIVATE -Wl,--no-undefined -Wl,-z,nodelete)
 target_link_libraries(sfnp_stream_launch PRIVATE ${CMAKE_DL_LIBS})
+if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(test_stream_bridge_camera_client
+        tests/stream-bridge-camera-client/client_tests.cpp receiver/stream_bridge_camera_client.cpp)
+    target_include_directories(test_stream_bridge_camera_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(test_stream_bridge_camera_client PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(test_stream_bridge_camera_client PRIVATE Threads::Threads)
+    add_test(NAME stream_bridge_camera_client COMMAND test_stream_bridge_camera_client)
+endif()

@@ -138,6 +138,11 @@ bool LeaseReader::current(const LeaseReference& ref) const noexcept {
     Words values{};std::uint64_t sequence=0;return ref.capture.kind==nd::CaptureKind::Decoded&&ref.epoch==impl_->epoch&&snapshot(impl_->shared,ref.slot,impl_->epoch,sequence,values)
         &&sequence==ref.sequence&&values==words(ref.capture,ref.kernel);
 }
+bool LeaseReader::epochCurrent(const LeaseReference& ref) const noexcept {
+    const auto* shared=impl_->shared;
+    return shared&&ref.epoch&&ref.epoch==impl_->epoch&&shared->magic.load(std::memory_order_acquire)==Magic
+        &&shared->active.load(std::memory_order_acquire)==ref.epoch;
+}
 PeerPin vrlinkPin() noexcept{return {2425024,nd::ExpectedVrlinkHash};}
 PeerPin compositorPin() noexcept{return {6026096,{{0x0b,0xb1,0x48,0xed,0xa6,0xb5,0xe5,0x4e,0x2f,0xbe,0xd0,0x9d,0x47,0x5a,0x43,0x67,0x1f,0x5f,0xf6,0xfc,0xb6,0xc2,0xb4,0xf4,0x83,0x45,0xb1,0xa9,0xfe,0x8d,0x6f,0x96}}};}
 namespace {

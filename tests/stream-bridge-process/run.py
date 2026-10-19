@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--sanitized", action="store_true")
     parser.add_argument("--causal", action="store_true")
     parser.add_argument("--handoff-only", action="store_true")
-    parser.add_argument("--handoff-control", choices=("early-receipt", "single-packet", "stale-receipt"))
+    parser.add_argument("--handoff-control", choices=("early-receipt", "single-packet", "stale-receipt", "camera-receipt"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     root = args.source_root.resolve()
@@ -31,12 +31,14 @@ def main():
             raise RuntimeError("process consumer gate changed; control needs review")
         source = source.replace(old, b"if(false){")
     controls = {
-        "early-receipt": (b"if(needsCoverage&&(!any||!all))continue;", b"(void)any;(void)all;",
+        "early-receipt": (b"if(needsCoverage&&(!any||!all||!p.camera.ready()))continue;", b"(void)any;(void)all;",
                           "active certificate and picture do not acknowledge unpublished exact mask storage"),
         "single-packet": (b"n<native::MaxBuffers*4&&p.channel.receive(message)", b"n<1&&p.channel.receive(message)",
                           "one actual worker cycle drains certificate/capture/certificate/capture burst without artificial 2-ms serialization"),
         "stale-receipt": (b"expected.binding!=message.binding", b"false",
                           "foreign binding/source/frame/capture/kernel and stale epoch receipts cannot expose native DQ"),
+        "camera-receipt": (b"||!p.camera.ready()", b"",
+                           "published exact GPU mask cannot expose native DQ before camera API acknowledgment"),
     }
     if args.handoff_control:
         old, new, _ = controls[args.handoff_control]
@@ -59,7 +61,7 @@ def main():
         flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"] if args.sanitized else []
         native = [root / ("receiver/" + name + ".cpp") for name in
                   ("stream_bridge_native_decode", "stream_bridge_native_loader", "stream_bridge_native_runtime",
-                   "stream_bridge_native_images", "stream_bridge_local")]
+                   "stream_bridge_native_images", "stream_bridge_local", "stream_bridge_camera_client")]
         libraries = [args.libraries / ("libsfnp_stream_bridge" + name + ".a") for name in ("_control", "")]
         command = ["g++", "-std=c++17", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-pthread", *flags,
                    "-I" + str(root), "-I" + str(root / "layer"),

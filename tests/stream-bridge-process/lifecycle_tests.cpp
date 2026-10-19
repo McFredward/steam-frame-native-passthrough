@@ -4,6 +4,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../stream-bridge-camera-client/helper_fixture.h"
 #ifndef SFNP_PROCESS_SOURCE
 #define SFNP_PROCESS_SOURCE "../../layer/stream_bridge_process.cpp"
 #endif
@@ -79,8 +80,13 @@ void sourceLossReconnect(){
     ++capture.contentGeneration;p.writer.captureEvent(capture);local::LeaseReference fresh;
     check(p.writer.reference(capture,fresh)&&fresh.epoch>old.epoch,"source callback uses nonterminal epoch and permits actual new capture");
     local::LeaseReader after;check(after.mapReadOnly(fd)&&after.current(fresh)&&!after.current(old)&&!before.current(fresh),"fresh reconnect reader succeeds without reviving any old reference or mapping");
+    check(after.epochCurrent(fresh),"source epoch is independently current before ordinary native requeue");
+    auto requeue=capture;requeue.kind=native::CaptureKind::Requeue;p.writer.captureEvent(requeue);
+    check(!after.current(fresh)&&after.epochCurrent(fresh),"ordinary native buffer requeue retires picture authority without falsely retiring source session");
+    ++capture.contentGeneration;p.writer.captureEvent(capture);check(p.writer.reference(capture,fresh)&&after.current(fresh),"same source epoch permits actual newly decoded content after requeue");
     notice.state=native::RuntimeState::SourceLost;renderer::sourceNotice(notice,&p);
     check(!after.current(fresh),"real SourceLost callback also invalidates current source epoch");
+    check(!after.epochCurrent(fresh),"source restart revokes independent epoch readiness even when buffer identity is unchanged");
     local::LeaseReference next;check(p.writer.reference(capture,next)&&next.epoch>fresh.epoch,"successive source losses still allow a future admission epoch");
     close(fd);
 }
@@ -119,7 +125,8 @@ struct HandoffFixture {
     Directory directory;File file,secondFile;renderer::Process source,display;Publication publication;
     local::State sourceState=local::State::Connected,displayState=local::State::Connected;
     sb::Pairing pair{};sb::Nonce binding{},connection{};sb::AuthSession sender,observer;
-    HandoffFixture(){
+    HandoffFixture(bool warmCamera=true,bool delayedCamera=false){
+        sfnp_camera_fixture::write(directory.path,delayedCamera?"gate":"normal");
         pair.role=sb::Role::Producer;pair.pairId.fill(11);pair.key.fill(101);binding.fill(41);connection.fill(71);
         check(sender.prepareProducer(pair,binding)==sb::AuthStatus::Ok,"actual handoff producer signer prepared");
         pair.role=sb::Role::Receiver;
@@ -133,6 +140,15 @@ struct HandoffFixture {
         for(unsigned n=0;n<16;++n){display.channel.tick();source.channel.tick();}
         check(source.channel.state()==local::State::Connected&&display.channel.state()==local::State::Connected,"handoff channel peers authenticated by kernel and exact executable");
         check(source.writer.prepareCold()&&source.writer.associateResourceFd(file.fd)&&source.writer.associateResourceFd(secondFile.fd),"actual shared capture writer owns both physical resources");
+        if(warmCamera){
+            display.camera.request(true);const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+            while(!display.camera.ready()&&std::chrono::steady_clock::now()<end){display.camera.tickCold(directory.path,true);std::this_thread::yield();}
+            check(display.camera.ready(),"independent actual helper acknowledges settings before GPU-only handoff fixture begins");
+        }
+    }
+    ~HandoffFixture(){
+        display.camera.stopCold();const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+        while(display.camera.runningCold()&&std::chrono::steady_clock::now()<end){display.camera.tickCold(directory.path,false);std::this_thread::yield();}
     }
     local::Message queue(bool active=true,unsigned index=0){
         const int image=index?secondFile.fd:file.fd;
@@ -187,5 +203,21 @@ void interruptedHandoff(){
     {HandoffFixture f;const auto decoded=f.queue();auto dq=f.start(decoded);f.waiting();auto requeue=decoded.lease.capture;requeue.kind=native::CaptureKind::Requeue;f.source.writer.captureEvent(requeue);f.source.released.notify_all();check(dq.wait_for(std::chrono::seconds(1))==std::future_status::ready,"native requeue invalidates and releases old exact DQ wait");dq.get();f.receipt(decoded);check(!f.source.flow[unsigned(renderer::Flow::ReadyReceived)]&&!f.source.flow[unsigned(renderer::Flow::HandoffReady)],"receipt for requeued capture cannot revive old mask authority");}
     {HandoffFixture f;const auto decoded=f.queue();const auto start=std::chrono::steady_clock::now();auto dq=f.start(decoded);dq.get();const auto elapsed=std::chrono::steady_clock::now()-start;check(elapsed>=std::chrono::milliseconds(80)&&elapsed<std::chrono::seconds(2),"genuine missing peer receipt uses bounded emergency deadline, never an indefinite native freeze");check(f.source.flow[unsigned(renderer::Flow::HandoffTimeout)]==1&&!f.source.flow[unsigned(renderer::Flow::HandoffReady)],"emergency release is explicitly counted and never misreported as an exact mask");}
 }
+void cameraHandoff(){
+    HandoffFixture f(false,true);f.publication.ready=true;const auto decoded=f.queue();
+    const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while(sfnp_camera_fixture::events(f.directory.path).find("enable-pending")==std::string::npos&&std::chrono::steady_clock::now()<end){f.cycle();std::this_thread::yield();}
+    check(sfnp_camera_fixture::events(f.directory.path).find("enable-pending")!=std::string::npos,"actual authenticated active metadata reaches isolated settings helper");
+    check(!f.display.camera.ready()&&!f.display.flow[unsigned(renderer::Flow::ReadyQueued)],"published exact GPU mask cannot expose native DQ before camera API acknowledgment");
+    auto dq=f.start(decoded);f.waiting();std::ofstream(f.directory.path/"enable-release")<<"acknowledged";
+    const auto readyEnd=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while(!f.source.flow[unsigned(renderer::Flow::ReadyReceived)]&&std::chrono::steady_clock::now()<readyEnd){f.cycle();std::this_thread::yield();}
+    check(f.display.camera.ready()&&f.source.flow[unsigned(renderer::Flow::ReadyReceived)]==1,"matching settings acknowledgment and exact mask jointly publish actual reverse Ready");
+    check(dq.wait_for(std::chrono::seconds(1))==std::future_status::ready,"settings-gated native handoff finishes without compositor I/O");dq.get();
+    auto requeue=decoded.lease.capture;requeue.kind=native::CaptureKind::Requeue;f.source.writer.captureEvent(requeue);f.cycle();
+    check(f.display.camera.ready(),"ordinary requeue does not disable acknowledged global camera session");
+    f.source.writer.invalidateCurrentEpoch();f.cycle();
+    check(!f.display.camera.ready(),"shared native source epoch loss atomically revokes cached settings readiness before restore");
 }
-int main(int argc,char** argv){try{const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();}exactHandoff();noneAndBurst();interruptedHandoff();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+}
+int main(int argc,char** argv){try{const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();}exactHandoff();noneAndBurst();interruptedHandoff();cameraHandoff();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

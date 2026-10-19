@@ -39,6 +39,9 @@ public:
     bool mapReadOnly(int) noexcept;
     // Atomic scalar reads only, never file/socket calls or mutex waits.
     bool current(const LeaseReference&) const noexcept;
+    // Source-session lifetime only, not individual capture/content permission.
+    // Ordinary buffer requeue does not retire this epoch. No image admission.
+    bool epochCurrent(const LeaseReference&) const noexcept;
     void reset() noexcept;
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

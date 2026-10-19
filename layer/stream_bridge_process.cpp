@@ -2,6 +2,7 @@
 #include "stream_bridge_artifacts.h"
 #include "pixel_snapshot_io.h"
 #include "../receiver/stream_bridge_native_loader.h"
+#include "../receiver/stream_bridge_camera_client.h"
 #include "../bridge/stream_bridge_credentials.h"
 #include <algorithm>
 #include <atomic>
@@ -32,6 +33,7 @@ struct Process {
     std::array<bool,native::ReceiverWorker::PendingCapacity> coverageNeeded{};
     std::array<bool,native::MaxDevices*native::MaxBuffers> readyQueued{};
     std::shared_ptr<local::LeaseReader> currentLeases;
+    stream_bridge_camera::Client camera;bool cameraPeer=false;local::LeaseReference cameraEpoch{};
     std::shared_ptr<std::atomic<bool>> connection;std::uint64_t lastConnect=0;
     std::thread worker;std::uint32_t notes=0;bool prepared=false;
     std::array<std::array<std::uint32_t,24>,9> sourceNotices{};unsigned sourceNoticeLines=0; // Written only by the receiver worker.
@@ -166,10 +168,14 @@ void consume(Process&p,local::Message& message){
             sb::Pairing pair;const auto status=sb::loadPrivatePairing(p.root/"pairings",sb::Role::Receiver,pair);
             if(status!=sb::CredentialStatus::Ok){count(p,Flow::AuthenticationRefused);return;}
             const auto ready=p.verifier.prepareReceiver(pair,message.source.stream);sb::secureZero(pair.key.data(),pair.key.size());if(ready!=sb::AuthStatus::Ok){count(p,Flow::AuthenticationRefused);return;}
+            p.camera.request(false);p.cameraPeer=false;
             p.verifiedSource=message.source.stream;for(auto& old:p.masks)old={};for(auto& old:p.pictures)old={};p.currentLeases.reset();
         }
         sb::CertifiedAccessUnit certificate;if(sb::inspectCoverageMetadata({message.certifiedMetadata.data(),message.certifiedMetadata.size()},p.verifier,certificate)!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor)){count(p,Flow::AuthenticationRefused);return;}
         count(p,Flow::Authenticated);
+        // Only verified current stream metadata may request the global camera
+        // switch. Local peer/transport presence alone is not an MR opt-in.
+        p.cameraPeer=true;p.camera.request(certificate.coverageEncoding!=sb::CoverageEncoding::None);
         const auto index=message.descriptor.sourceFrame%p.masks.size();
         auto* target=&p.masks[index];*target=message;p.coverageNeeded[index]=certificate.coverageEncoding!=sb::CoverageEncoding::None;
         for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))&&consumer.coverage)consumer.coverage(consumer.owner,certificate);
@@ -180,6 +186,7 @@ void consume(Process&p,local::Message& message){
         auto reader=std::make_shared<local::LeaseReader>();if(!reader->mapReadOnly(message.readOnlyLeases)||!reader->current(message.lease)){count(p,Flow::ReceivedLeaseMiss);return;}
         struct stat file{};if(fstat(message.dmabuf,&file)||local::KernelIdentity{{std::uint64_t(file.st_dev),std::uint64_t(file.st_ino)}}!=message.lease.kernel){count(p,Flow::KernelMiss);return;}
         LocalPicture picture;picture.metadata=message;picture.metadata.dmabuf=picture.metadata.readOnlyLeases=-1;picture.leases=reader;picture.connection=p.connection;
+        p.currentLeases=reader;p.cameraEpoch=message.lease;
         if(message.lease.slot>=p.pictures.size())return;
         auto& old=p.pictures[message.lease.slot];old=std::move(picture);p.readyQueued[message.lease.slot]=false;count(p,Flow::PicturesRetained);
         for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))&&consumer.picture)consumer.picture(consumer.owner,old);
@@ -196,6 +203,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
         const auto state=p.channel.state();
         const bool start=p.kind==ProcessKind::Vrlink||std::any_of(p.consumers.begin(),p.consumers.end(),[](const auto& c){return c.owner&&(!c.admitted||c.admitted(c.owner));});
         if(!start&&state!=local::State::Off){
+            p.cameraPeer=false;p.camera.stopCold();
             if(p.connection)p.connection->store(false,std::memory_order_release);
             p.channel.stop();
         }
@@ -205,6 +213,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
         }
         p.channel.tick();const auto current=p.channel.state();
         if(current!=previous){
+            p.cameraPeer=false;p.camera.request(false);
             if(p.connection)p.connection->store(false,std::memory_order_release);
             if(current==local::State::Connected)p.connection=std::make_shared<std::atomic<bool>>(true);
             if(current==local::State::Lost||current==local::State::Refused)p.writer.invalidateCurrentEpoch();
@@ -233,6 +242,10 @@ void workCycle(Process& p,local::State& previous) noexcept{
             message={};p.channel.tick();
         }
         if(p.kind==ProcessKind::Compositor){
+            if(p.currentLeases&&!p.currentLeases->epochCurrent(p.cameraEpoch)){
+                p.cameraPeer=false;p.camera.request(false);
+            }
+            p.camera.tickCold(p.root,current==local::State::Connected&&p.cameraPeer);
             for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))){
                 if(consumer.tick)consumer.tick(consumer.owner);
                 for(const auto& picture:p.pictures)if(picture.leases&&picture.connection&&picture.connection->load(std::memory_order_acquire)&&picture.leases->current(picture.metadata.lease)&&consumer.picture)consumer.picture(consumer.owner,picture);
@@ -250,7 +263,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
                 if(needsCoverage)for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))){
                     any=true;all&=consumer.published&&consumer.published(consumer.owner,picture);
                 }
-                if(needsCoverage&&(!any||!all))continue;
+                if(needsCoverage&&(!any||!all||!p.camera.ready()))continue;
                 auto receipt=picture.metadata;receipt.kind=local::Kind::Ready;receipt.certifiedMetadata.clear();
                 if(p.channel.enqueue(receipt)){p.readyQueued[n]=true;count(p,Flow::ReadyQueued);}
             }
@@ -325,6 +338,7 @@ bool prepareProcessCold() noexcept{
     return p.prepared;
 }
 bool enabled() noexcept{const auto* p=process();return p&&p->kind.load(std::memory_order_acquire)!=ProcessKind::Off;}
+bool cameraAlphaReady() noexcept{const auto* p=process();return p&&p->kind.load(std::memory_order_acquire)==ProcessKind::Compositor&&p->camera.ready();}
 ProcessKind processKind() noexcept{const auto* p=process();return p?p->kind.load(std::memory_order_acquire):ProcessKind::Off;}
 native::NativeImages* sourceImages() noexcept{auto* p=process();return p&&p->kind==ProcessKind::Vrlink?&p->images:nullptr;}
 void sourceExportedFd(int fd) noexcept{auto* p=process();if(p&&p->kind==ProcessKind::Vrlink)p->writer.associateResourceFd(fd);}
@@ -338,6 +352,7 @@ void unregisterConsumerCold(void* owner) noexcept{
     auto* pointer=process();if(!pointer)return;auto&p=*pointer;std::lock_guard<std::mutex> lock(p.gate);
     for(auto& slot:p.consumers)if(slot.owner==owner)slot={};
     if(std::none_of(p.consumers.begin(),p.consumers.end(),[](const auto& c){return c.owner&&(!c.admitted||c.admitted(c.owner));})){
+        p.cameraPeer=false;p.camera.stopCold();
         if(p.connection)p.connection->store(false,std::memory_order_release);
         p.channel.stop();
     }
