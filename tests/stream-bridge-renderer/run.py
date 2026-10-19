@@ -123,6 +123,7 @@ def main():
     original_args=args
     pressure_modes={'camera-draw-bypassed':5,'camera-collect-bypassed':5,'image-budget-too-small':0,'memory-budget-too-small':1,'view-budget-too-small':2,'untracked-write-reserves-entry':3,'untracked-copy-reserves-entry':4}
     if name in pressure_modes:args=args[:3]+['pressure-'+str(pressure_modes[name])]
+    if a.camera_pending_only and name in ('startup-always-adds-zero','loss-skips-retained-zero'):args=args[:3]+['idle-startup']
     try:results[name]=run(name,path,negative=True)
     finally:args=original_args
  (out/'results.json').write_text(json.dumps({'results':results,'sources':pins,'fixture_sha256':hashlib.sha256((source/'fixture.cpp').read_bytes()).hexdigest(),'private_inputs':input_pins,'scope':'Actual production Renderer and Pool with forwarded public-call fake, explicit external auth/lease observations; not a native Steam/Frame or GPU-picture test.'},indent=2)+'\n')
