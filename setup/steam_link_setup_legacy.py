@@ -27,12 +27,28 @@ def allowed(home,path):
         path.is_relative_to(data/name) for name in ('package','tools'))
 
 
-def plan(unit):
+def plan(unit,*,checkpoint=None):
     e=unit.e;home=unit.home;config=home/'.config/SteamFrameNativePassthrough'
     data=home/'.local/share/SteamFrameNativePassthrough';receipt=config/'install.json'
     dropin=home/'.config/systemd/user/steamvr.service.d'/DROPIN
     manifest=home/'.local/share/vulkan/implicit_layer.d'/MANIFEST
-    if not os.path.lexists(receipt):
+    # The caller supplies only Checkpoint.value() from its private, validated
+    # recovery file. Read exact predecessors in memory; never reinstall an old
+    # activation just to complete an interrupted Uninstall.
+    known={}
+    if checkpoint is not None:
+        e.require(type(checkpoint)is dict and checkpoint.get('schema')=='sfnp-setup-checkpoint-v1' and
+            type(checkpoint.get('operations'))is list and len(checkpoint['operations'])<=128,
+            'The uninstall recovery authority was not recognized.')
+        if checkpoint.get('action')=='uninstall':known={item['path']:item for item in checkpoint['operations']}
+    def predecessor(path,limit):
+        saved=known.get(str(path));before=saved.get('before') if saved else None
+        if not before or before.get('kind')!='file' or None not in saved.get('after',[]):return None
+        raw=base64.b64decode(before['bytes'],validate=True)
+        e.require(len(raw)<=limit,'An old uninstall predecessor exceeds its bound.')
+        return raw
+    recovered_receipt=predecessor(receipt,128*1024) if not os.path.lexists(receipt) else None
+    if not os.path.lexists(receipt) and recovered_receipt is None:
         e.require(not os.path.lexists(dropin) and not os.path.lexists(manifest),
             'Unknown old Frame activation was preserved; it could not be uninstalled safely.')
         e.require(not os.path.lexists(config/'camera-before.json'),
@@ -42,7 +58,7 @@ def plan(unit):
             for op in paired['operations']),
             'The old uninstall receipt is missing; restoring a retired patch was refused.')
         return None
-    raw=e.read(receipt,128*1024,private=True);value=e.parse(raw)
+    raw=recovered_receipt if recovered_receipt is not None else e.read(receipt,128*1024,private=True);value=e.parse(raw)
     expected_link=str(Path('/run/user')/str(os.getuid())/'steam-frame-native-passthrough/receiver.json')
     e.require(type(value)is dict and set(value)=={'schema','home','data','manifest_link','package_sha256','files'} and
         value['schema']==RECEIPT and value['home']==str(home) and value['data']==str(data) and
@@ -61,7 +77,9 @@ def plan(unit):
         observed=unit.tx.current(path)
         if observed is None:
             prior=admitted.get(name)
-            e.require(prior is not None and prior['after'] is None and prior['before'] is not None and
+            saved=predecessor(path,e.MAX_FILE)
+            e.require(saved is not None and e.sha(saved)==pin or
+                prior is not None and prior['after'] is None and prior['before'] is not None and
                 prior['before']['kind']=='file' and e.sha(base64.b64decode(prior['before']['bytes'],validate=True))==pin,
                 'An old Frame component is missing without an owned migration record; existing files were preserved.')
         else:e.require(observed['kind']=='file' and e.sha(base64.b64decode(observed['bytes'],validate=True))==pin,
@@ -85,8 +103,9 @@ def plan(unit):
         operations.append(unit.tx.operation(control,None,expected=unit.tx.current(control)))
     else:operations.append(unit.tx.operation(control,None))
     camera=None;camera_receipt=config/'camera-before.json'
-    if os.path.lexists(camera_receipt):
-        value=e.parse(e.read(camera_receipt,16384,private=True))
+    camera_raw=e.read(camera_receipt,16384,private=True) if os.path.lexists(camera_receipt) else predecessor(camera_receipt,16384)
+    if camera_raw is not None:
+        value=e.parse(camera_raw)
         e.require(type(value)is dict and set(value)=={'schema','settings','previous','write_intent'} and
             value['schema']==CAMERA and value['settings']==str(unit.settings_path()) and type(value['write_intent'])is bool,
             'The original camera preference could not be verified; recovery records were preserved.')

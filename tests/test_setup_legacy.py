@@ -73,6 +73,28 @@ class Tests(f.Tests):
   self.seed();path=self.oldcfg/'install.json';raw=s.read(path);v=s.parse(raw);v['files'].pop(str(self.olddrop));s.put(path,s.encoded(v),raw)
   with self.assertRaisesRegex(s.SetupError,'launch hook is missing'):legacy.plan(self.unit)
   self.assertTrue(self.olddrop.exists());self.assertEqual(self.camera_native_calls,[])
+ def partial_uninstall(self):
+  self.seed();plan=legacy.plan(self.unit)
+  self.unit.backup('uninstall',plan['operations'],{'path':str(self.fsettings),'policy':b.SESSION_POLICY},[None],camera_override=plan['camera'])
+  legacy.apply_camera(self.unit,plan)
+  removed={self.oldcfg/'install.json',self.oldcfg/'camera-before.json',self.olddata/'package/legacy.so'}
+  for op in plan['operations']:
+   if Path(op['path'])in removed:self.unit.tx.replace(op)
+  return self.unit.checkpoint().value()
+ def test_interrupted_uninstall_uses_exact_checkpoint_without_reactivating_missing_files(self):
+  checkpoint=self.partial_uninstall();before=s.read(self.unit.checkpoint().path)
+  recovered=legacy.plan(self.unit,checkpoint=checkpoint)
+  self.assertIsNone(recovered['camera']['desired']);self.assertIsNone(recovered['camera']['before'])
+  self.assertFalse((self.oldcfg/'install.json').exists());self.assertFalse((self.olddata/'package/legacy.so').exists())
+  self.assertEqual(s.read(self.unit.checkpoint().path),before)
+  legacy.apply_camera(self.unit,recovered)
+  for op in recovered['operations']:self.unit.tx.replace(op)
+  self.assertIsNone(legacy.plan(self.unit));self.assertIsNone(self.unit.camera_value(self.fsettings))
+ def test_checkpoint_reconstruction_never_admits_changed_remaining_payload(self):
+  checkpoint=self.partial_uninstall();path=self.olddata/'tools/native_passthrough_setup.py';s.put(path,b'foreign change',s.read(path))
+  calls=list(self.camera_native_calls)
+  with self.assertRaisesRegex(s.SetupError,'component changed'):legacy.plan(self.unit,checkpoint=checkpoint)
+  self.assertEqual(self.camera_native_calls,calls);self.assertTrue(self.olddrop.exists())
 if __name__=='__main__':
  suite=unittest.TestSuite(Tests(name)for name in Tests.__dict__ if name.startswith('test_'))
  raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
