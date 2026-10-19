@@ -45,6 +45,8 @@ struct DecodeProvider::Impl{
     mutable std::mutex mutex;std::uintptr_t base=0;Originals calls{};Reader reader{};
     bool prepared=false,active=false;std::uint64_t generation=0,ticket=0;
     CaptureSink sink=nullptr;void* sinkContext=nullptr;
+    CaptureHandoff handoff=nullptr;void* handoffContext=nullptr;
+    ObservationWake wake=nullptr;void* wakeContext=nullptr;
     std::array<CaptureObservation,64> captureEvents{};std::size_t captureHead=0,captureSize=0;
     std::array<Device,MaxDevices> devices{};std::array<Slot,SnapshotCapacity> slots{};SnapshotStats counts{};
     Device* find(int fd){for(auto& d:devices)if(d.fd==fd&&fd>=0)return &d;return nullptr;}
@@ -106,6 +108,8 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
     v4l2_format format{};v4l2_requestbuffers requested{};v4l2_buffer buffer{};v4l2_plane plane{};
     int streamType=0;std::uint64_t expectedGeneration=0,reservation=0;std::size_t slotIndex=SnapshotCapacity;
     InputLoss inputLoss=InputLoss::None;bool knownGap=false;
+    CaptureHandoff handoff=nullptr;void* handoffContext=nullptr;CaptureObservation completed{};
+    ObservationWake wake=nullptr;void* wakeContext=nullptr;bool work=false;
     bool shape=false;const bool captureSite=caller==impl_->base+0x3242c||caller==impl_->base+0x324a8
         ||caller==impl_->base+0x325c8||caller==impl_->base+0x310f8||caller==impl_->base+0x32a5c;
     std::uint64_t captureGeneration=0;v4l2_buffer captureBuffer{};v4l2_plane capturePlane{};bool captureShape=false;
@@ -132,6 +136,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                     if(b.queried&&!b.queued&&capturePlane.m.fd>=0&&capturePlane.length&&b.cycle!=~std::uint64_t(0)){
                         b.dmabuf=capturePlane.m.fd;b.decoded=false;b.token=0;++b.cycle;
                         impl_->captureEvent({CaptureKind::Requeue,fd,b.dmabuf,captureBuffer.index,0,d->generation,d->captureGeneration,b.cycle});
+                        work=true;
                     }else captureShape=false;
                 }
                 if(request==VIDIOC_QBUF&&!captureShape)impl_->revokeCapture(*d);
@@ -187,7 +192,10 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                     if(b.queried&&b.queued&&b.cycle&&copied&&actual.timestamp.tv_sec>=0&&actual.timestamp.tv_sec<=0xffff
                         &&actual.timestamp.tv_usec==0&&!(actual.flags&V4L2_BUF_FLAG_ERROR)){
                         b.decoded=true;b.token=static_cast<std::uint32_t>(actual.timestamp.tv_sec);
-                        impl_->captureEvent({CaptureKind::Decoded,fd,b.dmabuf,actual.index,static_cast<std::uint32_t>(actual.timestamp.tv_sec),d->generation,d->captureGeneration,b.cycle});
+                        completed={CaptureKind::Decoded,fd,b.dmabuf,actual.index,static_cast<std::uint32_t>(actual.timestamp.tv_sec),d->generation,d->captureGeneration,b.cycle};
+                        impl_->captureEvent(completed);
+                        handoff=impl_->handoff;handoffContext=impl_->handoffContext;
+                        work=true;
                     }
                     b.queued=false;
                 }
@@ -224,6 +232,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                     increment(sequence);
                     if(knownGap)impl_->captureEvent({CaptureKind::InputGap,fd,-1,buffer.index,
                         static_cast<std::uint32_t>(buffer.timestamp.tv_sec),d->generation,0,0,inputLoss,sequence});
+                    work=true;
                 }
             }else impl_->revoke(*d); // Successful unsupported shape loses ownership evidence.
         }
@@ -231,12 +240,18 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
             if(slot.state==Impl::Slot::Reserved&&slot.ticket==reservation){
                 if(impl_->active&&result==0&&d&&d->generation==expectedGeneration&&buffer.index<d->count){
                     auto& b=d->buffers[buffer.index];b.pending=false;b.queued=true;
-                    if(d->content!=~std::uint64_t(0)){slot.fact.contentGeneration=++d->content;slot.state=Impl::Slot::Ready;increment(impl_->counts.accepted);}
+                    if(d->content!=~std::uint64_t(0)){slot.fact.contentGeneration=++d->content;slot.state=Impl::Slot::Ready;increment(impl_->counts.accepted);work=true;}
                     else slot.state=Impl::Slot::Free;
                 }else{slot.state=Impl::Slot::Free;if(d&&d->generation==expectedGeneration&&buffer.index<d->count)d->buffers[buffer.index].pending=false;}
             }
         }
+        if(work){wake=impl_->wake;wakeContext=impl_->wakeContext;}
     }
+    // The worker's exact lease validation takes this same provider mutex.
+    // Calling a waiting handoff from captureEvent/sink would deadlock it.
+    // Its borrowed scalar event is complete, and the original ioctl ran once.
+    if(wake)wake(wakeContext);
+    if(handoff)handoff(completed,handoffContext);
     errno=error;return result;
 }
 void* DecodeProvider::invokeMmap(std::uintptr_t caller,void* address,std::size_t size,int prot,int flags,int fd,off_t offset) noexcept{
@@ -295,6 +310,16 @@ bool DecodeProvider::setCaptureSink(CaptureSink sink,void* context) noexcept{
     for(const auto& device:impl_->devices)if(device.fd>=0)return false;
     impl_->sink=sink;impl_->sinkContext=context;return true;
 }
+bool DecodeProvider::setCaptureHandoff(CaptureHandoff handoff,void* context) noexcept{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    for(const auto& device:impl_->devices)if(device.fd>=0)return false;
+    impl_->handoff=handoff;impl_->handoffContext=context;return true;
+}
+bool DecodeProvider::setObservationWake(ObservationWake wake,void* context) noexcept{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    for(const auto& device:impl_->devices)if(device.fd>=0)return false;
+    impl_->wake=wake;impl_->wakeContext=context;return true;
+}
 SnapshotStats DecodeProvider::stats()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->counts;}
 
 namespace {
@@ -344,6 +369,8 @@ SnapshotStats pinnedSnapshotStats() noexcept{return runtime?runtime->stats():Sna
 bool pinnedCaptureLeaseCurrent(const CaptureObservation& fact) noexcept{return runtime&&runtime->captureLeaseCurrent(fact);}
 bool pinnedCaptureLeaseCurrentOnWorker(const CaptureObservation& fact) noexcept{return runtime&&runtime->captureLeaseCurrentOnWorker(fact);}
 bool setPinnedCaptureSink(CaptureSink sink,void* context) noexcept{return runtime&&runtime->setCaptureSink(sink,context);}
+bool setPinnedCaptureHandoff(CaptureHandoff handoff,void* context) noexcept{return runtime&&runtime->setCaptureHandoff(handoff,context);}
+bool setPinnedObservationWake(ObservationWake wake,void* context) noexcept{return runtime&&runtime->setObservationWake(wake,context);}
 std::uintptr_t preparedImageBase() noexcept{return runtime?runtime->imageBase():0;}
 Entries preparedEntries() noexcept{
 #if defined(__aarch64__)

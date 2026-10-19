@@ -106,4 +106,7 @@ private:
 bool startPinnedReceiver(const RuntimeRequest&) noexcept;
 void stopPinnedReceiver() noexcept;
 bool pinnedReceiverRunning() noexcept;
+// Event notification only. Never takes receiver/control/provider locks or
+// performs I/O; successful decoder observations wake the existing cold worker.
+void wakePinnedReceiver() noexcept;
 }
