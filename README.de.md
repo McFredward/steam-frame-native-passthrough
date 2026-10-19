@@ -43,12 +43,16 @@ Andere Spiele benötigen eine Integration; der Patch allein reicht nicht aus.
 **SSH einmalig auf der Steam Frame aktivieren:**
 
 1. Öffne **Steam-Einstellungen → System → Entwicklermodus aktivieren**.
-2. Öffne **Entwickler → Benutzerpasswort festlegen** und wähle ein Passwort.
+2. Öffne **Entwickler → Benutzerpasswort festlegen** und setze ein Passwort für
+   `steamos` (alternativ im Desktop-Terminal: `passwd`). Dieses Passwort brauchst
+   du später im Installer; es ist unabhängig von deinem Steam-Passwort.
 3. Öffne im Desktop-Modus ein Terminal und aktiviere SSH dauerhaft:
 
    ```bash
    sudo systemctl enable --now sshd.service
    ```
+
+   Gib auf Nachfrage dieses Passwort ein. Bei der Eingabe erscheinen keine Zeichen.
 
 [Valves Geräteanleitung](https://partner.steamgames.com/doc/steamhardware/steamframe/setup) zeigt die Einstellungen.
 Lass die Frame eingeschaltet und im selben Netzwerk wie den PC; beende den VR-Stream.
