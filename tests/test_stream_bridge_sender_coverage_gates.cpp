@@ -8,6 +8,12 @@ namespace {
 unsigned checks=0;void check(bool value,const char* why){++checks;if(!value)throw std::runtime_error(why);}
 void run(){
     CoverageGateCounters counters;auto cold=counters.snapshot();
+    check(!cold.maskedVideoBytes&&!cold.maskedWireBytes&&!cold.maskRleBytes&&!cold.maxMaskedWireBytes,"payload accounting starts empty without estimating network load");
+    counters.payload(2000,500,2700);counters.payload(100,40,340);
+    auto payload=counters.snapshot();check(payload.maskedVideoBytes==2100&&payload.maskRleBytes==540&&payload.maskedWireBytes==3040&&payload.maxMaskedWireBytes==2700,
+        "paired-frame accounting separates original video, coverage and escaped/certified access units");
+    counters.payload(std::numeric_limits<std::uint64_t>::max(),0,0);
+    check(counters.snapshot().maskedVideoBytes==std::numeric_limits<std::uint64_t>::max(),"payload byte totals saturate without wrapping or touching frame authority");
     check(cold.hookDraws==0&&cold.nativeDraws==0&&cold.completePairs==0&&cold.lastRefusal==CoverageGate::None,"diagnostic counters start without rendering authority or samples");
     for(unsigned i=0;i<static_cast<unsigned>(CoverageSignal::Count);++i)
         for(unsigned n=0;n<=i;++n)counters.signal(static_cast<CoverageSignal>(i));

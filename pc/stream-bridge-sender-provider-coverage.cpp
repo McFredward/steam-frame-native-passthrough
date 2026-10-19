@@ -207,7 +207,7 @@ struct SenderCoverage::Impl {
                 // Only publish the still-current capture; no stale mask leaves
                 // this callback even when its original GPU readback was valid.
                 if(!s.sourceContract.current(maskContract,maskPid)){output.clear();s.gates.refuse(CoverageGate::SourceRevoked);return false;}
-                s.lastPid=maskPid;s.state=7;s.gates.signal(CoverageSignal::CertifiedMasks);return true;
+                s.lastPid=maskPid;s.state=7;s.gates.payload(candidate.size,rle.size(),output.size());s.gates.signal(CoverageSignal::CertifiedMasks);return true;
             }
         }
         // Discovery/coded-boundary certificate without a mask is useful and

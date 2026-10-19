@@ -55,6 +55,7 @@ struct CoverageGateStats {
         lastCopyAgeUs=0,maxCopyAgeUs=0,lastSubmissionAgeUs=0,lastReadbackUs=0,maxReadbackUs=0;
     std::uint64_t submittedReadbacks=0,queryReady=0,queryPending=0,queryErrors=0,lastQueryAgeUs=0,maxQueryAgeUs=0;
     std::uint32_t lastQueryResult=0,lastReadbackResult=0;
+    std::uint64_t maskedVideoBytes=0,maskedWireBytes=0,maskRleBytes=0,maxMaskedWireBytes=0;
     bool contextTableReadable=false,contextTableStable=false,nativeDeviceSame=false;
 };
 class CoverageGateCounters {
@@ -73,6 +74,9 @@ public:
     void source(std::uint32_t width,std::uint32_t height,std::uint32_t format)noexcept{sourceWidth_.store(width,std::memory_order_relaxed);sourceHeight_.store(height,std::memory_order_relaxed);sourceFormat_.store(format,std::memory_order_relaxed);}
     void output(std::uint32_t width,std::uint32_t height,std::uint32_t format)noexcept{outputWidth_.store(width,std::memory_order_relaxed);outputHeight_.store(height,std::memory_order_relaxed);outputFormat_.store(format,std::memory_order_relaxed);}
     void submitted()noexcept{increment(submittedReadbacks_);}
+    void payload(std::uint64_t video,std::uint64_t rle,std::uint64_t wire)noexcept{
+        add(maskedVideoBytes_,video);add(maskRleBytes_,rle);add(maskedWireBytes_,wire);maximum(maxMaskedWireBytes_,wire);
+    }
     void completion(std::uint32_t result,std::uint64_t ageUs=0)noexcept{
         increment(result==0?queryReady_:(result==1?queryPending_:queryErrors_));
         queryResult_.store(result,std::memory_order_relaxed);queryAge_.store(ageUs,std::memory_order_relaxed);maximum(maxQueryAge_,ageUs);
@@ -97,15 +101,21 @@ public:
         out.lastOutputWidth=outputWidth_.load(std::memory_order_relaxed);out.lastOutputHeight=outputHeight_.load(std::memory_order_relaxed);out.lastOutputFormat=outputFormat_.load(std::memory_order_relaxed);out.readbackReady=readbackReady_.load(std::memory_order_relaxed);out.readbackBusy=readbackBusy_.load(std::memory_order_relaxed);out.readbackErrors=readbackErrors_.load(std::memory_order_relaxed);
         out.submittedReadbacks=submittedReadbacks_.load(std::memory_order_relaxed);out.queryReady=queryReady_.load(std::memory_order_relaxed);out.queryPending=queryPending_.load(std::memory_order_relaxed);out.queryErrors=queryErrors_.load(std::memory_order_relaxed);out.lastQueryResult=queryResult_.load(std::memory_order_relaxed);out.lastQueryAgeUs=queryAge_.load(std::memory_order_relaxed);out.maxQueryAgeUs=maxQueryAge_.load(std::memory_order_relaxed);
         out.lastReadbackResult=readbackResult_.load(std::memory_order_relaxed);out.lastCopyAgeUs=copyAge_.load(std::memory_order_relaxed);out.maxCopyAgeUs=maxCopyAge_.load(std::memory_order_relaxed);
-        out.lastSubmissionAgeUs=submissionAge_.load(std::memory_order_relaxed);out.lastReadbackUs=readbackDuration_.load(std::memory_order_relaxed);out.maxReadbackUs=maxReadbackDuration_.load(std::memory_order_relaxed);return out;
+        out.lastSubmissionAgeUs=submissionAge_.load(std::memory_order_relaxed);out.lastReadbackUs=readbackDuration_.load(std::memory_order_relaxed);out.maxReadbackUs=maxReadbackDuration_.load(std::memory_order_relaxed);
+        out.maskedVideoBytes=maskedVideoBytes_.load(std::memory_order_relaxed);out.maskRleBytes=maskRleBytes_.load(std::memory_order_relaxed);out.maskedWireBytes=maskedWireBytes_.load(std::memory_order_relaxed);out.maxMaskedWireBytes=maxMaskedWireBytes_.load(std::memory_order_relaxed);return out;
     }
 private:
+    static void add(std::atomic<std::uint64_t>& value,std::uint64_t sample)noexcept{
+        auto current=value.load(std::memory_order_relaxed);const auto remaining=std::numeric_limits<std::uint64_t>::max()-current;
+        value.compare_exchange_strong(current,current+(sample<remaining?sample:remaining),std::memory_order_relaxed,std::memory_order_relaxed);
+    }
     static void maximum(std::atomic<std::uint64_t>& value,std::uint64_t sample)noexcept{
         auto current=value.load(std::memory_order_relaxed);if(sample>current)value.compare_exchange_strong(current,sample,std::memory_order_relaxed,std::memory_order_relaxed);
     }
     std::atomic<std::uint64_t> readbackReady_{},readbackBusy_{},readbackErrors_{},copyAge_{},maxCopyAge_{},submissionAge_{},readbackDuration_{},maxReadbackDuration_{};
     std::atomic<std::uint32_t> readbackResult_{},queryResult_{};
     std::atomic<std::uint64_t> submittedReadbacks_{},queryReady_{},queryPending_{},queryErrors_{},queryAge_{},maxQueryAge_{};
+    std::atomic<std::uint64_t> maskedVideoBytes_{},maskedWireBytes_{},maskRleBytes_{},maxMaskedWireBytes_{};
     // Contention can lose diagnostic samples; snapshots are intentionally not
     // coherent frame proofs. No caller may use them to authorize rendering.
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(CoverageSignal::Count)> signals_{};

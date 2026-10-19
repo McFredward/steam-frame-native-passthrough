@@ -154,7 +154,11 @@ hundreds of independent connection failures. The receiver then reports OUTPUT
 STREAMOFF and later capture-format resets. Camera-demand fixes cannot prove the
 network/data path repaired; these gaps remain a separate investigation.
 The contribution of added exact-coverage payload to those losses is not yet
-measured and must not be dismissed as an unrelated WLAN fault.
+measured and must not be dismissed as an unrelated WLAN fault. New bounded
+`coverage payload` totals distinguish original-video bytes, lossless RLE mask
+bytes, complete escaped access-unit bytes and the largest such unit. These are
+approximate cold diagnostics, never frame identity or admission. They let the
+next ordinary run quantify mask overhead without another headset probe.
 
 The game also genuinely replaces its head camera across intro/menu/loading/
 scenario transitions; five verified two-eye cohort admissions match those head
