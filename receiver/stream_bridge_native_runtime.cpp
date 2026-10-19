@@ -192,6 +192,14 @@ struct ReceiverWorker::Impl {
             ||!fact.bufferCapacity||fact.usedBytes==0||fact.usedBytes>bytes.size()||fact.usedBytes>fact.bufferCapacity){
             clear(RuntimeState::SourceLost,true,RuntimeReason::InvalidInput);return;}
         if(retired(fact.fd,fact.poolGeneration))return;
+        // A new successful same-fd pool can publish between the event drain
+        // and this snapshot poll. Retire old receipts BEFORE advancing that
+        // fd's quarantine; otherwise retirePending would see its old pool as
+        // stale only because this input already changed our bookkeeping.
+        if(source.decoderFd==fact.fd&&source.outputPoolGeneration&&fact.poolGeneration>source.outputPoolGeneration){
+            if(!retirePending()){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
+            pending={};
+        }
         auto* q=quarantine(fact.fd,fact.poolGeneration);
         if(!q){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
         if(q->hard){q->tokens.set(fact.nativeTimestampToken);return;}

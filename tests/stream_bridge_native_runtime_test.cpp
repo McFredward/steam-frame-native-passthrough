@@ -255,6 +255,22 @@ void liveDecoderSwitch(){
         "switching live decoder A B A quarantines old A pending token before dropping its prior session");
 }
 
+void sameFdPoolOrdering(){
+    Fixture f;f.negotiate();const auto port=f.producer.localPort();
+    f.enqueue(f.certifiedFrame(),40);f.pump();
+    // The provider's successful new-pool input may become visible after this
+    // tick's first capture drain, before its SourceReset event is next drained.
+    f.relisten(port);f.enqueue(ordinary,50,8);f.pump();
+    check(f.randomCalls==2&&f.worker.status().source.outputPoolGeneration==8
+        &&f.worker.status().state==nd::RuntimeState::Negotiating,
+        "new same-fd pool retires prior pending before advancing quarantine metadata");
+    for(unsigned token=51;token<54;++token){f.enqueue(f.certifiedDiscovery(),token,8);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,8,22,token});f.pump();}
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed,"genuinely new same-fd pool remains live after source-event scheduling boundary");
+    const auto count=f.certified;f.enqueue(ordinary,60,7);f.pump();
+    check(f.certified==count&&f.worker.status().source.outputPoolGeneration==8,"delayed old same-fd pool never rolls back the newer quarantine");
+}
+
 void ambiguityAndBound(){
     Fixture f;f.start();f.enqueue(f.certifiedDiscovery(),30);f.pump();check(f.certified==1,"first unique token admitted");
     f.enqueue(ordinary,30);f.pump();check(f.worker.status().state==nd::RuntimeState::SourceLost,"same live native token never aliases a newer source frame");
@@ -349,4 +365,4 @@ void transportRecoveryRejectsOldProof(){
         "transport retry never retries authenticated-control rejection or grants pixels");
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
