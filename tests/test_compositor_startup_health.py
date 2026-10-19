@@ -1057,6 +1057,136 @@ class NativeSourceTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): self.source.resume(checkpoint)
 
 
+class CameraHealthTests(unittest.TestCase):
+    """Camera observations are separate from the UI startup/recovery verdict."""
+    def setUp(self):
+        self.fixture=NativeSourceTests();self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.source=self.fixture.source
+        self.baseline=self.source.baseline()
+        self.fixture.now=2.0
+        self.commands=[]
+
+    @staticmethod
+    def row(message, *, monotonic=2000000, identifier="XRService"):
+        return {"MESSAGE":message,"__MONOTONIC_TIMESTAMP":str(monotonic),"SYSLOG_IDENTIFIER":identifier}
+
+    def journal(self,system=(),user=(),*,denied=False,partial=False):
+        def run(args,**kwargs):
+            self.commands.append(args)
+            if "--user" not in args and denied:
+                raise subprocess.CalledProcessError(1,args,stderr="private denied details")
+            rows=user if "--user" in args else system
+            raw="\n".join(json.dumps(row) for row in rows)+"\n"
+            return subprocess.CompletedProcess(args,0,raw,"Not seeing messages from other users" if partial and "--user" not in args else "")
+        self.source.run=run
+
+    def test_actual_camera_fault_signatures_warn_without_changing_ready_ui(self):
+        messages=("[ICP] Failed to receive a firmware response to the IPE_FRAME_PROCESS command",
+            "[ICP] Frame processing failure detected after running hardware recovery.",
+            "Skipping compositor shared frame update after ICP frame processing failure",
+            "icp-sm8650 ac00000.icp: Unexpected ICP IRQ (irq=280|280)")
+        self.journal([self.row(message,identifier="kernel" if index==3 else "XRService") for index,message in enumerate(messages)])
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["status"],"warning")
+        self.assertEqual(set(result["reason_codes"]),{"firmware-response-missing","hardware-recovery-failed","camera-update-skipped","icp-interrupt"})
+        self.assertFalse(result["camera_pixels_verified"])
+        self.assertFalse(result["automatic_restart"]);self.assertFalse(result["automatic_rollback"])
+        # The same native camera failure must not turn a healthy UI into an
+        # automatic rollback trigger in the independent existing gate.
+        value=sample();value["journal"]=[{**self.row(messages[0]),"_PID":"2001583","_SYSTEMD_INVOCATION_ID":"c"*32}]
+        self.assertTrue(M.StartupGate(baseline()).consume(value,stable_seconds=0)["ready"])
+
+    def test_old_faults_are_excluded_and_service_or_init_success_does_not_claim_camera_pixels(self):
+        self.journal([self.row("[ICP] Failed to receive a firmware response to the IPE_FRAME_PROCESS command",monotonic=500000),
+                      self.row("[CTrackedCamera] Late initialization successful")])
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["status"],"no-errors-observed")
+        self.assertEqual(result["reason_codes"],[])
+        self.assertFalse(result["camera_pixels_verified"])
+        self.assertNotIn("healthy",json.dumps(result))
+        for args in self.commands:
+            self.assertIn("--boot=0",args)
+            self.assertIn("--after-cursor="+self.baseline["cursor"],args)
+            self.assertNotIn("--user-unit="+M.UNIT,args)
+
+    def test_permission_denied_uses_user_relay_and_never_exposes_raw_identity(self):
+        message="Skipping compositor shared frame update after ICP frame processing failure serial=SECRET-DEVICE"
+        self.journal(user=[self.row(message)],denied=True)
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["status"],"warning")
+        self.assertEqual(result["observations"]["system_journal"]["status"],"unavailable")
+        self.assertEqual(result["observations"]["user_journal"]["counts"],{"camera-update-skipped":1})
+        text=json.dumps(result)
+        self.assertNotIn("SECRET",text);self.assertNotIn("private denied",text);self.assertNotIn("_PID",text)
+        self.assertTrue(any("--user" in args for args in self.commands))
+
+    def test_permission_gap_without_faults_is_unavailable_not_camera_success(self):
+        for mode in ("denied","partial"):
+            with self.subTest(mode=mode):
+                self.journal(denied=mode=="denied",partial=mode=="partial")
+                result=self.source.camera_health(self.baseline)
+                self.assertEqual(result["status"],"unavailable")
+                self.assertFalse(result["camera_pixels_verified"])
+
+    def test_native_log_fallback_uses_baseline_offset_and_time_without_consuming_startup_source(self):
+        path=self.fixture.logdir/"vrcompositor.txt"
+        with path.open("a") as stream:
+            stream.write(line("Skipping compositor shared frame update after ICP frame processing failure",wall=99)+"\n")
+            stream.write(line("Skipping compositor shared frame update after ICP frame processing failure",wall=101)+"\n")
+        self.journal(denied=True)
+        before=copy.deepcopy(self.source.checkpoint())
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["status"],"warning")
+        self.assertEqual(result["observations"]["compositor_log"]["counts"],{"camera-update-skipped":1})
+        self.assertEqual(self.source.checkpoint(),before)
+        self.assertIn("Skipping compositor",self.source.log_read("vrcompositor"))
+
+    def test_binary_ansi_message_preserves_fault_and_output_is_only_fixed_metadata(self):
+        text="\x1b[91m[ICP] Failed to receive a firmware response to the IPE_FRAME_PROCESS command\x1b[0m"
+        self.journal([self.row(list(text.encode()))])
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["reason_codes"],["firmware-response-missing"])
+        self.assertNotIn("MESSAGE",json.dumps(result))
+
+    def test_record_and_byte_bounds_are_explicit_and_never_silently_no_errors(self):
+        rows=[self.row("[ICP] Failed to receive a firmware response to the IPE_FRAME_PROCESS command")]*128
+        self.journal(rows)
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["status"],"warning")
+        self.assertEqual(result["observations"]["system_journal"]["status"],"bounded")
+        self.assertLessEqual(result["observations"]["system_journal"]["counts"]["firmware-response-missing"],128)
+        self.journal([self.row("x"*(M.LIMIT+1))])
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["status"],"unavailable")
+
+    def test_native_fault_before_baseline_offset_cannot_leak_into_current_observation(self):
+        with (self.fixture.logdir/"vrcompositor.txt").open("a") as stream:
+            stream.write(line("Skipping compositor shared frame update after ICP frame processing failure",wall=101)+"\n")
+        current=self.source.baseline()
+        self.journal()
+        result=self.source.camera_health(current)
+        self.assertEqual(result["status"],"no-errors-observed")
+        self.assertEqual(result["observations"]["compositor_log"]["counts"],{})
+
+    def test_valid_fault_is_retained_when_later_journal_row_is_unreadable(self):
+        self.journal([self.row("[ICP] Failed to receive a firmware response to the IPE_FRAME_PROCESS command"),
+                      {"MESSAGE":"untrusted malformed row"}])
+        result=self.source.camera_health(self.baseline)
+        self.assertEqual(result["status"],"warning")
+        self.assertEqual(result["observations"]["system_journal"]["status"],"unavailable")
+        self.assertEqual(result["reason_codes"],["firmware-response-missing"])
+        self.assertNotIn("untrusted",json.dumps(result))
+
+    def test_unknown_or_incomplete_baseline_does_not_read_any_current_or_historical_camera_data(self):
+        self.journal()
+        for broken in ({},{**self.baseline,"cursor":"not a safe cursor"},{**self.baseline,"monotonic":True}):
+            with self.subTest(keys=sorted(broken)):
+                before=len(self.commands)
+                self.assertEqual(self.source.camera_health(broken)["status"],"unavailable")
+                self.assertEqual(len(self.commands),before)
+
+
 class ForkedRendererGateTests(unittest.TestCase):
     def test_actual_native_fork_shape_retains_all_required_positive_ui_proofs(self):
         gate = M.StartupGate(baseline())

@@ -33,6 +33,27 @@ JOURNAL_FIELDS = ("MESSAGE", "_PID", "_SYSTEMD_INVOCATION_ID", "_SYSTEMD_USER_IN
     "__MONOTONIC_TIMESTAMP", "__CURSOR", "SYSLOG_IDENTIFIER", "MESSAGE_ID",
     "COREDUMP_PID", "COREDUMP_EXE", "COREDUMP_SIGNAL", "COREDUMP_USER_UNIT", "COREDUMP_CGROUP")
 COREDUMP_MESSAGE_ID = "fc2e22bc6ee647b6b90729ab34a250b1"
+CAMERA_SCHEMA = "frame-camera-startup-observation-v1"
+CAMERA_RECORD_LIMIT = 128
+CAMERA_PATTERNS = {
+    "firmware-response-missing": re.compile(r"Failed to receive a firmware response to the IPE_FRAME_PROCESS command", re.I),
+    "hardware-recovery-failed": re.compile(r"Frame processing failure detected after running hardware recovery", re.I),
+    "camera-update-skipped": re.compile(r"Skipping compositor shared frame update after ICP frame processing failure", re.I),
+    "icp-interrupt": re.compile(r"Unexpected ICP IRQ", re.I),
+}
+CAMERA_JOURNAL_PATTERN = "IPE_FRAME_PROCESS|hardware recovery|ICP frame processing failure|Unexpected ICP IRQ"
+
+
+def camera_counts(messages):
+    """Only fixed reason/count metadata escapes; never camera/device log text."""
+    counts = {}
+    for message in messages:
+        message = ANSI_CSI.sub("", message)
+        for reason, pattern in CAMERA_PATTERNS.items():
+            if pattern.search(message): counts[reason] = min(CAMERA_RECORD_LIMIT, counts.get(reason, 0) + 1)
+    return counts
+
+
 MAX_PROCESSES = 512
 UI_COMPOSITOR_TASK_NAMES = frozenset(("Chrome_ChildIOT", "GpuMemoryThread", "Compositor"))
 UI_COMPOSITOR_TASK_BYTES = frozenset(name.encode("ascii") for name in UI_COMPOSITOR_TASK_NAMES)
@@ -829,6 +850,86 @@ class NativeEvidenceSource:
         journal = self.journal()
         return {"unit": unit, "processes": processes, "main_process": main, "errors": errors, "journal": journal,
                 "logs": {name: self.log_read(name) for name in self.logs}, "monotonic": self.clock(), "isolation": isolation}
+
+    def camera_health(self, baseline):
+        """Optional current-start camera warnings, independent of UI readiness.
+
+        No errors observed is not proof of camera images. Global XRService
+        messages can be hidden from a user's journal; try its user relay and
+        native compositor log without making that permission gap a UI failure.
+        This method neither advances the main observer nor changes services.
+        """
+        observations = {name: {"status": "unavailable", "counts": {}}
+                        for name in ("system_journal", "user_journal", "compositor_log")}
+        def result():
+            reasons = sorted({reason for source in observations.values() for reason in source["counts"]})
+            status = ("warning" if reasons else "no-errors-observed"
+                      if observations["system_journal"]["status"] == "available" else "unavailable")
+            return {"schema": CAMERA_SCHEMA, "status": status, "reason_codes": reasons,
+                    "observations": observations, "camera_pixels_verified": False,
+                    "automatic_restart": False, "automatic_rollback": False}
+        try:
+            if not isinstance(baseline, dict) or baseline.get("schema") != SCHEMA:
+                raise RuntimeError("Invalid camera baseline")
+            require_clock(baseline["monotonic"]); require_clock(baseline["wall_time"])
+            cursor = baseline["cursor"]
+            if not isinstance(cursor, str) or not re.fullmatch(r"[A-Za-z0-9_=;:-]{1,4096}", cursor):
+                raise RuntimeError("Invalid camera baseline cursor")
+            offset = baseline["log_offsets"]["vrcompositor"]
+            if offset is not None and (not isinstance(offset, dict) or set(offset) != {"dev", "ino", "offset"} or
+                    any(type(value) is not int or not 0 <= value < 2**63 for value in offset.values())):
+                raise RuntimeError("Invalid camera baseline offset")
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return result()
+        for name, user in (("system_journal", False), ("user_journal", True)):
+            args = ["journalctl", "--boot=0", "--no-pager", "--output=json", "--all",
+                    "--output-fields=MESSAGE,__MONOTONIC_TIMESTAMP", "--after-cursor=" + cursor,
+                    "--grep=" + CAMERA_JOURNAL_PATTERN, "--case-sensitive=no", "-n", str(CAMERA_RECORD_LIMIT)]
+            if user: args.insert(1, "--user")
+            messages = []
+            try:
+                response = self.run(args, check=True, capture_output=True, text=True, timeout=5)
+                if (response.returncode != 0 or not isinstance(response.stdout, str) or
+                        not isinstance(response.stderr, str) or
+                        len(response.stdout.encode()) + len(response.stderr.encode()) > LIMIT):
+                    raise RuntimeError("Camera journal unavailable")
+                rows = response.stdout.splitlines()
+                if len(rows) > CAMERA_RECORD_LIMIT: raise RuntimeError("Camera journal record bound exceeded")
+                for row in rows:
+                    if not row: continue
+                    value = json.loads(row)
+                    if not isinstance(value, dict): raise RuntimeError("Unsupported camera journal row")
+                    stamp = value.get("__MONOTONIC_TIMESTAMP")
+                    if not isinstance(stamp, str) or not re.fullmatch(r"[0-9]{1,20}", stamp):
+                        raise RuntimeError("Unsupported camera journal clock")
+                    if int(stamp) / 1000000 >= baseline["monotonic"]:
+                        messages.append(journal_message(value.get("MESSAGE")))
+                state = ("bounded" if len(rows) == CAMERA_RECORD_LIMIT else
+                         "partial" if response.stderr.strip() else "available")
+                observations[name] = {"status": state, "counts": camera_counts(messages)}
+            except (OSError, RuntimeError, ValueError, UnicodeError, subprocess.SubprocessError):
+                # A later unreadable row cannot erase a fault already observed.
+                observations[name]["counts"] = camera_counts(messages)
+            if not user and observations[name]["status"] == "available":
+                observations["user_journal"]["status"] = "not-needed"
+                break
+        try:
+            # A separate reader preserves startup offsets, partial lines and its
+            # cumulative budget; camera observation has its own bounded read.
+            reader = NativeEvidenceSource(self.home, uid=self.uid)
+            reader.logs = {"vrcompositor": self.logs["vrcompositor"]}
+            reader.offsets = {"vrcompositor": offset}
+            reader.pending_lines = {"vrcompositor": ""}
+            if not reader.logs["vrcompositor"].exists(): raise RuntimeError("Camera native log unavailable")
+            messages = []
+            for row in reader.log_read("vrcompositor").splitlines():
+                match = DATE.match(row)
+                if match and datetime.datetime.strptime(match[1], "%b %d %Y %H:%M:%S.%f").timestamp() >= baseline["wall_time"]:
+                    messages.append(row)
+            observations["compositor_log"] = {"status": "available", "counts": camera_counts(messages)}
+        except (OSError, RuntimeError, ValueError, UnicodeError):
+            pass
+        return result()
 
     def checkpoint(self):
         return {"cursor": self.cursor, "log_offsets": self.offsets, "pending_lines": self.pending_lines, "total": self.total,
