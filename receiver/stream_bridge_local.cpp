@@ -211,33 +211,34 @@ bool validMessage(const Message& m){
         ||!nonzero(m.binding)||!m.descriptor.sourceFrame||!m.descriptor.encoderGeneration||!m.descriptor.codedWidth||!m.descriptor.codedHeight
         ||m.descriptor.codedWidth>8192||m.descriptor.codedHeight>8192||m.nativeTimestampToken>0xffff||!m.submittedContent)return false;
     if(m.kind==Kind::Certified)return !m.certifiedMetadata.empty()&&m.certifiedMetadata.size()<=Channel::MaximumPayload&&m.dmabuf<0&&m.readOnlyLeases<0;
-    if(m.kind!=Kind::Decoded||!m.certifiedMetadata.empty()||m.dmabuf<0||m.readOnlyLeases<0||m.lease.slot>=SlotCount||!m.lease.epoch||!m.lease.sequence||(m.lease.sequence&1))return false;
+    if((m.kind!=Kind::Decoded&&m.kind!=Kind::Ready)||!m.certifiedMetadata.empty()
+        ||(m.kind==Kind::Decoded?(m.dmabuf<0||m.readOnlyLeases<0):(m.dmabuf>=0||m.readOnlyLeases>=0))||m.lease.slot>=SlotCount||!m.lease.epoch||!m.lease.sequence||(m.lease.sequence&1))return false;
     const auto& c=m.lease.capture;return c.kind==nd::CaptureKind::Decoded&&c.sourcePoolGeneration==m.source.outputPoolGeneration
         &&c.nativeTimestampToken==m.nativeTimestampToken&&c.fd>=0&&c.dmabufFd>=0&&c.index<nd::MaxBuffers
         &&c.capturePoolGeneration&&c.contentGeneration&&m.lease.kernel[1];
 }
 std::array<std::uint8_t,HeaderBytes> encode(const Message& m){
-    std::array<std::uint8_t,HeaderBytes> h{};std::memcpy(h.data(),"SFL1",4);h[4]=1;h[5]=static_cast<std::uint8_t>(m.kind);h[6]=m.peerConfirmed?1:0;
+    std::array<std::uint8_t,HeaderBytes> h{};std::memcpy(h.data(),"SFL2",4);h[4]=2;h[5]=static_cast<std::uint8_t>(m.kind);h[6]=m.peerConfirmed?1:0;
     put(h.data()+8,m.certifiedMetadata.size(),4);std::copy(m.source.stream.connection.begin(),m.source.stream.connection.end(),h.begin()+16);
     put(h.data()+32,m.source.outputPoolGeneration,8);put(h.data()+40,m.descriptor.sourceFrame,8);put(h.data()+48,m.descriptor.encoderGeneration,8);
     put(h.data()+56,m.descriptor.codedWidth,2);put(h.data()+58,m.descriptor.codedHeight,2);put(h.data()+60,m.nativeTimestampToken,4);put(h.data()+64,m.submittedContent,8);
     std::copy(m.binding.begin(),m.binding.end(),h.begin()+72);
     put(h.data()+144,m.source.stream.generation,8);
-    if(m.kind==Kind::Decoded){put(h.data()+152,m.lease.epoch,8);put(h.data()+88,m.lease.slot,4);put(h.data()+92,m.lease.capture.index,4);put(h.data()+96,m.lease.sequence,8);
+    if(m.kind!=Kind::Certified){put(h.data()+152,m.lease.epoch,8);put(h.data()+88,m.lease.slot,4);put(h.data()+92,m.lease.capture.index,4);put(h.data()+96,m.lease.sequence,8);
         put(h.data()+104,m.lease.capture.capturePoolGeneration,8);put(h.data()+112,m.lease.capture.contentGeneration,8);
         put(h.data()+120,m.lease.kernel[0],8);put(h.data()+128,m.lease.kernel[1],8);
         put(h.data()+136,static_cast<std::uint64_t>(m.lease.capture.fd),4);put(h.data()+140,static_cast<std::uint64_t>(m.lease.capture.dmabufFd),4);}
     return h;
 }
 bool decode(const std::array<std::uint8_t,HeaderBytes>& h,Message& m){
-    if(std::memcmp(h.data(),"SFL1",4)||h[4]!=1||(h[5]!=1&&h[5]!=2)||h[6]>1||h[7])return false;
+    if(std::memcmp(h.data(),"SFL2",4)||h[4]!=2||(h[5]!=1&&h[5]!=2&&h[5]!=3)||h[6]>1||h[7])return false;
     for(unsigned i=12;i<16;++i)if(h[i])return false;
     for(unsigned i=160;i<HeaderBytes;++i)if(h[i])return false;
     const auto payload=get(h.data()+8,4);if(payload>Channel::MaximumPayload)return false;
     m.kind=static_cast<Kind>(h[5]);m.peerConfirmed=h[6]!=0;std::copy_n(h.begin()+16,16,m.source.stream.connection.begin());
     m.source.outputPoolGeneration=get(h.data()+32,8);m.source.stream.generation=get(h.data()+144,8);m.descriptor={get(h.data()+40,8),get(h.data()+48,8),static_cast<std::uint16_t>(get(h.data()+56,2)),static_cast<std::uint16_t>(get(h.data()+58,2))};
     m.nativeTimestampToken=static_cast<std::uint32_t>(get(h.data()+60,4));m.submittedContent=get(h.data()+64,8);std::copy_n(h.begin()+72,16,m.binding.begin());
-    if(m.kind==Kind::Decoded){m.lease.epoch=get(h.data()+152,8);m.lease.slot=static_cast<std::uint32_t>(get(h.data()+88,4));m.lease.sequence=get(h.data()+96,8);m.lease.kernel={{get(h.data()+120,8),get(h.data()+128,8)}};
+    if(m.kind!=Kind::Certified){m.lease.epoch=get(h.data()+152,8);m.lease.slot=static_cast<std::uint32_t>(get(h.data()+88,4));m.lease.sequence=get(h.data()+96,8);m.lease.kernel={{get(h.data()+120,8),get(h.data()+128,8)}};
         m.lease.capture={nd::CaptureKind::Decoded,static_cast<int>(get(h.data()+136,4)),static_cast<int>(get(h.data()+140,4)),static_cast<std::uint32_t>(get(h.data()+92,4)),m.nativeTimestampToken,m.source.outputPoolGeneration,get(h.data()+104,8),get(h.data()+112,8)};
         if(payload)return false;
     }else {for(unsigned i=88;i<144;++i)if(h[i])return false;for(unsigned i=152;i<160;++i)if(h[i])return false;if(!payload)return false;}
@@ -248,7 +249,7 @@ struct Channel::Impl {
     struct Queued {bool used=false;std::array<std::uint8_t,HeaderBytes> header{};std::vector<std::uint8_t> payload;std::size_t at=0;int dma=-1,lease=-1;};
     Endpoint endpoint=Endpoint::CompositorConsumer;State state=State::Off;PeerPin pin{};
     int listen=-1,socket=-1,parent=-1,ownerLock=-1;std::filesystem::path path;std::string lockName;KernelIdentity socketIdentity{};bool ownsPath=false;
-    std::array<Queued,2> outgoing{};std::size_t head=0,count=0;
+    std::array<Queued,stream_bridge_native::MaxBuffers*2> outgoing{};std::size_t head=0,count=0;
     std::array<std::uint8_t,HeaderBytes> header{};std::size_t headerAt=0,payloadAt=0;Message assembling{};bool decoded=false,ready=false;
     void close(State next){closeFd(socket);closeFd(listen);for(auto& q:outgoing){closeFd(q.dma);closeFd(q.lease);q={};}head=count=0;
         closeFd(assembling.dmabuf);closeFd(assembling.readOnlyLeases);assembling={};header={};headerAt=payloadAt=0;decoded=ready=false;state=next;}
@@ -284,9 +285,12 @@ void Channel::stop() noexcept {
     impl_->ownsPath=false;impl_->path.clear();impl_->socketIdentity={};
     closeFd(impl_->ownerLock);closeFd(impl_->parent);impl_->lockName.clear();
 }
+int Channel::activityFd()const noexcept{return impl_->socket>=0?impl_->socket:impl_->listen;}
+bool Channel::pendingOutput()const noexcept{return impl_->count!=0;}
 State Channel::state()const noexcept{return impl_->state;}
 bool Channel::enqueue(const Message& message) noexcept {
-    if(impl_->endpoint!=Endpoint::VrlinkProducer||impl_->state!=State::Connected||impl_->count==impl_->outgoing.size()||!validMessage(message))return false;
+    if(impl_->state!=State::Connected||impl_->count==impl_->outgoing.size()||!validMessage(message)
+        ||((impl_->endpoint==Endpoint::CompositorConsumer)!=(message.kind==Kind::Ready)))return false;
     try{auto& q=impl_->outgoing[(impl_->head+impl_->count)%impl_->outgoing.size()];
         q.header=encode(message);q.payload=message.certifiedMetadata;
         if(message.kind==Kind::Decoded){q.dma=duplicate(message.dmabuf);q.lease=duplicate(message.readOnlyLeases);KernelIdentity copied{};
@@ -304,13 +308,7 @@ void Channel::tick() noexcept {
             if(getsockopt(impl_->socket,SOL_SOCKET,SO_ERROR,&error,&size)||error){impl_->close(State::Lost);return;}
             if(!verifyPeer(impl_->socket,impl_->pin)){impl_->close(State::Refused);return;}impl_->state=State::Connected;}
         if(impl_->state!=State::Connected)return;
-        if(impl_->endpoint==Endpoint::VrlinkProducer){
-            // This channel is intentionally one-way. Check peer teardown even
-            // with no queued frame, without consuming bytes or ever waiting.
-            std::uint8_t unexpected=0;const auto probed=recv(impl_->socket,&unexpected,1,MSG_PEEK|MSG_DONTWAIT);
-            if(probed==0){impl_->close(State::Lost);return;}
-            if(probed>0){impl_->close(State::Refused);return;}
-            if(errno!=EINTR&&errno!=EAGAIN&&errno!=EWOULDBLOCK){impl_->close(State::Lost);return;}
+        {
             for(unsigned attempt=0;attempt<8&&impl_->count;++attempt){auto& q=impl_->outgoing[impl_->head];
                 const bool header=q.at<HeaderBytes;const auto at=header?q.at:q.at-HeaderBytes;
                 const auto* data=header?q.header.data():q.payload.data();const auto size=header?HeaderBytes:q.payload.size();
@@ -319,7 +317,7 @@ void Channel::tick() noexcept {
                 if(q.at==0&&q.dma>=0){message.msg_control=control.data();message.msg_controllen=control.size();auto* c=CMSG_FIRSTHDR(&message);c->cmsg_level=SOL_SOCKET;c->cmsg_type=SCM_RIGHTS;c->cmsg_len=CMSG_LEN(sizeof(int)*2);int fds[]{q.dma,q.lease};std::memcpy(CMSG_DATA(c),fds,sizeof fds);}
                 const auto n=sendmsg(impl_->socket,&message,MSG_NOSIGNAL);if(n<0){if(pending())break;impl_->close(State::Lost);return;}if(!n){impl_->close(State::Lost);return;}q.at+=static_cast<std::size_t>(n);
                 if(q.at==HeaderBytes+q.payload.size()){closeFd(q.dma);closeFd(q.lease);q={};impl_->head=(impl_->head+1)%impl_->outgoing.size();--impl_->count;}
-            }return;
+            }
         }
         for(unsigned attempt=0;attempt<8&&!impl_->ready;++attempt){
             const bool header=impl_->headerAt<HeaderBytes;auto* data=header?impl_->header.data():impl_->assembling.certifiedMetadata.data();
@@ -335,9 +333,16 @@ void Channel::tick() noexcept {
             }
             if(bad){impl_->close(State::Refused);return;}
             if(header){impl_->headerAt+=static_cast<std::size_t>(n);
+                constexpr char magic[]="SFL2";
+                for(std::size_t at=0;at<std::min<std::size_t>(4,impl_->headerAt);++at)if(impl_->header[at]!=static_cast<std::uint8_t>(magic[at])){impl_->close(State::Refused);return;}
+                if(impl_->headerAt>=5&&impl_->header[4]!=2){impl_->close(State::Refused);return;}
+                if(impl_->headerAt>=6&&((impl_->endpoint==Endpoint::VrlinkProducer&&impl_->header[5]!=static_cast<std::uint8_t>(Kind::Ready))
+                    ||(impl_->endpoint==Endpoint::CompositorConsumer&&impl_->header[5]!=static_cast<std::uint8_t>(Kind::Certified)&&impl_->header[5]!=static_cast<std::uint8_t>(Kind::Decoded)))){impl_->close(State::Refused);return;}
                 if(impl_->headerAt==HeaderBytes){if(!decode(impl_->header,impl_->assembling)){impl_->close(State::Refused);return;}impl_->decoded=true;
                     KernelIdentity imported{};
-                    if(!validMessage(impl_->assembling)||(impl_->assembling.kind==Kind::Decoded
+                    if(!validMessage(impl_->assembling)
+                        ||((impl_->endpoint==Endpoint::VrlinkProducer)!=(impl_->assembling.kind==Kind::Ready))
+                        ||(impl_->assembling.kind==Kind::Decoded
                         &&(!identity(impl_->assembling.dmabuf,imported)||imported!=impl_->assembling.lease.kernel))){impl_->close(State::Refused);return;}
                     if(impl_->assembling.certifiedMetadata.empty())impl_->ready=true;}
             }else {impl_->payloadAt+=static_cast<std::size_t>(n);if(impl_->payloadAt==size)impl_->ready=true;}
@@ -345,7 +350,7 @@ void Channel::tick() noexcept {
     }catch(...){impl_->close(State::Refused);}
 }
 bool Channel::receive(Message& output) noexcept {
-    if(impl_->endpoint!=Endpoint::CompositorConsumer||!impl_->ready)return false;
+    if(!impl_->ready)return false;
     output=std::move(impl_->assembling);impl_->assembling={};impl_->header={};impl_->headerAt=impl_->payloadAt=0;impl_->decoded=impl_->ready=false;return true;
 }
 }

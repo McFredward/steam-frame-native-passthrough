@@ -6,7 +6,7 @@
 #include <memory>
 
 namespace stream_bridge_coverage_gpu {
-constexpr std::uint32_t MaximumSlots=8;
+constexpr std::uint32_t MaximumSlots=32;
 constexpr std::uint32_t MaximumSubmissionFences=64;
 struct FrameIdentity {
     stream_bridge::Nonce binding{};
@@ -57,7 +57,7 @@ public:
     // only. One successful acquire owns one recording reference until release.
     Lease acquire(const FrameIdentity&) noexcept;
     // Renderer-only recording preview. Pending/Copying is allowed solely for
-    // an already initialized same-extent image. It is NOT submit permission:
+    // the same-extent image, including its first upload. It is NOT submit permission:
     // drainUploads must enqueue the new copy on the exact admitted queue, then
     // prepareSubmit must succeed before the caller enables mask coverage.
     Lease acquireScheduled(const FrameIdentity&) noexcept;

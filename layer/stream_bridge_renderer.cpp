@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <unistd.h>
@@ -42,6 +43,12 @@ struct Renderer::Impl {
     struct Descriptor{std::uint64_t id=0,view=0,viewSerial=0;bool valid=false;};
     struct Pipeline{std::uint64_t id=0;VkPipeline coverage{};VkPipelineLayout layout{};};
     struct Use{gpu::Lease lease{};LocalPicture picture;std::uint64_t descriptor=0,viewSerial=0,image=0,imageGeneration=0,memoryGeneration=0;};
+    struct Retention {
+        gpu::Pool* pool=nullptr;gpu::Lease lease{};
+        Retention(gpu::Pool& p,gpu::Lease l):pool(&p),lease(l){}
+        ~Retention(){if(pool)pool->releaseRecorded(lease);}
+    };
+    struct PreparedPicture:LocalPicture {std::shared_ptr<Retention> retained;};
     struct Control{VkBuffer buffer{};VkDeviceSize offset=0;VkDescriptorSet set{};VkCommandBuffer one{};bool assigned=false;};
     struct Command{
         std::uint64_t id=0,pipeline=0,set0=0,epoch=0;bool primary=false,eligible=false;
@@ -56,7 +63,8 @@ struct Renderer::Impl {
     VkDescriptorSetLayout controlLayout{};VkDescriptorPool controlPool{};VkCommandPool guardPool{};
     VkCommandBuffer zero{};VkQueue queue{};VkBuffer controlsBuffer{};VkDeviceMemory controlsMemory{};std::array<Control,128> controls{};
     std::array<Memory,64> memories{};std::array<Image,64> images{};std::array<View,256> views{};std::array<Descriptor,256> descriptors{};
-    std::array<Pipeline,128> pipelines{};std::array<Command,128> commands{};std::array<std::shared_ptr<const LocalPicture>,16> pictures{};
+    std::array<Pipeline,128> pipelines{};std::array<Command,128> commands{};std::array<std::shared_ptr<const PreparedPicture>,native::MaxDevices*native::MaxBuffers> pictures{};
+
 #define FUNCS(X) X(CreateShaderModule) X(DestroyShaderModule) X(CreateGraphicsPipelines) X(DestroyPipeline) X(CreatePipelineLayout) X(DestroyPipelineLayout) \
  X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) X(CreateDescriptorPool) X(DestroyDescriptorPool) X(AllocateDescriptorSets) X(FreeDescriptorSets) X(UpdateDescriptorSets) \
  X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements) X(AllocateMemory) X(FreeMemory) X(BindBufferMemory) X(DeviceWaitIdle) \
@@ -68,6 +76,7 @@ struct Renderer::Impl {
     std::array<gpu::Lease,gpu::MaximumSlots> submittedLeases{};std::size_t submittedCount=0;
     struct Counters {
         std::atomic<std::uint64_t> metadata{0},maskNone{0},maskDecoded{0},maskRejected{0},uploadAccepted{0},uploadRefused{0},pictures{0};
+        std::atomic<std::uint64_t> maskOpaque{0},maskTransparent{0},maskMixed{0};
         std::atomic<std::uint64_t> begins{0},draws{0},selected{0},guardAttempts{0},guardAccepted{0},guardRefused{0},opaqueSubmits{0};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(DrawRefusal::Count)> refusals{};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
@@ -75,6 +84,8 @@ struct Renderer::Impl {
         std::atomic<std::uint64_t> collects{0},collected{0},coreSubmits{0},submits2{0};
         std::atomic<std::uint32_t> firstNextType{0},firstRefusedNextType{0};
     } counts;
+    std::chrono::steady_clock::time_point nextReport{};
+    std::uint64_t lastReportedMetadata=0;
     std::uint64_t reportedMilestones=0;unsigned reportedLevel=0,statusLines=0;
     void refused(DrawRefusal reason) noexcept {counts.refusals[static_cast<std::size_t>(reason)].fetch_add(1,std::memory_order_relaxed);}
     void submitRefused(SubmitRefusal reason,std::uint32_t next=0) noexcept {
@@ -86,6 +97,7 @@ struct Renderer::Impl {
         RendererStats out;
 #define COUNT(n) out.n=counts.n.load(std::memory_order_relaxed);
         COUNT(metadata) COUNT(maskNone) COUNT(maskDecoded) COUNT(maskRejected) COUNT(uploadAccepted) COUNT(uploadRefused) COUNT(pictures)
+        COUNT(maskOpaque) COUNT(maskTransparent) COUNT(maskMixed)
         COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
         COUNT(collects) COUNT(collected) COUNT(coreSubmits) COUNT(submits2) COUNT(firstNextType) COUNT(firstRefusedNextType)
 #undef COUNT
@@ -97,7 +109,7 @@ struct Renderer::Impl {
         out.prepared=out.pipelines!=0;out.lost=lost.load(std::memory_order_acquire);return out;
     }
     void reportCold() noexcept{
-        if(statusLines>=48)return;
+        if(statusLines>=192)return;
         const auto s=stats();if(!s.metadata&&!s.pictures)return;
         std::uint64_t milestones=0;
         const std::array<std::uint64_t,11> events{{s.metadata,s.maskDecoded,s.maskRejected,s.uploadAccepted,s.uploadRefused,s.pictures,s.selected,s.guardAccepted,s.guardRefused,s.ready,s.quarantined}};
@@ -107,8 +119,11 @@ struct Renderer::Impl {
         for(unsigned n=0;n<s.submitRefusals.size();++n)if(s.submitRefusals[n])milestones|=std::uint64_t(1)<<(48+n);
         if(s.firstNextType)milestones|=std::uint64_t(1)<<56;
         if(s.collected)milestones|=std::uint64_t(1)<<57;
-        const auto progress=std::max({s.metadata,s.draws,s.guardAttempts,s.opaqueSubmits});unsigned level=0;for(auto value=progress;value>1;value>>=1)++level;
-        if(!(milestones&~reportedMilestones)&&level<=reportedLevel)return;
+        const auto progress=std::max({s.metadata,s.guardAttempts,s.opaqueSubmits});unsigned level=0;for(auto value=progress;value>1;value>>=1)++level;
+        const auto now=std::chrono::steady_clock::now();
+        const bool periodic=now>=nextReport&&s.metadata!=lastReportedMetadata;
+        if(!(milestones&~reportedMilestones)&&level<=reportedLevel&&!periodic)return;
+        nextReport=now+std::chrono::seconds(5);lastReportedMetadata=s.metadata;
         reportedMilestones|=milestones;reportedLevel=std::max(level,reportedLevel);++statusLines;
         const auto miss=[&](DrawRefusal r){return static_cast<unsigned long long>(s.drawRefusals[static_cast<std::size_t>(r)]);};
         std::fprintf(stderr,"[Steam Link Native Passthrough] renderer flow: metadata=%llu; mask decoded/none/rejected=%llu/%llu/%llu; upload accepted/refused=%llu/%llu, actual=%llu; pool pending/copying/ready/quarantined=%u/%u/%u/%u; pictures=%llu; record selected/attempts=%llu/%llu, begins=%llu; miss unavailable/busy/cb/epoch/pipeline/ineligible/descriptor/image/exact/mask/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu; submit guarded-accepted/attempts/refused=%llu/%llu/%llu, opaque=%llu; pipelines=%u, lost=%u\n",
@@ -117,6 +132,8 @@ struct Renderer::Impl {
             static_cast<unsigned long long>(s.pictures),static_cast<unsigned long long>(s.selected),static_cast<unsigned long long>(s.draws),static_cast<unsigned long long>(s.begins),
             miss(DrawRefusal::Unavailable),miss(DrawRefusal::Busy),miss(DrawRefusal::Command),miss(DrawRefusal::Epoch),miss(DrawRefusal::Pipeline),miss(DrawRefusal::Ineligible),miss(DrawRefusal::Descriptor),miss(DrawRefusal::Image),miss(DrawRefusal::ExactPicture),miss(DrawRefusal::ReadyMask),miss(DrawRefusal::Capacity),
             static_cast<unsigned long long>(s.guardAccepted),static_cast<unsigned long long>(s.guardAttempts),static_cast<unsigned long long>(s.guardRefused),static_cast<unsigned long long>(s.opaqueSubmits),s.pipelines,unsigned(s.lost));
+        std::fprintf(stderr,"[Steam Link Native Passthrough] coverage content: fully-opaque/fully-transparent/mixed=%llu/%llu/%llu; exact pre-draw storage retained; no image capture\n",
+            static_cast<unsigned long long>(s.maskOpaque),static_cast<unsigned long long>(s.maskTransparent),static_cast<unsigned long long>(s.maskMixed));
         const auto collect=[&](CollectRefusal r){return static_cast<unsigned long long>(s.collectRefusals[static_cast<std::size_t>(r)]);};
         const auto submit=[&](SubmitRefusal r){return static_cast<unsigned long long>(s.submitRefusals[static_cast<std::size_t>(r)]);};
         std::fprintf(stderr,"[Steam Link Native Passthrough] renderer submit: core/submit2=%llu/%llu; first-pNext/refused-pNext=%u/%u; unsupported busy/bounds/shape/extension/flags=%llu/%llu/%llu/%llu/%llu; collect accepted/attempts=%llu/%llu; collect miss cb/empty/ineligible/epoch/lease/descriptor/image/memory/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
@@ -196,25 +213,46 @@ struct Renderer::Impl {
     static bool admitted(void* owner) noexcept{
         auto&p=*static_cast<Impl*>(owner);return !p.lost.load(std::memory_order_acquire)&&p.admittedPipelines.load(std::memory_order_acquire)>0;
     }
+    void retirePictures() noexcept {
+        for(auto& slot:pictures){const auto old=std::atomic_load_explicit(&slot,std::memory_order_acquire);
+            if(old&&!current(*old))std::atomic_store_explicit(&slot,std::shared_ptr<const PreparedPicture>{},std::memory_order_release);}
+    }
     static void coverage(void* owner,const sb::CertifiedAccessUnit& certificate) noexcept{
-        auto&p=*static_cast<Impl*>(owner);++p.counts.metadata;
+        auto&p=*static_cast<Impl*>(owner);++p.counts.metadata;p.retirePictures();
+        const auto& d=certificate.descriptor;
         if(certificate.coverageEncoding==sb::CoverageEncoding::None){++p.counts.maskNone;return;}
         try{std::vector<std::uint8_t> bytes;
             if(!sb::decodeCertifiedCoverage(certificate,bytes)){++p.counts.maskRejected;return;}
             ++p.counts.maskDecoded;
-            if(p.pool.upload({certificate.binding,certificate.descriptor},certificate.descriptor.codedWidth,certificate.descriptor.codedHeight,{bytes.data(),bytes.size()}))++p.counts.uploadAccepted;
+            std::uint8_t low=255,high=0;
+            if(certificate.coverageEncoding==sb::CoverageEncoding::Rle){for(std::size_t n=1;n<certificate.coverage.size();n+=2){low=std::min(low,certificate.coverage[n]);high=std::max(high,certificate.coverage[n]);}}
+            else {const auto bounds=std::minmax_element(bytes.begin(),bytes.end());low=*bounds.first;high=*bounds.second;}
+            if(low==255)++p.counts.maskOpaque;else if(!high)++p.counts.maskTransparent;else ++p.counts.maskMixed;
+            if(p.pool.upload({certificate.binding,certificate.descriptor},d.codedWidth,d.codedHeight,{bytes.data(),bytes.size()}))++p.counts.uploadAccepted;
             else ++p.counts.uploadRefused;
         }catch(...){++p.counts.maskRejected;}
     }
     static void picture(void* owner,const LocalPicture& value) noexcept{
         auto&p=*static_cast<Impl*>(owner);try{
-            auto& slot=p.pictures[value.metadata.descriptor.sourceFrame%p.pictures.size()];const auto old=std::atomic_load_explicit(&slot,std::memory_order_acquire);
-            const bool fresh=!old||old->metadata.binding!=value.metadata.binding||!same(old->metadata.descriptor,value.metadata.descriptor)||old->metadata.lease.epoch!=value.metadata.lease.epoch||old->metadata.lease.sequence!=value.metadata.lease.sequence||old->metadata.lease.slot!=value.metadata.lease.slot;
-            auto snapshot=std::make_shared<const LocalPicture>(value);std::atomic_store_explicit(&slot,std::move(snapshot),std::memory_order_release);
-            if(fresh)++p.counts.pictures;
+            if(value.metadata.lease.slot>=p.pictures.size()||!current(value))return;
+            auto& slot=p.pictures[value.metadata.lease.slot];const auto old=std::atomic_load_explicit(&slot,std::memory_order_acquire);
+            const bool samePicture=old&&old->metadata.binding==value.metadata.binding&&same(old->metadata.descriptor,value.metadata.descriptor)
+                &&old->metadata.lease.epoch==value.metadata.lease.epoch&&old->metadata.lease.sequence==value.metadata.lease.sequence;
+            if(samePicture)return;
+            const auto lease=p.pool.acquireScheduled({value.metadata.binding,value.metadata.descriptor});if(!lease)return;
+            std::shared_ptr<Retention> retained;
+            try{retained=std::make_shared<Retention>(p.pool,lease);}catch(...){p.pool.releaseRecorded(lease);return;}
+            auto snapshot=std::make_shared<PreparedPicture>();static_cast<LocalPicture&>(*snapshot)=value;snapshot->retained=std::move(retained);
+            std::atomic_store_explicit(&slot,std::shared_ptr<const PreparedPicture>(std::move(snapshot)),std::memory_order_release);++p.counts.pictures;
         }catch(...){}
     }
-    static void tick(void* owner) noexcept{auto& p=*static_cast<Impl*>(owner);p.pool.reapCold();p.reportCold();}
+    static bool published(void* owner,const LocalPicture& value) noexcept{
+        auto&p=*static_cast<Impl*>(owner);if(value.metadata.lease.slot>=p.pictures.size())return false;
+        const auto ready=std::atomic_load_explicit(&p.pictures[value.metadata.lease.slot],std::memory_order_acquire);
+        return ready&&current(*ready)&&ready->retained&&ready->metadata.binding==value.metadata.binding&&same(ready->metadata.descriptor,value.metadata.descriptor)
+            &&ready->metadata.lease.epoch==value.metadata.lease.epoch&&ready->metadata.lease.sequence==value.metadata.lease.sequence;
+    }
+    static void tick(void* owner) noexcept{auto& p=*static_cast<Impl*>(owner);p.retirePictures();p.pool.reapCold();p.reportCold();}
     bool matchingImage(std::uint64_t image,std::shared_ptr<const LocalPicture>& output){
         const auto* i=find(images,image);if(!i)return false;const auto* m=find(memories,i->memory);if(!m||m->generation!=i->memoryGeneration||m->duplicate<0)return false;
         output.reset();
@@ -326,7 +364,7 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
         }
         if(entry->coverage){
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
-            if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted});
+            if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted,Impl::published});
             coldNote("native exact-coverage pipeline prepared; original picture preserved");
         }else{if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);*entry={};coldNote("exact-coverage pipeline unavailable; ordinary native video retained");}
     }catch(...){/* The successfully created native pipeline remains unchanged. */}
@@ -538,6 +576,7 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
 void Renderer::stopCold() noexcept{
     auto&p=*impl_;if(p.registered){unregisterConsumerCold(&p);p.registered=false;}
     std::lock_guard<std::mutex> lock(p.gate);if(!p.device)return;
+    for(auto& picture:p.pictures)std::atomic_store_explicit(&picture,std::shared_ptr<const Impl::PreparedPicture>{},std::memory_order_release);
     // Device destruction is a cold lifecycle boundary. Join the producer by
     // unregistering first, then obtain actual GPU idle before owned cleanup.
     if(p.DeviceWaitIdle&&p.DeviceWaitIdle(p.device)==VK_SUCCESS){

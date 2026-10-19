@@ -11,19 +11,26 @@
 #include <dlfcn.h>
 #include <mutex>
 #include <thread>
+#include <condition_variable>
+#include <sys/eventfd.h>
+#include <poll.h>
 #include <unistd.h>
 namespace sb=stream_bridge;
 namespace local=stream_bridge_local;
 namespace native=stream_bridge_native;
 namespace stream_bridge_renderer {
 namespace {
-enum class Flow:unsigned {CertifiedCallback,CertifiedQueued,CertifiedQueueRefused,DecodedCallback,ImageMiss,LeaseMiss,NativeStale,BindingMiss,DecodedQueued,DecodedQueueRefused,CertifiedReceived,Authenticated,AuthenticationRefused,DecodedReceived,CertificateMiss,ReceivedLeaseMiss,KernelMiss,PicturesRetained,Count};
+enum class Flow:unsigned {CertifiedCallback,CertifiedQueued,CertifiedQueueRefused,DecodedCallback,ImageMiss,LeaseMiss,NativeStale,BindingMiss,DecodedQueued,DecodedQueueRefused,CertifiedReceived,Authenticated,AuthenticationRefused,DecodedReceived,CertificateMiss,ReceivedLeaseMiss,KernelMiss,PicturesRetained,ReadyQueued,ReadyReceived,HandoffWait,HandoffReady,HandoffTimeout,Count};
 struct Process {
-    std::mutex gate;std::atomic<ProcessKind> kind{ProcessKind::Off};int directory=-1;
+    std::mutex gate;std::condition_variable released;std::atomic<bool> peerConfirmed{false};int wake=-1;std::atomic<ProcessKind> kind{ProcessKind::Off};int directory=-1;
     std::filesystem::path root;std::array<ProcessConsumer,4> consumers{};
     local::Channel channel;local::LeaseWriter writer;native::NativeImages images;
     sb::AuthSession verifier;sb::VideoStreamContext verifiedSource{};
-    std::array<local::Message,16> masks{};std::array<LocalPicture,16> pictures{};
+    std::array<local::Message,native::ReceiverWorker::PendingCapacity> masks{};
+    std::array<LocalPicture,native::MaxDevices*native::MaxBuffers> pictures{};
+    std::array<local::Message,native::MaxDevices*native::MaxBuffers> awaiting{},acknowledged{};
+    std::array<bool,native::ReceiverWorker::PendingCapacity> coverageNeeded{};
+    std::array<bool,native::MaxDevices*native::MaxBuffers> readyQueued{};
     std::shared_ptr<local::LeaseReader> currentLeases;
     std::shared_ptr<std::atomic<bool>> connection;std::uint64_t lastConnect=0;
     std::thread worker;std::uint32_t notes=0;bool prepared=false;
@@ -44,6 +51,8 @@ void reportFlowCold(Process& p){
     const auto get=[&](Flow f){return static_cast<unsigned long long>(values[static_cast<unsigned>(f)]);};
     std::fprintf(stderr,"[Steam Link Native Passthrough] local flow %s: certificate callbacks/queued/queue-refused=%llu/%llu/%llu; decoded callbacks/queued/queue-refused=%llu/%llu/%llu; source miss image/lease/current/binding=%llu/%llu/%llu/%llu; received certificate/authenticated/auth-refused=%llu/%llu/%llu; received decoded/retained=%llu/%llu; receive miss certificate/lease/kernel=%llu/%llu/%llu\n",
         p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::CertifiedCallback),get(Flow::CertifiedQueued),get(Flow::CertifiedQueueRefused),get(Flow::DecodedCallback),get(Flow::DecodedQueued),get(Flow::DecodedQueueRefused),get(Flow::ImageMiss),get(Flow::LeaseMiss),get(Flow::NativeStale),get(Flow::BindingMiss),get(Flow::CertifiedReceived),get(Flow::Authenticated),get(Flow::AuthenticationRefused),get(Flow::DecodedReceived),get(Flow::PicturesRetained),get(Flow::CertificateMiss),get(Flow::ReceivedLeaseMiss),get(Flow::KernelMiss));
+    std::fprintf(stderr,"[Steam Link Native Passthrough] paired decoder handoff %s: ready queued/received=%llu/%llu; waited/ready/emergency-timeout=%llu/%llu/%llu\n",
+        p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::ReadyQueued),get(Flow::ReadyReceived),get(Flow::HandoffWait),get(Flow::HandoffReady),get(Flow::HandoffTimeout));
 }
 Process* process() noexcept{
     // The optional pre-main companion must not terminate Steam on allocation
@@ -68,11 +77,37 @@ bool ownedRead(int directory,const char* name,void* output,std::size_t size){
     good=good&&!fstat(fd,&after)&&before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&before.st_size==after.st_size&&before.st_mtim.tv_sec==after.st_mtim.tv_sec&&before.st_mtim.tv_nsec==after.st_mtim.tv_nsec;close(fd);return good&&n==size;
 }
 void note(Process&p,const char* event){if(p.notes++<32)std::fprintf(stderr,"[Steam Link Native Passthrough] %s\n",event);}
+void notify(Process& p) noexcept {if(p.wake>=0){const std::uint64_t one=1;const auto ignored=write(p.wake,&one,sizeof one);(void)ignored;}}
+bool sameCapture(const native::CaptureObservation&a,const native::CaptureObservation&b) noexcept {
+    return a.kind==b.kind&&a.fd==b.fd&&a.dmabufFd==b.dmabufFd&&a.index==b.index&&a.nativeTimestampToken==b.nativeTimestampToken
+        &&a.sourcePoolGeneration==b.sourcePoolGeneration&&a.capturePoolGeneration==b.capturePoolGeneration&&a.contentGeneration==b.contentGeneration;
+}
+bool sameLease(const local::LeaseReference&a,const local::LeaseReference&b) noexcept {
+    return a.slot==b.slot&&a.sequence==b.sequence&&a.epoch==b.epoch&&a.kernel==b.kernel&&sameCapture(a.capture,b.capture);
+}
+// The native decoder calls this only AFTER publishing its successful exact DQ
+// and dropping its state lock, before exposing that image to the native player.
+// Never wait on a compositor/render thread, a socket, or an unpaired stream.
+void handoff(const native::CaptureObservation& capture,void* context) noexcept {
+    auto&p=*static_cast<Process*>(context);if(!p.peerConfirmed.load(std::memory_order_acquire))return;
+    try{
+        native::wakePinnedReceiver();notify(p);
+        std::unique_lock<std::mutex> lock(p.gate);
+        const auto current=[&]{local::LeaseReference lease;return p.writer.reference(capture,lease);};
+        const auto ready=[&]{local::LeaseReference lease;if(!p.writer.reference(capture,lease))return false;for(const auto& receipt:p.acknowledged)if(receipt.peerConfirmed&&sameLease(receipt.lease,lease))return true;return false;};
+        if(ready()&&current()){count(p,Flow::HandoffReady);return;}
+        if(!current()||!p.peerConfirmed.load(std::memory_order_acquire)||p.channel.state()!=local::State::Connected)return;
+        count(p,Flow::HandoffWait);
+        const bool woke=p.released.wait_for(lock,std::chrono::milliseconds(100),[&]{return ready()||!current()||!p.peerConfirmed.load(std::memory_order_acquire)||p.channel.state()!=local::State::Connected;});
+        if(woke&&ready()&&current())count(p,Flow::HandoffReady);
+        else if(!woke)count(p,Flow::HandoffTimeout);
+    }catch(...){/* Genuine local failure preserves the original native result. */}
+}
 void certified(const native::CertifiedFrame& frame,void* context) noexcept{
     auto&p=*static_cast<Process*>(context);count(p,Flow::CertifiedCallback);if(!frame.certificate||!frame.peerConfirmed||!frame.certificate->originalAccessUnitVerified)return;
     try{local::Message message;message.kind=local::Kind::Certified;message.source=frame.source;message.descriptor=frame.certificate->descriptor;message.binding=frame.certificate->binding;message.nativeTimestampToken=frame.submitted.nativeTimestampToken;message.submittedContent=frame.submitted.contentGeneration;message.peerConfirmed=true;
         if(!sb::serializeCoverageMetadata(*frame.certificate,message.certifiedMetadata))return;
-        std::lock_guard<std::mutex> lock(p.gate);if(p.channel.enqueue(message)){p.masks[message.descriptor.sourceFrame%p.masks.size()]=message;count(p,Flow::CertifiedQueued);}else count(p,Flow::CertifiedQueueRefused);
+        std::lock_guard<std::mutex> lock(p.gate);if(p.channel.enqueue(message)){p.masks[message.descriptor.sourceFrame%p.masks.size()]=message;count(p,Flow::CertifiedQueued);notify(p);}else count(p,Flow::CertifiedQueueRefused);
     }catch(...){/* Missing local copy is opaque, never a guessed picture. */}
 }
 void decoded(const native::DecodedFrame& frame,void* context) noexcept{
@@ -88,11 +123,17 @@ void decoded(const native::DecodedFrame& frame,void* context) noexcept{
         for(const auto& old:p.masks)if(old.peerConfirmed&&sameSource(old.source.stream,frame.source.stream)&&sameDescriptor(old.descriptor,frame.descriptor)&&old.nativeTimestampToken==frame.submitted.nativeTimestampToken&&old.submittedContent==frame.submitted.contentGeneration){message.binding=old.binding;found=true;break;}
         if(!found){count(p,Flow::BindingMiss);return;}
         message.kind=local::Kind::Decoded;message.source=frame.source;message.descriptor=frame.descriptor;message.nativeTimestampToken=frame.submitted.nativeTimestampToken;message.submittedContent=frame.submitted.contentGeneration;message.peerConfirmed=true;message.lease=lease;message.dmabuf=frame.capture.dmabufFd;message.readOnlyLeases=p.writer.duplicateReadOnly();
-        if(message.readOnlyLeases>=0){if(p.channel.enqueue(message))count(p,Flow::DecodedQueued);else count(p,Flow::DecodedQueueRefused);close(message.readOnlyLeases);}else count(p,Flow::LeaseMiss);
+        if(message.readOnlyLeases>=0){if(p.channel.enqueue(message)){
+            count(p,Flow::DecodedQueued);auto receipt=message;receipt.dmabuf=receipt.readOnlyLeases=-1;
+            if(lease.slot<p.awaiting.size()){p.awaiting[lease.slot]=std::move(receipt);p.acknowledged[lease.slot]={};}notify(p);
+        }else count(p,Flow::DecodedQueueRefused);close(message.readOnlyLeases);}else count(p,Flow::LeaseMiss);
     }catch(...){/* Missing selected lease is ordinary native output. */}
 }
 void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
-    auto&p=*static_cast<Process*>(context);if(notice.state==native::RuntimeState::SourceLost||notice.state==native::RuntimeState::SenderUnavailable)p.writer.invalidateCurrentEpoch();
+    auto&p=*static_cast<Process*>(context);
+    {std::lock_guard<std::mutex> lock(p.gate);p.peerConfirmed.store(notice.state==native::RuntimeState::PeerConfirmed,std::memory_order_release);
+        if(notice.state==native::RuntimeState::SourceLost||notice.state==native::RuntimeState::SenderUnavailable)p.writer.invalidateCurrentEpoch();}
+    p.released.notify_all();
     // Worker-only, first occurrence of each state/control/reason, with an
     // overall process bound. Keep distinct native-loss causes visible without
     // journal growth proportional to frames or repeated connection attempts.
@@ -110,6 +151,15 @@ void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
 }
 void consume(Process&p,local::Message& message){
     if(!message.peerConfirmed)return;
+    if(message.kind==local::Kind::Ready){
+        if(p.kind!=ProcessKind::Vrlink||message.lease.slot>=p.awaiting.size())return;
+        const auto& expected=p.awaiting[message.lease.slot];local::LeaseReference lease;
+        if(!expected.peerConfirmed||expected.binding!=message.binding||!sameSource(expected.source.stream,message.source.stream)
+            ||!sameDescriptor(expected.descriptor,message.descriptor)||expected.nativeTimestampToken!=message.nativeTimestampToken
+            ||expected.submittedContent!=message.submittedContent||!sameLease(expected.lease,message.lease)
+            ||!p.writer.reference(message.lease.capture,lease)||!sameLease(lease,message.lease))return;
+        p.acknowledged[message.lease.slot]=message;count(p,Flow::ReadyReceived);p.released.notify_all();return;
+    }
     if(message.kind==local::Kind::Certified){
         count(p,Flow::CertifiedReceived);
         if(!sameSource(p.verifiedSource,message.source.stream)){
@@ -120,7 +170,8 @@ void consume(Process&p,local::Message& message){
         }
         sb::CertifiedAccessUnit certificate;if(sb::inspectCoverageMetadata({message.certifiedMetadata.data(),message.certifiedMetadata.size()},p.verifier,certificate)!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor)){count(p,Flow::AuthenticationRefused);return;}
         count(p,Flow::Authenticated);
-        auto* target=&p.masks[message.descriptor.sourceFrame%p.masks.size()];*target=message;
+        const auto index=message.descriptor.sourceFrame%p.masks.size();
+        auto* target=&p.masks[index];*target=message;p.coverageNeeded[index]=certificate.coverageEncoding!=sb::CoverageEncoding::None;
         for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))&&consumer.coverage)consumer.coverage(consumer.owner,certificate);
     }else if(message.kind==local::Kind::Decoded){
         count(p,Flow::DecodedReceived);
@@ -129,7 +180,8 @@ void consume(Process&p,local::Message& message){
         auto reader=std::make_shared<local::LeaseReader>();if(!reader->mapReadOnly(message.readOnlyLeases)||!reader->current(message.lease)){count(p,Flow::ReceivedLeaseMiss);return;}
         struct stat file{};if(fstat(message.dmabuf,&file)||local::KernelIdentity{{std::uint64_t(file.st_dev),std::uint64_t(file.st_ino)}}!=message.lease.kernel){count(p,Flow::KernelMiss);return;}
         LocalPicture picture;picture.metadata=message;picture.metadata.dmabuf=picture.metadata.readOnlyLeases=-1;picture.leases=reader;picture.connection=p.connection;
-        auto& old=p.pictures[message.descriptor.sourceFrame%p.pictures.size()];old=std::move(picture);count(p,Flow::PicturesRetained);
+        if(message.lease.slot>=p.pictures.size())return;
+        auto& old=p.pictures[message.lease.slot];old=std::move(picture);p.readyQueued[message.lease.slot]=false;count(p,Flow::PicturesRetained);
         for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))&&consumer.picture)consumer.picture(consumer.owner,old);
     }
 }
@@ -156,7 +208,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
             if(p.connection)p.connection->store(false,std::memory_order_release);
             if(current==local::State::Connected)p.connection=std::make_shared<std::atomic<bool>>(true);
             if(current==local::State::Lost||current==local::State::Refused)p.writer.invalidateCurrentEpoch();
-            previous=current;
+            previous=current;p.released.notify_all();
             const auto bit=std::uint32_t(1)<<static_cast<unsigned>(current);
             if(!(p.channelNotices&bit)){
                 p.channelNotices|=bit;
@@ -171,27 +223,53 @@ void workCycle(Process& p,local::State& previous) noexcept{
                 }
             }
         }
+        // Drain a bounded complete burst in this cycle. A second receive
+        // without tick cannot parse the next certificate/decoded packet.
+        local::Message message;
+        for(unsigned n=0;n<native::MaxBuffers*4&&p.channel.receive(message);++n){
+            try{consume(p,message);}catch(...){}
+            if(message.dmabuf>=0)close(message.dmabuf);
+            if(message.readOnlyLeases>=0)close(message.readOnlyLeases);
+            message={};p.channel.tick();
+        }
         if(p.kind==ProcessKind::Compositor){
-            local::Message message;
-            for(unsigned n=0;n<2&&p.channel.receive(message);++n){
-                // Consumer allocation failure must still close this packet's
-                // received SCM_RIGHTS. Never leak decoder objects on OOM.
-                try{consume(p,message);}catch(...){}
-                if(message.dmabuf>=0)close(message.dmabuf);
-                if(message.readOnlyLeases>=0)close(message.readOnlyLeases);
-                message={};
-            }
             for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))){
-                for(const auto& picture:p.pictures)if(picture.leases&&picture.connection&&picture.connection->load(std::memory_order_acquire)&&picture.leases->current(picture.metadata.lease)&&consumer.picture)consumer.picture(consumer.owner,picture);
                 if(consumer.tick)consumer.tick(consumer.owner);
+                for(const auto& picture:p.pictures)if(picture.leases&&picture.connection&&picture.connection->load(std::memory_order_acquire)&&picture.leases->current(picture.metadata.lease)&&consumer.picture)consumer.picture(consumer.owner,picture);
             }
+            for(std::size_t n=0;n<p.pictures.size();++n){const auto& picture=p.pictures[n];
+                if(p.readyQueued[n]||!picture.leases||!picture.connection||!picture.connection->load(std::memory_order_acquire)||!picture.leases->current(picture.metadata.lease))continue;
+                bool certificateFound=false,needsCoverage=true;
+                for(std::size_t k=0;k<p.masks.size();++k)if(p.masks[k].peerConfirmed&&p.masks[k].binding==picture.metadata.binding
+                    &&sameSource(p.masks[k].source.stream,picture.metadata.source.stream)
+                    &&p.masks[k].source.outputPoolGeneration==picture.metadata.source.outputPoolGeneration
+                    &&p.masks[k].nativeTimestampToken==picture.metadata.nativeTimestampToken&&p.masks[k].submittedContent==picture.metadata.submittedContent
+                    &&sameDescriptor(p.masks[k].descriptor,picture.metadata.descriptor)){certificateFound=true;needsCoverage=p.coverageNeeded[k];break;}
+                if(!certificateFound)continue;
+                bool any=false,all=true;
+                if(needsCoverage)for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))){
+                    any=true;all&=consumer.published&&consumer.published(consumer.owner,picture);
+                }
+                if(needsCoverage&&(!any||!all))continue;
+                auto receipt=picture.metadata;receipt.kind=local::Kind::Ready;receipt.certifiedMetadata.clear();
+                if(p.channel.enqueue(receipt)){p.readyQueued[n]=true;count(p,Flow::ReadyQueued);}
+            }
+            p.channel.tick();
         }
         reportFlowCold(p);
     }catch(...){/* Optional worker loss cannot stop native rendering. */}
 }
 void work(Process* pointer) noexcept{
     local::State previous=local::State::Off;
-    for(;;){workCycle(*pointer,previous);std::this_thread::sleep_for(std::chrono::milliseconds(2));}
+    for(;;){
+        workCycle(*pointer,previous);
+        // Poll is confined to this cold local worker. Data arrival and producer
+        // callbacks wake it immediately instead of adding two 2-ms sleeps.
+        pollfd descriptors[2]{};
+        {std::lock_guard<std::mutex> lock(pointer->gate);descriptors[0]={pointer->channel.activityFd(),short(POLLIN|(pointer->channel.pendingOutput()?POLLOUT:0)),0};descriptors[1]={pointer->wake,POLLIN,0};}
+        const auto ignored=poll(descriptors,2,2);(void)ignored;
+        if(descriptors[1].revents&POLLIN){std::uint64_t value=0;const auto drained=read(pointer->wake,&value,sizeof value);(void)drained;}
+    }
 }
 bool fragment(const char* name,std::size_t bytes,const char* sha,std::vector<std::uint32_t>& output){
     auto* pointer=process();if(!pointer)return false;auto&p=*pointer;if(p.directory<0||bytes%4)return false;
@@ -234,12 +312,13 @@ bool prepareProcessCold() noexcept{
         if(std::memcmp(config,magic,sizeof(magic)-1))return;
         char address[16]{};unsigned port=0;int used=0;
         if(std::sscanf(config+sizeof(magic)-1,"%15[0-9.]\n%u\n%n",address,&port,&used)!=2||used!=st.st_size-static_cast<off_t>(sizeof(magic)-1)||!port||port>65535)return;
+        p.wake=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);if(p.wake<0)return;
         p.kind.store(kind,std::memory_order_release);
         if(kind==ProcessKind::Vrlink){
             if(!p.writer.prepareCold()){p.kind=ProcessKind::Off;return;}
             native::RuntimeRequest request;request.explicitlyEnabled=true;request.buildId=712;request.pairingsDirectory=p.root/"pairings";std::copy_n(address,std::strlen(address)+1,request.producerAddress.data());request.producerPort=std::uint16_t(port);
             request.callbacks={certified,decoded,nullptr,sourceNotice,&p};request.imageRoutePrepared=imageRoutePrepared;request.imageRouteContext=&p;
-            if(!native::startPinnedReceiver(request)||!native::setPinnedCaptureSink(local::LeaseWriter::sink,&p.writer)){native::stopPinnedReceiver();p.kind=ProcessKind::Off;return;}
+            if(!native::startPinnedReceiver(request)||!native::setPinnedCaptureSink(local::LeaseWriter::sink,&p.writer)||!native::setPinnedCaptureHandoff(handoff,&p)){native::stopPinnedReceiver();p.kind=ProcessKind::Off;return;}
         }
         p.prepared=true;p.worker=std::thread(work,&p);p.worker.detach();note(p,kind==ProcessKind::Vrlink?"early video source prepared":"native compositor bridge prepared");
     });}catch(...){p.prepared=false;p.kind=ProcessKind::Off;native::stopPinnedReceiver();}

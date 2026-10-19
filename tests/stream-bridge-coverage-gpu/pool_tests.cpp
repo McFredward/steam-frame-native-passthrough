@@ -83,7 +83,7 @@ struct Fixture {
 };
 void lifecycle(){Fixture f(false);auto id=f.frame(1);check(f.upload(1),"upload valid");check(!f.pool.acquire(id),"pending is never sampled");auto before=f.vk.submits;f.pool.drainUploads(handle<VkQueue>(999));check(f.vk.submits==before,"unknown queue untouched");f.pool.drainUploads(f.vk.queue);check(!f.pool.acquire(id),"unsignaled copy never sampled");f.pool.reapCold();check(!f.pool.acquire(id),"poll does not invent completion");f.vk.signal();f.pool.reapCold();unsigned calls=f.vk.calls;auto l=f.pool.acquire(id);check(bool(l),"upload fence completion permits binding");check(f.vk.calls==calls,"draw acquires without Vulkan call");const auto reservation=f.pool.prepareSubmit(f.vk.queue,&l,1);check(bool(reservation),"reserve retirement");f.pool.submitted(reservation,f.vk.queue,&l,1,VK_SUCCESS);f.pool.releaseRecorded(l);check(f.pool.statusCold().submitted==1,"record release does not free in-flight GPU reference");f.pool.reapCold();check(f.pool.statusCold().submitted==1,"tail fence required");f.vk.signal();f.pool.reapCold();check(f.pool.statusCold().submitted==0,"tail fence releases GPU ownership");}
 void inputs(){Fixture f;auto id=f.frame(1);auto invalid=id;invalid.binding={};check(!f.pool.upload(invalid,16,1,{f.pixels.data(),16}),"no empty binding");invalid=id;invalid.descriptor.sourceFrame=0;check(!f.pool.upload(invalid,16,1,{f.pixels.data(),16}),"no guessed frame0");invalid=id;invalid.descriptor.encoderGeneration=0;check(!f.pool.upload(invalid,16,1,{f.pixels.data(),16}),"no generation0");check(!f.pool.upload(id,8,2,{f.pixels.data(),16}),"extent must match authenticated descriptor");check(!f.pool.upload(id,16,1,{f.pixels.data(),15}),"exact bytes required");check(f.upload(1)&&f.upload(1),"immutable duplicate accepted");f.pixels[0]=17;check(!f.upload(1),"conflicting same-frame bytes refused");}
-void bounded(){Fixture f;std::array<Lease,MaximumSlots> ls{};for(unsigned i=0;i<MaximumSlots;++i)ls[i]=f.ready(i+1);check(!f.upload(9),"eight recorded slots cannot be evicted");const auto allocations=f.vk.allocations,destroys=f.vk.destroys;f.pool.releaseRecorded(ls[0]);check(f.upload(9),"unreferenced ready slot recycled");check(f.vk.allocations==allocations&&f.vk.destroys==destroys,"same extent reuses idle image and staging allocations");f.pool.drainUploads(f.vk.queue);f.vk.signal();f.pool.reapCold();auto l=f.pool.acquire(f.frame(9));check(bool(l)&&l.slot==ls[0].slot&&l.generation!=ls[0].generation,"reused slot has fresh generation");auto n=f.pool.statusCold().recorded;f.pool.releaseRecorded(ls[0]);check(f.pool.statusCold().recorded==n,"stale release cannot decrement new slot");f.pool.releaseRecorded(l);for(unsigned i=1;i<MaximumSlots;++i)f.pool.releaseRecorded(ls[i]);}
+void bounded(){Fixture f;std::array<Lease,MaximumSlots> ls{};for(unsigned i=0;i<MaximumSlots;++i)ls[i]=f.ready(i+1);check(!f.upload(MaximumSlots+1),"all recorded slots cannot be evicted");const auto allocations=f.vk.allocations,destroys=f.vk.destroys;f.pool.releaseRecorded(ls[0]);check(f.upload(MaximumSlots+1),"unreferenced ready slot recycled");check(f.vk.allocations==allocations&&f.vk.destroys==destroys,"same extent reuses idle image and staging allocations");f.pool.drainUploads(f.vk.queue);f.vk.signal();f.pool.reapCold();auto l=f.pool.acquire(f.frame(MaximumSlots+1));check(bool(l)&&l.slot==ls[0].slot&&l.generation!=ls[0].generation,"reused slot has fresh generation");auto n=f.pool.statusCold().recorded;f.pool.releaseRecorded(ls[0]);check(f.pool.statusCold().recorded==n,"stale release cannot decrement new slot");f.pool.releaseRecorded(l);for(unsigned i=1;i<MaximumSlots;++i)f.pool.releaseRecorded(ls[i]);}
 void failure(){
     {Fixture f;f.vk.failImage=true;check(!f.upload(1),"allocation failure refused");check(!f.pool.acquire(f.frame(1)),"failed upload cannot bind");f.vk.failImage=false;check(f.upload(2),"failed allocation releases slot");}
     {Fixture f;check(f.upload(1),"pending before queue failure");f.vk.failSubmit=true;f.pool.drainUploads(f.vk.queue);check(!f.pool.acquire(f.frame(1))&&f.pool.statusCold().quarantined==1,"failed copy quarantines");}
@@ -93,23 +93,31 @@ void failure(){
 }
 void scheduled(){
     auto prime=[](Fixture&f){for(unsigned i=0;i<MaximumSlots;++i){auto l=f.ready(i+1);f.pool.releaseRecorded(l);}};
-    {Fixture f;check(f.upload(1),"first scheduled upload");check(!f.pool.acquireScheduled(f.frame(1)),"scheduled never exposes first uninitialized image");
-        f.pool.drainUploads(f.vk.queue);check(!f.pool.acquireScheduled(f.frame(1)),"scheduled first copy still requires completed upload fence");
-        f.vk.signal();f.pool.reapCold();auto l=f.pool.acquireScheduled(f.frame(1));check(bool(l),"scheduled first image allowed after real reap");f.pool.releaseRecorded(l);}
-    {Fixture f;prime(f);auto allocations=f.vk.allocations;check(f.upload(9),"reuse pending mask");check(f.vk.allocations==allocations,"same extent reuses image and staging allocations");
-        check(!f.pool.acquire(f.frame(9)),"strict acquire remains ready-only");auto calls=f.vk.calls;auto l=f.pool.acquireScheduled(f.frame(9));check(bool(l),"scheduled initialized reuse is recordable before copy submit");check(f.vk.calls==calls,"scheduled acquire has no Vulkan calls");
+    {Fixture f;check(f.upload(1),"first scheduled upload");auto l=f.pool.acquireScheduled(f.frame(1));
+        check(bool(l)&&!f.pool.acquire(f.frame(1)),"first image can be recorded without pretending CPU-ready");
+        check(!f.pool.prepareSubmit(f.vk.queue,&l,1),"first pending upload cannot enable a native sample");
+        f.pool.drainUploads(handle<VkQueue>(999));check(!f.pool.prepareSubmit(f.vk.queue,&l,1),"another queue cannot establish first-image ordering");
+        f.pool.drainUploads(f.vk.queue);const auto reservation=f.pool.prepareSubmit(f.vk.queue,&l,1);
+        check(bool(reservation),"successful first same-queue copy and barrier authorize later native sampling");
+        f.pool.submitted(reservation,f.vk.queue,&l,1,VK_SUCCESS);f.pool.releaseRecorded(l);
+        f.vk.signal();f.pool.reapCold();auto strict=f.pool.acquire(f.frame(1));check(bool(strict),"only actual fence completion grants CPU-ready acquire");f.pool.releaseRecorded(strict);}
+    {Fixture f;prime(f);auto allocations=f.vk.allocations;check(f.upload(MaximumSlots+1),"reuse pending mask");check(f.vk.allocations==allocations,"same extent reuses image and staging allocations");
+        check(!f.pool.acquire(f.frame(MaximumSlots+1)),"strict acquire remains ready-only");auto calls=f.vk.calls;auto l=f.pool.acquireScheduled(f.frame(MaximumSlots+1));check(bool(l),"scheduled initialized reuse is recordable before copy submit");check(f.vk.calls==calls,"scheduled acquire has no Vulkan calls");
         check(!f.pool.prepareSubmit(f.vk.queue,&l,1),"scheduled pending image cannot submit before actual copy acceptance");check(f.pool.statusCold().quarantined==0,"unsubmitted scheduled reference retains recording storage without permanent quarantine");f.pool.drainUploads(f.vk.queue);const auto retried=f.pool.prepareSubmit(f.vk.queue,&l,1);check(bool(retried),"same scheduled reference recovers only after actual copy acceptance");f.pool.submitted(retried,f.vk.queue,&l,1,VK_SUCCESS);f.pool.releaseRecorded(l);}
-    {Fixture f;prime(f);check(f.upload(9),"accepted scheduled upload");auto l=f.pool.acquireScheduled(f.frame(9));check(bool(l),"scheduled valid reused descriptor");
-        f.pool.drainUploads(f.vk.queue);check(!f.pool.acquire(f.frame(9)),"strict acquire does not inherit ordered queue authority");
+    {Fixture f;prime(f);check(f.upload(MaximumSlots+1),"accepted scheduled upload");auto l=f.pool.acquireScheduled(f.frame(MaximumSlots+1));check(bool(l),"scheduled valid reused descriptor");
+        f.pool.drainUploads(f.vk.queue);check(!f.pool.acquire(f.frame(MaximumSlots+1)),"strict acquire does not inherit ordered queue authority");
         const auto reservation=f.pool.prepareSubmit(f.vk.queue,&l,1);check(bool(reservation),"copy accepted on exact queue permits scheduled mask before reap");f.pool.submitted(reservation,f.vk.queue,&l,1,VK_SUCCESS);f.pool.releaseRecorded(l);
         check(f.pool.statusCold().copying==1&&f.pool.statusCold().submitted==1,"unreaped upload and GPU ownership retained");f.vk.signal();f.pool.reapCold();
-        check(f.pool.statusCold().submitted==0,"scheduled caller retirement completed");auto strict=f.pool.acquire(f.frame(9));check(bool(strict),"strict acquire enabled by actual copy reap");f.pool.releaseRecorded(strict);}
-    {Fixture f;prime(f);check(f.upload(9),"failed-copy reused upload");auto l=f.pool.acquireScheduled(f.frame(9));auto destroys=f.vk.destroys;
+        check(f.pool.statusCold().submitted==0,"scheduled caller retirement completed");auto strict=f.pool.acquire(f.frame(MaximumSlots+1));check(bool(strict),"strict acquire enabled by actual copy reap");f.pool.releaseRecorded(strict);}
+    {Fixture f;prime(f);check(f.upload(MaximumSlots+1),"failed-copy reused upload");auto l=f.pool.acquireScheduled(f.frame(MaximumSlots+1));auto destroys=f.vk.destroys;
         f.vk.failSubmit=true;f.pool.drainUploads(f.vk.queue);check(!f.pool.prepareSubmit(f.vk.queue,&l,1),"failed copy never authorizes scheduled submission");
         check(f.vk.destroys==destroys&&f.pool.statusCold().quarantined==1,"failed copy retains previously initialized descriptor and resources");f.pool.releaseRecorded(l);}
-    {Fixture f;prime(f);auto resized=f.frame(9);resized.descriptor.codedWidth=8;resized.descriptor.codedHeight=2;
-        check(f.pool.upload(resized,8,2,{f.pixels.data(),f.pixels.size()}),"new extent upload");check(!f.pool.acquireScheduled(resized),"new extent cannot reuse initialized-image authority");
-        f.pool.drainUploads(f.vk.queue);check(!f.pool.acquireScheduled(resized),"new extent remains uninitialized until actual reap");f.vk.signal();f.pool.reapCold();auto l=f.pool.acquireScheduled(resized);check(bool(l),"new extent allowed after actual copy completion");f.pool.releaseRecorded(l);}
+    {Fixture f;prime(f);auto resized=f.frame(MaximumSlots+1);resized.descriptor.codedWidth=8;resized.descriptor.codedHeight=2;
+        check(f.pool.upload(resized,8,2,{f.pixels.data(),f.pixels.size()}),"new extent upload");auto l=f.pool.acquireScheduled(resized);
+        check(bool(l)&&!f.pool.prepareSubmit(f.vk.queue,&l,1),"new extent records but cannot submit before its own copy");
+        f.pool.drainUploads(f.vk.queue);const auto reservation=f.pool.prepareSubmit(f.vk.queue,&l,1);
+        check(bool(reservation),"new extent has its own successful copy and first-layout barrier");f.pool.submitted(reservation,f.vk.queue,&l,1,VK_SUCCESS);f.pool.releaseRecorded(l);
+        f.vk.signal();f.pool.reapCold();auto strict=f.pool.acquire(resized);check(bool(strict),"new extent is CPU-ready only after actual reap");f.pool.releaseRecorded(strict);}
 }
 void reservations(){
     {Fixture f;auto l=f.ready(1);const auto old=f.pool.prepareSubmit(f.vk.queue,&l,1);check(bool(old),"first exact reservation");f.pool.submitted(old,f.vk.queue,&l,1,VK_SUCCESS);f.vk.signal();f.pool.reapCold();
@@ -135,27 +143,27 @@ void warmSlots(Fixture& f){for(unsigned n=1;n<=MaximumSlots;++n){auto lease=f.re
 void gpuReferencedReuse(){Fixture f;std::array<Lease,MaximumSlots> leases{};for(unsigned n=0;n<MaximumSlots;++n)leases[n]=f.ready(n+1);
     for(const auto& lease:leases){const auto reservation=f.pool.prepareSubmit(f.vk.queue,&lease,1);check(bool(reservation),"actual in-flight GPU reservation owns its exact source");f.pool.submitted(reservation,f.vk.queue,&lease,1,VK_SUCCESS);f.pool.releaseRecorded(lease);}
     const auto allocations=f.vk.allocations,destroys=f.vk.destroys;check(f.pool.statusCold().submitted==MaximumSlots&&!f.pool.statusCold().recorded,"all exact sources remain GPU-owned after recording references release");
-    check(!f.upload(9)&&f.vk.allocations==allocations&&f.vk.destroys==destroys,"post-claim GPU ownership prevents any cold resource replacement");
-    f.vk.signal();f.pool.reapCold();check(f.upload(9),"only real GPU retirement permits cold replacement");
+    check(!f.upload(MaximumSlots+1)&&f.vk.allocations==allocations&&f.vk.destroys==destroys,"post-claim GPU ownership prevents any cold resource replacement");
+    f.vk.signal();f.pool.reapCold();check(f.upload(MaximumSlots+1),"only real GPU retirement permits cold replacement");
 }
-void submitting(){Fixture f;warmSlots(f);check(f.upload(9),"initialized next source is pending");f.vk.block=true;std::thread queue([&]{f.pool.drainUploads(f.vk.queue);});while(!f.vk.inside.load())std::this_thread::yield();
+void submitting(){Fixture f;warmSlots(f);check(f.upload(MaximumSlots+1),"initialized next source is pending");f.vk.block=true;std::thread queue([&]{f.pool.drainUploads(f.vk.queue);});while(!f.vk.inside.load())std::this_thread::yield();
     // The native copy submit has not returned. Its slot is not idle, even
     // though no recording or GPU sampling reference owns it yet.
-    const auto calls=f.vk.calls;f.pool.reapCold();check(f.vk.calls==calls,"cold reap cannot poll a Submitting copy fence before native success");check(f.upload(9)&&f.vk.calls==calls,"duplicate certificate cannot reset or rewrite a Submitting copy");
-    auto preview=f.pool.acquireScheduled(f.frame(9));check(bool(preview)&&!f.pool.acquire(f.frame(9)),"initialized Submitting image permits recording preview but no completed-upload claim");f.pool.releaseRecorded(preview);
-    for(unsigned n=10;n<17;++n)check(f.upload(n),"other idle slots can receive independent exact masks while copy submit is blocked");
-    const bool refused=!f.upload(17);f.vk.block=false;queue.join();check(refused,"Submitting slot cannot be recycled even after all seven other idle slots are consumed");
-    f.vk.signal();f.pool.reapCold();auto lease=f.pool.acquire(f.frame(9));check(bool(lease)&&f.pool.statusCold().ready==8,"original Submitting source survives through real success and completion");f.pool.releaseRecorded(lease);
+    const auto calls=f.vk.calls;f.pool.reapCold();check(f.vk.calls==calls,"cold reap cannot poll a Submitting copy fence before native success");check(f.upload(MaximumSlots+1)&&f.vk.calls==calls,"duplicate certificate cannot reset or rewrite a Submitting copy");
+    auto preview=f.pool.acquireScheduled(f.frame(MaximumSlots+1));check(bool(preview)&&!f.pool.acquire(f.frame(MaximumSlots+1)),"initialized Submitting image permits recording preview but no completed-upload claim");f.pool.releaseRecorded(preview);
+    for(unsigned n=MaximumSlots+2;n<MaximumSlots*2+1;++n)check(f.upload(n),"other idle slots can receive independent exact masks while copy submit is blocked");
+    const bool refused=!f.upload(MaximumSlots*2+1);f.vk.block=false;queue.join();check(refused,"Submitting slot cannot be recycled even after all other finite idle slots are consumed");
+    f.vk.signal();f.pool.reapCold();auto lease=f.pool.acquire(f.frame(MaximumSlots+1));check(bool(lease)&&f.pool.statusCold().ready==MaximumSlots,"original Submitting source survives through real success and completion");f.pool.releaseRecorded(lease);
 }
-void concurrentReuse(){Fixture f;warmSlots(f);std::atomic<std::uint64_t> published{8};std::atomic<bool> start{false},done{false},invalid{false};std::atomic<unsigned> held{0};
-    std::thread cold([&]{while(!start.load())std::this_thread::yield();for(std::uint64_t id=9;id<=4096;++id){if(!f.upload(id)){invalid=true;break;}f.pool.drainUploads(f.vk.queue);f.vk.signal();f.pool.reapCold();published.store(id,std::memory_order_release);}done=true;});
+void concurrentReuse(){Fixture f;warmSlots(f);std::atomic<std::uint64_t> published{MaximumSlots};std::atomic<bool> start{false},done{false},invalid{false};std::atomic<unsigned> held{0};
+    std::thread cold([&]{while(!start.load())std::this_thread::yield();for(std::uint64_t id=MaximumSlots+1;id<=4096;++id){if(!f.upload(id)){invalid=true;break;}f.pool.drainUploads(f.vk.queue);f.vk.signal();f.pool.reapCold();published.store(id,std::memory_order_release);}done=true;});
     // Establish one owned claim BEFORE releasing the worker, so even a
     // single-core scheduler proves overlapping lifetime rather than racing
     // the main thread against completion of the whole short cold loop.
-    auto initial=f.pool.acquire(f.frame(8));if(!initial)invalid=true;else ++held;
+    auto initial=f.pool.acquire(f.frame(MaximumSlots));if(!initial)invalid=true;else ++held;
     start=true;
     while(!done.load(std::memory_order_acquire)&&published.load(std::memory_order_acquire)<24)std::this_thread::yield();
-    auto retained=f.pool.acquire(f.frame(8));if(!retained||retained.slot!=initial.slot||retained.generation!=initial.generation||retained.set!=initial.set)invalid=true;
+    auto retained=f.pool.acquire(f.frame(MaximumSlots));if(!retained||retained.slot!=initial.slot||retained.generation!=initial.generation||retained.set!=initial.set)invalid=true;
     if(retained)f.pool.releaseRecorded(retained);
     if(initial)f.pool.releaseRecorded(initial);
     while(!done.load(std::memory_order_acquire)){const auto id=published.load(std::memory_order_acquire);auto first=f.pool.acquire(f.frame(id));if(!first)continue;

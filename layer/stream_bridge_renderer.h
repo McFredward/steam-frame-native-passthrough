@@ -20,6 +20,7 @@ enum class CollectRefusal:std::uint8_t {Command,Empty,Ineligible,Epoch,Lease,Des
 enum class SubmitRefusal:std::uint8_t {Busy,Bounds,Shape,Extension,Flags,Count};
 struct RendererStats {
     std::uint64_t metadata=0,maskNone=0,maskDecoded=0,maskRejected=0,uploadAccepted=0,uploadRefused=0,pictures=0;
+    std::uint64_t maskOpaque=0,maskTransparent=0,maskMixed=0;
     std::uint64_t begins=0,draws=0,selected=0,guardAttempts=0,guardAccepted=0,guardRefused=0,opaqueSubmits=0;
     std::array<std::uint64_t,static_cast<std::size_t>(DrawRefusal::Count)> drawRefusals{};
     std::array<std::uint64_t,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};

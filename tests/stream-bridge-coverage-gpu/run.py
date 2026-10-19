@@ -97,14 +97,10 @@ def main():
                     result['negative_controls'].append({'name': name, 'assertion': intended, 'rejected': True})
             if args.suite in ('all', 'core', 'scheduled-controls'):
                 scheduled_mutants = [
-                    ('scheduled-first-uninitialized',
-                     'scheduled&&s.initializedShaderReadLayout.load(std::memory_order_acquire)&&',
-                     'scheduled&&',
-                     'scheduled never exposes first uninitialized image'),
                     ('scheduled-before-copy-submit',
-                     's.state==State::Ready||(s.state==State::Copying&&s.initializedShaderReadLayout)',
-                     's.state==State::Ready||((s.state==State::Copying||s.state==State::Pending)&&s.initializedShaderReadLayout)',
-                     'scheduled pending image cannot submit before actual copy acceptance'),
+                     's.state==State::Ready||(s.state==State::Copying)',
+                     's.state==State::Ready||(s.state==State::Copying||s.state==State::Pending)',
+                     'first pending upload cannot enable a native sample'),
                 ]
                 result.setdefault('negative_controls', [])
                 for name, old, new, intended in scheduled_mutants:
