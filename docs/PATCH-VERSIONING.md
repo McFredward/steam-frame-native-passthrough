@@ -13,9 +13,12 @@ Update whenever the exact checked package differs.
 
 Routine candidates are delivered through the stable repository installation
 line in the English/German READMEs. The maintainer does not want a separate
-version-tagged GitHub Release for every candidate. Existing installer download
-channels remain delivery infrastructure; package and installed-component
-versions remain independently inspectable.
+version-tagged GitHub Release for every candidate. The installer payload is
+stored under `distribution/` and the bootstraps use an immutable repository
+commit URL with its exact byte count and SHA256. They do not require a GitHub
+Release. Package and installed-component versions remain independently
+inspectable. The [payload procedure](../distribution/README.md) describes the
+two source-pinned publication steps.
 
 The package assembler source-pins `VERSION` and stamps it in the outer package's
 owned `VERSION` file, source/packaging receipts, and the two component entries in

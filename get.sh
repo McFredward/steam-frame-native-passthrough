@@ -51,6 +51,10 @@ import urllib.request
 import zipfile
 
 REPO = 'McFredward/steam-link-native-passthrough'
+REPOSITORY_COMMIT = 'c497d4b58c28c1f83b35d16be83d474d435d4ab4'
+REPOSITORY_ASSET = 'distribution/steam-link-native-passthrough.zip'
+REPOSITORY_BYTES = 18203820
+REPOSITORY_SHA256 = '6d8f6ec93cc80a2220892184966d4b9b4568ed86a9e51e09382570e53da6b2df'
 INSPECTION_TAG = 'setup-inspection-v2'
 INSPECTION_ASSET = 'steam-link-native-passthrough-inspection.zip'
 MANAGER_TAG = 'setup-manager-v1'
@@ -93,7 +97,7 @@ class Redirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, url):
         parsed = urllib.parse.urlsplit(url)
         require(parsed.scheme == 'https' and parsed.hostname in
-                ('github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com') and
+                ('github.com', 'raw.githubusercontent.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com') and
                 not parsed.username and not parsed.password, 'Unexpected download redirect.')
         return super().redirect_request(request, fp, code, msg, headers, url)
 
@@ -105,6 +109,13 @@ def download(url, limit):
         result = response.read(limit + 1)
     require(len(result) <= limit, 'Download exceeds size bound.')
     return result
+
+
+def repository_asset():
+    # The ordinary wizard is pinned to a reviewed repository archive, not a release channel.
+    return {'browser_download_url': 'https://raw.githubusercontent.com/' + REPO + '/' +
+            REPOSITORY_COMMIT + '/' + REPOSITORY_ASSET,
+            'size': REPOSITORY_BYTES, 'digest': 'sha256:' + REPOSITORY_SHA256}
 
 
 def select_asset(release, inspection=False, maintenance=False, bridge_preview=False):
@@ -230,9 +241,12 @@ def main():
     try:
         print('Steam Link Native Passthrough — downloading ' +
               ('the paired bridge preview setup...' if bridge_preview else 'the check/removal assistant...' if maintenance else 'read-only inspection (no installation or restart)...' if inspection else 'the guided setup...'), flush=True)
-        endpoint = '/releases/tags/' + BRIDGE_TAG if bridge_preview else '/releases/tags/' + MANAGER_TAG if maintenance else '/releases/tags/' + INSPECTION_TAG if inspection else '/releases/tags/' + BRIDGE_TAG
-        release = parse(download('https://api.github.com/repos/' + REPO + endpoint, 1024 * 1024))
-        asset = select_asset(release, inspection, maintenance, bridge_preview)
+        if bridge_preview:
+            asset = repository_asset()
+        else:
+            endpoint = '/releases/tags/' + MANAGER_TAG if maintenance else '/releases/tags/' + INSPECTION_TAG
+            release = parse(download('https://api.github.com/repos/' + REPO + endpoint, 1024 * 1024))
+            asset = select_asset(release, inspection, maintenance)
         stage = Path(tempfile.mkdtemp(prefix='sfnp-setup-'))
         stage.chmod(0o700)
         raw = download(asset['browser_download_url'], asset['size'])
@@ -260,7 +274,7 @@ if __name__ == '__main__':
     try:
         sys.exit(main())
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
-        reason = str(error) if type(error) is ValueError else 'Check your connection and the complete PC/Frame setup release.'
+        reason = str(error) if type(error) is ValueError else 'Check your connection and the complete PC/Frame setup package.'
         print('Could not start the verified setup: ' + reason + ' No restart was performed.', file=sys.stderr)
         sys.exit(2)
 SFNP_BOOTSTRAP_PY
