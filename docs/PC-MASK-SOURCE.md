@@ -1,5 +1,7 @@
 # PC source for a real Steam Link mask
 
+> **Historical reference.** Historical source investigation. The no-PC-sender-modification preference below was superseded by the maintainer's explicit authorization of the paired sender companion on 2026-10-18. The atlas investigation is retired, not a fallback. Current integration starts at [Developing](DEVELOPING.md).
+
 Investigation: 2026-10-11. The maintainer subsequently supplied the installed
 Windows driver and manifest for private static inspection; see
 [the actual PC driver dataflow](PC-DRIVER-20261011.md). A live Frame inspection is recorded separately in

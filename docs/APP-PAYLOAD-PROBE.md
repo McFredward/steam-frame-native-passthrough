@@ -1,5 +1,7 @@
 # App-owned same-frame payload probe
 
+> **Historical reference.** Historical offline atlas experiment, not the installed coverage route. Its image packing, test actions and missing-adapter status describe that checkpoint only. Current transport uses the [coverage certificate](protocols/stream-coverage-v1.md) beside unchanged video; start with [Developing](DEVELOPING.md).
+
 This is an **offline source fixture**, not working Steam Link passthrough. It
 prepares the first carriage experiment from the
 [no-native-sender-hook plan](PC-WITHOUT-SENDER-MODIFICATION.md). It changes no

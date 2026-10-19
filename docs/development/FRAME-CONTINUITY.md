@@ -282,3 +282,43 @@ current exact first-use storage. Hardware confirmation is still required:
 removing proven duplicate work does not establish that the native FEC reset
 has been eliminated. No stale-mask substitution, transition timer, automatic
 headset operation or opaque-safety bypass is introduced.
+
+
+## Prerelease paired log review (game 713 / patch 0.2.10)
+
+A fresh read-only capture on 2026-10-19 matches game Build 713, PC SteamVR
+2.17.10 and the exact installed 0.2.10 Frame layer on SteamVR 2.18.2,
+build 1791331621. It contains 8,481 decoded/uploaded masks, no decode/upload
+refusals and 10,005 guarded submits without guard refusals. No native backtrack
+reset occurs after the first active masks; initial transport resets precede
+active MR. The 124 FEC retries are recoverable packet requests, not 124 visible
+image failures. These counters cannot establish every headset pixel.
+
+The sender reports 1,564,247,194 original coded-video bytes and 998,551,528
+encoded coverage bytes (63.8% additional coverage); complete escaped AU bytes
+are 2,568,559,437. All masks use LZ4. Different viewpoint/content makes this
+another measured run, not a controlled comparison with 0.2.9. The original
+image, mask precision and extent remain unchanged.
+
+The game genuinely tears down its owned head when the native main-menu anchor
+is disabled, before finding a replacement anchor. That removes its coverage
+source despite the requested MR setting. This source-proven loading/menu gap
+must be fixed in the game lifetime, not by borrowing a previous mask or forcing
+foreign source alpha. Later deliberate MR off/on and dashboard/game exit are
+separate transitions; cumulative opaque totals must not label them all faults.
+
+Cold handoff milestones contain two 100-ms emergency timeouts: one before
+active masks, another later in the run. There is no per-event timestamp to
+prove their exact visual effect or attribute them to an individual capture.
+A completed requeue without a condition-variable notification can delay a waiter
+until its deadline without incrementing the timeout counter, because the final
+predicate check sees invalidation. It must not be claimed as proof explaining
+these two recorded emergency timeouts.
+
+The previous 0.2.9 compositor segfault occurred during the intentional update
+stop, before the new 0.2.10 compositor started. Its native teardown stack also
+has historical original-state counterparts. It remains an unresolved teardown
+observation, not a demonstrated 0.2.10 gameplay crash and not proof either of
+patch causation or exoneration. No speculative teardown patch is justified by
+that stack alone. Simultaneous local menu/game composition, final sharpness
+and future runtime updates still need their own hardware evidence.

@@ -1,5 +1,7 @@
 # PC passthrough without hooks in the native Steam sender
 
+> **Historical reference.** Historical review under a superseded constraint. On 2026-10-18 the maintainer authorized the paired PC sender companion. The current route carries independent authenticated coverage beside ordinary video; it does not use the payload atlas proposed below. See [Developing](DEVELOPING.md).
+
 Review: 2026-10-12, against `dev` `89b22e7` and the official SDK sources linked
 below. **There is no proved, installable Steam Link alpha route under this
 constraint yet.** The preferred investigation is an app-owned explicit-payload

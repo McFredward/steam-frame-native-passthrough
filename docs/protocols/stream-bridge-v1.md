@@ -58,7 +58,10 @@ nonzero reserved fields and invalid enums are rejected transactionally.
 |72|8|Sender required capabilities|
 
 Known capabilities are negotiation1, Annex-B SEI2, exact source association4,
-opaque fallback8, explicit coverage16. The mandatory baseline is1|2|8 =11.
+opaque fallback8, explicit coverage16 and lossless RLE+LZ4 coverage32. The portable
+mandatory baseline is1|2|8 =11. The installed sender and receiver currently both
+offer and require all six bits (63); an older peer without bit32 cannot activate
+their paired route. This is separate from the project semantic version.
 Advertising source-association or coverage support is not proof of a particular
 frame or content. Required bits must include the baseline, be known and be a
 subset of offered bits. Unknown offered bits are harmless unless selected or
@@ -140,13 +143,17 @@ RBSP trailing bits and correct emulation-prevention bytes. Original AUD,
 parameter sets, foreign SEI and VCL bytes retain their original start codes,
 order and exact bytes. No original byte is rewritten to carry the message.
 
-Limits are16MiB per input/output AU,4096 NALs,64KiB per decoded SEI container,
+For this control UUID, limits are16MiB per input/output AU,4096 NALs,64KiB per decoded SEI container,
 256 bytes per owned payload and exactly one owned message per AU. Both prefix39
 and suffix40 SEIs can be inspected. Type/size extension bytes and RBSP escape
 sequences are validated. Invalid NAL headers, truncated sizes, malformed escape
 sequences and duplicate owned messages refuse the operation. Foreign UUIDs do
 not become bridge messages. An owned payload mixed with other payloads in the
 same NAL is refused rather than rewriting someone else's SEI data.
+
+The [coverage certificate](stream-coverage-v1.md) uses a different UUID and parser.
+Its full-resolution mask payload is not subject to this control message's
+256-byte limit. Do not send coverage through `appendOwned`.
 
 Every operation constructs its result separately; refusal leaves output and
 original AU unchanged. Removal deletes only a dedicated owned NAL, retaining

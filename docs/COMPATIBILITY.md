@@ -9,7 +9,7 @@
 | PC sender | Windows x86_64, supported NVIDIA encoder, HEVC |
 | Game source | Explicit integration; Gamma SDR UNorm, MultiPass, real RGB contribution and alpha |
 | Installation | Matching PC and Frame companions, [guided setup](PC-FRAME-SETUP.md) |
-| Hardware status | Experimental; final full-resolution picture and simultaneous local menu/game remain unconfirmed |
+| Hardware status | User-confirmed native room pictures; continuity and simultaneous local menu/game are not fully certified |
 
 The supported game and minimum version have their own [table](../README.md#supported-games).
 A matching development build is needed before an upcoming game release is available.
@@ -45,12 +45,21 @@ background-sampling shaders and every material family are not certified.
 
 Software checks exercise production native dispatch, source/texture ownership,
 authenticated control, accepted access units, receiver leases and guarded GPU
-coverage. The independent-mask route has user-confirmed visible room pictures,
-but is not yet continuously stable. The paired 0.2.8 run confirms much improved
-continuity alongside occasional loading/gameplay interruptions and real native
-transport resets. Its coverage payload exceeded the original coded-video size.
-Version 0.2.9 adds negotiated lossless mask compression, preserving full image and
-mask resolution; its hardware outcome is not yet verified. See the
+coverage. The independent-mask route has user-confirmed visible room pictures.
+The paired 0.2.9 hardware run was reported as the best continuous picture yet,
+with a brief activation interruption and a later native video reset. Lossless
+compression was verified in use, reducing coverage payload from 108.6% of
+original video in the 0.2.8 capture to 53.5% in that different run; this is not
+a controlled benchmark.
+
+The latest read-only audit of game Build 713 / patch 0.2.10 verifies 8,481
+decoded/uploaded masks without decode, upload or guarded-submit refusals. There
+is no native backtrack reset after active masks begin. The logs still identify
+a game-owned main-menu head replacement that withdraws its source, and two
+decoder emergency handoff timeouts (one before active masks). These are bounded
+observations, not proof that every visible frame was correct or uninterrupted.
+The latest automated and log results do not certify arbitrary game materials,
+new runtimes or a final like-for-like sharpness/latency comparison. See the
 [continuity evidence and limits](development/FRAME-CONTINUITY.md).
 Simultaneous local Steam menu/game mixed reality remains unconfirmed.
 

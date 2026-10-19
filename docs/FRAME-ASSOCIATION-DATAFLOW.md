@@ -1,5 +1,7 @@
 # Frame decoder association dataflow
 
+> **Historical reference.** Historical native-build investigation. Addresses and observations below belong to the explicitly pinned ELF and are not current installation instructions or a portable ABI. For the installed source/decoder/lease chain, start with [Developing](DEVELOPING.md).
+
 ## Finding and correction
 
 The inspected Frame receiver carries a **received 16-bit frame key**, distinct

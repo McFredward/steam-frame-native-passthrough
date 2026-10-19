@@ -1,5 +1,7 @@
 # Explicit stereo-mask foundation
 
+> **Historical reference.** Historical 2026-10-11 UDP/CRC foundation. The installed route does not use this mask protocol or its activation/expiry policy. It uses authenticated [coverage certificates](protocols/stream-coverage-v1.md) through Steam Link. Statements below about a missing bridge describe the original checkpoint; see [Developing](DEVELOPING.md) for current integration.
+
 Status: implemented and software-tested, 2026-10-11. This is a development path
 for real scene alpha, independent of the scene's RGB. It is **not yet a working
 Steam Link mask integration**. The existing chroma path remains separate.

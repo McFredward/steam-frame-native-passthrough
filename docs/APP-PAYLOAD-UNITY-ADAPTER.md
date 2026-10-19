@@ -1,5 +1,7 @@
 # Unity application-output core
 
+> **Historical reference.** Historical diagnostic API, not the current game integration. The static test-pattern/atlas source and its activation policy below are retained for reproducing the earlier experiment. Current games use the ordinary-RGBA [application source API](protocols/application-source-v1.md); see [Developing](DEVELOPING.md).
+
 The four source files under `probe/unity` implement an isolated application-side
 output core for the [same-frame payload experiment](APP-PAYLOAD-PROBE.md). They
 are intended to be integrated **inside GloomhavenVR and controlled by its VR

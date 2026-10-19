@@ -1,9 +1,24 @@
 # Developing Steam Link Native Passthrough
 
-Current development supports one **experimental paired Windows/NVIDIA/HEVC
+Current development supports one **paired Windows/NVIDIA/HEVC
 route**. [Installation](../README.md#installation) and [compatibility](COMPATIBILITY.md) are the
 player entry points. The [retired atlas record](history/ATLAS-RECEIVER.md) preserves
 the earlier implementation and evidence; its formats are not runtime fallbacks.
+
+## Start here
+
+| Task | Current reference |
+|---|---|
+| Add support to a game | [Application source API](protocols/application-source-v1.md), then the integration checklist below |
+| Understand the mask transport | [Negotiation](protocols/stream-bridge-v1.md), [authentication](protocols/stream-bridge-auth-v1.md), [coverage certificate](protocols/stream-coverage-v1.md) |
+| Build, test or publish | [Build and validation guide](development/BUILDING.md), [versioning](PATCH-VERSIONING.md), [payload publication](../distribution/README.md) |
+| Diagnose continuity | [Current compatibility and evidence](COMPATIBILITY.md), [versioned continuity record](development/FRAME-CONTINUITY.md) |
+| Port to another PC backend | [AMD/Linux boundaries](PC-BACKENDS-AMD-LINUX-20261019.md); these are not supported installation paths |
+
+The headers and implementation are authoritative for byte layouts and admission.
+An API description is not a replacement for the runtime checks it names. Dated
+research, `probe/`, `mask/` and `history/` also preserve earlier experiments:
+do not follow their activation instructions as current installation steps.
 
 ## Architecture
 
@@ -92,7 +107,7 @@ native content; final game/menu visual composition remains a hardware milestone.
 ### Camera lifetime and standby
 
 Installation must not leave `camera/forceSceneAlphaBlending` permanently enabled.
-Only authenticated current-stream Raw/RLE coverage may request this setting.
+Only authenticated current-stream Raw/RLE/RLE+LZ4 coverage may request this setting.
 The compositor's cold worker uses an isolated Python background application and
 the pinned public native settings interface; never initialize or shut down
 OpenVR inside Valve's Steam or compositor process. The renderer and decoder

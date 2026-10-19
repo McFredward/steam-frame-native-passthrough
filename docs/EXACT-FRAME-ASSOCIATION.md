@@ -1,5 +1,7 @@
 # Exact association prerequisite
 
+> **Historical reference.** Historical generic ledger contract. The missing-adapter statement below applies to this foundation, not the current paired native implementation. Current source, AU and selected-image proof is described in [Developing](DEVELOPING.md) and the [coverage contract](protocols/stream-coverage-v1.md). The old ledger alone is not a runtime admission path.
+
 `mask/frame_association.h` adds a bounded scalar ledger beside the mask receiver.
 It does not hook Steam Link, extract scene coverage or activate passthrough.
 The native adapter is still missing; synthetic tests cannot establish a private
