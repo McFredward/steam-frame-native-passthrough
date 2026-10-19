@@ -92,6 +92,165 @@ class Tests(unittest.TestCase):
         # derivation is covered by the parent's separate native GPU evidence.
         with mock.patch.object(b,'generate_shaders',return_value={'coverage.spv':b'fixture coverage'}):yield
 
+    def version_bundle(self,pc='0.2.0',frame='0.2.0'):
+        self.manifest.update(version='0.2.0')
+        self.manifest['pc']['version']=pc;self.manifest['frame']['version']=frame
+        s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'))
+        self.bundle=b.Bundle(self.bundle_root,s)
+        return self.bundle
+
+    def test_semantic_version_precedence_and_rejection(self):
+        ordered=['1.0.0-alpha','1.0.0-alpha.1','1.0.0-alpha.beta','1.0.0-beta','1.0.0-beta.2','1.0.0-beta.11','1.0.0-rc.1','1.0.0','1.0.1','2.0.0']
+        for a,z in zip(ordered,ordered[1:]):
+            self.assertTrue(b.older_version(a,z));self.assertFalse(b.older_version(z,a))
+        self.assertFalse(b.older_version('0.2.0+one','0.2.0+two'))
+        self.assertFalse(b.older_version('0.2.0',None))
+        for bad in ('1.2','01.2.3','1.2.3-01','1.2.3-','v1.2.3','1.2.3\n','1.2.3\x1b[31m',1,True,'1.2.3+'+'x'*81):
+            with self.subTest(bad=repr(bad)),self.assertRaises(ValueError):b.patch_version(bad)
+        for side in ('pc','frame'):
+            self.manifest[side]['version']=None
+            s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'))
+            with self.assertRaises(ValueError):b.Bundle(self.bundle_root,s)
+            del self.manifest[side]['version']
+
+    def test_versioned_install_records_independent_component_versions(self):
+        self.version_bundle(pc='0.2.0',frame='0.2.1')
+        installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        self.assertEqual(installed.state()['version'],'0.2.0');self.assertEqual(self.unit.tx.state()['version'],'0.2.1')
+        self.assertEqual(b.version_status(installed.state(),self.bundle.pc),{'installed':True,'installed_version':'0.2.0','target_version':'0.2.0'})
+        self.assertEqual(self.unit.inventory(self.bundle)['installed_version'],'0.2.1')
+        self.assertEqual(self.unit.inventory(self.bundle)['target_version'],'0.2.1')
+        self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
+
+    def test_version_update_migrates_legacy_receipts_and_exact_undo_retains_missing_version(self):
+        installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();pc_before=s.read(installed.receipt);frame_before=s.read(self.unit.tx.path)
+        settings=s.read(self.settings);frame_settings=s.read(self.fsettings)
+        credential=self.local.root/'pairings'/(self.pair['pair_id']+'.json');pair=s.read(credential,4096,private=True)
+        self.assertIsNone(b.version_status(installed.state(),self.bundle.pc)['installed_version'])
+        self.version_bundle()
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        self.assertEqual(installed.state()['version'],'0.2.0');self.assertEqual(self.unit.tx.state()['version'],'0.2.0')
+        self.assertEqual(s.read(credential,4096,private=True),pair)
+        self.assertEqual(s.read(self.settings),settings);self.assertEqual(s.read(self.fsettings),frame_settings)
+        self.assertFalse(any('restart' in arg for command in self.commands for arg in command))
+        installed.checkpoint().restore();installed.checkpoint().verify_restored()
+        self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+        self.assertEqual(s.read(installed.receipt),pc_before);self.assertEqual(s.read(self.unit.tx.path),frame_before)
+        self.assertNotIn('version',installed.state());self.assertNotIn('version',self.unit.tx.state())
+
+    def test_version_downgrades_refuse_both_components_before_writes(self):
+        self.version_bundle('0.2.0','0.2.0');installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit()
+        for target in ('0.1.9',None):
+            with self.subTest(target=target):
+                self.version_bundle('0.1.9','0.1.9')
+                if target is None:
+                    for side in ('pc','frame'):del self.manifest[side]['version']
+                    del self.manifest['version']
+                    s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'))
+                    self.bundle=b.Bundle(self.bundle_root,s)
+                before={str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+                with self.assertRaisesRegex(s.SetupError,'newer'):installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+                with self.assertRaisesRegex(s.SetupError,'newer'):
+                    self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+                self.assertEqual(before,{str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_version_does_not_override_changed_file_hashes(self):
+        self.version_bundle();installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        path=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'
+        s.put(path,b'foreign modification',s.read(path))
+        with self.assertRaisesRegex(s.SetupError,'Changed provider'):
+            installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+
+    def test_version_same_number_changed_bundle_still_offers_update_and_logs_both_roles(self):
+        import contextlib,types
+        self.version_bundle();installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit()
+        name='pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'
+        raw=s.read(self.bundle_root/name)+b' changed package, same semantic version'
+        s.put(self.bundle_root/name,raw,s.read(self.bundle_root/name))
+        self.manifest['files'][name]={'bytes':len(raw),'sha256':s.sha(raw)};self.version_bundle()
+        choices=[];plans=[];calls=[]
+        class Screen:
+            def banner(inner,**kw):pass
+            def status(inner,*a):pass
+            def path(inner,*a,**kw):pass
+            def say(inner,*a):pass
+            def inventory(inner,**kw):pass
+            def version_plan(inner,**kw):plans.append(kw)
+            def choose_action(inner,actions,**kw):choices.append((actions,kw));return 'update'
+            def confirm(inner,*a):return False
+            def suspend(inner):return contextlib.nullcontext()
+        class Peer:
+            def call(inner,request):calls.append(request['command']);return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())):
+            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        self.assertIn('update',choices[0][0]);self.assertEqual(choices[0][1]['recommended'],'update')
+        self.assertEqual(plans[0]['pc'],{'installed':True,'installed_version':'0.2.0','target_version':'0.2.0'})
+        self.assertEqual(plans[0]['frame'],plans[0]['pc'])
+        self.assertEqual(calls,['bridge-inventory'])
+        events=[json.loads(line) for path in (self.local.root/'logs').glob('*.jsonl') for line in path.read_text().splitlines()]
+        versions=[e['versions'] for e in events if 'versions'in e]
+        self.assertEqual(versions,[plans[0]])
+
+    def test_version_inspection_reports_missing_and_unversioned_independently(self):
+        import contextlib,io,types
+        installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        self.version_bundle('0.2.0','0.2.1')
+        class Peer:
+            def call(inner,request):return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=True,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        output=io.StringIO()
+        before={str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with contextlib.redirect_stdout(output):self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        report=json.loads(output.getvalue())
+        self.assertTrue(report['pc']['installed']);self.assertIsNone(report['pc']['installed_version'])
+        self.assertFalse(report['frame']['installed']);self.assertIsNone(report['frame']['installed_version'])
+        self.assertEqual(report['pc']['target_version'],'0.2.0');self.assertEqual(report['frame']['target_version'],'0.2.1')
+        self.assertEqual(report['target_versions'],{'pc':'0.2.0','frame':'0.2.1'})
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_version_newer_frame_does_not_offer_an_update_or_repair(self):
+        import contextlib,types
+        self.version_bundle('0.2.0','0.3.0');installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();self.version_bundle();choices=[];messages=[];calls=[]
+        class Screen:
+            def banner(inner,**kw):pass
+            def status(inner,*a):pass
+            def path(inner,*a,**kw):pass
+            def say(inner,key):messages.append(key)
+            def inventory(inner,**kw):pass
+            def choose_action(inner,actions,**kw):choices.append((actions,kw));return 'exit'
+            def suspend(inner):return contextlib.nullcontext()
+        class Peer:
+            def call(inner,request):calls.append(request['command']);return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())):
+            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        self.assertFalse({'install','update','repair'}&set(choices[0][0]))
+        self.assertEqual(choices[0][1]['recommended'],'check');self.assertIn('version_downgrade',messages)
+        self.assertEqual(calls,['bridge-inventory'])
+
     def test_prototype_never_applies(self):
         self.manifest['readiness']='prototype';s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'))
         bundle=b.Bundle(self.bundle_root,s)

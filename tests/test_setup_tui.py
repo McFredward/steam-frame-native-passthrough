@@ -121,6 +121,18 @@ class Menus(unittest.TestCase):
         result = ui.Presenter(stream, lambda _: next(values), lang='en', input_enabled=True, width=22)
         return result, stream
 
+    def test_patch_versions_are_shown_independently_in_console_status_and_plan(self):
+        for lang in ('en','de'):
+            presenter,stream=self.make();presenter.lang=lang
+            pc={'installed':False,'installed_version':None,'target_version':'0.2.0'}
+            frame={'installed':True,'installed_version':None,'target_version':'0.2.1'}
+            presenter.inventory(pc=pc,frame=frame);presenter.version_plan(pc=pc,frame=frame)
+            output=' '.join(stream.getvalue().split())
+            self.assertIn(presenter.text('version_missing'),output)
+            self.assertIn(presenter.text('version_unknown'),output)
+            self.assertIn('0.2.0',output);self.assertIn('0.2.1',output)
+            self.assertIn('→',output)
+
     def test_generalized_actions_plain_pipe_can_select_tenth_item(self):
         actions = ['install', 'update', 'repair', 'uninstall', 'check', 'exit', 'retry', 'back', 'rollback', 'continue']
         presenter, stream = self.make(['10'])

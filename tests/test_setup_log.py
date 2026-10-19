@@ -18,6 +18,18 @@ spec.loader.exec_module(log)
 
 
 class SessionLogs(unittest.TestCase):
+    def test_component_versions_are_bounded_metadata_without_a_transcript(self):
+        session=self.open()
+        versions={'pc':{'installed':True,'installed_version':'0.2.0','target_version':'0.2.1'},
+                  'frame':{'installed':False,'installed_version':None,'target_version':'0.2.1'}}
+        self.assertTrue(session.event('preflight','result',status='ok',versions=versions))
+        self.assertEqual(self.entries(session)[-1]['versions'],versions)
+        before=session.path.read_bytes()
+        for bad in ('password=secret','0.2.0\nsecret','0.2.0'+'a'*81):
+            versions['pc']['installed_version']=bad
+            self.assertFalse(session.event('preflight','result',versions=versions))
+        self.assertEqual(session.path.read_bytes(),before)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='sfnp-log-test-')
         self.addCleanup(self.temp.cleanup)

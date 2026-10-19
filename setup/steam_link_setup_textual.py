@@ -125,10 +125,11 @@ class ConfirmScreen(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "cancel", show=False), Binding("ctrl+c", "cancel", show=False),
                 Binding("left,up", "app.focus_previous", show=False), Binding("right,down", "app.focus_next", show=False)]
 
-    def __init__(self, title: str, question: str, plan: str, cancel: str, accept: str, destructive: bool = False):
+    def __init__(self, title: str, question: str, plan: str, cancel: str, accept: str, destructive: bool = False, *, versioned=False):
         super().__init__()
         self.heading, self.question, self.plan = title, question, plan
         self.cancel_label, self.accept_label, self.destructive = cancel, accept, destructive
+        self.set_class(versioned,"versioned-plan")
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
@@ -366,6 +367,9 @@ class TextualPresenter:
     def inventory(self, *, pc=None, frame=None, report=None):
         self._call(self.app.update_inventory, pc, frame, report)
 
+    def version_plan(self,*,pc,frame):
+        self._call(self.app.add_version_plan,_existing_words().version_plan(self.text,pc,frame))
+
     @contextmanager
     def progress(self, key):
         self._tasks.append(key)
@@ -462,7 +466,8 @@ class TextualPresenter:
             plan = self.text("bridge_stop_first")
         return self._wait(lambda prompt: self.app.push_screen(ConfirmScreen(
             self.app.words["confirm"], self.text(key), plan,
-            self.app.words["cancel"], self.app.words["continue"]),
+            self.app.words["cancel"], self.app.words["continue"],
+            versioned=key=="bridge_confirm" and bool(self.app.version_plan_prefix)),
             lambda value: self.app.resolve_prompt(value, expected=prompt)), False)
 
     def confirm_uninstall(self):
@@ -523,6 +528,13 @@ class SetupApp(App[int]):
     SetupApp.compact #notice { padding: 0 1; }
     SetupApp.compact .device { padding: 0 1; min-height: 4; }
     SetupApp.compact #devices { min-height: 4; }
+    SetupApp.compact.versioned.reviewing #devices { margin-bottom: 0; }
+    SetupApp.compact.versioned.reviewing #step { display: none; }
+    SetupApp.compact.versioned.reviewing #notice { display: none; }
+    SetupApp.compact.versioned.reviewing #notice.warning { display: block; }
+    SetupApp.compact.versioned.reviewing #action-heading { margin-bottom: 0; }
+    SetupApp.compact.versioned.reviewing #action-help { margin: 0; }
+    SetupApp.compact.versioned.reviewing #actions { max-height: 7; }
     SetupApp.narrow #devices { layout: vertical; }
     SetupApp.narrow .device { width: 1fr; margin: 0; }
     ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen { align: center middle; background: #030811cc; }
@@ -530,6 +542,8 @@ class SetupApp(App[int]):
     #confirm-title, #input-title, #ssh-title { color: #8de2ec; text-style: bold; height: auto; margin-bottom: 1; }
     #ssh-question { height: auto; margin-bottom: 1; }
     #confirm-copy { height: auto; max-height: 16; }
+    ConfirmScreen.versioned-plan #confirm-dialog { height: 90%; max-height: 24; }
+    ConfirmScreen.versioned-plan #confirm-copy { height: 1fr; min-height: 1; }
     PictureScreen.short #confirm-dialog { height: 90%; }
     PictureScreen.short #confirm-copy { height: 1fr; min-height: 1; }
     PictureScreen Button { min-width: 6; }
@@ -556,6 +570,7 @@ class SetupApp(App[int]):
         self.stop_requested = False
         self.prompt: Prompt | None = None
         self.plan = ""
+        self.version_plan_prefix = ""
         self.outcome = None
         self.stage_name = "pc_inventory"
         self.paths: dict[tuple[str, str], None] = {}
@@ -671,6 +686,7 @@ class SetupApp(App[int]):
             self.outcome = key
         if key.endswith("_plan") or key in ("bridge_stop_first", "bridge_retry_ambiguous"):
             self.plan = value
+            self.version_plan_prefix = ""
         if key in ("pc_ready", "pc_partial"):
             self.query_one("#pc-status", Static).update(self.words["ready" if key == "pc_ready" else "attention"])
         if key in ("found", "receiver_ready", "receiver_changed", "pc_only"):
@@ -689,14 +705,28 @@ class SetupApp(App[int]):
                 ready = all(isinstance(item, dict) and item.get("status") == "match" for item in files.values())
             state = self.words["ready"] if ready else self.words["attention"]
             installed = value.get("installed")
+            versioned=bool({"installed_version","target_version"}&set(value))
+            if versioned:self.add_class("versioned")
             if isinstance(installed, bool):
                 if key == "frame" and not installed and value.get("legacy_installed") is True:
                     state += "\n" + self.words["legacy_only"]
-                state += "\n" + self.words["connection_installed" if installed else "connection_missing"]
+                if not versioned:state += "\n" + self.words["connection_installed" if installed else "connection_missing"]
+            if versioned:
+                current,target=_existing_words().version_labels(lambda k:self.texts[k],value)
+                state += "\n" + self.texts["version_installed"].format(version=current)
+                state += "\n" + self.texts["version_target"].format(version=target)
             host = value.get("host") if key == "frame" else None
             if isinstance(host, str):
                 state += "\n" + _plain(host, 100)
             self.query_one("#" + key + "-status", Static).update(state)
+
+    def add_version_plan(self,value):
+        prefix=self.version_plan_prefix
+        if prefix and self.plan.startswith(prefix+"\n\n"):
+            self.plan=self.plan[len(prefix)+2:]
+        self.version_plan_prefix=value
+        self.plan = value + "\n\n" + self.plan
+        self.add_detail(value)
 
     def add_detail(self, value):
         value = _plain(value)
@@ -727,6 +757,7 @@ class SetupApp(App[int]):
         if expected is not None and self.prompt is not expected:
             return
         prompt, self.prompt = self.prompt, None
+        self.remove_class("reviewing")
         self.query_one("#action-area").display = False
         if prompt is not None and not prompt.future.done():
             prompt.future.set_result(answer)
@@ -748,6 +779,7 @@ class SetupApp(App[int]):
         self.set_working(self.words["rollback"])
 
     def show_actions(self, actions, recommended):
+        self.add_class("reviewing")
         self.action_names = list(actions)
         self.query_one("#action-area").display = True
         self.set_heading(self.words["review"])

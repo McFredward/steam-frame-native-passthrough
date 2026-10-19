@@ -134,6 +134,15 @@ TEXT = {
         'report': 'Report saved: ',
         'done_prompt': 'Press Enter to close. ',
         'title': 'Steam Link Native Passthrough',
+        'version_installed': 'Installed patch: {version}',
+        'version_target': 'Available patch: {version}',
+        'version_missing': 'Not installed',
+        'version_unknown': 'Unversioned',
+        'version_unchecked': 'Not checked',
+        'version_plan': 'Patch versions to apply',
+        'version_pc': 'This PC',
+        'version_frame': 'Steam Frame',
+        'version_downgrade': 'This package is older than an installed patch or has no version information. Update is unavailable; use a newer package or restore a saved previous setup with Undo.',
         'inspection': 'Just a check: nothing will be installed, paired or restarted.',
         'setup': 'We will check your PC and Frame before offering any changes.',
         'search': 'Looking for your Steam Frame',
@@ -248,6 +257,15 @@ TEXT = {
         'report': 'Bericht gespeichert: ',
         'done_prompt': 'Zum Schließen Enter drücken. ',
         'title': 'Steam Link Native Passthrough',
+        'version_installed': 'Installierter Patch: {version}',
+        'version_target': 'Verfügbarer Patch: {version}',
+        'version_missing': 'Nicht installiert',
+        'version_unknown': 'Ohne Versionsangabe',
+        'version_unchecked': 'Nicht geprüft',
+        'version_plan': 'Anzuwendende Patch-Versionen',
+        'version_pc': 'Dieser PC',
+        'version_frame': 'Steam Frame',
+        'version_downgrade': 'Dieses Paket ist älter als ein installierter Patch oder hat keine Versionsangabe. Eine Aktualisierung ist damit nicht möglich; nutze ein neueres Paket oder stelle einen gespeicherten vorherigen Zustand mit Rücknahme wieder her.',
         'inspection': 'Nur prüfen: Es wird nichts installiert, gekoppelt oder neu gestartet.',
         'setup': 'Wir prüfen PC und Frame, bevor Änderungen angeboten werden.',
         'search': 'Steam Frame wird gesucht',
@@ -277,6 +295,25 @@ def language(override=None):
     if not value:
         value = os.environ.get('LC_ALL') or os.environ.get('LC_MESSAGES') or os.environ.get('LANG', '')
     return 'de' if value.lower().startswith(('de', 'german')) else 'en'
+
+
+def version_labels(text,record):
+    """Render checked metadata; absence never invents an installed version."""
+    def safe(value):
+        return value if type(value)is str and re.fullmatch(r'[0-9A-Za-z][0-9A-Za-z.+-]{0,79}',value) else None
+    current=safe(record.get('installed_version'))
+    if record.get('installed') is False:current=text('version_missing')
+    elif record.get('installed') is not True:current=text('version_unchecked')
+    elif current is None:current=text('version_unknown')
+    return current,safe(record.get('target_version')) or text('version_unknown')
+
+
+def version_plan(text,pc,frame):
+    rows=[text('version_plan')]
+    for role,record in (('pc',pc),('frame',frame)):
+        current,target=version_labels(text,record)
+        rows.append(text('version_'+role)+': '+current+' → '+target)
+    return '\n'.join(rows)
 
 
 class _WindowsKeyReader:
@@ -518,6 +555,20 @@ class Presenter:
             self._paragraph(self.text('title'))
             self._write('\n')
         self.say('inspection' if inspection else 'setup')
+
+    def inventory(self,*,pc=None,frame=None,report=None):
+        if type(report)is dict:pc=report.get('pc',pc);frame=report.get('frame',frame)
+        with self._lock:
+            for role,value in (('pc',pc),('frame',frame)):
+                if type(value)is not dict or not {'installed_version','target_version'}&set(value):continue
+                current,target=version_labels(self.text,value)
+                self._paragraph(self.text('version_'+role))
+                self._paragraph(self.text('version_installed').format(version=current),indent=4)
+                self._paragraph(self.text('version_target').format(version=target),indent=4)
+
+    def version_plan(self,*,pc,frame):
+        with self._lock:
+            for line in version_plan(self.text,pc,frame).splitlines():self._paragraph(line)
 
     def _animate(self, stopped):
         phase = 0

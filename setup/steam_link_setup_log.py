@@ -236,6 +236,21 @@ def _recovery(value):
     return result
 
 
+def _versions(value):
+    _require(type(value)is dict and set(value)=={'pc','frame'},'invalid_event')
+    result={}
+    for role,record in value.items():
+        _require(type(record)is dict and set(record)=={'installed','installed_version','target_version'} and
+                 (record['installed'] is None or type(record['installed'])is bool),'invalid_event')
+        for key in ('installed_version','target_version'):
+            version=record[key]
+            _require(version is None or type(version)is str and len(version)<=80 and
+                     bool(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?',version)),
+                     'invalid_event')
+        result[role]=dict(record)
+    return result
+
+
 class SessionLog:
     """One exclusive JSONL file, capped at 256 KiB; no log rotation/deletion.
 
@@ -311,7 +326,7 @@ class SessionLog:
         os.fsync(self._fd)
 
     def event(self, stage, kind, *, status=None, command=None, reason=None,
-              error_type=None, errno=None, winerror=None, recovery=None, action=None):
+              error_type=None, errno=None, winerror=None, recovery=None, action=None,versions=None):
         with self._lock:
             self.last_event_error = None
             if not self.available or self._closed or self._limited:
@@ -339,6 +354,7 @@ class SessionLog:
                         value[key] = number
                 if recovery is not None:
                     value['recovery'] = _recovery(recovery)
+                if versions is not None:value['versions']=_versions(versions)
                 # Reserve one final, guaranteed limit marker instead of silently
                 # growing or overwriting old evidence. No feature timer is used.
                 if self._bytes + MAX_EVENT_BYTES > MAX_BYTES - _LIMIT_RESERVE:

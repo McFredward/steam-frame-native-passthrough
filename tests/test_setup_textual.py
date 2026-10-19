@@ -43,6 +43,98 @@ async def until(pilot, predicate):
 
 
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_component_version_cards_remain_in_compact_viewport_while_actions_scroll(self):
+        for lang in ("en","de"):
+            def backend():
+                p=UI.active_presenter()
+                p.inventory(pc={"compatible":True,"installed":True,"installed_version":"0.1.9","target_version":"0.2.0"},
+                            frame={"runtime_compatible":True,"installed":True,"installed_version":None,"target_version":"0.2.0","host":"192.168.0.25"})
+                p.choose_action(["update","uninstall","retry","check","exit"],recommended="update")
+                return 0
+            app=UI.SetupApp(backend,lang)
+            async with app.run_test(size=(80,24)) as pilot:
+                await until(pilot,lambda:app.prompt is not None)
+                await pilot.pause()
+                body=app.query_one("#body")
+                for key in ("pc","frame"):
+                    self.assertTrue(body.content_region.contains_region(app.query_one("#"+key+"-card").region),key)
+                    self.assertTrue(body.content_region.contains_region(app.query_one("#"+key+"-status").region),key)
+                self.assertEqual(body.scroll_y,0)
+                await pilot.press("end");await pilot.pause()
+                self.assertGreater(app.query_one(OptionList).scroll_y,0)
+                self.assertEqual(body.scroll_y,0)
+                for key in ("pc","frame"):
+                    self.assertTrue(body.content_region.contains_region(app.query_one("#"+key+"-status").region),key)
+                app.show_notice("A useful warning remains visible",state="warning")
+                await pilot.pause()
+                self.assertTrue(app.query_one("#notice").display)
+                await pilot.press("enter")
+                await until(pilot,lambda:app.backend_finished)
+            app.backend.join()
+
+    async def test_component_versions_are_independent_in_status_and_apply_plan(self):
+        for lang in ("en","de"):
+            observed=[]
+            pc={"compatible":True,"installed":True,"installed_version":"0.1.9","target_version":"0.2.0"}
+            frame={"runtime_compatible":True,"installed":True,"installed_version":None,"target_version":"0.2.1"}
+            def backend():
+                p=UI.active_presenter()
+                p.inventory(pc=pc,frame=frame)
+                p.say("bridge_install_plan")
+                p.version_plan(pc={**pc,"installed_version":"0.0.9"},frame=frame)
+                p.version_plan(pc=pc,frame=frame)
+                observed.append(p.confirm("bridge_confirm"))
+                return 0
+            app=UI.SetupApp(backend,lang)
+            async with app.run_test(size=(100,36)) as pilot:
+                await until(pilot,lambda:isinstance(app.screen,UI.ConfirmScreen))
+                underlying=app.screen_stack[0]
+                pc_status=str(underlying.query_one("#pc-status",Static).render())
+                frame_status=str(underlying.query_one("#frame-status",Static).render())
+                self.assertIn("0.1.9",pc_status);self.assertIn("0.2.0",pc_status)
+                self.assertNotIn("0.1.9",frame_status);self.assertIn("0.2.1",frame_status)
+                self.assertIn(app.texts["version_unknown"],frame_status)
+                self.assertIn("0.1.9 → 0.2.0",app.screen.plan)
+                self.assertNotIn("0.0.9",app.screen.plan)
+                self.assertEqual(app.screen.plan.count(app.texts["version_plan"]),1)
+                self.assertIn(app.texts["version_unknown"]+" → 0.2.1",app.screen.plan)
+                self.assertIn(app.texts["version_pc"],app.screen.plan)
+                self.assertIn(app.texts["version_frame"],app.screen.plan)
+                await pilot.resize_terminal(80,24);await pilot.pause()
+                dialog=app.screen.query_one("#confirm-dialog").region
+                for button in app.screen.query(Button):
+                    self.assertTrue(dialog.contains_region(button.region),button.id)
+                visible=" ".join(html.unescape(re.sub(r"<[^>]+>"," ",app.export_screenshot())).split())
+                self.assertIn("0.1.9 → 0.2.0",visible)
+                self.assertIn(app.texts["version_unknown"]+" → 0.2.1",visible)
+                await pilot.press("escape")
+                await until(pilot,lambda:app.backend_finished)
+                self.assertEqual(observed,[False])
+            app.backend.join()
+
+    async def test_component_version_status_distinguishes_not_checked_missing_and_unversioned(self):
+        ready=threading.Event();release=threading.Event()
+        def backend():
+            p=UI.active_presenter()
+            p.inventory(pc={"installed":False,"installed_version":None,"target_version":"0.2.0"},
+                        frame={"installed":None,"installed_version":None,"target_version":"0.2.0"})
+            ready.set();release.wait();return 0
+        app=UI.SetupApp(backend,"en")
+        try:
+            async with app.run_test(size=(80,24)) as pilot:
+                await until(pilot,ready.is_set)
+                self.assertIn("Installed patch: Not installed",str(app.query_one("#pc-status",Static).render()))
+                self.assertIn("Installed patch: Not checked",str(app.query_one("#frame-status",Static).render()))
+                self.assertNotIn("Not installed",str(app.query_one("#frame-status",Static).render()))
+                app.update_inventory(frame={"installed":True,"installed_version":None,"target_version":"0.2.0"})
+                self.assertIn("Installed patch: Unversioned",str(app.query_one("#frame-status",Static).render()))
+                for width,height in ((42,16),(100,36)):
+                    await pilot.resize_terminal(width,height);await pilot.pause()
+                    self.assertLessEqual(app.query_one("#frame-card").region.right,width)
+                    self.assertIn("Available patch: 0.2.0",str(app.query_one("#frame-status",Static).render()))
+                release.set();await until(pilot,lambda:app.backend_finished)
+        finally:release.set();app.backend.join()
+
     async def test_picture_popup_retains_setup_background_and_controls_when_resized(self):
         for lang in ("en", "de"):
             for original in (False, True):

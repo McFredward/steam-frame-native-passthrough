@@ -103,6 +103,19 @@ class Tests(unittest.TestCase):
     def test_reproducible_archive(self):
         first,r1=self.build();second,r2=self.build();self.assertEqual(first,second);self.assertEqual(r1,r2)
 
+    def test_project_version_is_source_pinned_and_stamped_in_package_and_both_roles(self):
+        raw,receipt=self.build()
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            version=z.read('VERSION').decode().strip()
+            bundle=json.loads(z.read('stream-bridge-bundle.json'))
+            self.assertEqual(version,'0.2.0');self.assertEqual(receipt['version'],version)
+            self.assertEqual(bundle['version'],version)
+            self.assertEqual(bundle['pc']['version'],version);self.assertEqual(bundle['frame']['version'],version)
+            self.assertEqual(json.loads(z.read('stream-bridge-package-source.json'))['version'],version)
+            self.assertEqual(receipt['source_pins']['VERSION'],p.pin(z.read('VERSION')))
+        (self.root/'VERSION').write_text('0.2.1\n')
+        with self.assertRaisesRegex(ValueError,'sources differ'):self.build()
+
     def test_release_requires_exact_complete_receipts(self):
         with self.assertRaisesRegex(ValueError,'receipts'):self.build(release=True)
         partial=self.validation({'pc_provider_build'})
