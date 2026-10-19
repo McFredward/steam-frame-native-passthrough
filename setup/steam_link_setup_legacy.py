@@ -35,6 +35,10 @@ def plan(unit):
     if not os.path.lexists(receipt):
         e.require(not os.path.lexists(dropin) and not os.path.lexists(manifest),
             'Unknown old Frame activation was preserved; it could not be uninstalled safely.')
+        paired=unit.tx.state()
+        e.require(paired is None or not any(op['path'] in (str(dropin),str(manifest)) and op['before'] is not None
+            for op in paired['operations']),
+            'The old uninstall receipt is missing; restoring a retired patch was refused.')
         return None
     raw=e.read(receipt,128*1024,private=True);value=e.parse(raw)
     expected_link=str(Path('/run/user')/str(os.getuid())/'steam-frame-native-passthrough/receiver.json')

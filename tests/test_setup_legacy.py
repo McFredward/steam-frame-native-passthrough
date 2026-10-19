@@ -2,6 +2,7 @@
 import base64,importlib.util,os
 from pathlib import Path
 import unittest
+from unittest import mock
 ROOT=Path(__file__).resolve().parents[1]
 def load(name,path):
  spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
@@ -54,6 +55,12 @@ class Tests(f.Tests):
   self.seed();p=self.fsettings;v=s.parse(s.read(p));v['camera']['forceSceneAlphaBlending']=False;s.put(p,s.encoded(v),s.read(p));before=s.read(p)
   with self.assertRaisesRegex(s.SetupError,'changed outside'):legacy.plan(self.unit)
   self.assertEqual(s.read(p),before);self.assertEqual(self.camera_native_calls,[])
+ def test_missing_legacy_receipt_never_reactivates_a_paired_predecessor(self):
+  drop=self.fhome/'.config/systemd/user/steamvr.service.d'/legacy.DROPIN
+  state={'operations':[{'path':str(drop),'before':{'kind':'file','bytes':base64.b64encode(b'owned predecessor').decode()},'after':None,'mode':0o600}]}
+  with mock.patch.object(self.unit.tx,'state',return_value=state):
+   with self.assertRaisesRegex(s.SetupError,'restoring a retired patch was refused'):legacy.plan(self.unit)
+  self.assertFalse(drop.exists());self.assertEqual(self.camera_native_calls,[])
 if __name__=='__main__':
  suite=unittest.TestSuite(Tests(name)for name in Tests.__dict__ if name.startswith('test_'))
  raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
