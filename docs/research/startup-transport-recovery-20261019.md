@@ -50,9 +50,11 @@ inferred globally from another decoder's newer generation.
 The decoder snapshot queue is intentionally bounded. When an original native
 QBUF succeeds but a byte snapshot was unavailable, the hook now publishes a
 bounded receipt for that exact fd, pool and token together with its loss counter.
-No gap or loss is reported before the original call succeeds. A known gap can
-revoke the current authority and permit a completely fresh admission; it cannot
-certify an image. The worker samples counters before draining these ordered
+No gap or loss is reported before the original call succeeds. The initial repair
+revoked the entire current authority even for a known gap. The subsequent
+[continuous-coverage review](continuous-coverage-20261019.md) replaces that
+unnecessary global reset with exact decoder/pool/token quarantine. A known gap
+cannot certify an image. The worker samples counters before draining these ordered
 receipts, so a concurrent publication cannot fabricate an unknown gap. Missing
 or malformed receipts, overflow and unattributed loss remain hard refusal.
 
