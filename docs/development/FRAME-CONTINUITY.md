@@ -232,3 +232,53 @@ attributable. It does not claim that all loading/menu/network gaps are already
 eliminated on hardware. The current camera helper, projection shaders, camera
 switch lifetime and exact source/frame/eye/lease safety checks remain unchanged.
 No diagnostic module, timer or unattended headset restart is installed.
+
+
+## Activation CPU path and the remaining native reset (0.2.10)
+
+The maintainer's paired game 710 / patch 0.2.9 run reports the best continuous
+picture yet, with a brief black interval after enabling MR. The installed
+0.2.9 binary and actual LZ4 use were verified read-only. The final PC totals
+are 30,902 masked frames, 2,864,100,875 original coded-video bytes and
+1,533,654,459 compressed coverage bytes. Coverage is 53.5% of original video,
+compared with 108.6% in the preceding capture; these different runs do not
+establish a controlled like-for-like benchmark. Frame mask authentication,
+GPU upload and exact-mask association refusals remain zero during the initial
+active-mask transition. Later exact-picture misses include signed-None/menu/off
+intervals; these counters do not establish one missed active-MR frame per miss.
+
+First active masks arrive around Frame 20:23:00. At 20:23:01.254 the ordinary
+receiver retries 34 packets for native frame 4027 (219,027 bytes); at
+20:23:01.299733 it reports a frame outside its FEC backtrack window, then
+late metadata 4032. The PC clock is approximately 1.28s ahead and reports the
+matching transport/reset at 20:23:02.574. Opaque submits rise during recovery.
+FEC retries also predate MR at 20:22:14/18. These logs establish native video
+loss/reset, not that every packet loss is a patch bug or a WLAN fault.
+
+The active path did contain avoidable CPU work: the compositor authenticated
+and validated a compressed certificate, discarded the expanded RLE, then its
+renderer decompressed that same mask again, expanded R8 and performed a separate
+full-image min/max scan. Decoder DQBUF handoff waits for exact publication, so
+this work and first-use resource allocation can delay the native decoder's
+progress even without reaching the existing emergency 100ms deadline.
+
+The compositor now authenticates, validates and expands the exact mask once.
+Its decoded samples and content range are transient, synchronous callback
+arguments; they are not cached in retained certificates or used as a later
+frame's coverage. RLE min/max is gathered during existing expansion. The
+renderer copies the same full-resolution R8 values into its existing pool,
+retains the exact certificate/descriptor/lease checks and uses the supplied
+range only for content diagnostics. Existing consumers keep their validated
+fallback callback. The independent video-process verification remains intact.
+No compressed wire encoding, image extent, shader, camera setting or handshake
+permission changes in this repair.
+
+Bounded cold handoff telemetry now reports the maximum measured duration and
+counts above 11/22/50ms, including time waiting for Process ownership. This
+separates shorter stalls from the previous 100ms-timeout-only observation.
+Software fixtures verify authentication and transactional failures, fractional
+sample equality, single decoded delivery, no duplicate fallback upload and
+current exact first-use storage. Hardware confirmation is still required:
+removing proven duplicate work does not establish that the native FEC reset
+has been eliminated. No stale-mask substitution, transition timer, automatic
+headset operation or opaque-safety bypass is introduced.
