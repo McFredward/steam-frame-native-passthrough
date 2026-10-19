@@ -88,7 +88,7 @@ void run(){
   // Only the fixture flushes/waits. Production copy/readback never does.
   context->Flush();wait(context.p,nativeReady.p);
   BOOL completed=FALSE;const auto completion=context->GetData(workDone.p,&completed,sizeof completed,D3D11_ASYNC_GETDATA_DONOTFLUSH);check(SUCCEEDED(completion),"actual workload availability query");if(completion==S_FALSE||!completed)++pendingWindows;
-  std::fill(pixels.begin(),pixels.end(),0x5a);const auto result=readCoverageNonblocking(context.p,staging.p,Width,Height,pixels.data(),pixels.size(),nativeMap,nativeUnmap);
+  std::fill(pixels.begin(),pixels.end(),std::uint8_t{0x5a});const auto result=readCoverageNonblocking(context.p,staging.p,Width,Height,pixels.data(),pixels.size(),nativeMap,nativeUnmap);
   std::printf("round%u: native-handoff complete; later-work-pending=%u; production-Map-hr=0x%08lx\n",round,unsigned(completion==S_FALSE||!completed),static_cast<unsigned long>(result));
   check(SUCCEEDED(result),"coverage ready at native handoff using production DO_NOT_WAIT readback");
   const unsigned expected=round&1u?64u:191u;for(const auto v:pixels)check(v==expected,"exact full-size current-frame coverage; no previous-frame mask");
