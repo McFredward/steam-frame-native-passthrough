@@ -27,7 +27,7 @@ struct Device{
     FIELD(CreateImage) FIELD(DestroyImage) FIELD(AllocateMemory) FIELD(FreeMemory)
     FIELD(BindImageMemory) FIELD(BindImageMemory2) FIELD(BindImageMemory2KHR) FIELD(GetMemoryFdKHR)
     FIELD(CreateImageView) FIELD(DestroyImageView) FIELD(UpdateDescriptorSets) FIELD(UpdateDescriptorSetWithTemplate)
-    FIELD(UpdateDescriptorSetWithTemplateKHR) FIELD(FreeDescriptorSets) FIELD(ResetDescriptorPool) FIELD(DestroyDescriptorPool)
+    FIELD(UpdateDescriptorSetWithTemplateKHR) FIELD(AllocateDescriptorSets) FIELD(FreeDescriptorSets) FIELD(ResetDescriptorPool) FIELD(DestroyDescriptorPool)
     FIELD(GetDeviceQueue) FIELD(GetDeviceQueue2) FIELD(CreateCommandPool) FIELD(DestroyCommandPool) FIELD(ResetCommandPool)
     FIELD(AllocateCommandBuffers) FIELD(FreeCommandBuffers) FIELD(BeginCommandBuffer) FIELD(ResetCommandBuffer)
     FIELD(CmdBindPipeline) FIELD(CmdBindDescriptorSets) FIELD(CmdDraw) FIELD(CmdDrawIndexed)
@@ -117,7 +117,7 @@ VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice physical,const VkDe
     LOAD(CreateGraphicsPipelines) LOAD(DestroyPipeline) LOAD(CreateImage) LOAD(DestroyImage) LOAD(AllocateMemory) LOAD(FreeMemory)
     LOAD(BindImageMemory) LOAD(BindImageMemory2) LOAD(BindImageMemory2KHR) LOAD(GetMemoryFdKHR)
     LOAD(CreateImageView) LOAD(DestroyImageView) LOAD(UpdateDescriptorSets) LOAD(UpdateDescriptorSetWithTemplate)
-    LOAD(UpdateDescriptorSetWithTemplateKHR) LOAD(FreeDescriptorSets) LOAD(ResetDescriptorPool) LOAD(DestroyDescriptorPool)
+    LOAD(UpdateDescriptorSetWithTemplateKHR) LOAD(AllocateDescriptorSets) LOAD(FreeDescriptorSets) LOAD(ResetDescriptorPool) LOAD(DestroyDescriptorPool)
     LOAD(GetDeviceQueue) LOAD(GetDeviceQueue2) LOAD(CreateCommandPool) LOAD(DestroyCommandPool) LOAD(ResetCommandPool)
     LOAD(AllocateCommandBuffers) LOAD(FreeCommandBuffers) LOAD(BeginCommandBuffer) LOAD(ResetCommandBuffer)
     LOAD(CmdBindPipeline) LOAD(CmdBindDescriptorSets) LOAD(CmdDraw) LOAD(CmdDrawIndexed) LOAD(CmdExecuteCommands) LOAD(CmdBindShadersEXT) LOAD(CmdPushDescriptorSetKHR)
@@ -163,11 +163,12 @@ VKAPI_ATTR VkResult VKAPI_CALL getMemoryFdKHR(VkDevice value,const VkMemoryGetFd
 VKAPI_ATTR VkResult VKAPI_CALL createImageView(VkDevice value,const VkImageViewCreateInfo* info,const VkAllocationCallbacks* alloc,VkImageView* out){auto* d=device(value);const auto result=d->CreateImageView(value,info,alloc,out);if(result==VK_SUCCESS)d->renderer.viewCreated(*out,*info);return result;}
 VKAPI_ATTR void VKAPI_CALL destroyImageView(VkDevice value,VkImageView object,const VkAllocationCallbacks* alloc){auto* d=device(value);d->renderer.viewDestroyed(object);d->DestroyImageView(value,object,alloc);}
 VKAPI_ATTR void VKAPI_CALL updateDescriptorSets(VkDevice value,uint32_t count,const VkWriteDescriptorSet* writes,uint32_t copies,const VkCopyDescriptorSet* copy){auto* d=device(value);d->renderer.descriptorWrites(count,writes,copies,copy);d->UpdateDescriptorSets(value,count,writes,copies,copy);}
-VKAPI_ATTR void VKAPI_CALL updateDescriptorSetWithTemplate(VkDevice value,VkDescriptorSet set,VkDescriptorUpdateTemplate templ,const void* data){auto* d=device(value);d->renderer.descriptorRetired(set);d->UpdateDescriptorSetWithTemplate(value,set,templ,data);}
-VKAPI_ATTR void VKAPI_CALL updateDescriptorSetWithTemplateKHR(VkDevice value,VkDescriptorSet set,VkDescriptorUpdateTemplate templ,const void* data){auto* d=device(value);d->renderer.descriptorRetired(set);d->UpdateDescriptorSetWithTemplateKHR(value,set,templ,data);}
-VKAPI_ATTR VkResult VKAPI_CALL freeDescriptorSets(VkDevice value,VkDescriptorPool pool,uint32_t count,const VkDescriptorSet* sets){auto* d=device(value);if(count<=256)for(uint32_t n=0;n<count;++n)d->renderer.descriptorRetired(sets[n]);else d->renderer.descriptorsInvalidated();return d->FreeDescriptorSets(value,pool,count,sets);}
-VKAPI_ATTR VkResult VKAPI_CALL resetDescriptorPool(VkDevice value,VkDescriptorPool pool,VkDescriptorPoolResetFlags flags){auto* d=device(value);d->renderer.descriptorsInvalidated();return d->ResetDescriptorPool(value,pool,flags);}
-VKAPI_ATTR void VKAPI_CALL destroyDescriptorPool(VkDevice value,VkDescriptorPool pool,const VkAllocationCallbacks* alloc){auto* d=device(value);d->renderer.descriptorsInvalidated();d->DestroyDescriptorPool(value,pool,alloc);}
+VKAPI_ATTR void VKAPI_CALL updateDescriptorSetWithTemplate(VkDevice value,VkDescriptorSet set,VkDescriptorUpdateTemplate templ,const void* data){auto* d=device(value);d->renderer.descriptorInvalidated(set);d->UpdateDescriptorSetWithTemplate(value,set,templ,data);}
+VKAPI_ATTR void VKAPI_CALL updateDescriptorSetWithTemplateKHR(VkDevice value,VkDescriptorSet set,VkDescriptorUpdateTemplate templ,const void* data){auto* d=device(value);d->renderer.descriptorInvalidated(set);d->UpdateDescriptorSetWithTemplateKHR(value,set,templ,data);}
+VKAPI_ATTR VkResult VKAPI_CALL allocateDescriptorSets(VkDevice value,const VkDescriptorSetAllocateInfo* info,VkDescriptorSet* sets){auto* d=device(value);const auto result=d->AllocateDescriptorSets(value,info,sets);if(result==VK_SUCCESS&&info&&sets)d->renderer.descriptorsAllocated(*info,sets);return result;}
+VKAPI_ATTR VkResult VKAPI_CALL freeDescriptorSets(VkDevice value,VkDescriptorPool pool,uint32_t count,const VkDescriptorSet* sets){auto* d=device(value);const auto result=d->FreeDescriptorSets(value,pool,count,sets);if(result==VK_SUCCESS){if(sets)for(std::size_t first=0;first<count;first+=256)for(std::size_t n=first;n<std::min<std::size_t>(count,first+256);++n)d->renderer.descriptorRetired(sets[n]);else if(count)d->renderer.descriptorsInvalidated();}return result;}
+VKAPI_ATTR VkResult VKAPI_CALL resetDescriptorPool(VkDevice value,VkDescriptorPool pool,VkDescriptorPoolResetFlags flags){auto* d=device(value);const auto result=d->ResetDescriptorPool(value,pool,flags);if(result==VK_SUCCESS)d->renderer.descriptorPoolRetired(pool);return result;}
+VKAPI_ATTR void VKAPI_CALL destroyDescriptorPool(VkDevice value,VkDescriptorPool pool,const VkAllocationCallbacks* alloc){auto* d=device(value);d->renderer.descriptorPoolRetired(pool);d->DestroyDescriptorPool(value,pool,alloc);}
 VKAPI_ATTR void VKAPI_CALL getDeviceQueue(VkDevice value,uint32_t family,uint32_t index,VkQueue* out){auto* d=device(value);d->GetDeviceQueue(value,family,index,out);d->renderer.queueObserved(*out,family);}
 VKAPI_ATTR void VKAPI_CALL getDeviceQueue2(VkDevice value,const VkDeviceQueueInfo2* info,VkQueue* out){auto* d=device(value);d->GetDeviceQueue2(value,info,out);if(!info->flags)d->renderer.queueObserved(*out,info->queueFamilyIndex);}
 VKAPI_ATTR VkResult VKAPI_CALL createCommandPool(VkDevice value,const VkCommandPoolCreateInfo* info,const VkAllocationCallbacks* alloc,VkCommandPool* out){
@@ -250,7 +251,7 @@ PFN_vkVoidFunction hook(const char* name,PFN_vkVoidFunction original){
     HOOK(BindImageMemory,bindImageMemory) HOOK(BindImageMemory2,bindImageMemory2) HOOK(BindImageMemory2KHR,bindImageMemory2KHR) HOOK(GetMemoryFdKHR,getMemoryFdKHR)
     HOOK(CreateImageView,createImageView) HOOK(DestroyImageView,destroyImageView)
     HOOK(UpdateDescriptorSets,updateDescriptorSets) HOOK(UpdateDescriptorSetWithTemplate,updateDescriptorSetWithTemplate) HOOK(UpdateDescriptorSetWithTemplateKHR,updateDescriptorSetWithTemplateKHR)
-    HOOK(FreeDescriptorSets,freeDescriptorSets) HOOK(ResetDescriptorPool,resetDescriptorPool) HOOK(DestroyDescriptorPool,destroyDescriptorPool)
+    HOOK(AllocateDescriptorSets,allocateDescriptorSets) HOOK(FreeDescriptorSets,freeDescriptorSets) HOOK(ResetDescriptorPool,resetDescriptorPool) HOOK(DestroyDescriptorPool,destroyDescriptorPool)
     HOOK(GetDeviceQueue,getDeviceQueue) HOOK(GetDeviceQueue2,getDeviceQueue2)
     HOOK(CreateCommandPool,createCommandPool) HOOK(AllocateCommandBuffers,allocateCommandBuffers) HOOK(FreeCommandBuffers,freeCommandBuffers) HOOK(DestroyCommandPool,destroyCommandPool) HOOK(ResetCommandPool,resetCommandPool)
     HOOK(BeginCommandBuffer,beginCommandBuffer) HOOK(ResetCommandBuffer,resetCommandBuffer)

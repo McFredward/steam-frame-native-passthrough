@@ -115,7 +115,7 @@ struct Integration {
  Driver vk;sr::Renderer renderer;CloneFixture native;
  std::array<VkDescriptorSetLayoutBinding,29> observedBindings{};
  VkPipeline publicPipeline=handle<VkPipeline>(0x60);
- VkDevice device=handle<VkDevice>(1);VkCommandBuffer cb=handle<VkCommandBuffer>(0x71000);VkImage image=handle<VkImage>(0x72000);VkImageView view=handle<VkImageView>(0x73000);VkDescriptorSet set=handle<VkDescriptorSet>(0x74000);VkDeviceMemory imported=handle<VkDeviceMemory>(0x75000);
+ VkDevice device=handle<VkDevice>(1);VkCommandBuffer cb=handle<VkCommandBuffer>(0x71000);VkImage image=handle<VkImage>(0x72000);VkImageView view=handle<VkImageView>(0x73000);VkDescriptorSet set=handle<VkDescriptorSet>(0x74000);VkDeviceMemory imported=handle<VkDeviceMemory>(0x75000);VkDescriptorPool descriptorPool=handle<VkDescriptorPool>(0x76000);
  std::shared_ptr<std::atomic<bool>> connection=std::make_shared<std::atomic<bool>>(true);int file=-1;sr::LocalPicture picture;VkBuffer guard=VK_NULL_HANDLE;
  Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true,bool failCoverage=false,bool customAllocator=false,bool prime=true,unsigned pendingPipelines=0){
   leaseCurrent=true;leaseSequence=71;vk.fences[number(vk.appFence)]=false;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
@@ -139,7 +139,7 @@ struct Integration {
   check(consumer.owner&&consumer.coverage&&consumer.picture&&consumer.tick,"only actual exact-coverage native companion registers receiver route");
   VkExternalMemoryImageCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};external.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};info.pNext=&external;info.imageType=VK_IMAGE_TYPE_2D;info.extent={16,2,1};info.mipLevels=info.arrayLayers=1;info.samples=VK_SAMPLE_COUNT_1_BIT;info.format=VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;renderer.imageCreated(image,info);
   char path[]="/tmp/sfnp-renderer-fixture-XXXXXX";file=mkstemp(path);check(file>=0,"owned kernel-object fixture fd");unlink(path);struct stat st{};check(!fstat(file,&st),"exact kernel object observed");VkImportMemoryFdInfoKHR fd{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};fd.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;fd.fd=file;VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocate.pNext=&fd;allocate.allocationSize=32;auto preparation=renderer.memoryPreparing(allocate);check(preparation.duplicate>=0,"fd duplicated BEFORE original consumes it");renderer.memoryAllocated(imported,allocate,preparation,VK_SUCCESS);renderer.imageBound(image,imported,0);
-  VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};ci.image=image;ci.viewType=VK_IMAGE_VIEW_TYPE_2D;ci.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};renderer.viewCreated(view,ci);writeView(view);
+  VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};ci.image=image;ci.viewType=VK_IMAGE_VIEW_TYPE_2D;ci.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};renderer.viewCreated(view,ci);allocateSet(set,descriptorPool);writeView(view);
   picture.metadata.kind=local::Kind::Decoded;picture.metadata.descriptor={7,9,16,2};picture.metadata.binding[0]=31;picture.metadata.lease.kernel={std::uint64_t(st.st_dev),std::uint64_t(st.st_ino)};picture.metadata.lease.sequence=71;picture.metadata.peerConfirmed=true;picture.leases=std::make_shared<local::LeaseReader>();picture.connection=connection;
   renderer.commandAllocated(handle<VkCommandBuffer>(0x70fff),VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);renderer.commandAllocated(cb,VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);
   if(prime){publish();consumer.picture(consumer.owner,picture);
@@ -153,6 +153,7 @@ struct Integration {
  ~Integration(){renderer.stopCold();if(file>=0)close(file);}
  void publish(sb::CoverageEncoding encoding=sb::CoverageEncoding::Raw,unsigned size=32){sb::CertifiedAccessUnit certificate;certificate.descriptor=picture.metadata.descriptor;certificate.binding=picture.metadata.binding;certificate.coverageEncoding=encoding;certificate.coverage.assign(encoding==sb::CoverageEncoding::None?0:size,127);consumer.coverage(consumer.owner,certificate);}
  void writeView(VkImageView selected){VkDescriptorImageInfo imageInfo{};imageInfo.imageView=selected;imageInfo.imageLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};write.dstSet=set;write.dstBinding=9;write.descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;write.descriptorCount=1;write.pImageInfo=&imageInfo;renderer.descriptorWrites(1,&write,0,nullptr);}
+ void allocateSet(VkDescriptorSet target,VkDescriptorPool pool){VkDescriptorSetAllocateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};info.descriptorPool=pool;info.descriptorSetCount=1;info.pSetLayouts=&native.nativeSet;renderer.descriptorsAllocated(info,&target);}
  sr::Draw record(VkCommandBufferUsageFlags flags=0){VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=flags;renderer.commandBegin(cb,&begin);renderer.pipelineBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,publicPipeline);renderer.setsBound(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,0,1,&set,0);auto result=renderer.beforeDraw(cb);if(result.control){guard=handle<VkBuffer>(vk.setBuffer.at(number(result.control)));vk.appControl[number(cb)]=number(guard);vk.appOffset[number(cb)]=vk.setOffset.at(number(result.control));}return result;}
  sr::Draw freshFrame(){
   ++picture.metadata.descriptor.sourceFrame;picture.metadata.lease.sequence=++leaseSequence;
@@ -199,6 +200,38 @@ void idleStartup(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
   check(f.renderer.submit2(f.vk.queue,1,&replay,f.vk.appFence,mode==2)==VK_SUCCESS&&f.vk.reads.back()==0,"tracking loss retains mandatory zeroing for previously guarded Submit2 recordings");
  }
  {Integration f(vs,ps,1,true,true,false,false,false);f.vk.ordinaryMarks[number(f.cb)]=0x7b;f.vk.blockPipeline=true;VkPipeline other=handle<VkPipeline>(0x61);std::thread cold([&]{f.renderer.graphicsCreated(VK_NULL_HANDLE,f.native.graphics,nullptr,other);});const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(!f.vk.insidePipeline.load()&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();const bool locked=f.vk.insidePipeline.load();const auto before=f.vk.forwarded.size();const auto result=f.submit(false);f.vk.blockPipeline=false;cold.join();check(locked,"idle contention control reaches actual native pipeline creation");check(result==VK_SUCCESS&&f.vk.forwarded.size()==before+1&&f.vk.forwarded.back().count==1,"idle native submit stays transparent even while actual cold pipeline preparation holds renderer mutex");}
+}
+void descriptorIsolation(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ Integration f(vs,ps,1);const auto otherPool=handle<VkDescriptorPool>(0x86000);const auto otherSet=handle<VkDescriptorSet>(0x84000);f.allocateSet(otherSet,otherPool);
+ check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"current video descriptor initially samples its exact current mask");
+ f.vk.signal();consumer.tick(consumer.owner);f.renderer.descriptorPoolRetired(otherPool);
+ check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"unrelated native UI pool reset cannot erase video descriptor or lose an active mask");
+ f.vk.signal();consumer.tick(consumer.owner);f.allocateSet(otherSet,otherPool);f.renderer.descriptorPoolRetired(otherPool);
+ check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"unrelated native UI pool destruction cannot erase video descriptor");
+ f.vk.signal();consumer.tick(consumer.owner);f.allocateSet(otherSet,otherPool);
+ VkCopyDescriptorSet copy{VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};copy.srcSet=f.set;copy.srcBinding=copy.dstBinding=9;copy.dstSet=otherSet;copy.descriptorCount=1;
+ f.renderer.descriptorWrites(0,nullptr,1,&copy);check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"copying video image into a UI descriptor never invalidates source video descriptor");
+ f.vk.signal();consumer.tick(consumer.owner);copy.srcBinding=copy.dstBinding=0;copy.dstSet=f.set;f.renderer.descriptorWrites(0,nullptr,1,&copy);
+ check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"copies outside image binding9 cannot disturb unchanged video image content");
+ f.vk.signal();consumer.tick(consumer.owner);std::array<VkWriteDescriptorSet,300> uiWrites{};for(auto& write:uiWrites){write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;write.dstSet=otherSet;write.dstBinding=0;}
+ f.renderer.descriptorWrites(uiWrites.size(),uiWrites.data(),0,nullptr);check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"large unrelated native write batch cannot globally erase video descriptor");
+ f.vk.signal();consumer.tick(consumer.owner);f.renderer.descriptorInvalidated(otherSet);check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"unknown template targeting another set cannot erase video descriptor");
+ f.vk.signal();consumer.tick(consumer.owner);check(f.record().ready,"record video before its genuine owning pool reset");f.renderer.descriptorPoolRetired(f.descriptorPool);
+ check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0&&!f.renderer.beforeDraw(f.cb).ready,"reset of actual video pool retires selected set and all old recorded authority");
+ f.allocateSet(f.set,f.descriptorPool);f.writeView(f.view);check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"reallocated identical numeric set/view cannot revive command's old allocation generation");
+ check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"fresh native recording under new allocation generation restores exact coverage");
+ f.vk.signal();consumer.tick(consumer.owner);f.renderer.descriptorRetired(otherSet);check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"free of unrelated set does not retire video set");
+ f.vk.signal();consumer.tick(consumer.owner);f.renderer.descriptorRetired(f.set);check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"actual selected set free invalidates an already recorded command");
+ f.allocateSet(f.set,f.descriptorPool);f.writeView(f.view);check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"free/reallocation ABA remains refused even when same image/view is written again");
+ check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"native re-record after free/reallocation permits newly proven allocation");
+ f.vk.signal();consumer.tick(consumer.owner);copy.srcSet=f.set;copy.srcBinding=9;copy.dstSet=f.set;copy.dstBinding=9;f.renderer.descriptorWrites(0,nullptr,1,&copy);check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"supported self-copy preserves actual first-image metadata in API order");
+ f.vk.signal();consumer.tick(consumer.owner);copy.srcSet=handle<VkDescriptorSet>(0xdead);f.renderer.descriptorWrites(0,nullptr,1,&copy);check(!f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"unknown source writing selected image refuses only exact affected destination");
+ const auto stats=f.renderer.statsCold();check(stats.descriptorPoolRetirements==3&&stats.descriptorCopies==4&&stats.descriptorUnknownUpdates>=2&&stats.descriptorAllocated>=5&&!stats.descriptorAllocationRefused,"bounded descriptor cause counters distinguish lifetime changes and unknown exact updates");
+}
+void descriptorStream(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ Integration f(vs,ps,1);const auto uiPool=handle<VkDescriptorPool>(0x86100);const auto ui=handle<VkDescriptorSet>(0x84100);const auto baseline=f.renderer.statsCold().guardAccepted;
+ for(unsigned n=0;n<128;++n){f.allocateSet(ui,uiPool);VkCopyDescriptorSet copy{VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};copy.srcSet=f.set;copy.srcBinding=copy.dstBinding=9;copy.dstSet=ui;copy.descriptorCount=1;f.renderer.descriptorWrites(0,nullptr,1,&copy);f.renderer.descriptorPoolRetired(uiPool);check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"every exact video frame remains covered during unrelated UI pool/copy lifecycle");f.vk.signal();consumer.tick(consumer.owner);}
+ check(f.renderer.statsCold().guardAccepted==baseline+128&&!f.renderer.statsCold().drawRefusals[std::size_t(sr::DrawRefusal::Descriptor)],"UI descriptor churn causes zero missing masks across the entire bounded repeated native stream");
 }
 void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  {Integration f(vs,ps,1,true,true,false,false,false,64);check(f.renderer.statsCold().pipelines==1,"repeated pending startup pipelines do not prevent later exact admission");}
@@ -421,7 +454,8 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
 }
 }
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
- if(argc==5&&std::strcmp(argv[4],"idle-startup")==0)idleStartup(vs,ps);
+ if(argc==5&&std::strcmp(argv[4],"descriptor-isolation")==0){descriptorIsolation(vs,ps);descriptorStream(vs,ps);}
+ else if(argc==5&&std::strcmp(argv[4],"idle-startup")==0)idleStartup(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"telemetry")==0)telemetry(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"fallback-recovery")==0)fallbackRecovery(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"timeline")==0)timeline(vs,ps);

@@ -4,11 +4,16 @@
 #include <vulkan/vulkan.h>
 #include <array>
 #include <new>
+#include <vector>
 namespace wrapper_fixture {
 struct State {
     bool enabled=true,throwConstructor=false,throwJournal=false;
     unsigned prepared=0,stopped=0,allocated=0,retired=0,resets=0,begins=0,unknown=0,lost=0,journal=0;
     VkCommandBuffer lastCommand{};std::uint32_t family=0;VkCommandBufferLevel level{};
+    unsigned descriptorAllocations=0,descriptorGlobals=0,descriptorUpdates=0;
+    VkDescriptorPool descriptorAllocatedPool{},descriptorRetiredPool{};std::uint32_t descriptorAllocatedCount=0;
+    const VkDescriptorSet* descriptorAllocatedSets=nullptr;
+    std::vector<VkDescriptorSet> descriptorRetiredSets,descriptorInvalidatedSets;
 };
 inline State state;
 }
@@ -55,8 +60,13 @@ public:
     NOOP(memoryAllocated,(VkDeviceMemory,const VkMemoryAllocateInfo&,MemoryPreparation&,VkResult)) NOOP(memoryFreed,(VkDeviceMemory))
     NOOP(imageBound,(VkImage,VkDeviceMemory,VkDeviceSize)) NOOP(memoryExported,(VkDeviceMemory,int,VkExternalMemoryHandleTypeFlagBits,std::uintptr_t))
     NOOP(viewCreated,(VkImageView,const VkImageViewCreateInfo&)) NOOP(viewDestroyed,(VkImageView))
-    NOOP(descriptorWrites,(std::uint32_t,const VkWriteDescriptorSet*,std::uint32_t,const VkCopyDescriptorSet*))
-    NOOP(descriptorRetired,(VkDescriptorSet)) NOOP(descriptorsInvalidated,()) NOOP(queueObserved,(VkQueue,std::uint32_t))
+    void descriptorWrites(std::uint32_t,const VkWriteDescriptorSet*,std::uint32_t,const VkCopyDescriptorSet*) noexcept{++wrapper_fixture::state.descriptorUpdates;}
+    void descriptorsAllocated(const VkDescriptorSetAllocateInfo& i,const VkDescriptorSet* s) noexcept{auto& v=wrapper_fixture::state;++v.descriptorAllocations;v.descriptorAllocatedPool=i.descriptorPool;v.descriptorAllocatedCount=i.descriptorSetCount;v.descriptorAllocatedSets=s;}
+    void descriptorRetired(VkDescriptorSet s) noexcept{wrapper_fixture::state.descriptorRetiredSets.push_back(s);}
+    void descriptorInvalidated(VkDescriptorSet s) noexcept{wrapper_fixture::state.descriptorInvalidatedSets.push_back(s);}
+    void descriptorPoolRetired(VkDescriptorPool p) noexcept{wrapper_fixture::state.descriptorRetiredPool=p;}
+    void descriptorsInvalidated() noexcept{++wrapper_fixture::state.descriptorGlobals;}
+    NOOP(queueObserved,(VkQueue,std::uint32_t))
     NOOP(pipelineBound,(VkCommandBuffer,VkPipelineBindPoint,VkPipeline))
     NOOP(setsBound,(VkCommandBuffer,VkPipelineBindPoint,std::uint32_t,std::uint32_t,const VkDescriptorSet*,std::uint32_t))
 #undef NOOP

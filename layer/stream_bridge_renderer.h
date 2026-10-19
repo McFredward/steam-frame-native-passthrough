@@ -26,6 +26,7 @@ struct RendererStats {
     std::array<std::uint64_t,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
     std::array<std::uint64_t,static_cast<std::size_t>(SubmitRefusal::Count)> submitRefusals{};
     std::uint64_t collects=0,collected=0,coreSubmits=0,submits2=0;
+    std::uint64_t descriptorAllocated=0,descriptorAllocationRefused=0,descriptorPoolRetirements=0,descriptorSetsRetired=0,descriptorUnknownUpdates=0,descriptorCopies=0;
     std::uint32_t firstNextType=0,firstRefusedNextType=0;
     std::uint32_t pending=0,copying=0,ready=0,quarantined=0,pipelines=0;
     std::uint64_t poolUploaded=0,poolRefused=0;
@@ -56,6 +57,9 @@ public:
     void viewCreated(VkImageView,const VkImageViewCreateInfo&) noexcept;
     void viewDestroyed(VkImageView) noexcept;
     void descriptorWrites(std::uint32_t,const VkWriteDescriptorSet*,std::uint32_t,const VkCopyDescriptorSet*) noexcept;
+    void descriptorsAllocated(const VkDescriptorSetAllocateInfo&,const VkDescriptorSet*) noexcept;
+    void descriptorPoolRetired(VkDescriptorPool) noexcept;
+    void descriptorInvalidated(VkDescriptorSet) noexcept;
     void descriptorRetired(VkDescriptorSet) noexcept;
     void descriptorsInvalidated() noexcept;
     void queueObserved(VkQueue,std::uint32_t family) noexcept;

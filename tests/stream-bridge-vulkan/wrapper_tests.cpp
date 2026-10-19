@@ -19,6 +19,15 @@ unsigned nativeSubmits=0,nativeSubmits2=0,nativeSubmits2KHR=0,nativeShaderCreate
 std::vector<VkPipeline> binds;std::vector<std::uint32_t> sets;
 std::uintptr_t nextPool=100;std::vector<VkCommandBuffer> allocatedHandles;
 VkQueue seenQueue{};VkFence seenFence{};const void* seenSubmit=nullptr;std::uint32_t seenCount=0;
+unsigned nativeDescriptorAlloc=0,nativeDescriptorFree=0,nativeDescriptorReset=0,nativeDescriptorDestroy=0,nativeDescriptorWrites=0,nativeDescriptorTemplates=0,nativeDescriptorTemplatesKHR=0;
+VkDescriptorPool seenDescriptorPool{};const void* seenDescriptorInfo=nullptr;const void* seenDescriptorSets=nullptr;std::uint32_t seenDescriptorCount=0;VkDescriptorPoolResetFlags seenDescriptorFlags=0;
+VkResult VKAPI_CALL nAllocateDescriptors(VkDevice,const VkDescriptorSetAllocateInfo* i,VkDescriptorSet* sets){++nativeDescriptorAlloc;seenDescriptorPool=i->descriptorPool;seenDescriptorInfo=i;seenDescriptorSets=sets;seenDescriptorCount=i->descriptorSetCount;if(nativeResult==VK_SUCCESS)for(unsigned n=0;n<i->descriptorSetCount;++n)sets[n]=scalar<VkDescriptorSet>(0x900+n);return nativeResult;}
+VkResult VKAPI_CALL nFreeDescriptors(VkDevice,VkDescriptorPool p,std::uint32_t n,const VkDescriptorSet* sets){++nativeDescriptorFree;seenDescriptorPool=p;seenDescriptorSets=sets;seenDescriptorCount=n;return nativeResult;}
+VkResult VKAPI_CALL nResetDescriptors(VkDevice,VkDescriptorPool p,VkDescriptorPoolResetFlags flags){++nativeDescriptorReset;seenDescriptorPool=p;seenDescriptorFlags=flags;return nativeResult;}
+void VKAPI_CALL nDestroyDescriptors(VkDevice,VkDescriptorPool p,const VkAllocationCallbacks* a){++nativeDescriptorDestroy;seenDescriptorPool=p;seenDescriptorInfo=a;}
+void VKAPI_CALL nUpdateDescriptors(VkDevice,std::uint32_t n,const VkWriteDescriptorSet* w,std::uint32_t copies,const VkCopyDescriptorSet* c){++nativeDescriptorWrites;seenDescriptorCount=n;seenDescriptorInfo=w;seenDescriptorSets=c;check(copies==1,"native descriptor copy count unchanged");}
+void VKAPI_CALL nTemplate(VkDevice,VkDescriptorSet,VkDescriptorUpdateTemplate,const void*){++nativeDescriptorTemplates;}
+void VKAPI_CALL nTemplateKHR(VkDevice,VkDescriptorSet,VkDescriptorUpdateTemplate,const void*){++nativeDescriptorTemplatesKHR;}
 VkResult VKAPI_CALL nCreateInstance(const VkInstanceCreateInfo*,const VkAllocationCallbacks*,VkInstance* out){++nativeCreateInstances;if(nativeResult==VK_SUCCESS)*out=dispatchable<VkInstance>();return nativeResult;}
 void VKAPI_CALL nDestroyInstance(VkInstance value,const VkAllocationCallbacks*){++nativeDestroyInstances;destroyDispatch(value);}
 VkResult VKAPI_CALL nCreateDevice(VkPhysicalDevice,const VkDeviceCreateInfo*,const VkAllocationCallbacks*,VkDevice* out){++nativeCreateDevices;if(nativeResult==VK_SUCCESS)*out=dispatchable<VkDevice>();return nativeResult;}
@@ -45,6 +54,8 @@ PFN_vkVoidFunction VKAPI_CALL gdpa(VkDevice,const char* name){
  FUN(AllocateCommandBuffers,nAllocate) FUN(FreeCommandBuffers,nFree) FUN(BeginCommandBuffer,nBegin) FUN(ResetCommandBuffer,nReset)
  FUN(CmdBindPipeline,nBindPipeline) FUN(CmdBindDescriptorSets,nBindSets) FUN(CmdDraw,nDraw) FUN(CmdDrawIndexed,nDrawIndexed)
  FUN(QueueSubmit,nSubmit) FUN(QueueSubmit2,nSubmit2) FUN(QueueSubmit2KHR,nSubmit2KHR) FUN(CreateShaderModule,nCreateShader)
+ FUN(AllocateDescriptorSets,nAllocateDescriptors) FUN(FreeDescriptorSets,nFreeDescriptors) FUN(ResetDescriptorPool,nResetDescriptors) FUN(DestroyDescriptorPool,nDestroyDescriptors)
+ FUN(UpdateDescriptorSets,nUpdateDescriptors) FUN(UpdateDescriptorSetWithTemplate,nTemplate) FUN(UpdateDescriptorSetWithTemplateKHR,nTemplateKHR)
 #undef FUN
  return !std::strcmp(name,"vkUnaffected")?marker:nullptr;
 }
@@ -67,6 +78,22 @@ VkCommandPool makePool(VkDevice d,bool protectedMemory=false){VkCommandPoolCreat
  check(createCommandPool(d,&info,nullptr,&pool)==VK_SUCCESS,"pool forwards successful creation");return pool;}
 VkCommandBuffer makeCommand(VkDevice d,VkCommandPool p){VkCommandBufferAllocateInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};info.commandPool=p;info.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;info.commandBufferCount=1;VkCommandBuffer cb{};
  check(allocateCommandBuffers(d,&info,&cb)==VK_SUCCESS,"command allocation preserves native result");return cb;}
+void descriptorLifetime(VkDevice d){
+ auto& state=wrapper_fixture::state;const auto pool=scalar<VkDescriptorPool>(0x700),other=scalar<VkDescriptorPool>(0x701);VkDescriptorSetLayout layout=scalar<VkDescriptorSetLayout>(0x800);VkDescriptorSetAllocateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};info.descriptorPool=pool;info.descriptorSetCount=2;std::array<VkDescriptorSetLayout,2> layouts{{layout,layout}};info.pSetLayouts=layouts.data();std::array<VkDescriptorSet,300> sets{};
+ check(framebridge_vkGetDeviceProcAddr(d,"vkAllocateDescriptorSets")==reinterpret_cast<PFN_vkVoidFunction>(allocateDescriptorSets),"descriptor allocation is observed through actual intercepted device dispatch");
+ check(allocateDescriptorSets(d,&info,sets.data())==VK_SUCCESS&&nativeDescriptorAlloc==1&&seenDescriptorInfo==&info&&seenDescriptorSets==sets.data()&&seenDescriptorCount==2,"descriptor allocation forwards exact native pointers/count once");
+ check(state.descriptorAllocations==1&&state.descriptorAllocatedPool==pool&&state.descriptorAllocatedCount==2&&state.descriptorAllocatedSets==sets.data(),"successful original allocation publishes actual owning pool and native handles");
+ nativeResult=VK_ERROR_OUT_OF_POOL_MEMORY;check(allocateDescriptorSets(d,&info,sets.data())==nativeResult&&nativeDescriptorAlloc==2&&state.descriptorAllocations==1,"failed native allocation cannot create descriptor ownership");
+ check(resetDescriptorPool(d,pool,3)==nativeResult&&nativeDescriptorReset==1&&seenDescriptorPool==pool&&seenDescriptorFlags==3&&!state.descriptorRetiredPool&&!state.descriptorGlobals,"failed native pool reset preserves prior descriptor authority");
+ check(freeDescriptorSets(d,pool,2,sets.data())==nativeResult&&nativeDescriptorFree==1&&state.descriptorRetiredSets.empty(),"failed native descriptor free preserves still-live allocations");nativeResult=VK_SUCCESS;
+ check(resetDescriptorPool(d,other,0)==VK_SUCCESS&&nativeDescriptorReset==2&&state.descriptorRetiredPool==other&&!state.descriptorGlobals,"successful native pool reset scopes observation to exact original pool");
+ VkAllocationCallbacks callbacks{};destroyDescriptorPool(d,pool,&callbacks);check(nativeDescriptorDestroy==1&&seenDescriptorPool==pool&&seenDescriptorInfo==&callbacks&&state.descriptorRetiredPool==pool&&!state.descriptorGlobals,"native pool destroy preserves allocator and scopes retirement to that pool");
+ for(unsigned n=0;n<sets.size();++n)sets[n]=scalar<VkDescriptorSet>(0x900+n);
+ check(freeDescriptorSets(d,pool,sets.size(),sets.data())==VK_SUCCESS&&nativeDescriptorFree==2&&seenDescriptorCount==sets.size()&&seenDescriptorSets==sets.data()&&state.descriptorRetiredSets==std::vector<VkDescriptorSet>(sets.begin(),sets.end())&&!state.descriptorGlobals,"large successful native free retires exact sets without global invalidation");
+ VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};VkCopyDescriptorSet copy{VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};copy.dstSet=sets[0];updateDescriptorSets(d,1,&write,1,&copy);check(nativeDescriptorWrites==1&&seenDescriptorCount==1&&seenDescriptorInfo==&write&&seenDescriptorSets==&copy&&state.descriptorUpdates==1,"native writes and copies retain exact public API transaction");
+ const auto retired=state.descriptorRetiredSets.size();updateDescriptorSetWithTemplate(d,sets[0],scalar<VkDescriptorUpdateTemplate>(0xa00),&copy);updateDescriptorSetWithTemplateKHR(d,sets[1],scalar<VkDescriptorUpdateTemplate>(0xa01),&write);
+ check(nativeDescriptorTemplates==1&&nativeDescriptorTemplatesKHR==1&&state.descriptorInvalidatedSets==std::vector<VkDescriptorSet>({sets[0],sets[1]})&&state.descriptorRetiredSets.size()==retired&&!state.descriptorGlobals,"core/KHR unknown templates invalidate only exact destination content, preserving allocation ownership");
+}
 }
 int main(){
  using wrapper_fixture::state;
@@ -78,6 +105,7 @@ int main(){
  check(nativeCreateInstances==1&&nativeCreateDevices==1,"native creation called exactly once");
  check(state.prepared==1,"minimum renderer forwarding prepared even without optional memory query");
  check(framebridge_vkGetDeviceProcAddr(d,"vkUnaffected")==marker,"unknown function forwarded untouched");
+ descriptorLifetime(d);
  check(!framebridge_vkGetDeviceProcAddr(d,"vkCmdBindShadersEXT"),"absent extension stays absent");
  check(physicalProc(i,"vkUnaffected")==marker,"optional physical dispatch falls back to original instance proc");
  state.enabled=false;check(framebridge_vkGetDeviceProcAddr(d,"vkCmdDraw")==reinterpret_cast<PFN_vkVoidFunction>(nDraw),"disabled instrumentation keeps original proc");state.enabled=true;

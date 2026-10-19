@@ -55,6 +55,10 @@ class Wrapper(unittest.TestCase):
 
     def test_causal_controls(self):
         controls = [
+            ("failed-descriptor-pool-reset", "if(result==VK_SUCCESS)d->renderer.descriptorPoolRetired(pool);", "d->renderer.descriptorPoolRetired(pool);",
+             "failed native pool reset preserves prior descriptor authority"),
+            ("descriptor-allocation-not-observed", "if(result==VK_SUCCESS&&info&&sets)d->renderer.descriptorsAllocated(*info,sets);", "(void)sets;",
+             "successful original allocation publishes actual owning pool and native handles"),
             ("reset-retirement", "else d.renderer.commandReset(c.value);", "else d.renderer.commandRetired(c.value);",
              "pool reset preserves allocations"),
             ("protected-pool", "if(pool&&!pool->protectedMemory)", "if(pool)",

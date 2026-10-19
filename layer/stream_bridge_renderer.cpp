@@ -41,8 +41,9 @@ struct Renderer::Impl {
     struct Image{std::uint64_t id=0,generation=0,memory=0,memoryGeneration=0;std::uint32_t width=0,height=0;};
     struct View{std::uint64_t id=0,image=0,generation=0,serial=0;};
     struct Descriptor{std::uint64_t id=0,view=0,viewSerial=0;bool valid=false;};
+    struct DescriptorAllocation{std::uint64_t id=0,pool=0,generation=0;};
     struct Pipeline{std::uint64_t id=0;VkPipeline coverage{};VkPipelineLayout layout{};};
-    struct Use{gpu::Lease lease{};LocalPicture picture;std::uint64_t descriptor=0,viewSerial=0,image=0,imageGeneration=0,memoryGeneration=0;};
+    struct Use{gpu::Lease lease{};LocalPicture picture;std::uint64_t descriptor=0,descriptorGeneration=0,viewSerial=0,image=0,imageGeneration=0,memoryGeneration=0;};
     struct Retention {
         gpu::Pool* pool=nullptr;gpu::Lease lease{};
         Retention(gpu::Pool& p,gpu::Lease l):pool(&p),lease(l){}
@@ -67,6 +68,7 @@ struct Renderer::Impl {
     VkDescriptorSetLayout controlLayout{};VkDescriptorPool controlPool{};VkCommandPool guardPool{};
     VkCommandBuffer zero{};VkQueue queue{};VkBuffer controlsBuffer{};VkDeviceMemory controlsMemory{};std::array<Control,128> controls{};
     std::array<Memory,64> memories{};std::array<Image,64> images{};std::array<View,256> views{};std::array<Descriptor,256> descriptors{};
+    std::array<DescriptorAllocation,4096> descriptorAllocations{};std::uint64_t descriptorGeneration=0;
     std::array<Pipeline,128> pipelines{};std::array<Command,128> commands{};std::array<std::shared_ptr<const PreparedPicture>,native::MaxDevices*native::MaxBuffers> pictures{};
 
 #define FUNCS(X) X(CreateShaderModule) X(DestroyShaderModule) X(CreateGraphicsPipelines) X(DestroyPipeline) X(CreatePipelineLayout) X(DestroyPipelineLayout) \
@@ -86,6 +88,7 @@ struct Renderer::Impl {
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(SubmitRefusal::Count)> submitRefusals{};
         std::atomic<std::uint64_t> collects{0},collected{0},coreSubmits{0},submits2{0};
+        std::atomic<std::uint64_t> descriptorAllocated{0},descriptorAllocationRefused{0},descriptorPoolRetirements{0},descriptorSetsRetired{0},descriptorUnknownUpdates{0},descriptorCopies{0};
         std::atomic<std::uint32_t> firstNextType{0},firstRefusedNextType{0};
     } counts;
     std::chrono::steady_clock::time_point nextReport{};
@@ -104,6 +107,7 @@ struct Renderer::Impl {
         COUNT(maskOpaque) COUNT(maskTransparent) COUNT(maskMixed)
         COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
         COUNT(collects) COUNT(collected) COUNT(coreSubmits) COUNT(submits2) COUNT(firstNextType) COUNT(firstRefusedNextType)
+        COUNT(descriptorAllocated) COUNT(descriptorAllocationRefused) COUNT(descriptorPoolRetirements) COUNT(descriptorSetsRetired) COUNT(descriptorUnknownUpdates) COUNT(descriptorCopies)
 #undef COUNT
         for(std::size_t n=0;n<out.drawRefusals.size();++n)out.drawRefusals[n]=counts.refusals[n].load(std::memory_order_relaxed);
         for(std::size_t n=0;n<out.collectRefusals.size();++n)out.collectRefusals[n]=counts.collectRefusals[n].load(std::memory_order_relaxed);
@@ -138,6 +142,8 @@ struct Renderer::Impl {
             static_cast<unsigned long long>(s.guardAccepted),static_cast<unsigned long long>(s.guardAttempts),static_cast<unsigned long long>(s.guardRefused),static_cast<unsigned long long>(s.opaqueSubmits),s.pipelines,unsigned(s.lost));
         std::fprintf(stderr,"[Steam Link Native Passthrough] coverage content: fully-opaque/fully-transparent/mixed=%llu/%llu/%llu; exact pre-draw storage retained; no image capture\n",
             static_cast<unsigned long long>(s.maskOpaque),static_cast<unsigned long long>(s.maskTransparent),static_cast<unsigned long long>(s.maskMixed));
+        std::fprintf(stderr,"[Steam Link Native Passthrough] descriptor flow: allocated/refused=%llu/%llu; pool-retire/set-retire=%llu/%llu; unknown-updates/copies=%llu/%llu\n",
+            static_cast<unsigned long long>(s.descriptorAllocated),static_cast<unsigned long long>(s.descriptorAllocationRefused),static_cast<unsigned long long>(s.descriptorPoolRetirements),static_cast<unsigned long long>(s.descriptorSetsRetired),static_cast<unsigned long long>(s.descriptorUnknownUpdates),static_cast<unsigned long long>(s.descriptorCopies));
         const auto collect=[&](CollectRefusal r){return static_cast<unsigned long long>(s.collectRefusals[static_cast<std::size_t>(r)]);};
         const auto submit=[&](SubmitRefusal r){return static_cast<unsigned long long>(s.submitRefusals[static_cast<std::size_t>(r)]);};
         std::fprintf(stderr,"[Steam Link Native Passthrough] renderer submit: core/submit2=%llu/%llu; first-pNext/refused-pNext=%u/%u; unsupported busy/bounds/shape/extension/flags=%llu/%llu/%llu/%llu/%llu; collect accepted/attempts=%llu/%llu; collect miss cb/empty/ineligible/epoch/lease/descriptor/image/memory/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
@@ -276,10 +282,11 @@ struct Renderer::Impl {
             // A descriptor can legally change after recording but before
             // submission. It must still name this EXACT leased image.
             const auto* descriptor=find(descriptors,use.descriptor);
+            const auto* allocation=find(descriptorAllocations,use.descriptor);
             const auto* view=descriptor&&descriptor->valid?find(views,descriptor->view):nullptr;
             const auto* image=view?find(images,view->image):nullptr;
             const auto* memory=image?find(memories,image->memory):nullptr;
-            require(descriptor&&descriptor->valid,CollectRefusal::Descriptor);
+            require(descriptor&&descriptor->valid&&allocation&&allocation->generation==use.descriptorGeneration,CollectRefusal::Descriptor);
             require(view&&view->serial==use.viewSerial&&descriptor->viewSerial==use.viewSerial&&
                 image&&image->id==use.image&&image->generation==use.imageGeneration&&view->generation==use.imageGeneration,CollectRefusal::Image);
             require(memory&&memory->generation==use.memoryGeneration&&image->memoryGeneration==use.memoryGeneration&&
@@ -417,13 +424,49 @@ void Renderer::imageBound(VkImage value,VkDeviceMemory memory,VkDeviceSize offse
 void Renderer::memoryExported(VkDeviceMemory memory,int fd,VkExternalMemoryHandleTypeFlagBits type,std::uintptr_t caller) noexcept{auto&p=*impl_;if(auto* source=sourceImages())if(source->exported(handle(p.device),handle(memory),fd,std::uint32_t(type),caller))sourceExportedFd(fd);}
 void Renderer::viewCreated(VkImageView value,const VkImageViewCreateInfo& info) noexcept{auto&p=*impl_;if(!p.prepared)return;std::lock_guard<std::mutex> lock(p.gate);const auto* image=find(p.images,handle(info.image));if(!image||info.viewType!=VK_IMAGE_VIEW_TYPE_2D||info.subresourceRange.baseMipLevel||info.subresourceRange.levelCount!=1||info.subresourceRange.baseArrayLayer||info.subresourceRange.layerCount!=1)return;if(auto* view=add(p.views,handle(value))){view->image=image->id;view->generation=image->generation;view->serial=++p.generation;}}
 void Renderer::viewDestroyed(VkImageView value) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);if(auto* view=find(p.views,handle(value)))*view={};}
-void Renderer::descriptorWrites(std::uint32_t count,const VkWriteDescriptorSet* writes,std::uint32_t copies,const VkCopyDescriptorSet*) noexcept{
-    auto&p=*impl_;if(!p.prepared)return;std::lock_guard<std::mutex> lock(p.gate);if(count>256||copies){for(auto& entry:p.descriptors)entry.valid=false;return;}
-    for(unsigned n=0;n<count;++n){const auto& write=writes[n];if(write.dstBinding!=9)continue;auto* entry=find(p.descriptors,handle(write.dstSet));if(!entry)entry=add(p.descriptors,handle(write.dstSet));if(!entry)continue;entry->valid=false;
-        if(write.sType==VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET&&!write.pNext&&write.descriptorType==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE&&!write.dstArrayElement&&write.descriptorCount&&write.descriptorCount<=3&&write.pImageInfo){entry->view=handle(write.pImageInfo[0].imageView);const auto* view=find(p.views,entry->view);entry->valid=view!=nullptr;entry->viewSerial=view?view->serial:0;}
+void Renderer::descriptorWrites(std::uint32_t count,const VkWriteDescriptorSet* writes,std::uint32_t copies,const VkCopyDescriptorSet* copy) noexcept{
+    auto&p=*impl_;if(!p.prepared)return;std::lock_guard<std::mutex> lock(p.gate);
+    if((count&&!writes)||(copies&&!copy)){for(auto& entry:p.descriptors)entry.valid=false;++p.counts.descriptorUnknownUpdates;return;}
+    // Follow the original API batch in fixed chunks without another allocation.
+    // A large UI update is not evidence that unrelated video sets changed.
+    for(std::size_t first=0;first<count;first+=256)for(std::size_t n=first;n<std::min<std::size_t>(count,first+256);++n){const auto& write=writes[n];if(write.dstBinding!=9||write.dstArrayElement)continue;
+        const auto* allocation=find(p.descriptorAllocations,handle(write.dstSet));
+        auto* entry=find(p.descriptors,handle(write.dstSet));
+        if(!allocation){if(entry)entry->valid=false;++p.counts.descriptorUnknownUpdates;continue;}
+        if(!entry)entry=add(p.descriptors,handle(write.dstSet));
+        if(!entry)continue;
+        entry->valid=false;
+        if(allocation&&write.sType==VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET&&!write.pNext&&write.descriptorType==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE&&write.descriptorCount&&write.descriptorCount<=3&&write.pImageInfo){entry->view=handle(write.pImageInfo[0].imageView);const auto* view=find(p.views,entry->view);entry->valid=view!=nullptr;entry->viewSerial=view?view->serial:0;}
+        else ++p.counts.descriptorUnknownUpdates;
+    }
+    // Vulkan applies writes first and then copies in the supplied order.
+    for(std::size_t first=0;first<copies;first+=256)for(std::size_t n=first;n<std::min<std::size_t>(copies,first+256);++n){const auto& update=copy[n];++p.counts.descriptorCopies;
+        if(update.dstBinding!=9||update.dstArrayElement)continue;
+        const auto* source=find(p.descriptors,handle(update.srcSet));
+        const auto* sourceAllocation=find(p.descriptorAllocations,handle(update.srcSet));
+        const auto* destinationAllocation=find(p.descriptorAllocations,handle(update.dstSet));
+        // Save before creating/overwriting dst; src and dst may name one set.
+        const auto prior=source?*source:Impl::Descriptor{};
+        auto* destination=find(p.descriptors,handle(update.dstSet));if(!destinationAllocation){if(destination)destination->valid=false;++p.counts.descriptorUnknownUpdates;continue;}if(!destination)destination=add(p.descriptors,handle(update.dstSet));if(!destination)continue;destination->valid=false;
+        if(update.sType==VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET&&!update.pNext&&update.srcBinding==9&&!update.srcArrayElement&&update.descriptorCount&&update.descriptorCount<=3&&sourceAllocation&&destinationAllocation&&prior.valid){destination->view=prior.view;destination->viewSerial=prior.viewSerial;destination->valid=true;}
+        else ++p.counts.descriptorUnknownUpdates;
     }
 }
-void Renderer::descriptorRetired(VkDescriptorSet value) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);if(auto* entry=find(p.descriptors,handle(value)))*entry={};}
+void Renderer::descriptorsAllocated(const VkDescriptorSetAllocateInfo& info,const VkDescriptorSet* values) noexcept{
+    // Allocation lifetime begins at native device startup, independently of
+    // source admission, shader discovery, or whether MR has ever been active.
+    auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);
+    if(info.sType!=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO||!info.descriptorPool||(info.descriptorSetCount&&!values)){++p.counts.descriptorAllocationRefused;return;}
+    for(std::size_t first=0;first<info.descriptorSetCount;first+=256)for(std::size_t n=first;n<std::min<std::size_t>(info.descriptorSetCount,first+256);++n){
+        const auto id=handle(values[n]);if(auto* old=find(p.descriptors,id))*old={};
+        auto* entry=id?add(p.descriptorAllocations,id):nullptr;
+        if(!entry||p.descriptorGeneration==~std::uint64_t(0)){if(entry)*entry={};++p.counts.descriptorAllocationRefused;continue;}
+        *entry={id,handle(info.descriptorPool),++p.descriptorGeneration};++p.counts.descriptorAllocated;
+    }
+}
+void Renderer::descriptorRetired(VkDescriptorSet value) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);bool known=false;if(auto* entry=find(p.descriptors,handle(value))){*entry={};known=true;}if(auto* entry=find(p.descriptorAllocations,handle(value))){*entry={};known=true;}if(known)++p.counts.descriptorSetsRetired;}
+void Renderer::descriptorPoolRetired(VkDescriptorPool pool) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);++p.counts.descriptorPoolRetirements;for(auto& allocation:p.descriptorAllocations)if(allocation.id&&allocation.pool==handle(pool)){if(auto* entry=find(p.descriptors,allocation.id))*entry={};allocation={};++p.counts.descriptorSetsRetired;}}
+void Renderer::descriptorInvalidated(VkDescriptorSet value) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);if(auto* entry=find(p.descriptors,handle(value)))entry->valid=false;++p.counts.descriptorUnknownUpdates;}
 void Renderer::descriptorsInvalidated() noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);for(auto& entry:p.descriptors)entry={};}
 void Renderer::queueObserved(VkQueue,std::uint32_t) noexcept{}
 void Renderer::commandAllocated(VkCommandBuffer value,VkCommandBufferLevel level,std::uint32_t family) noexcept{
@@ -447,13 +490,13 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline){p.refused(DrawRefusal::Pipeline);return out;}
     out.original=from<VkPipeline>(pipeline->id);
     if(!command->eligible||!command->control||!pipeline->coverage){p.refused(DrawRefusal::Ineligible);return out;}
-    const auto* descriptor=find(p.descriptors,command->set0);if(!descriptor||!descriptor->valid){p.refused(DrawRefusal::Descriptor);return out;}
+    const auto* descriptor=find(p.descriptors,command->set0);const auto* descriptorAllocation=find(p.descriptorAllocations,command->set0);if(!descriptor||!descriptor->valid||!descriptorAllocation){p.refused(DrawRefusal::Descriptor);return out;}
     const auto* view=find(p.views,descriptor->view);if(!view||view->serial!=descriptor->viewSerial){p.refused(DrawRefusal::Image);return out;}
     const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation){p.refused(DrawRefusal::Image);return out;}
     std::shared_ptr<const LocalPicture> picture;if(!p.matchingImage(image->id,picture)){p.refused(DrawRefusal::ExactPicture);return out;}
     Impl::Use* use=nullptr;
-    for(unsigned n=0;n<command->used;++n)if(command->uses[n].descriptor==command->set0&&command->uses[n].viewSerial==view->serial&&command->uses[n].picture.metadata.binding==picture->metadata.binding&&same(command->uses[n].picture.metadata.descriptor,picture->metadata.descriptor)){use=&command->uses[n];break;}
-    if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return out;}auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return out;}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
+    for(unsigned n=0;n<command->used;++n)if(command->uses[n].descriptor==command->set0&&command->uses[n].descriptorGeneration==descriptorAllocation->generation&&command->uses[n].viewSerial==view->serial&&command->uses[n].picture.metadata.binding==picture->metadata.binding&&same(command->uses[n].picture.metadata.descriptor,picture->metadata.descriptor)){use=&command->uses[n];break;}
+    if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return out;}auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return out;}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->descriptorGeneration=descriptorAllocation->generation;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
     // Publish before the wrapper can record the companion bind/draw. A submit
     // observing false cannot contain an earlier guarded recording; recording
     // and submitting the same CB concurrently is outside native Vulkan rules.
