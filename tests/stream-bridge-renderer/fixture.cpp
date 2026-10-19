@@ -201,7 +201,7 @@ void continuous(const std::vector<std::uint32_t>& vs,const std::vector<std::uint
   // Cold startup prewarms every finite slot through actual queue copy/fence
   // completion. The tested active stream never relies on a first-use image.
   for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSlots;++n){++f.picture.metadata.descriptor.sourceFrame;publish(true,static_cast<std::uint8_t>(n+1));f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);f.vk.signal();consumer.tick(consumer.owner);}
-  check(f.renderer.statsCold().ready==8,"continuous stream starts with eight actual initialized images");const auto allocations=f.vk.allocations;unsigned activeFrames=0,inactiveFrames=0;
+  check(f.renderer.statsCold().ready==stream_bridge_coverage_gpu::MaximumSlots,"continuous stream starts with every finite image actually initialized");const auto allocations=f.vk.allocations;unsigned activeFrames=0,inactiveFrames=0;
   for(unsigned frame=0;frame<128;++frame){const bool active=!mode||frame%11!=3;const auto marker=static_cast<std::uint8_t>((frame*37)%253+1);
    ++f.picture.metadata.descriptor.sourceFrame;f.picture.metadata.lease.sequence=++leaseSequence;publish(active,marker);consumer.picture(consumer.owner,f.picture);
    f.vk.appControl.erase(number(f.cb));f.vk.appMasks.erase(number(f.cb));
@@ -239,7 +239,7 @@ void continuous(const std::vector<std::uint32_t>& vs,const std::vector<std::uint
   check(left.ready&&right.ready,"an already published exact mask remains recordable while cold fence status is blocked");
   check(result==VK_SUCCESS&&f.renderer.statsCold().guardAccepted==previous+1,"cold fence poll cannot interrupt exact copy/reservation/native/tail submission");
   check(f.vk.sampledMasks.size()==samples+2&&f.vk.sampledMasks[samples]==std::vector<std::uint8_t>(32,201)&&f.vk.sampledMasks[samples+1]==std::vector<std::uint8_t>(32,201),"complete blocked-worker frame samples its new exact R8 bytes in both eyes");
-  f.vk.signal();consumer.tick(consumer.owner);const auto stats=f.renderer.statsCold();check(!stats.quarantined&&!stats.guardRefused&&!stats.uploadRefused&&stats.ready==8,"complete blocked-worker cycle retires normally without lost pool slots");
+  f.vk.signal();consumer.tick(consumer.owner);const auto stats=f.renderer.statsCold();check(!stats.quarantined&&!stats.guardRefused&&!stats.uploadRefused&&stats.ready==stream_bridge_coverage_gpu::MaximumSlots,"complete blocked-worker cycle retires normally without lost pool slots");
  }
 
 }
