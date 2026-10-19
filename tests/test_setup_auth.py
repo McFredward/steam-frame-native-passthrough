@@ -5,8 +5,11 @@ are contacted. Production authentication still uses OpenSSH, never Paramiko.
 """
 from __future__ import annotations
 import argparse
+import contextlib
 import faulthandler
 import importlib.util
+import io
+import logging
 import os
 from pathlib import Path
 import shlex
@@ -50,13 +53,19 @@ class LocalServer:
         self.socket=socket.socket();self.socket.bind(('127.0.0.1',0));self.socket.listen(8);self.socket.settimeout(.1)
         self.port=self.socket.getsockname()[1];self.stopped=threading.Event();self.connections=[];self.workers=[]
         self.passwords=0;self.authenticated=0;self.requests=0;self.stall=False
+        # Paramiko is a background fixture, not wizard output. Its default
+        # lastResort handler follows redirected stderr and can hold a logging
+        # lock while waiting for the UI, which also logs asyncio warnings.
+        self.logger=logging.getLogger('sfnp.auth_fixture.'+str(self.port))
+        self.logger.propagate=False;self.logger.setLevel(logging.WARNING)
+        self.log_handler=logging.StreamHandler(sys.__stderr__);self.logger.addHandler(self.log_handler)
         self.worker=threading.Thread(target=self._accept);self.worker.start()
     def _accept(self):
         while not self.stopped.is_set():
             try:peer,_=self.socket.accept()
             except socket.timeout:continue
             except OSError:break
-            transport=paramiko.Transport(peer);self.connections.append(transport)
+            transport=paramiko.Transport(peer);transport.set_log_channel(self.logger.name);self.connections.append(transport)
             worker=threading.Thread(target=self._connection,args=(transport,));self.workers.append(worker);worker.start()
     def _connection(self,transport):
         outer=self
@@ -115,7 +124,27 @@ class LocalServer:
         for transport in self.connections:transport.close()
         self.worker.join(2)
         for worker in self.workers:worker.join(5)
-        assert not self.worker.is_alive() and not any(w.is_alive() for w in self.workers)
+        for transport in self.connections:
+            if transport.ident is not None:transport.join(2)
+        assert not self.worker.is_alive() and not any(w.is_alive() for w in self.workers+self.connections)
+        self.logger.removeHandler(self.log_handler);self.log_handler.close()
+
+@unittest.skipUnless(paramiko is not None,'test-only Paramiko local server not installed')
+class ServerDiagnostics(unittest.TestCase):
+    def test_server_errors_bypass_redirected_ui_stderr_and_remain_visible(self):
+        diagnostics=io.StringIO();ui_output=io.StringIO()
+        with mock.patch.object(sys,'__stderr__',diagnostics),contextlib.redirect_stderr(ui_output):
+            server=LocalServer()
+            try:
+                with socket.create_connection(('127.0.0.1',server.port),timeout=2) as peer:
+                    peer.sendall(b'SSH-1.5-incompatible-fixture\r\n')
+                    self.assertTrue(peer.recv(256).startswith(b'SSH-2.0-'))
+                deadline=time.monotonic()+2
+                while any(worker.is_alive() for worker in server.workers) and time.monotonic()<deadline:
+                    time.sleep(.01)
+            finally:server.close()
+        self.assertIn('Incompatible version',diagnostics.getvalue())
+        self.assertEqual(ui_output.getvalue(),'')
 
 class BrokerBoundary(unittest.TestCase):
     def test_untrusted_local_client_cannot_open_prompt_or_receive_cached_secret(self):
