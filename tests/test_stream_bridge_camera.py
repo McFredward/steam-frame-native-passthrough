@@ -243,6 +243,11 @@ class Controls(unittest.TestCase):
         state['error']=2
         with self.assertRaises(tool.SafetyError):camera.read()
         self.assertEqual(calls,[(b'camera',b'forceSceneAlphaBlending',True),(b'camera',b'forceSceneAlphaBlending','remove')])
+    def test_repeated_enable_cannot_overwrite_changed_active_native_value(self):
+        session=self.session();session.enable();self.camera.value=False
+        with self.assertRaisesRegex(tool.SafetyError,'readiness lost'):session.enable()
+        self.assertEqual(self.camera.calls,[('write',True)])
+        self.assertIs(self.camera.value,False)
     def test_native_generation_change_refuses_before_getter(self):
         camera=tool.NativeCamera({});camera.generation=((10,11,'vrserver'),)
         camera.fn=mock.Mock()

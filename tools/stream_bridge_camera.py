@@ -343,7 +343,7 @@ class NativeCamera:
 class Session:
     def __init__(self, root, config, config_sha, camera):
         self.root, self.config, self.sha, self.camera = root, config, config_sha, camera
-        self.path = absolute(config['settings']);self.lease = self.raw = None
+        self.path = absolute(config['settings']);self.lease = self.raw = None;self.enabled = False
 
     def save(self, value):
         raw = encoded(value)
@@ -369,6 +369,7 @@ class Session:
     def enable(self):
         unpaused(self.root);self.refresh()
         value, before, _, info = settings(self.path);effective = self.camera.read()
+        if self.enabled:require(effective is True, 'active native camera readiness lost')
         if self.lease is None:
             require(before is None or before is effective, 'file/runtime camera baseline disagrees')
             self.save({'schema':LEASE_SCHEMA, 'config_sha256':self.sha, 'helper_pid':os.getpid(),
@@ -382,6 +383,7 @@ class Session:
             require(effective is self.lease['effective'], 'changed runtime camera baseline preserved')
             self.camera.write(True)
         require(self.camera.read() is True, 'camera enable not acknowledged')
+        self.enabled = True
 
     def restore(self):
         if self.lease is None:return
@@ -395,6 +397,7 @@ class Session:
             if self.lease['override'] is None:self.camera.remove_override()
             else:self.camera.write(self.lease['override'])
         require(self.camera.read() is wanted, 'camera restore not acknowledged')
+        self.enabled = False
         _, observed, _, info = settings(self.path)
         persisted = observed is self.lease['override'] and (
             not self.lease['write_intent'] or signature(info) != self.lease['settings_signature'])
