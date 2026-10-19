@@ -45,15 +45,15 @@ background-sampling shaders and every material family are not certified.
 
 Software checks exercise production native dispatch, source/texture ownership,
 authenticated control, accepted access units, receiver leases and guarded GPU
-coverage. The latest paired run is the first user-confirmed visible room picture
-for the independent-mask route, but it repeatedly alternates with opaque black.
-The sender now reads and certifies masks without pending GPU readbacks, and the
-Frame accepts actual canonical timeline submits and guarded draws. The remaining
-pool review found that transient worker contention could permanently consume
-mask capacity: six of eight slots were quarantined during the captured run.
+coverage. The independent-mask route has user-confirmed visible room pictures,
+but is not yet continuously stable. Earlier readback, upload-pool and
+descriptor-pool fixes reduced the gaps; the latest 0.2.4 run still contains
+individual opaque frames, and camera recovery after standby required
+reconnecting the stream. The 0.2.5 candidate changes camera lifetime and
+descriptor tracking; those software fixes are not yet a confirmed headset result.
 See the [paired flicker review](research/coverage-pool-flicker-20261019.md),
 [readback history](research/readback-order-20261019.md) and
-[source-format review](research/source-format-opt-in-20261019.md).
+[camera/continuity review](research/camera-lifetime-and-continuity-20261019.md).
 Stable final full-resolution headset output, sharpness and simultaneous local
 Steam menu/game mixed reality remain unconfirmed.
 

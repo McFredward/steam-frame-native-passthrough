@@ -89,6 +89,31 @@ descriptor, source-image and selected-frame contracts match. Unsupported native
 pipelines retain their original handles/output. Local Steam UI must keep its
 native content; final game/menu visual composition remains a hardware milestone.
 
+### Camera lifetime and standby
+
+Installation must not leave `camera/forceSceneAlphaBlending` permanently enabled.
+Only authenticated current-stream Raw/RLE coverage may request this setting.
+The compositor's cold worker uses an isolated Python background application and
+the pinned public native settings interface; never initialize or shut down
+OpenVR inside Valve's Steam or compositor process. The renderer and decoder
+handoff require the helper's current enable acknowledgment, independently of
+the exact image/mask proof.
+
+None coverage, source-epoch loss, disconnect and teardown revoke readiness and
+restore the original preference. A real Linux suspend is detected by the
+`CLOCK_BOOTTIME − CLOCK_MONOTONIC` offset, not by a long frame or an expiry timer.
+Resume requires an acknowledged restore followed by a new enable acknowledgment,
+even when the peer, video allocation and saved MR choice have not changed.
+
+Durable private leases retain the original key before enabling it. A fail-open
+SteamVR pre-start helper repairs only an exact stale owned lease while native
+VR is stopped. Unknown/user-modified values are preserved. Old permanent-True
+installations get a one-use receipt-bound migration grant. Update, uninstall
+and Undo quiesce the live helper and confirm native persistence before deleting
+its files; offline file replacement is never substituted for a live settings
+API call. See the [camera and continuity review](research/camera-lifetime-and-continuity-20261019.md)
+for the evidence and remaining hardware checks.
+
 ## Packaging and updates
 
 The guided [PC + Frame assistant](PC-FRAME-SETUP.md) is the sole install workflow.

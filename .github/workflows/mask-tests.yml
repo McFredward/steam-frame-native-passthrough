@@ -154,6 +154,8 @@ jobs:
           cmake --build build/stream-bridge --parallel 4
           python3 -B tests/test_stream_bridge_vulkan.py
           python3 -B tests/test_stream_bridge_launch.py
+      - name: Isolated camera subprocess and suspend acknowledgement
+        run: python3 -B tests/stream-bridge-camera-client/run.py --output build/camera-client --sanitize
       - name: Windows sender cross-build
         run: x86_64-w64-mingw32-g++-win32 -std=c++17 -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ -I. tools/mask_endpoint.cpp mask/mask_protocol.cpp -lws2_32 -o build/mask_endpoint.exe
       - name: Protocol memory and undefined-behavior checks
