@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 
 import native_fragment_ssa_probe as ssa
-import native_fragment_packed_output as packed_output
+import native_fragment_count1_interface as count1
 
 
 def transform(original, descriptor_count=1):
@@ -25,7 +25,7 @@ def transform(original, descriptor_count=1):
                 "unsupported native fragment")
     # Reuse the established original-only constant-zero B9 proof before adding
     # our explicit-LOD mask reads. No native layout or executed access changes.
-    owned_original = (packed_output.specialize_owned_binding9_count1(original, original)
+    owned_original = (count1.specialize_owned_binding9_count1(original, original)
                       if descriptor_count == 1 else original)
     native_header, instructions = ssa.parse_module(owned_original)
     header = list(native_header)
@@ -87,7 +87,7 @@ def transform(original, descriptor_count=1):
         'owned_binding9_descriptor_count': descriptor_count,
         'mask_type': 'combined-image-sampler R8_UNORM',
         'recording_control_set': 2, 'recording_control_binding': 0,
-        'recording_control': 'owned coherent float: 0 exact-original alpha, 1 current mask',
+        'recording_control': 'owned coherent float: 0 opaque native RGB, 1 current exact mask',
         'mask_uv': 'unchanged current native coded-video UVs 538/798 and reconstruction weight 1008',
         'native_rgb_instructions_retained': True,
         'source_and_selected_image_authority_provided_by_runtime': False,

@@ -14,16 +14,16 @@ def main():
     parser.add_argument('--source-root', type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument('--libraries', type=Path, required=True)
     parser.add_argument('--coverage', type=Path, required=True)
-    parser.add_argument('--legacy', type=Path, required=True)
+    parser.add_argument('--retired-atlas', type=Path, required=True)
     parser.add_argument('--historical-count3', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     root=args.source_root.resolve();out=args.output.resolve();out.mkdir(parents=True,exist_ok=True)
     fixture=Path(__file__).with_name('artifact_tests.cpp')
-    inputs=[args.coverage.resolve(),args.legacy.resolve(),args.historical_count3.resolve()]
+    inputs=[args.coverage.resolve(),args.retired_atlas.resolve(),args.historical_count3.resolve()]
     sources=['layer/stream_bridge_process.cpp','layer/stream_bridge_process.h','layer/stream_bridge_artifacts.h',
              'tests/stream-bridge-process/artifact_tests.cpp','tests/stream-bridge-process/lifecycle_tests.cpp']
-    result={'scope':'Actual production readCoverageFragmentCold/readLegacyFragmentCold with installed private generated files; no renderer reader stub or native Steam/Frame execution.',
+    result={'scope':'Actual production readCoverageFragmentCold with installed coverage and ignored obsolete atlas files; no renderer reader stub or native Steam/Frame execution.',
             'hardware':False,'sources':{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in sources},
             'inputs':{str(name):hashlib.sha256(name.read_bytes()).hexdigest() for name in inputs},'checks':{}}
     def run(name,command,negative=False):

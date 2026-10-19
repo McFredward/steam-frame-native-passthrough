@@ -237,6 +237,5 @@ void unregisterConsumerCold(void* owner) noexcept{
     }
 }
 bool readCoverageFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("coverage.spv",stream_bridge_artifacts::CoverageBytes,stream_bridge_artifacts::CoverageSha256,output);}catch(...){return false;}}
-bool readLegacyFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("legacy.spv",stream_bridge_artifacts::LegacyBytes,stream_bridge_artifacts::LegacySha256,output);}catch(...){return false;}}
 __attribute__((constructor)) static void prepareBeforeMain(){prepareProcessCold();}
 } // namespace stream_bridge_renderer

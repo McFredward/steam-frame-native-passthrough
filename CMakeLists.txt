@@ -43,11 +43,11 @@ option(FRAME_MASK_BUILD_TRACE "Build the opt-in passive compositor diagnostic la
 option(FRAME_MASK_BUILD_PIXEL_SNAPSHOT
     "Build an uninstalled one-shot explicit-pattern GPU pixel diagnostic" OFF)
 option(FRAME_PIXEL_SYNTHETIC_PRESENTER
-    "Build the uninstalled explicitly opted-in synthetic or real-scene native output replacement" OFF)
+    "Archived, uninstalled explicitly opted-in synthetic/scene diagnostic" OFF)
 option(FRAME_PIXEL_RELEASE_RECEIVER
-    "Build the explicitly installed Steam Frame Native Passthrough scene receiver" OFF)
-if(FRAME_PIXEL_RELEASE_RECEIVER AND NOT FRAME_PIXEL_SYNTHETIC_PRESENTER)
-    message(FATAL_ERROR "Release receiver requires the scene-capable presenter")
+    "Retired legacy picture/mask-atlas receiver (unsupported)" OFF)
+if(FRAME_PIXEL_RELEASE_RECEIVER)
+    message(FATAL_ERROR "The legacy picture/mask-atlas release receiver is retired; use FRAME_STREAM_BRIDGE_RECEIVER")
 endif()
 option(FRAME_PIXEL_UNIFORM_COMPANION
     "Require a bounded same-command native uniform companion in the uninstalled diagnostic" OFF)

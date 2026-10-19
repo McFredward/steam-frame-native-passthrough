@@ -26,5 +26,4 @@ void sourceExportedFd(int) noexcept;
 bool registerConsumerCold(ProcessConsumer) noexcept;
 void unregisterConsumerCold(void*) noexcept;
 bool readCoverageFragmentCold(std::vector<std::uint32_t>&) noexcept;
-bool readLegacyFragmentCold(std::vector<std::uint32_t>&) noexcept;
 } // namespace stream_bridge_renderer

@@ -6,7 +6,7 @@
 // while Vulkan's original dependency handles and CI remain valid. Historical
 // recipes, numeric handle equality or a former successful capture are not leases.
 #include "pixel_ssbo_clone_contract.h"
-#include "stream_bridge_artifacts.h"
+
 
 namespace frame_native_presenter {
 namespace definitions = frame_pixel_ssbo_clone;
@@ -18,8 +18,9 @@ constexpr std::size_t GuardedFragmentBytes=18416;
 // Real image contribution is a distinct protocol: RGB already includes surface
 // opacity and additive emission. It must never enter the straight-RGB decoder.
 // This exact executable recognizes robust scene-atlas v3 and legacy v1.
-constexpr const char* SceneFragmentSha256=stream_bridge_artifacts::LegacySha256;
-constexpr std::size_t SceneFragmentBytes=stream_bridge_artifacts::LegacyBytes;
+// Archived offline scene-atlas proof only; not an installed receiver artifact.
+constexpr const char* SceneFragmentSha256="44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49";
+constexpr std::size_t SceneFragmentBytes=31384;
 enum class Profile : std::uint8_t { Synthetic, SceneContribution };
 inline const char* fragmentSha256(Profile profile) noexcept {
     return profile == Profile::SceneContribution ? SceneFragmentSha256 : GuardedFragmentSha256;

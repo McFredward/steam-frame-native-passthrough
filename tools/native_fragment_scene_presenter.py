@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline same-R1 scene-contribution atlas and strict current-image format guard.
+"""Archived offline same-R1 atlas experiment; never shipped by the active product.
 
 The current image must carry all twelve fixed raw-G codes. This is format
 recognition, not body authentication, liveness or authorization for native MR.

@@ -5,9 +5,10 @@ image-route lifecycle. It does not start the background worker or a Steam proces
 
 `artifacts.py` adds the real installed-file boundary. It compiles
 `stream_bridge_process.cpp` and calls its production `readCoverageFragmentCold`
-and `readLegacyFragmentCold` functions with locally generated private shaders.
+function with locally generated private shaders.
 The renderer fixture's in-memory reader stubs cannot establish this evidence.
-Exact scalar coverage and legacy files must load; historical array3 coverage,
+Exact scalar coverage must load; obsolete atlas files cannot substitute for it.
+Historical array3 coverage,
 changed/missing files, wrong permissions, links and partial output must refuse.
 A causal control restores the obsolete array3 runtime pin and must fail the
 positive scalar-file assertion. The generator test independently compares its
@@ -17,7 +18,7 @@ actual output with the authoritative C++ pins and installer pins.
 python3 tests/stream-bridge-process/artifacts.py \
   --libraries /path/to/host-cmake-static-libraries \
   --coverage /path/to/private/scalar-coverage.spv \
-  --legacy /path/to/private/legacy-decoder.spv \
+  --retired-atlas /path/to/private/retired-atlas.spv \
   --historical-count3 /path/to/private/array3-coverage.spv \
   --output /path/to/private/evidence
 ```

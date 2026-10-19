@@ -18,31 +18,28 @@ or the leading zero command; both must fail a positive/negative assertion.
 The documented native 29-binding scalar Set0 is replayed with the exact private
 original shaders. The production successful-shader callback must prove the
 original fragment's constant-zero image accesses and promote pending count1
-definitions before either companion can register a route. A control removes
+definitions before the companion can register a route. A control removes
 that authorization and must fail. Merely observing count1, or supplying a
 mutated original fragment, cannot promote it. The older count3 integration cases
 remain unchanged. The generated coverage module defaults to an independently
 specialized count1 interface, also usable with a larger count3 layout.
 
-The creation callback publishes the already verified self-detecting legacy
-decoder as the application's baseline pipeline. The original native object is
-private and retained only until baseline retirement. Coverage can temporarily
-replace that baseline, then restore it. Losing command observation, an epoch,
-or a mask never requires a hot callback to reconstruct the legacy baseline.
-Publication, unknown/lost observation, coverage creation failure and exactly-once
-public/private pipeline retirement have focused controls; a raw-native baseline
-mutant must fail. Custom allocation callbacks remain unsupported and keep their
-original object untouched. No caller-owned callback context is retained.
+The native creation callback preserves the original pipeline handle and picture.
+It creates only a separate exact-coverage companion. Only a verified current
+image lease selects that companion at an eligible draw; missing coverage,
+unsupported recordings, lost observations and failed preparation keep ordinary
+native RGB. There is no picture/mask-atlas decoder or legacy pipeline fallback.
+Coverage and layout retirement destroy only owned objects, leaving the caller's
+native pipeline to its original destroy. A control that changes the public
+native handle must fail. Custom allocation callbacks remain unsupported and
+keep their original object untouched.
 
-The optional coverage artifact and GPU preparation are independent of baseline
-decoder preparation. Missing coverage must still publish the verified legacy
-decoder without advertising an exact-mask route. Its submits forward directly,
-without any unprepared guard command. `--artifact-fallback-only` runs this bounded
-preparation/forwarding check and a valid scalar-coverage control; its causal
-mutation makes coverage-file failure disable the decoder and must fail. The
+`--artifact-fallback-only` checks unavailable coverage, unchanged native pipeline
+and exact original-submit forwarding, plus a valid scalar-coverage control. The
 separate `tests/stream-bridge-process/artifacts.py` fixture uses the actual cold
-file readers, so a generator/runtime pin mismatch cannot hide behind the
-renderer fixture's explicitly supplied artifact observations.
+file reader and verifies that an obsolete atlas file cannot replace missing
+coverage. The renderer fixture's supplied artifact observations do not prove
+installed-file admission.
 
 External process admission, authenticated picture callbacks and lease validity
 are explicitly supplied fixture observations. A regular temporary fd tests the
@@ -59,7 +56,6 @@ python3 tests/stream-bridge-renderer/run.py \
   --vs /path/to/original-vertex.spv \
   --ps /path/to/original-fragment.spv \
   --coverage /path/to/local-coverage.spv \
-  --legacy /path/to/local-legacy.spv \
   --sanitize --mutants
 ```
 

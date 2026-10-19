@@ -138,11 +138,6 @@ jobs:
         run: |
           cmake -S . -B build/presenter -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON -DFRAME_PIXEL_SYNTHETIC_PRESENTER=ON
           cmake --build build/presenter --target VkLayer_frame_pixel_snapshot --parallel 2
-      - name: Compile installed scene receiver and check user setup
-        run: |
-          cmake -S . -B build/release-receiver -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON -DFRAME_PIXEL_SYNTHETIC_PRESENTER=ON -DFRAME_PIXEL_RELEASE_RECEIVER=ON
-          cmake --build build/release-receiver --target VkLayer_frame_pixel_snapshot --parallel 2
-          python3 -B tests/test_native_passthrough_setup.py
       - name: Compile independent coverage receiver and check actual Vulkan forwarding
         run: |
           cmake -S . -B build/stream-bridge -DFRAME_STREAM_BRIDGE_ONLY=ON -DFRAME_STREAM_BRIDGE_RECEIVER=ON -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release

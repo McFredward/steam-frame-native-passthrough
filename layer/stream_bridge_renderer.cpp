@@ -35,7 +35,7 @@ struct Renderer::Impl {
     struct Image{std::uint64_t id=0,generation=0,memory=0,memoryGeneration=0;std::uint32_t width=0,height=0;};
     struct View{std::uint64_t id=0,image=0,generation=0,serial=0;};
     struct Descriptor{std::uint64_t id=0,view=0,viewSerial=0;bool valid=false;};
-    struct Pipeline{std::uint64_t id=0;VkPipeline native{},coverage{},legacy{};VkPipelineLayout layout{};};
+    struct Pipeline{std::uint64_t id=0;VkPipeline coverage{};VkPipelineLayout layout{};};
     struct Use{gpu::Lease lease{};LocalPicture picture;std::uint64_t descriptor=0,viewSerial=0,image=0,imageGeneration=0,memoryGeneration=0;};
     struct Control{VkBuffer buffer{};VkDeviceSize offset=0;VkDescriptorSet set{};VkCommandBuffer one{};bool assigned=false;};
     struct Command{
@@ -47,7 +47,7 @@ struct Renderer::Impl {
     mutable std::mutex gate;VkDevice device{};PFN_vkGetDeviceProcAddr gdpa{};VkPhysicalDeviceMemoryProperties memory{};
     std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,coveragePrepared=false,registered=false,count1Authorized=false;
     gpu::Pool pool;journal::Journal definitions{1,{},journal::PendingCount1::RetainFacts};
-    std::vector<std::uint32_t> coverageWords,legacyWords;
+    std::vector<std::uint32_t> coverageWords;
     VkDescriptorSetLayout controlLayout{};VkDescriptorPool controlPool{};VkCommandPool guardPool{};
     VkCommandBuffer zero{};VkQueue queue{};VkBuffer controlsBuffer{};VkDeviceMemory controlsMemory{};std::array<Control,128> controls{};
     std::array<Memory,64> memories{};std::array<Image,64> images{};std::array<View,256> views{};std::array<Descriptor,256> descriptors{};
@@ -196,29 +196,26 @@ bool Renderer::prepareCold(VkDevice device,VkPhysicalDeviceMemoryProperties memo
         if(processKind()==ProcessKind::Vrlink)return true;
         if(api<VK_API_VERSION_1_1){coldNote("renderer unavailable: negotiated Vulkan API below 1.1; original retained");return false;}
         if(!p.load()){coldNote("renderer unavailable: required Vulkan dispatch missing; original retained");return false;}
-        if(!readLegacyFragmentCold(p.legacyWords)){coldNote("renderer unavailable: legacy.spv missing, changed or inaccessible; original retained");return false;}
-        // The independently verified atlas decoder is a safe baseline even if
-        // optional exact-coverage preparation fails. Never expose an undecoded
-        // atlas merely because a coverage artifact, queue or pool is unavailable.
-        p.prepared=true;
-        if(!readCoverageFragmentCold(p.coverageWords)){coldNote("exact coverage unavailable: coverage.spv missing, changed or inaccessible; legacy decoder retained");return true;}
-        if(family==UINT32_MAX){coldNote("exact coverage unavailable: no admitted graphics queue; legacy decoder retained");return true;}
-        if(!p.pool.prepare(device,get,memory,family)){coldNote("exact coverage unavailable: GPU pool preparation failed; legacy decoder retained");return true;}
+        // Ordinary native RGB is always the baseline. Missing exact coverage
+        // never installs a picture/mask atlas decoder or replaces the picture.
+        if(!readCoverageFragmentCold(p.coverageWords)){coldNote("exact coverage unavailable: coverage.spv missing, changed or inaccessible; ordinary native video retained");return false;}
+        if(family==UINT32_MAX){coldNote("exact coverage unavailable: no admitted graphics queue; ordinary native video retained");return false;}
+        if(!p.pool.prepare(device,get,memory,family)){coldNote("exact coverage unavailable: GPU pool preparation failed; ordinary native video retained");return false;}
         VkDescriptorSetLayoutBinding binding{0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};layout.bindingCount=1;layout.pBindings=&binding;
-        if(p.CreateDescriptorSetLayout(device,&layout,nullptr,&p.controlLayout)!=VK_SUCCESS){coldNote("exact coverage unavailable: control layout creation failed; legacy decoder retained");return true;}
+        if(p.CreateDescriptorSetLayout(device,&layout,nullptr,&p.controlLayout)!=VK_SUCCESS){coldNote("exact coverage unavailable: control layout creation failed; ordinary native video retained");return false;}
         VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,128};VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pool.flags=VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;pool.maxSets=128;pool.poolSizeCount=1;pool.pPoolSizes=&size;
-        if(p.CreateDescriptorPool(device,&pool,nullptr,&p.controlPool)!=VK_SUCCESS){coldNote("exact coverage unavailable: control pool creation failed; legacy decoder retained");return true;}
+        if(p.CreateDescriptorPool(device,&pool,nullptr,&p.controlPool)!=VK_SUCCESS){coldNote("exact coverage unavailable: control pool creation failed; ordinary native video retained");return false;}
         // Exactly one requested nonprotected queue in this admitted graphics
         // family. Other families cannot record one of our eligible primaries.
         unsigned queues=0;for(unsigned n=0;n<create.queueCreateInfoCount;++n)if(create.pQueueCreateInfos[n].queueFamilyIndex==family&&!create.pQueueCreateInfos[n].flags)queues+=create.pQueueCreateInfos[n].queueCount;
-        if(queues!=1){coldNote("exact coverage unavailable: graphics family does not request exactly one queue; legacy decoder retained");return true;}
-        if(!p.makeControls()){coldNote("exact coverage unavailable: immutable control preparation failed; legacy decoder retained");return true;}
-        p.GetDeviceQueue(device,family,0,&p.queue);if(!p.queue){coldNote("exact coverage unavailable: native graphics queue missing; legacy decoder retained");return true;}
-        p.coveragePrepared=true;coldNote("native decoder and exact-coverage resources verified");return true;
-    }catch(...){coldNote("renderer preparation failed; exact coverage disabled");return p.prepared;}
+        if(queues!=1){coldNote("exact coverage unavailable: graphics family does not request exactly one queue; ordinary native video retained");return false;}
+        if(!p.makeControls()){coldNote("exact coverage unavailable: immutable control preparation failed; ordinary native video retained");return false;}
+        p.GetDeviceQueue(device,family,0,&p.queue);if(!p.queue){coldNote("exact coverage unavailable: native graphics queue missing; ordinary native video retained");return false;}
+        p.prepared=p.coveragePrepared=true;coldNote("native full-colour exact-coverage resources verified");return true;
+    }catch(...){coldNote("renderer preparation failed; exact coverage disabled");return p.coveragePrepared;}
 }
 void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCreateInfo& info,const VkAllocationCallbacks* allocator,VkPipeline& original) noexcept{
-    auto&p=*impl_;if(!p.prepared)return;
+    auto&p=*impl_;if(!p.coveragePrepared)return;
     // Native profile uses the default allocator. A caller-owned allocation
     // context has no retained lifetime here, so keep that unsupported object
     // entirely native instead of borrowing callbacks after this cold call.
@@ -232,37 +229,30 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
         auto create=[&](const std::vector<std::uint32_t>& words,VkPipelineLayout layout,VkPipeline& pipeline){
             VkShaderModuleCreateInfo shader{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};shader.codeSize=words.size()*4;shader.pCode=words.data();VkShaderModule module{};if(p.CreateShaderModule(p.device,&shader,nullptr,&module)!=VK_SUCCESS)return;
             auto candidate=info;std::array<VkPipelineShaderStageCreateInfo,2> stages{{info.pStages[0],info.pStages[1]}};for(auto& stage:stages)if(stage.stage==VK_SHADER_STAGE_FRAGMENT_BIT)stage.module=module;candidate.pStages=stages.data();candidate.layout=layout;
-            const auto result=p.CreateGraphicsPipelines(p.device,cache,1,&candidate,nullptr,&pipeline);p.DestroyShaderModule(p.device,module,nullptr);if(result!=VK_SUCCESS&&pipeline){p.DestroyPipeline(p.device,pipeline,nullptr);pipeline={};}
+            const auto result=p.CreateGraphicsPipelines(p.device,cache,1,&candidate,nullptr,&pipeline);p.DestroyShaderModule(p.device,module,nullptr);if(pipeline==original){pipeline={};return;}if(result!=VK_SUCCESS&&pipeline){p.DestroyPipeline(p.device,pipeline,nullptr);pipeline={};}
         };
-        create(p.legacyWords,info.layout,entry->legacy);
-        if(!entry->legacy||entry->legacy==original){*entry={};coldNote("native legacy pipeline unavailable; original retained");return;}
-        // Publish the self-detecting legacy decoder as the application's
-        // ordinary pipeline, before any command can bind this returned handle.
-        // Epoch loss, missing masks, unknown recordings and hot try-lock misses
-        // can now only disable coverage; they cannot expose a raw legacy atlas.
-        entry->native=original;entry->id=handle(entry->legacy);original=entry->legacy;
-        if(!p.coveragePrepared){coldNote("native legacy decoder active; exact coverage unavailable");return;}
+        // The caller retains its exact native pipeline handle. A proved
+        // current picture may bind the companion only for that recorded draw.
         VkDescriptorSetLayout layouts[3]{from<VkDescriptorSetLayout>(ready->recipe.provenance[0].value),p.pool.descriptorLayout(),p.controlLayout};
         VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};ci.setLayoutCount=3;ci.pSetLayouts=layouts;ci.pushConstantRangeCount=ready->recipe.layout.count;ci.pPushConstantRanges=ready->recipe.layout.ranges.data();
         VkPipelineLayout coverageLayout{};
         if(p.CreatePipelineLayout(p.device,&ci,nullptr,&coverageLayout)==VK_SUCCESS&&coverageLayout){
             entry->layout=coverageLayout;create(p.coverageWords,entry->layout,entry->coverage);
         }
-        if(entry->coverage&&entry->legacy){
+        if(entry->coverage){
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
             if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted});
-            coldNote("native legacy and exact-coverage pipelines prepared");
-        }else coldNote("native legacy decoder active; exact coverage unavailable");
-    }catch(...){/* A valid native or legacy baseline has already succeeded. */}
+            coldNote("native exact-coverage pipeline prepared; original picture preserved");
+        }else{if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);*entry={};coldNote("exact-coverage pipeline unavailable; ordinary native video retained");}
+    }catch(...){/* The successfully created native pipeline remains unchanged. */}
 }
 void Renderer::pipelineDestroyed(VkPipeline original) noexcept{
     auto&p=*impl_;try{std::lock_guard<std::mutex> lock(p.gate);if(auto* entry=find(p.pipelines,handle(original))){
-        p.definitions.destroyPipeline(entry->native);
-        if(entry->coverage&&entry->legacy)p.admittedPipelines.fetch_sub(1,std::memory_order_release);
+        p.definitions.destroyPipeline(original);
+        if(entry->coverage)p.admittedPipelines.fetch_sub(1,std::memory_order_release);
         if(entry->coverage)p.DestroyPipeline(p.device,entry->coverage,nullptr);
-        if(entry->native)p.DestroyPipeline(p.device,entry->native,nullptr);
         if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);
-        // The downstream original vkDestroyPipeline owns the exposed baseline.
+        // The downstream original vkDestroyPipeline owns its native pipeline.
         *entry={};
     }else p.definitions.destroyPipeline(original);}catch(...){}
 }
@@ -325,9 +315,6 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     auto&p=*impl_;Draw out;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared||p.lost.load(std::memory_order_acquire))return out;
     auto* command=find(p.commands,handle(value));if(!command||command->epoch!=p.observationEpoch.load(std::memory_order_acquire))return out;auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline)return out;
     out.original=from<VkPipeline>(pipeline->id);
-    // Old atlas recognition remains the safe original-route companion while a
-    // new exact frame/upload is unavailable. Non-atlas native RGB passes through.
-    if(pipeline->legacy){out.replacement=pipeline->legacy;out.ready=true;}
     if(!command->eligible||!command->control||!pipeline->coverage)return out;
     const auto* descriptor=find(p.descriptors,command->set0);if(!descriptor||!descriptor->valid)return out;
     const auto* view=find(p.views,descriptor->view);if(!view||view->serial!=descriptor->viewSerial)return out;const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation)return out;
@@ -433,7 +420,7 @@ void Renderer::stopCold() noexcept{
     if(p.DeviceWaitIdle&&p.DeviceWaitIdle(p.device)==VK_SUCCESS){
         for(auto& command:p.commands)p.release(command);
         p.pool.destroyAfterIdle();p.destroyControls();
-        for(auto& entry:p.pipelines){if(entry.coverage)p.DestroyPipeline(p.device,entry.coverage,nullptr);if(entry.native)p.DestroyPipeline(p.device,entry.native,nullptr);if(entry.legacy)p.DestroyPipeline(p.device,entry.legacy,nullptr);if(entry.layout)p.DestroyPipelineLayout(p.device,entry.layout,nullptr);entry={};}
+        for(auto& entry:p.pipelines){if(entry.coverage)p.DestroyPipeline(p.device,entry.coverage,nullptr);if(entry.layout)p.DestroyPipelineLayout(p.device,entry.layout,nullptr);entry={};}
         if(p.controlPool)p.DestroyDescriptorPool(p.device,p.controlPool,nullptr);
         if(p.controlLayout)p.DestroyDescriptorSetLayout(p.device,p.controlLayout,nullptr);
     }else p.pool.abandonAfterDeviceDestroy(); // Native DestroyDevice owns eventual reclamation.

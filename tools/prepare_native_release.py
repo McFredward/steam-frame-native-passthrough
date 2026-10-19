@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the owned receiver and derive its private shader on a compatible Frame.
+"""Historical package verification for removal; legacy receiver builds are retired.
 
 Only requested local build/evidence files are written; there is no installation,
 service/restart action or camera/settings change. Valve input and
@@ -256,50 +256,10 @@ def preparation_run(output, snapshot):
 
 
 def prepare(output, steamvr_root=Path('/opt/steamvr')):
-    require(platform.system() == 'Linux' and platform.machine().lower() in ('aarch64', 'arm64'),
-            'local Linux AArch64 build required; no package was installed')
-    for name in ('cmake', 'g++', 'spirv-val'):
-        require(shutil.which(name) is not None, 'required local build tool missing: ' + name)
-    output = Path(output).absolute()
-    require(not output.exists() and not output.is_symlink(), 'exclusive absent output package required')
-    require(output.parent.is_dir(), 'output parent must already exist')
-    profile = verify_runtime(steamvr_root=steamvr_root)
-    files = runtime_files(steamvr_root)
-    before = source_snapshot()
-    # All processes are reaped before temporary generated modules/build caches
-    # disappear. Originals and the caller's existing files are never modified.
-    with preparation_run(output, before) as (scratch, log):
-        build = scratch / 'build'
-        run_command(['cmake', '-S', str(ROOT), '-B', str(build), '-DCMAKE_BUILD_TYPE=Release',
-            '-DBUILD_TESTING=OFF', '-DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON',
-            '-DFRAME_PIXEL_SYNTHETIC_PRESENTER=ON', '-DFRAME_PIXEL_RELEASE_RECEIVER=ON'], log)
-        run_command(['cmake', '--build', str(build), '--target', 'VkLayer_frame_pixel_snapshot', '--parallel', '2'], log)
-        import native_fragment_scene_presenter as transform
-        original = read_regular(Path(files['fragment']).resolve(strict=True), profile['runtime_files']['fragment']['bytes'])
-        candidate, record = transform.transform_robust(original, True, 1)
-        require(len(candidate) == profile['candidate']['bytes'] and sha(candidate) == profile['candidate']['sha256'], 'generated candidate pin differs')
-        candidate_path = scratch / CANDIDATE; candidate_path.write_bytes(candidate)
-        run_command(['spirv-val', '--target-env', 'vulkan1.1', str(candidate_path)], log, 30)
-        library = read_regular(build / LIBRARY, 32 * 1024 * 1024); elf_arm64(library)
-        require(source_snapshot() == before, 'source changed during build; package refused')
-        verify_runtime(files)
-        staged = scratch / 'package'; staged.mkdir(mode=0o700)
-        artifacts = {LIBRARY: library, CANDIDATE: candidate, 'compatibility.json': read_regular(COMPATIBILITY, MAX_METADATA),
-                     'source-manifest.json': json_bytes(before)}
-        artifacts.update({name: read_regular(ROOT / name, 2 * 1024 * 1024) for name in HELPERS})
-        for name, raw in artifacts.items():
-            path = staged / name; path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with path.open('xb') as stream:
-                os.chmod(path, 0o600); stream.write(raw)
-        manifest = {'schema': SCHEMA, 'profile': profile['profile'], 'build_marker': BUILD_MARKER[:-1].decode(),
-            'source_snapshot_sha256': sha(artifacts['source-manifest.json']),
-            'files': {name: {'bytes': len(raw), 'sha256': sha(raw)} for name, raw in artifacts.items()}}
-        path = staged / 'package.json'
-        with path.open('xb') as stream:
-            os.chmod(path, 0o600); stream.write(json_bytes(manifest))
-        verify_package(staged, files)
-        publish_directory(staged, output)
-        return manifest
+    del output, steamvr_root
+    raise SafetyError('The legacy picture/mask-atlas receiver is retired. '
+                      'Use the paired full-resolution Steam Link setup instead. '
+                      'Historical verification remains available for safe removal only.')
 
 
 def main(argv=None):
