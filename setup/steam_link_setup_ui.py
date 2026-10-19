@@ -50,6 +50,8 @@ TEXT = {
         'bridge_inventory_refresh_failed': 'The operation finished, but the final status could not be refreshed. Run Check again to confirm the current installation.',
         'action_retry': 'Try again',
         'action_retry_description': 'Check the last result and retry the operation.',
+        'action_verify': 'Retry verification',
+        'action_verify_description': 'Check the Frame startup again, then check its picture. Nothing is restarted or changed.',
         'action_manual': 'Enter Frame IP',
         'action_manual_description': 'Use the address shown in your Frame Wi-Fi settings.',
         'discovery_pc_only': 'Check this PC only',
@@ -86,6 +88,16 @@ TEXT = {
         'bridge_health_waiting': 'Startup is still being checked; no crash was confirmed. Retry checks again without restarting the Frame. You can also restore the previous setup.',
         'bridge_health_bad': 'The new startup failed its checks. Setup is restoring the previous setup and checking its restart.',
         'bridge_picture': 'Is the Frame picture normal and its interface usable?',
+        'bridge_original_picture': 'Is the previous Frame picture restored and its interface usable?',
+        'bridge_picture_help': 'Choose No if the picture is black, distorted or unusable. Setup checks again without restarting or changing anything, then offers verification or restoring the previous setup. Cancel exits and keeps recovery records.',
+        'bridge_original_picture_help': 'Choose No if the previous picture has not returned. Setup can check again without restarting. Recovery records are kept until you confirm a usable picture. Cancel exits without another restart.',
+        'picture_yes': 'Yes',
+        'picture_no': 'No',
+        'picture_cancel': 'Cancel setup',
+        'picture_prompt': 'Picture normal? [y] Yes / [n] No / [c] Cancel setup (default No): ',
+        'bridge_picture_rechecking': 'Checking the Frame startup again. No files or services are being changed.',
+        'bridge_picture_checks_ok': 'The software checks passed again, but they cannot confirm the picture you see. Choose the next step below.',
+        'bridge_picture_checks_unconfirmed': 'The startup could not be confirmed. Choose the next step below; nothing has been restarted or restored automatically.',
         'bridge_stop_first': 'Setup prepares recovery while your Frame interface stays running, then briefly restarts Steam and checks its startup. Recovery records are kept until restoration succeeds.',
         'bridge_continue': 'Continue with the supervised restoration? ',
         'bridge_unavailable': 'The new connection is not available yet. You can check or remove the existing Frame patch.',
@@ -107,7 +119,7 @@ TEXT = {
         'action_check': 'Check only',
         'action_check_description': 'Check this PC and Frame without changing them.',
         'action_exit': 'Exit',
-        'action_exit_description': 'Close without making changes.',
+        'action_exit_description': 'Close setup. Existing changes and recovery records are kept.',
         'recommended': 'recommended',
         'choice': 'Your choice',
         'choice_help': 'Enter = {default}.  0 = Exit.',
@@ -152,6 +164,8 @@ TEXT = {
         'bridge_inventory_refresh_failed': 'Die Aktion ist abgeschlossen, aber die abschließende Statusanzeige konnte nicht aktualisiert werden. Prüfe den Installationsstand mit „Nur prüfen“ erneut.',
         'action_retry': 'Erneut versuchen',
         'action_retry_description': 'Das letzte Ergebnis prüfen und die Aktion erneut versuchen.',
+        'action_verify': 'Prüfung wiederholen',
+        'action_verify_description': 'Den Frame-Start erneut prüfen und danach das Bild kontrollieren. Dabei wird nichts neu gestartet oder verändert.',
         'action_manual': 'Frame-IP eingeben',
         'action_manual_description': 'Die Adresse aus den WLAN-Einstellungen deiner Frame verwenden.',
         'discovery_pc_only': 'Nur diesen PC prüfen',
@@ -188,6 +202,16 @@ TEXT = {
         'bridge_health_waiting': 'Der Start wird noch geprüft; ein Absturz wurde nicht bestätigt. Erneut versuchen prüft weiter, ohne die Frame neu zu starten. Alternativ kannst du den vorherigen Zustand wiederherstellen.',
         'bridge_health_bad': 'Der neue Start hat die Prüfung nicht bestanden. Die Einrichtung stellt den vorherigen Zustand wieder her und prüft den Neustart.',
         'bridge_picture': 'Ist das Bild auf der Frame normal und ihre Oberfläche bedienbar?',
+        'bridge_original_picture': 'Ist das vorherige Frame-Bild wiederhergestellt und ihre Oberfläche bedienbar?',
+        'bridge_picture_help': 'Wähle Nein, wenn das Bild schwarz, verzerrt oder unbrauchbar ist. Die Einrichtung prüft erneut, ohne etwas neu zu starten oder zu verändern, und bietet eine weitere Prüfung oder die Wiederherstellung an. Abbrechen beendet die Einrichtung und behält die Wiederherstellungsdateien.',
+        'bridge_original_picture_help': 'Wähle Nein, wenn das vorherige Bild noch nicht zurück ist. Die Einrichtung kann ohne Neustart erneut prüfen. Wiederherstellungsdateien bleiben erhalten, bis du ein brauchbares Bild bestätigst. Abbrechen beendet die Einrichtung ohne weiteren Neustart.',
+        'picture_yes': 'Ja',
+        'picture_no': 'Nein',
+        'picture_cancel': 'Abbrechen',
+        'picture_prompt': 'Bild normal? [j] Ja / [n] Nein / [a] Abbrechen (Standard Nein): ',
+        'bridge_picture_rechecking': 'Der Frame-Start wird erneut geprüft. Dateien und Dienste werden nicht verändert.',
+        'bridge_picture_checks_ok': 'Die Softwareprüfungen waren erneut erfolgreich, können das sichtbare Bild aber nicht bestätigen. Wähle unten den nächsten Schritt.',
+        'bridge_picture_checks_unconfirmed': 'Der Start konnte nicht bestätigt werden. Wähle unten den nächsten Schritt; es wurde nichts automatisch neu gestartet oder zurückgenommen.',
         'bridge_stop_first': 'Die Wiederherstellung wird bei laufender Frame-Oberfläche vorbereitet. Danach wird Steam kurz neu gestartet und geprüft. Die Wiederherstellungsdaten bleiben bis zum erfolgreichen Abschluss erhalten.',
         'bridge_continue': 'Mit der überwachten Wiederherstellung fortfahren? ',
         'bridge_unavailable': 'Die neue Verbindung ist noch nicht verfügbar. Du kannst den vorhandenen Frame-Patch prüfen oder entfernen.',
@@ -209,7 +233,7 @@ TEXT = {
         'action_check': 'Nur prüfen',
         'action_check_description': 'PC und Frame prüfen, ohne etwas zu ändern.',
         'action_exit': 'Beenden',
-        'action_exit_description': 'Ohne Änderungen schließen.',
+        'action_exit_description': 'Die Einrichtung schließen. Vorhandene Änderungen und Wiederherstellungsdateien bleiben erhalten.',
         'recommended': 'empfohlen',
         'choice': 'Deine Auswahl',
         'choice_help': 'Enter = {default}.  0 = Beenden.',
@@ -650,7 +674,7 @@ class Presenter:
         This selects an action; the engine still owns its plan and permissions.
         """
         known = ('install', 'update', 'repair', 'uninstall', 'check', 'exit',
-                 'retry', 'back', 'rollback', 'continue', 'manual')
+                 'retry', 'verify', 'back', 'rollback', 'continue', 'manual')
         if (type(actions) not in (list, tuple) or len(actions) > len(known) or
                 any(type(action) is not str or action not in known for action in actions) or
                 len(set(actions)) != len(actions)):
@@ -699,6 +723,8 @@ class Presenter:
 
     def confirm(self, key):
         """Explicit permission for a displayed plan; No is always the default."""
+        if key in ('bridge_picture','bridge_original_picture'):
+            return self.picture(key)
         if not self.prompting:
             return False
         with self.suspend():
@@ -714,6 +740,26 @@ class Presenter:
             except (EOFError, KeyboardInterrupt):
                 return False
             return answer in ('y', 'yes', 'j', 'ja')
+
+    def picture(self,key):
+        """Return Yes, No or cancellation distinctly on every presentation."""
+        if not self.prompting:return None
+        with self.suspend():
+            self.say(key)
+            self.say('bridge_original_picture_help' if key=='bridge_original_picture' else 'bridge_picture_help')
+            if self._arrow_capable():
+                choices=[('cancel',self.text('picture_cancel'),''),
+                         ('no',self.text('picture_no'),''),('yes',self.text('picture_yes'),'')]
+                result=self._arrow_choose(choices,'no',title='choice_confirm')
+                if result is not False:return {'yes':True,'no':False}.get(result)
+            for _ in range(3):
+                try:answer=self._input(self.text('picture_prompt')).strip().casefold()
+                except (EOFError,KeyboardInterrupt):return None
+                if answer in ('y','yes','j','ja'):return True
+                if answer in ('','n','no','nein'):return False
+                if answer in ('c','cancel','a','abbrechen','q','exit'):return None
+                self.say('choice_invalid')
+            return None
 
     def confirm_uninstall(self):
         """A separate destructive confirmation, default Cancel on every console."""

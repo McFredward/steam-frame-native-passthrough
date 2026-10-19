@@ -41,6 +41,38 @@ class Workflow:
             self.check_cancelled()
             if action!='retry':return False
 
+    def picture_health(self,*,original=False):
+        """Observe again after a rejected picture, without changing either device."""
+        self.check_cancelled()
+        self.ui.say('bridge_picture_rechecking')
+        try:
+            value=self.ports.original_health() if original else self.ports.prepared_health()
+            ready=value is True or type(value)is dict and value.get('software_ready')is True
+        except KeyboardInterrupt:raise
+        except Exception as error:
+            self.check_cancelled()
+            self.ports.failure(error,recovery=original)
+            ready=False
+        self.check_cancelled()
+        self.ui.say('bridge_picture_checks_ok' if ready else 'bridge_picture_checks_unconfirmed')
+
+    def picture(self,*,original=False):
+        """Keep a visible No separate from cancellation and explicit Undo."""
+        while True:
+            self.check_cancelled()
+            answer=self.ui.confirm('bridge_original_picture' if original else 'bridge_picture')
+            self.check_cancelled()
+            if answer is True:return True
+            if answer is not False:raise KeyboardInterrupt()
+            self.picture_health(original=original)
+            self.check_cancelled()
+            actions=['verify','exit'] if original else ['verify','rollback','exit']
+            action=self.ui.choose_action(actions,recommended='verify')
+            self.check_cancelled()
+            if action=='rollback' and not original:return False
+            if action!='verify':raise KeyboardInterrupt()
+            self.picture_health(original=original)
+
     def recover(self):
         try:
             # This entry is reached only by an explicit recovery choice or a
@@ -58,6 +90,8 @@ class Workflow:
                     self.check_cancelled()
                     healthy=self.healthy(original=True)
                     if not healthy:raise self.ports.error('The original Frame startup could not be confirmed; recovery remains incomplete.')
+                    if not self.picture(original=True):
+                        raise self.ports.error('The original Frame picture could not be confirmed; recovery remains incomplete.')
                     self.check_cancelled()
                     self.ports.finish(restored=True)
                     self.check_cancelled()
@@ -98,9 +132,9 @@ class Workflow:
                         raise self.ports.error('The prepared Frame startup failed its health check.')
                     self.ui.say('bridge_health_ok')
                     self.check_cancelled()
-                    picture=self.ui.confirm('bridge_picture')
-                    # A stopped modal can return False (or a just-resolved
-                    # True); neither answer authorizes undo or commit on Ctrl+C.
+                    picture=self.picture()
+                    # A concurrent Ctrl+C overrides even a just-resolved Yes
+                    # or explicit Undo selection; neither may proceed afterward.
                     self.check_cancelled()
                     if not picture:
                         raise self.ports.error('The user could not confirm a usable Frame picture.')
