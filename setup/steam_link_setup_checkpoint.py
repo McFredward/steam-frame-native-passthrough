@@ -11,6 +11,8 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
+import re
+import secrets
 import stat
 
 SCHEMA='sfnp-setup-checkpoint-v1'
@@ -22,14 +24,28 @@ class Checkpoint:
         self.e=engine;self.path=Path(path);self.allowed=allowed
         self.current=current;self.replace=replace
 
+    def _sync_directory(self):
+        if os.name!='posix':return  # put() already flushes the Windows file before atomic publication.
+        descriptor=os.open(self.path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(descriptor)
+        finally:os.close(descriptor)
+
     def value(self):
         if not self.path.exists():return None
         e=self.e;value=e.parse(e.read(self.path,LIMIT,private=True))
-        e.require(type(value)is dict and set(value)=={'schema','action','operations','settings','registered'} and
+        e.require(type(value)is dict and set(value) in (
+                  {'schema','action','operations','settings','registered'},
+                  {'schema','action','operations','settings','registered','continuation'}) and
                   value['schema']==SCHEMA and value['action'] in ('install','update','repair','uninstall') and
                   type(value['operations'])is list and len(value['operations'])<=128 and
                   type(value['settings'])is list and len(value['settings'])<=4 and
                   (value['registered'] is None or type(value['registered'])is bool),'Unknown setup recovery checkpoint preserved.')
+        if 'continuation' in value:
+            transfer=value['continuation']
+            e.require(type(transfer)is dict and set(transfer)=={'target','id','phase','previous'} and
+                      all(type(transfer[k])is str and re.fullmatch('[0-9a-f]{64}',transfer[k]) for k in ('target','previous')) and
+                      type(transfer['id'])is str and re.fullmatch('[0-9a-f]{32}',transfer['id']) and
+                      transfer['phase'] in ('ready','active'),'Unknown setup continuation authority preserved.')
         seen=set()
         for op in value['operations']:
             e.require(type(op)is dict and set(op)=={'path','before','after'} and type(op['path'])is str and
@@ -45,6 +61,7 @@ class Checkpoint:
                               len(base64.b64decode(item['bytes'],validate=True))<=e.MAX_FILE,'Invalid setup recovery file.')
                 else:e.require(item['kind']=='link' and type(item['target'])is str and len(item['target'])<=2048,
                                'Invalid setup recovery link.')
+        seen_settings=set()
         for item in value['settings']:
             e.require(type(item)is dict and set(item)=={'path','section','key','before','after','file_present','section_present','mode'} and
                       type(item['path'])is str and self.allowed(Path(item['path'])) and
@@ -57,20 +74,80 @@ class Checkpoint:
                       type(item['mode'])is int and 0<=item['mode']<=0o777 and
                       type(item['after'])is list and 1<=len(item['after'])<=3,
                       'Unknown setup recovery settings scope preserved.')
+            identity=(item['path'],item['section'],item['key'])
+            e.require(identity not in seen_settings,'Duplicate setup recovery setting preserved.')
+            seen_settings.add(identity)
             for entry in [item['before'],*item['after']]:
                 e.require(type(entry)is dict and set(entry)=={'present','value'} and type(entry['present'])is bool,
                           'Invalid setup recovery setting.')
         return value
 
-    def begin(self,action,operations,settings,registered=None):
+    def reconcile(self,target):
+        """Keep original Undo authority while handing restored files to Apply.
+
+        This is not completed recovery: no runtime or picture is claimed. A
+        replacement checkpoint must retain these original predecessors before
+        any new package writes. Retrying the same ready handoff is idempotent.
+        """
+        e=self.e;e.require(type(target)is str and re.fullmatch('[0-9a-f]{64}',target),
+                          'A checked package is required for setup continuation.')
+        old=self.value()
+        if old is None:
+            self.begin('repair',[],[])
+            old=self.value()
+        self.verify_restored()
+        prior=old.get('continuation')
+        if prior and prior['phase']=='ready' and prior['target']==target:return prior['id']
+        raw=e.read(self.path,LIMIT,private=True)
+        e.require(e.parse(raw)==old,'The setup checkpoint changed before continuation could be recorded.')
+        updated={**old,'continuation':{'target':target,'id':secrets.token_hex(16),'phase':'ready','previous':e.sha(raw)}}
+        e.put(self.path,e.encoded(updated),raw)
+        self._sync_directory()
+        self.value()
+        return updated['continuation']['id']
+
+    def begin(self,action,operations,settings,registered=None,*,target=None):
         e=self.e;old=self.value()
-        e.require(old is None,'An unfinished setup recovery must be completed before another installation.')
         value={'schema':SCHEMA,'action':action,'operations':operations,'settings':settings,'registered':registered}
+        previous=None
+        if old is not None:
+            handoff=old.get('continuation')
+            e.require(handoff and handoff['phase']=='ready' and target==handoff['target'],
+                      'An unfinished setup recovery must be completed before another installation.')
+            self.verify_restored()
+            previous=e.read(self.path,LIMIT,private=True)
+            e.require(e.parse(previous)==old,'The setup checkpoint changed before continuation could start.')
+            by_path={item['path']:item for item in operations}
+            e.require(len(by_path)==len(operations),'Duplicate continuation file scope refused.')
+            for item in old['operations']:
+                replacement=by_path.get(item['path'])
+                if replacement is not None:
+                    e.require(replacement['before']==item['before'],'Changed continuation predecessor preserved.')
+                else:
+                    by_path[item['path']]={**item,'after':[item['before']]}
+            by_key={(item['path'],item['section'],item['key']):item for item in settings}
+            e.require(len(by_key)==len(settings),'Duplicate continuation setting refused.')
+            for item in old['settings']:
+                key=(item['path'],item['section'],item['key']);replacement=by_key.get(key)
+                if replacement is not None:
+                    e.require(replacement['before']==item['before'], 'Changed continuation preference preserved.')
+                    # The initial file/section ownership survives the handoff.
+                    by_key[key]={**replacement,**{k:item[k] for k in ('file_present','section_present','mode')}}
+                else:by_key[key]={**item,'after':[item['before']]}
+            if old['registered'] is not None:
+                e.require(registered is None or registered==old['registered'],'Changed continuation registration preserved.')
+                value['registered']=old['registered']
+            value.update(operations=list(by_path.values()),settings=list(by_key.values()),
+                         continuation={**handoff,'phase':'active','previous':e.sha(previous)})
         raw=e.encoded(value);e.require(len(raw)<=LIMIT,'Setup recovery checkpoint exceeds its bound.')
-        e.put(self.path,raw)
+        e.put(self.path,raw,previous)
+        self._sync_directory()
         try:self.value()
         except BaseException:
-            e.remove_owned(self.path,raw);raise
+            if previous is None:e.remove_owned(self.path,raw)
+            else:e.put(self.path,previous,raw)
+            self._sync_directory()
+            raise
         return value
 
     def operation(self,path,after):

@@ -93,11 +93,22 @@ class Files(fixtures.Tests):
         self.assertFalse(installer.checkpoint().path.exists());self.assertFalse(self.unit.checkpoint().path.exists())
         self.assertIn('bridge_rolled_back',ui.messages)
 
-    def test_confirmed_update_survives_recovery_and_installs_the_new_package(self):
+    def test_pending_confirmed_update_inherits_undo_and_has_one_restart_and_picture(self):
+        self.version_bundle(pc='0.2.4',frame='0.2.5')
         installer=b.LocalInstall(s,self.local)
         installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
         with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
-        self.unit.tx.commit();updated=self.newer_bundle();choices=[];confirmations=[];commands=[];inventories=[];messages=[]
+        self.unit.tx.commit();self.version_bundle(pc='0.2.6',frame='0.2.6')
+        updated=self.newer_bundle();choices=[];confirmations=[];commands=[];inventories=[];messages=[]
+        frame_fixture=load('sfnp_pending_update_lifecycle_fixture',ROOT/'tests/test_setup_frame.py')
+        system=frame_fixture.System()
+        def lifecycle(*a):
+            return frame_fixture.frame.FrameLifecycle(s,self.froot,runner=system,sleeper=system.sleep,
+                monotonic=lambda:system.now,poll_attempts=4,poll_interval=.01,phase_timeout=1)
+        lifecycle().restart()
+        original_runtime_baseline=s.parse(s.read(self.froot/'lifecycle.json'))['baseline']
+        old_runtime_actions=list(system.actions)
+        self.active=True
         class Screen:
             def banner(inner,**kw):pass
             def status(inner,*a):pass
@@ -107,9 +118,16 @@ class Files(fixtures.Tests):
             def inventory(inner,**kw):inventories.append(kw)
             def choose_action(inner,actions,**kw):
                 choices.append(actions)
+                self.assertEqual(kw.get('recommended'),'update')
                 if len(choices)>1:raise AssertionError('Confirmed Update must continue after recovery without asking again')
                 return 'update'
-            def confirm(inner,key):confirmations.append(key);return True
+            def confirm(inner,key):
+                confirmations.append(key)
+                if key=='bridge_picture':
+                    journal=s.parse(s.read(self.froot/'lifecycle.json'))
+                    self.assertEqual(journal['baseline'],original_runtime_baseline)
+                    self.assertEqual(journal['activation']['continuation'],self.unit.checkpoint().value()['continuation']['id'])
+                return True
         class Runtime:
             def __init__(inner,*a):pass
             def snapshot(inner):pass
@@ -121,23 +139,40 @@ class Files(fixtures.Tests):
                 command=request['command'];commands.append(command)
                 if command=='bridge-health-baseline':return {}
                 if command=='bridge-health':return {'software_ready':True}
-                if command.startswith('bridge-runtime-'):return {'running':True}
+                if command=='bridge-runtime-restart':
+                    return lifecycle().restart(restoring=request.get('restoring')is True,
+                        health_receipt={'baseline':{'current':'before-apply'},'checkpoint':{}})
                 return b.remote_request(s,request,unit=self.unit)
             def close(inner):pass
         real=b.load_helper
-        def helper(engine,name):return types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else real(engine,name)
+        def helper(engine,name):
+            if name=='steam_link_setup_pc':return types.SimpleNamespace(Lifecycle=Runtime)
+            if name=='steam_link_setup_frame':return types.SimpleNamespace(FrameLifecycle=lifecycle)
+            return real(engine,name)
         args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
         with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())),mock.patch.object(b,'local_address',return_value='192.168.1.4'),mock.patch.object(b,'load_helper',side_effect=helper),self.fake_generation():
             self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
-        self.assertIn('bridge_recovery_pending',messages)
+        self.assertIn('bridge_pending_apply',messages)
+        self.assertNotIn('bridge_recovery_pending',messages)
         self.assertNotIn('bridge_recovery_incomplete',messages)
         self.assertEqual(len(choices),1)
-        self.assertEqual(confirmations,['bridge_confirm','bridge_original_picture','bridge_picture'])
+        self.assertEqual(confirmations,['bridge_confirm','bridge_picture'])
+        self.assertEqual(commands.count('bridge-runtime-restart'),1)
+        self.assertNotIn('bridge_rolled_back',messages)
+        self.assertEqual(system.actions,old_runtime_actions+[
+            ('stop','steam.service'),('restart','steamvr.service'),('start','steam.service')])
+        self.assertEqual(system.live_client_vr_restarts,0)
+        self.assertFalse((self.froot/'lifecycle.json').exists())
         self.assertLess(commands.index('bridge-restore'),commands.index('bridge-prepare'))
         self.assertEqual(installer.state()['bundle'],updated.pin)
         self.assertEqual(self.unit.tx.state()['bundle'],updated.pin)
         self.assertTrue(inventories[-1]['pc']['installed']);self.assertTrue(inventories[-1]['frame']['installed'])
         self.assertFalse(installer.checkpoint().path.exists());self.assertFalse(self.unit.checkpoint().path.exists())
+        records=[s.parse(line) for path in (self.local.root/'logs').glob('setup-*.jsonl') for line in s.read(path).splitlines()]
+        picture=[item for item in records if item['stage']=='picture_check']
+        self.assertEqual([item['status'] for item in picture],['started','ok'])
+        self.assertTrue(all(item['action']=='update' for item in picture))
+        self.assertTrue(all(item['versions']['frame']['installed_version']=='0.2.6' for item in picture))
 
     def test_pc_update_retains_initial_uninstall_baseline_and_pairing(self):
         installer=b.LocalInstall(s,self.local);initial=s.parse(s.read(self.settings))
@@ -151,6 +186,87 @@ class Files(fixtures.Tests):
         installer.checkpoint().finish()
         installer.uninstall(self.local.inventory())
         self.assertEqual(s.parse(s.read(self.settings)),initial);self.assertFalse(self.local.inventory()['registered'])
+
+    def test_continuation_checkpoint_keeps_exact_original_predecessors_across_new_update(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        stable_receipt=s.read(installer.receipt);stable_settings=s.parse(s.read(self.settings))
+        image=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'
+        stable_image=s.read(image)
+        installer.install(self.newer_bundle(),self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        checkpoint=installer.checkpoint();old=checkpoint.value()
+        checkpoint.restore();checkpoint.verify_restored()
+        newest=self.newer_bundle();identity=checkpoint.reconcile(newest.pin)
+        ready=s.read(checkpoint.path);self.assertEqual(checkpoint.reconcile(newest.pin),identity)
+        self.assertEqual(s.read(checkpoint.path),ready)
+        installer.install(newest,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        active=checkpoint.value();self.assertEqual(active['continuation']['phase'],'active')
+        self.assertEqual(active['continuation']['id'],identity)
+        self.assertEqual(active['registered'],old['registered'])
+        for previous in old['operations']:
+            current=next(item for item in active['operations'] if item['path']==previous['path'])
+            self.assertEqual(current['before'],previous['before'])
+        checkpoint.restore();checkpoint.verify_restored()
+        self.assertEqual(s.read(installer.receipt),stable_receipt)
+        self.assertEqual(s.read(image),stable_image)
+        self.assertEqual(s.parse(s.read(self.settings)),stable_settings)
+        self.assertTrue(checkpoint.path.exists(),'Disk restoration is not a completed UI recovery')
+
+    def test_continuation_refuses_foreign_or_unrestored_state_and_keeps_journal(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        checkpoint=installer.checkpoint();old=s.read(checkpoint.path)
+        with self.assertRaisesRegex(s.SetupError,'changed before recovery'):checkpoint.reconcile('a'*64)
+        self.assertEqual(s.read(checkpoint.path),old)
+        checkpoint.restore();checkpoint.reconcile('a'*64);ready=s.read(checkpoint.path)
+        with self.assertRaisesRegex(s.SetupError,'unfinished setup recovery'):
+            checkpoint.begin('update',[],[],target='b'*64)
+        self.assertEqual(s.read(checkpoint.path),ready)
+        # A known path changed after the ready handoff is still foreign, even
+        # if the next package is otherwise valid and targets the right ID.
+        image=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'
+        s.put(image,b'foreign after handoff')
+        with self.assertRaisesRegex(s.SetupError,'changed before recovery'):
+            checkpoint.begin('update',[],[],target='a'*64)
+        self.assertEqual(s.read(image),b'foreign after handoff')
+        self.assertEqual(s.read(checkpoint.path),ready)
+
+    def test_continuation_keeps_prior_owned_scope_even_when_new_package_does_not_write_it(self):
+        installer=b.LocalInstall(s,self.local);checkpoint=installer.checkpoint()
+        helper=b.load_helper(s,'steam_link_setup_checkpoint')
+        older=self.local.root/'pairings'/('34'*16+'.json')
+        newer=self.local.root/'pairings'/('56'*16+'.json')
+        s.put(older,b'original owned predecessor')
+        original_setting=checkpoint.setting(self.settings,b.SETTINGS_SECTION,'controlPort',[{'present':True,'value':9999}])
+        checkpoint.begin('update',[checkpoint.operation(older,[helper.file_value(b'old attempted replacement')])],[original_setting],True)
+        s.put(older,b'old attempted replacement',s.read(older));checkpoint.restore()
+        checkpoint.reconcile('c'*64)
+        checkpoint.begin('repair',[checkpoint.operation(newer,[helper.file_value(b'new replacement')])],[],True,target='c'*64)
+        value=checkpoint.value()
+        retained=next(item for item in value['operations'] if item['path']==str(older))
+        self.assertEqual(retained['before'],helper.file_value(b'original owned predecessor'))
+        self.assertEqual(retained['after'],[retained['before']])
+        self.assertEqual(value['settings'][0]['before'],original_setting['before'])
+        s.put(newer,b'new replacement');checkpoint.restore();checkpoint.verify_restored()
+        self.assertEqual(s.read(older),b'original owned predecessor');self.assertFalse(newer.exists())
+
+    def test_lost_atomic_handoff_reply_keeps_original_undo_authority(self):
+        installer=b.LocalInstall(s,self.local);checkpoint=installer.checkpoint()
+        helper=b.load_helper(s,'steam_link_setup_checkpoint')
+        path=self.local.root/'pairings'/('78'*16+'.json');s.put(path,b'original')
+        checkpoint.begin('update',[checkpoint.operation(path,[helper.file_value(b'earlier attempt')])],[])
+        checkpoint.reconcile('d'*64)
+        ready=s.read(checkpoint.path);write=s.put
+        def lost_reply(target,raw,expected=None):
+            write(target,raw,expected)
+            if target==checkpoint.path and s.parse(raw).get('continuation',{}).get('phase')=='active':
+                raise OSError('atomic journal published, reply lost')
+        with mock.patch.object(s,'put',side_effect=lost_reply),self.assertRaises(OSError):
+            checkpoint.begin('update',[checkpoint.operation(path,[helper.file_value(b'new attempt')])],[],target='d'*64)
+        value=checkpoint.value();self.assertEqual(value['continuation']['phase'],'active')
+        self.assertEqual(value['continuation']['previous'],s.sha(ready))
+        self.assertEqual(value['operations'][0]['before'],helper.file_value(b'original'))
+        self.assertEqual(s.read(path),b'original');checkpoint.restore();checkpoint.verify_restored()
 
     def test_pc_update_rollback_restores_previous_version_and_owned_preferences(self):
         installer=b.LocalInstall(s,self.local)
@@ -521,6 +637,31 @@ class Workflow(unittest.TestCase):
         self.assertNotIn('allow_recovery',ports.events)
         self.assertNotIn('bridge_rolled_back',ui.messages)
         self.assertIn('bridge_cancelled_retained',ui.messages)
+
+    def test_cancel_during_pending_preparation_keeps_records_without_restart(self):
+        ports=Ports();ui=UI()
+        def reconcile():
+            ports.mark('reconcile');raise KeyboardInterrupt()
+        ports.reconcile_for_apply=reconcile
+        self.assertEqual(flow.Workflow(ports,ui).run('update',reconcile=True),130)
+        self.assert_retained_cancellation(ports,ui)
+        self.assertNotIn('begin',ports.events);self.assertNotIn('restart_prepared',ports.events)
+
+    def test_pending_preparation_restarts_only_the_prepared_package(self):
+        ports=Ports();ui=UI();questions=[]
+        ports.reconcile_for_apply=lambda:ports.mark('reconcile')
+        ui.confirm=lambda key:questions.append(key) or True
+        self.assertEqual(flow.Workflow(ports,ui).run('update',reconcile=True),0)
+        self.assertEqual(ports.events.count('restart_prepared'),1)
+        self.assertNotIn('restart_original',ports.events);self.assertNotIn('finished_original',ports.events)
+        self.assertEqual(questions,['bridge_picture'])
+
+    def test_picture_log_failure_cannot_turn_yes_into_rollback(self):
+        ports=Ports();ui=UI()
+        ports.picture_observation=lambda **kw:(_ for _ in ()).throw(OSError('log unavailable'))
+        self.assertEqual(flow.Workflow(ports,ui).run('update'),0)
+        self.assertEqual(ports.events.count('restart_prepared'),1)
+        self.assertNotIn('restore_files',ports.events);self.assertNotIn('restart_original',ports.events)
 
     def test_keyboard_interrupt_at_each_stage_retains_checkpoints_without_undo_or_retry(self):
         class SessionCancelled(KeyboardInterrupt):pass

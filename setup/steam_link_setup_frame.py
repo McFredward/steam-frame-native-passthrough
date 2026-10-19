@@ -134,7 +134,7 @@ class FrameLifecycle:
             self._validate_unit(value['baseline'][unit], unit)
         if 'activation' in value:
             activation = value['activation']
-            self.e.require(type(activation) is dict and set(activation) in ({'kind', 'baseline'}, {'kind', 'baseline', 'health'}) and
+            self.e.require(type(activation) is dict and set(activation)-{'health','continuation'} == {'kind', 'baseline'} and
                            activation['kind'] in ('prepared', 'original') and
                            type(activation['baseline']) is dict and set(activation['baseline']) == set(UNITS),
                            'Unknown Frame activation recovery record preserved.')
@@ -142,6 +142,10 @@ class FrameLifecycle:
                 self._validate_unit(activation['baseline'][unit], unit)
             if 'health' in activation:
                 self._health_receipt(activation['health'])
+            if 'continuation' in activation:
+                self.e.require(type(activation['continuation'])is str and
+                               re.fullmatch('[0-9a-f]{32}',activation['continuation']),
+                               'Unknown Frame continuation identity preserved.')
         self._raw, self._value = raw, value
         return value
 
@@ -156,10 +160,29 @@ class FrameLifecycle:
         return self.e.parse(raw)
 
     @staticmethod
-    def _activation(kind, baseline, health):
+    def _activation(kind, baseline, health, continuation=None):
         value = {'kind':kind, 'baseline':baseline}
         if health is not None:value['health'] = health
+        if continuation is not None:value['continuation'] = continuation
         return value
+
+    def continue_prepared(self, identity):
+        """Prepare one new activation after an exact disk-only handoff.
+
+        The original runtime baseline and Undo records stay authoritative. No
+        service is changed and no healthy/restored UI is claimed here. The
+        durable identity makes a lost handoff reply safe to observe again.
+        """
+        self.e.require(type(identity)is str and re.fullmatch('[0-9a-f]{32}',identity),
+                       'A checked Frame continuation identity is required.')
+        self._load()
+        before=self._units();prior=self._value
+        if prior and prior.get('activation',{}).get('continuation')==identity:
+            return self._result(before)
+        value=dict(prior) if prior else {'schema':SCHEMA,'baseline':before,'restart_steam':True}
+        value.update(phase='prepared',activation=self._activation('prepared',before,None,identity))
+        self._save(value)
+        return self._result(before)
 
     def _private_root(self):
         self.e.no_links(self.root)
@@ -274,7 +297,7 @@ class FrameLifecycle:
             self.e.require(prior['phase'] == 'prepared',
                            'Fresh startup health authority requires a new Frame activation intent; recovery details were kept.')
             value = dict(prior)
-            value['activation'] = self._activation(kind, before, health)
+            value['activation'] = self._activation(kind, before, health,prior['activation'].get('continuation'))
             self._save(value)
         # The same activation always retains its original health baseline and
         # log checkpoint, even after a lost reply or a new setup/SSH process.

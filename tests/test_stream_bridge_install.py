@@ -671,7 +671,8 @@ class Tests(unittest.TestCase):
             'library':{'path':str(self.fsvr/pin['path']),'bytes':pin['bytes'],'sha256':pin['sha256']}})
         hook=self.fhome/'.config/systemd/user/steamvr.service.d/85-steam-link-native-passthrough-camera.conf'
         text=hook.read_text()
-        self.assertIn('ExecStartPre=-/usr/bin/python3 -I -B ',text)
+        self.assertIn('ExecCondition=-/usr/bin/python3 -I -B ',text)
+        self.assertNotIn('ExecStartPre=',text,'Valve starts vrstartup in its own pre-start list; append would run too late')
         self.assertIn('stream_bridge_camera.py',text);self.assertIn(' startup --root ',text)
         self.assertNotIn('Environment=',text);self.assertNotIn('ExecStop',text)
         self.assertEqual((self.froot/'camera-session.json').stat().st_mode&0o777,0o600)

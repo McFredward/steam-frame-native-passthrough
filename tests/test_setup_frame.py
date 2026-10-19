@@ -120,6 +120,54 @@ class LifecycleTests(unittest.TestCase):
     def record(self):
         return engine.parse(engine.read(self.journal, private=True))
 
+    def test_continuation_keeps_original_undo_baseline_without_intermediate_restart(self):
+        self.lifecycle.restart(health_receipt={'baseline':{'old':'before'},'checkpoint':{}})
+        original=self.record()['baseline'];current=json.loads(json.dumps(self.system.units))
+        previous_actions=list(self.system.actions);identity='a1'*16
+        result=self.instance().continue_prepared(identity)
+        self.assertTrue(result['running']);self.assertTrue(result['pending']);self.assertFalse(result['healthy'])
+        self.assertEqual(self.system.actions,previous_actions)
+        self.assertEqual(self.record()['baseline'],original)
+        self.assertEqual(self.record()['activation']['baseline'],current)
+        self.assertNotIn('health',self.record()['activation'])
+        health={'baseline':{'new':'before'},'checkpoint':{'offset':20}}
+        self.instance().restart(health_receipt=health)
+        self.assertEqual(self.system.actions,previous_actions+[
+            ('stop','steam.service'),('restart','steamvr.service'),('start','steam.service')])
+        self.assertEqual(self.record()['activation']['continuation'],identity)
+        self.assertEqual(self.record()['activation']['health'],health)
+        self.assertEqual(self.record()['baseline'],original)
+
+    def test_continuation_replay_after_lost_restart_reply_never_restarts_twice(self):
+        identity='b2'*16;self.lifecycle.continue_prepared(identity)
+        health={'baseline':{'new':'before'},'checkpoint':{'offset':30}}
+        self.system.lost_reply_after=('start','steam.service')
+        with self.assertRaises(engine.SetupError):self.instance().restart(health_receipt=health)
+        previous=list(self.system.actions)
+        self.instance().continue_prepared(identity)
+        result=self.instance().restart(health_receipt={'baseline':{'wrong':'current'},'checkpoint':{}})
+        self.assertEqual(self.system.actions,previous)
+        self.assertEqual(result['health_receipt'],health)
+        self.assertEqual(self.record()['phase'],'awaiting-health')
+        self.instance().continue_prepared(identity)
+        self.assertEqual(self.system.actions,previous)
+
+    def test_continuation_does_not_weaken_explicit_original_restart(self):
+        self.lifecycle.restart();baseline=self.record()['baseline']
+        self.instance().continue_prepared('c3'*16)
+        self.instance().restart();before=list(self.system.actions)
+        self.instance().restore(health_receipt={'baseline':{'undo':'before'},'checkpoint':{}})
+        self.assertEqual(len(self.system.actions),len(before)+3)
+        self.assertEqual(self.record()['activation']['kind'],'original')
+        self.assertEqual(self.record()['baseline'],baseline)
+        self.assertNotIn('continuation',self.record()['activation'])
+
+    def test_invalid_continuation_never_writes_or_changes_services(self):
+        for identity in (None,False,'a'*31,'a'*33,'g'*32,{'id':'a'*32}):
+            with self.subTest(identity=identity),self.assertRaises(engine.SetupError):
+                self.instance().continue_prepared(identity)
+            self.assertFalse(self.journal.exists());self.assertEqual(self.system.actions,[])
+
     def test_import_constructor_and_inventory_do_not_write_or_change_services(self):
         self.assertEqual(self.system.calls, [])
         before = list(self.root.iterdir())

@@ -353,7 +353,7 @@ class LocalInstall:
                 else:e.require(e.sha(e.read(path))==pin['sha256'],'Changed provider files preserved.')
             if backup:
                 helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint(pair['pair_id'])
-                checkpoint.begin('repair',[checkpoint.operation(path,[helper.file_value(raw)]) for path,raw in missing],[],bool(pc.get('registered')))
+                checkpoint.begin('repair',[checkpoint.operation(path,[helper.file_value(raw)]) for path,raw in missing],[],bool(pc.get('registered')),target=bundle.pin)
             for path,raw in missing:e.put(path,raw)
             if not pc.get('registered'):
                 self.local.register(tool,'adddriver')
@@ -379,7 +379,7 @@ class LocalInstall:
                      'pair':pair['pair_id'],'vrpathreg':tool_pin}
             planned_ops.append(checkpoint.operation(self.receipt,[helper.file_value(e.encoded(receipt))]))
             settings=[checkpoint.setting(self.settings_path(),SETTINGS_SECTION,k,[{'present':True,'value':v}]) for k,v in edits.edits[SETTINGS_SECTION].items()]
-            checkpoint.begin('install',planned_ops,settings,bool(pc.get('registered')))
+            checkpoint.begin('install',planned_ops,settings,bool(pc.get('registered')),target=bundle.pin)
         try:
             for name,raw in planned.items():
                 path=self.local.root/e.relative(name);e.put(path,raw);undo.append((path,raw))
@@ -434,7 +434,7 @@ class LocalInstall:
         operations.append(checkpoint.operation(self.receipt,[helper.file_value(receipt_after)]))
         settings=[checkpoint.setting(settings_path,section,key,[{'present':True,'value':value}])
                   for section,values in desired.items() for key,value in values.items()]
-        checkpoint.begin('update',operations,settings,bool(pc.get('registered')))
+        checkpoint.begin('update',operations,settings,bool(pc.get('registered')),target=bundle.pin)
         for path,previous,raw in changes:e.put(path,raw,previous)
         mode=stat.S_IMODE(settings_path.stat().st_mode)
         e.put(settings_path,e.encoded(preferences),before)
@@ -751,7 +751,7 @@ class FrameInstall:
                     return super().restore()
         return FrameCheckpoint(self.e,self.root/'setup-restore.json',allowed,current,replace)
 
-    def backup(self,action,operations,settings,transaction_values,*,pause_settings=None):
+    def backup(self,action,operations,settings,transaction_values,*,pause_settings=None,target=None):
         e=self.e;helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint()
         # A pause is mutable helper state, not an uninstall payload. Journal its
         # exact predecessor so Undo can restore an old target after config
@@ -772,7 +772,7 @@ class FrameInstall:
                 if item['section']=='camera' and item['key']=='forceSceneAlphaBlending':
                     original=settings['baseline']['camera']['keys']['forceSceneAlphaBlending']
                     item['after'].append({'present':original['present'],'value':original['value']})
-        checkpoint.begin(action,entries,entries_settings)
+        checkpoint.begin(action,entries,entries_settings,target=target)
 
     def runtime(self,bundle):
         good=True;original=None
@@ -1018,7 +1018,9 @@ class FrameInstall:
         return e.encoded(value)
 
     def camera_dropin(self):
-        return ('[Service]\nExecStartPre=-/usr/bin/python3 -I -B '+self.systemd(str(self.root/CAMERA_TOOL))+
+        # Valve already starts vrstartup in ExecStartPre. Conditions precede
+        # every pre-start command, including the vendor list we must preserve.
+        return ('[Service]\nExecCondition=-/usr/bin/python3 -I -B '+self.systemd(str(self.root/CAMERA_TOOL))+
                 ' startup --root '+self.systemd(str(self.root))+'\n').encode()
 
     def plan(self,bundle,pair,address,port,*,live=False):
@@ -1094,7 +1096,7 @@ class FrameInstall:
                 missing.append(operation)
             if backup:
                 helper=load_helper(e,'steam_link_setup_checkpoint')
-                self.backup('repair',missing,current['settings'],[helper.read_value(e,self.tx.path)])
+                self.backup('repair',missing,current['settings'],[helper.read_value(e,self.tx.path)],target=bundle.pin)
             for operation in missing:self.tx.replace(operation)
             self.system('daemon-reload')
             return {'reason':'repaired','automatic_restart':False,'manual_restart_required':True}
@@ -1104,7 +1106,7 @@ class FrameInstall:
             transaction={**version_fields(bundle.frame),'schema':RECEIPT,'home':str(self.home),'root':str(self.root),'bundle':bundle.pin,
                          'phase':'pending','operations':operations,'settings':settings,'pair':pair['pair_id']}
             pending=helper.file_value(e.encoded(transaction));transaction['phase']='installed'
-            self.backup('install',operations,settings,[pending,helper.file_value(e.encoded(transaction)),None])
+            self.backup('install',operations,settings,[pending,helper.file_value(e.encoded(transaction)),None],target=bundle.pin)
         self.prepare_camera_target(settings)
         self.tx.begin(bundle.pin,operations,settings,pair['pair_id'],version=bundle.frame.get('version'))
         try:
@@ -1190,7 +1192,7 @@ class FrameInstall:
         pending.pop('version',None);pending.update(version_fields(bundle.frame))
         committed={**pending,'phase':'installed'};helper=load_helper(e,'steam_link_setup_checkpoint')
         previous=e.read(self.tx.path,64*1024*1024,private=True)
-        self.backup('update',changes,current['settings'],[helper.file_value(e.encoded(pending)),helper.file_value(e.encoded(committed))],pause_settings=settings)
+        self.backup('update',changes,current['settings'],[helper.file_value(e.encoded(pending)),helper.file_value(e.encoded(committed))],pause_settings=settings,target=bundle.pin)
         e.put(self.tx.path,e.encoded(pending),previous)
         # All cold work and the exact recovery journal precede live quiescence.
         # A generation/backup failure must not pause an otherwise valid session.
@@ -1297,7 +1299,15 @@ def remote_request(engine,request,*,unit=None):
         if command=='bridge-health':return observer.check(request['baseline'])
     if command in ('bridge-runtime-snapshot','bridge-runtime-restart','bridge-runtime-restored'):
         lifecycle=load_helper(e,'steam_link_setup_frame').FrameLifecycle(e,unit.root)
-        if command=='bridge-runtime-snapshot':return lifecycle.snapshot()
+        if command=='bridge-runtime-snapshot':
+            identity=request.get('continuation')
+            if identity is not None:
+                value=unit.checkpoint().value();handoff=value.get('continuation') if value else None
+                e.require(request.get('automated') is True and handoff and handoff['phase']=='ready' and
+                          handoff['target']==view.pin and handoff['id']==identity,
+                          'The Frame continuation does not match the checked recovery records.')
+                return lifecycle.continue_prepared(identity)
+            return lifecycle.snapshot()
         if command=='bridge-runtime-restart':return lifecycle.restart(restoring=request.get('restoring') is True,
             health_receipt=observer.baseline())
         return lifecycle.restored(health_ok=request.get('health_ok') is True)
@@ -1309,7 +1319,14 @@ def remote_request(engine,request,*,unit=None):
                   'The native camera provider does not match the checked package.')
         unit._camera_payload=(source,{'path':str(path),'bytes':provider['bytes'],'sha256':provider['sha256']})
     if command=='bridge-restore':
-        result=unit.checkpoint().restore();unit.system('daemon-reload');return result
+        continuation=request.get('continuation',False)
+        e.require(type(continuation)is bool and (not continuation or request.get('automated') is True),
+                  'Setup continuation requires the confirmed Apply workflow.')
+        checkpoint=unit.checkpoint();result=checkpoint.restore()
+        if continuation:result['continuation']=checkpoint.reconcile(view.pin)
+        unit.system('daemon-reload')
+        state=unit.tx.state()
+        return {**result,'installed':state is not None,'installed_version':patch_version(state.get('version')) if state else None}
     if command=='bridge-checkpoint-finish':unit.checkpoint().finish(restored=request.get('restored') is True);return {'reason':'complete'}
     if command=='bridge-undo':return unit.undo(backup=request.get('automated') is True,live=request.get('automated') is True)
     if command=='bridge-commit':unit.tx.commit();return {'reason':'committed','automatic_restart':False}
@@ -1487,12 +1504,13 @@ class Automation:
         self.phase('startup_health');result=self.call('bridge-health',baseline=self.baseline)
         return result
 
-    def restore_files(self):
+    def restore_files(self,*,continuation=False):
         self.phase('rollback')
         # A PC-side recovery error must never strand the Frame in a broken
         # startup. Restore/restart/check its UI independently, then report any
         # remaining PC recovery failure without claiming complete rollback.
-        self.call('bridge-restore')
+        restored=self.call('bridge-restore',continuation=continuation,automated=True)
+        self.restored_frame=restored
         self.pc_recovery_error=None
         try:
             self.runtime.snapshot();self.runtime.stop()
@@ -1507,6 +1525,37 @@ class Automation:
         except Exception as error:
             self.pc_recovery_error=error
             record_failure(self.context['log'],self.e,'rollback',error)
+
+    def reconcile_for_apply(self):
+        """Prepare a checked continuation without claiming completed recovery.
+
+        Both exact original journals remain until new checkpoints atomically
+        inherit their Undo predecessors. Original runtime baselines survive;
+        only the eventual new package receives a restart and picture question.
+        """
+        self.restore_files(continuation=True)
+        self.e.require(self.pc_recovery_error is None,
+                       'The saved PC state could not be prepared for this update; recovery records were kept.')
+        checkpoint=self.installed.checkpoint();checkpoint.reconcile(self.bundle.pin)
+        self.phase('preflight')
+        self.call('bridge-runtime-snapshot',continuation=self.restored_frame['continuation'],automated=True)
+
+    def picture_observation(self,*,original,status):
+        # One bounded event per question/result, with explicit intended picture
+        # and package versions. Never log screenshots or arbitrary UI answers.
+        self.context['stage']='picture_check'
+        if hasattr(self.ui,'stage'):self.ui.stage('picture_check')
+        log=self.context.get('log')
+        if not log:return
+        pc=version_status(self.installed.state(),self.bundle.pc)
+        restored=getattr(self,'restored_frame',{})
+        removed=self.context.get('operation_action')=='uninstall'
+        frame={'installed':restored.get('installed') if original else not removed,
+               'installed_version':restored.get('installed_version') if original else None if removed else patch_version(self.bundle.frame.get('version')),
+               'target_version':patch_version(self.bundle.frame.get('version'))}
+        action='rollback' if original else self.context.get('operation_action','install')
+        log.event('picture_check','stage' if status=='started' else 'result',status=status,
+                  action=action,versions={'pc':pc,'frame':frame})
 
     def restart_original(self):
         self.phase('runtime_start')
@@ -1746,7 +1795,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         if state is None:actions.insert(0,'install')
         elif state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
         else:actions.insert(0,'update')
-    recommended='rollback' if pending else 'install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'check'
+    recommended='install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'rollback' if pending else 'check'
     resumed=context.pop('confirmed_apply',None)
     if resumed is not None:
         e.require(type(resumed)is dict and set(resumed)=={'bundle','intent'} and resumed['bundle']==bundle.pin and
@@ -1782,8 +1831,13 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         ui.say('bridge_install_plan')
         if hasattr(ui,'version_plan'):ui.version_plan(pc=pc_versions,frame=frame_versions)
         if not confirm('bridge_confirm'):return 0
+    context['operation_action']=action
     ports=Automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
     flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
+    if pending and action in ('install','update','repair'):
+        result=flow.run(action,reconcile=True)
+        if result==0:refresh_inventory()
+        return result
     if pending or action=='rollback':
         ui.say('bridge_recovery_pending')
         if not flow.recover():return 2

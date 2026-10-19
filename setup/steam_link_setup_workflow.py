@@ -68,11 +68,14 @@ class Workflow:
         """Keep a visible No separate from cancellation and explicit Undo."""
         while True:
             self.check_cancelled()
+            self.observe_picture(original=original,status='started')
             answer=self.ui.confirm('bridge_original_picture' if original else 'bridge_picture')
             self.check_cancelled()
+            self.observe_picture(original=original,status='ok' if answer is True else 'failed' if answer is False else 'cancelled')
             if answer is True:return True
             if answer is not False:raise KeyboardInterrupt()
             self.picture_health(original=original)
+
             self.check_cancelled()
             actions=['verify','exit'] if original else ['verify','rollback','exit']
             action=self.ui.choose_action(actions,recommended='verify')
@@ -80,6 +83,13 @@ class Workflow:
             if action=='rollback' and not original:return False
             if action!='verify':raise KeyboardInterrupt()
             self.picture_health(original=original)
+
+    def observe_picture(self,*,original,status):
+        # Optional diagnostic metadata cannot turn Yes into automatic recovery.
+        observe=getattr(self.ports,'picture_observation',None)
+        if observe:
+            try:observe(original=original,status=status)
+            except Exception:pass
 
     def finish_confirmed(self,*,restored):
         """Finalize records after Yes; a cleanup error never authorizes Undo.
@@ -157,11 +167,16 @@ class Workflow:
             self.retain_cancelled(error,recovery=True)
             raise
 
-    def run(self,action):
+    def run(self,action,*,reconcile=False):
         try:
             while True:
                 try:
                     self.check_cancelled()
+                    if reconcile:
+                        self.ui.say('bridge_pending_apply')
+                        self.check_cancelled()
+                        self.ports.reconcile_for_apply()
+                        self.check_cancelled()
                     self.ports.begin()
                     self.check_cancelled()
                     self.ui.say('bridge_stopping')
