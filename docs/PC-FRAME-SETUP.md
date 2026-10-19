@@ -62,7 +62,9 @@ information and the exact log path are available in **Details**.
 4. The assistant prepares Frame files while its current interface remains
    running, then performs the required coordinated Steam/SteamVR restart. It
    checks fresh startup and asks whether the Frame picture is normal. Keep the
-   Frame awake until this is complete.
+   Frame awake until this is complete. **Yes** accepts the installation;
+   **No** offers rechecking or an explicit Undo. A cleanup error after Yes
+   must not roll back your accepted installation.
 5. Start Steam Link and the game normally when setup finishes. **PC SteamVR is
    left closed after installation**; the assistant does not launch it for you.
    Enable the game's native Steam Link passthrough option and check both eyes.

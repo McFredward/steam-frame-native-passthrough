@@ -171,6 +171,45 @@ void actualNativeBurst(){
     f.worker.stop();f.ownedNative=nullptr;
 }
 
+// A real STREAMOFF/STREAMON reset is not REQBUFS: native code retains the
+// existing MMAP and DMABUF allocations. Exercise the complete observer ->
+// authenticated worker route, not a fabricated new-pool Observation.
+void actualNativeRestart(){
+    Fixture f;auto native=std::make_unique<NativeBurst>();f.ownedNative=&native->provider;
+    check(f.worker.prepare(f.request(),f.provider()),"native restart pipeline prepares");
+    native->input(bytes(ordinary),9,0);f.pump();
+    for(unsigned token=10;token<13;++token){native->input(bytes(f.certifiedDiscovery()),token,0);native->capture(token,0);f.pump();}
+    check(f.sender.confirmed()&&f.decoded==3,"native restart starts from actual confirmed picture ownership");
+    const auto original=f.worker.status().source;const auto oldLease=f.lastDecoded.capture;
+    const auto port=f.producer.localPort();const auto before=f.decoded;
+    int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    const auto originalCalls=native->originals;
+    check(native->provider.invokeIoctl(NativeBurst::base+0x312e8,23,VIDIOC_STREAMOFF,&type)==0
+          &&native->originals==originalCalls+1,"ordinary native STREAMOFF forwards exactly once");
+    native->queued.fill(false);f.pump();
+    check(f.worker.status().state==nd::RuntimeState::SourceLost
+          &&!native->provider.captureLeaseCurrentOnWorker(oldLease),"STREAMOFF immediately revokes old session and exact picture lease");
+    check(f.worker.status().lastNativeReset==nd::ResetReason::OutputStreamOff,
+          "bounded worker notice reports the actual native stop cause rather than an unexplained source loss");
+    check(native->provider.invokeIoctl(NativeBurst::base+0x31368,23,VIDIOC_STREAMON,&type)==0,"native STREAMON reuses allocated buffers");
+    f.relisten(port);
+    native->input(bytes(ordinary),9,0);f.pump();
+    check(f.randomCalls==2&&f.worker.status().source.outputPoolGeneration>original.outputPoolGeneration,
+          "fresh actual QBUF after STREAMON starts a new authenticated source without REQBUFS or remapping");
+    check(f.decoded==before,"STREAMON and ordinary input alone never reuse an old mask");
+    for(unsigned token=10;token<13;++token){native->input(bytes(f.certifiedDiscovery()),token,0);native->capture(token,0);f.pump();}
+    check(f.sender.confirmed()&&f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.decoded==before+3,
+          "real native reset resumes new exact certified pictures through full mutual admission");
+    check(f.worker.status().source.stream.connection!=original.stream.connection
+          &&!native->provider.captureLeaseCurrentOnWorker(oldLease),"new source never revives previous session or CAPTURE lease");
+    const auto resumed=f.worker.status().source;const auto admissions=f.randomCalls;
+    for(unsigned token=20;token<52;++token){native->input(bytes(f.certifiedFrame()),token,token%nd::MaxBuffers);native->capture(token,token%nd::MaxBuffers);f.pump();}
+    check(f.decoded==before+35&&f.randomCalls==admissions
+          &&f.worker.status().source.stream.connection==resumed.stream.connection,
+          "post-reset continuous exact frames keep one stable session rather than repeated renegotiation");
+    f.worker.stop();f.ownedNative=nullptr;
+}
+
 void offAndPreparation(){
     nd::ReceiverWorker worker;nd::RuntimeRequest r;r.pairingsDirectory="/does/not/exist";
     check(worker.prepare(r,{})&&worker.status().state==nd::RuntimeState::Disabled,"off path ignores missing credentials/provider");worker.tick();
@@ -514,4 +553,4 @@ void transportRecoveryRejectsOldProof(){
         "transport retry never retries authenticated-control rejection or grants pixels");
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--native-burst")==0){actualNativeBurst();std::cout<<checks<<" actual native burst checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-validity")==0){earlyDecodedValidity();std::cout<<checks<<" early decoded validity checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-decoded")==0){earlyDecodedOrdering();std::cout<<checks<<" early decoded checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();actualNativeBurst();earlyDecodedOrdering();earlyDecodedValidity();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--native-restart")==0){actualNativeRestart();std::cout<<checks<<" actual native restart checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--native-burst")==0){actualNativeBurst();std::cout<<checks<<" actual native burst checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-validity")==0){earlyDecodedValidity();std::cout<<checks<<" early decoded validity checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-decoded")==0){earlyDecodedOrdering();std::cout<<checks<<" early decoded checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();actualNativeBurst();actualNativeRestart();earlyDecodedOrdering();earlyDecodedValidity();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

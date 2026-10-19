@@ -73,6 +73,43 @@ class Workflow:
             if action!='verify':raise KeyboardInterrupt()
             self.picture_health(original=original)
 
+    def finish_confirmed(self,*,restored):
+        """Finalize records after Yes; a cleanup error never authorizes Undo.
+
+        The production finish ports reconcile current records before deleting
+        exact owned data, and treat already removed records as complete. Retry
+        only repeats that idempotent cleanup, never prepare/health/restart.
+        """
+        while True:
+            self.check_cancelled()
+            try:self.ports.finish(restored=restored)
+            except KeyboardInterrupt:raise
+            except Exception as error:
+                self.check_cancelled()
+                try:self.ports.failure(error,recovery=restored)
+                except Exception:pass
+                self.check_cancelled()
+                self.ui.say('bridge_finalize_incomplete')
+                self.check_cancelled()
+                action=self.ui.choose_action(['retry','exit'],recommended='retry')
+                self.check_cancelled()
+                if action!='retry':return False
+            else:
+                self.check_cancelled()
+                return True
+
+    def announce_completed(self,*keys):
+        """Presentation failures cannot undo or repeat a completed transaction."""
+        for key in keys:
+            self.check_cancelled()
+            try:self.ui.say(key)
+            except KeyboardInterrupt:raise
+            except Exception as error:
+                self.check_cancelled()
+                try:self.ports.failure(error,recovery=False)
+                except Exception:pass
+        self.check_cancelled()
+
     def recover(self):
         try:
             # This entry is reached only by an explicit recovery choice or a
@@ -93,10 +130,7 @@ class Workflow:
                     if not self.picture(original=True):
                         raise self.ports.error('The original Frame picture could not be confirmed; recovery remains incomplete.')
                     self.check_cancelled()
-                    self.ports.finish(restored=True)
-                    self.check_cancelled()
-                    self.ui.say('bridge_rolled_back')
-                    return True
+                    break
                 except KeyboardInterrupt:raise
                 except BaseException as error:
                     self.check_cancelled()
@@ -107,6 +141,10 @@ class Workflow:
                     action=self.ui.choose_action(['retry','exit'],recommended='retry')
                     self.check_cancelled()
                     if action!='retry':return False
+            # Yes is a boundary: cleanup cannot restart recovery afterwards.
+            if not self.finish_confirmed(restored=True):return False
+            self.announce_completed('bridge_rolled_back')
+            return True
         except KeyboardInterrupt as error:
             self.retain_cancelled(error,recovery=True)
             raise
@@ -138,11 +176,6 @@ class Workflow:
                     self.check_cancelled()
                     if not picture:
                         raise self.ports.error('The user could not confirm a usable Frame picture.')
-                    self.ports.finish(restored=False)
-                    self.check_cancelled()
-                    self.ui.say('bridge_pc_stopped')
-                    self.ui.say('bridge_removed' if action=='uninstall' else 'bridge_installed')
-                    return 0
                 except KeyboardInterrupt:raise
                 except BaseException as error:
                     self.check_cancelled()
@@ -157,6 +190,13 @@ class Workflow:
                     answer=self.ui.choose_action(['retry','exit'],recommended='retry')
                     self.check_cancelled()
                     if answer!='retry':return 2
+                else:
+                    # Keep finalization outside the automatic failure recovery
+                    # scope. The user has just confirmed this running picture.
+                    if not self.finish_confirmed(restored=False):return 2
+                    self.announce_completed('bridge_pc_stopped',
+                        'bridge_removed' if action=='uninstall' else 'bridge_installed')
+                    return 0
         except KeyboardInterrupt as error:
             self.retain_cancelled(error)
             return 130

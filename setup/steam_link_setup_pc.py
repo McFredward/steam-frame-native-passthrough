@@ -135,7 +135,12 @@ class Lifecycle:
         return {**result,'baseline_restored':True}
 
     def finish(self):
-        """Forget only our exact unchanged receipt after the caller's success."""
+        """Forget our exact receipt; a reconciled finalization may repeat this.
+
+        Absence means an earlier finish already removed it. A dangling link,
+        changed receipt or changed runtime still goes through strict validation.
+        """
+        if not os.path.lexists(self.path):return
         raw,_ = self._baseline()
         self.e.remove_owned(self.path,raw)
 

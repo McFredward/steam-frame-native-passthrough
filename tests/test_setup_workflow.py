@@ -383,6 +383,9 @@ class Files(fixtures.Tests):
 
     def test_pc_recovery_failure_does_not_block_original_frame_restart(self):
         screen=UI();screen.path=lambda *a,**kw:None;screen.suspend=lambda:contextlib.nullcontext()
+        questions=[]
+        def confirm(key):questions.append(key);return True
+        screen.confirm=confirm
         class Runtime:
             def __init__(inner,*a):pass
             def snapshot(inner):pass
@@ -402,6 +405,51 @@ class Files(fixtures.Tests):
             self.assertFalse(flow.Workflow(ports,screen).recover())
         self.assertIn('bridge-runtime-restart',commands);self.assertIn('bridge-health',commands)
         self.assertNotIn('bridge_rolled_back',screen.messages);self.assertIn('bridge_recovery_incomplete',screen.messages)
+        self.assertNotIn('bridge_original_picture',questions,'A pending operation failure must be resolved before asking for final Yes')
+
+    def test_confirmed_finish_retry_reconciles_real_records_after_all_receipts_were_removed(self):
+        # Actual production finalizer, checkpoint files and lifecycle methods;
+        # only systemctl/process adapters are explicit no-device fixtures.
+        pc_fixture=load('sfnp_finish_pc_fixture',ROOT/'tests/test_setup_pc.py')
+        frame_fixture=load('sfnp_finish_frame_fixture',ROOT/'tests/test_setup_frame.py')
+        installed=b.LocalInstall(s,self.local)
+        installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        with self.fake_generation():
+            self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        adapter=pc_fixture.ChildAdapter(self.runtime);self.addCleanup(adapter.close)
+        runtime=pc_fixture.pc.Lifecycle(s,self.local,self.runtime,adapter=adapter);runtime.snapshot()
+        system=frame_fixture.System()
+        frame=frame_fixture.frame.FrameLifecycle(s,self.froot,runner=system,
+            sleeper=system.sleep,monotonic=lambda:system.now,poll_attempts=4,poll_interval=.01,phase_timeout=1)
+        frame.restart();original_actions=list(system.actions);commands=[]
+        class Peer:
+            def call(inner,request):
+                commands.append(request['command'])
+                if request['command']=='bridge-runtime-restored':
+                    return frame.restored(health_ok=request['health_ok'])
+                return b.remote_request(s,request,unit=self.unit)
+        ui=UI(['retry']);ui.suspend=lambda:contextlib.nullcontext()
+        ports=object.__new__(b.Automation)
+        ports.e=s;ports.bundle=self.bundle;ports.local=self.local;ports.installed=installed
+        ports.remote=Peer();ports.ui=ui;ports.runtime=runtime;ports.context={'log':None,'stage':'complete'}
+        ports.address='192.168.1.25';ports.login='steamos'
+        cache=s.remember_frame;remembered=[]
+        def lost_final_reply(*args):
+            remembered.append(1)
+            if len(remembered)==1:raise OSError('owned final response lost after all receipts were removed')
+            return cache(*args)
+        with mock.patch.object(s,'remember_frame',side_effect=lost_final_reply):
+            self.assertTrue(flow.Workflow(ports,ui).finish_confirmed(restored=False))
+        self.assertEqual(commands,['bridge-runtime-restored','bridge-checkpoint-finish']*2)
+        self.assertEqual(len(remembered),2)
+        self.assertEqual(system.actions,original_actions)
+        self.assertEqual(adapter.launches,0);self.assertEqual(adapter.graceful_calls,[])
+        for path in (installed.checkpoint().path,self.unit.checkpoint().path,runtime.path,frame.path):
+            self.assertFalse(path.exists(),str(path))
+        self.assertTrue(s.parse(s.read(self.local.root/'frame-address.json'))['host']=='192.168.1.25')
+        self.assertIsNotNone(installed.state());self.assertIsNotNone(self.unit.tx.state())
+        self.assertIn('bridge_finalize_incomplete',ui.messages)
 
     def test_prepared_restart_leaves_pc_steamvr_closed(self):
         commands=[];screen=UI();screen.suspend=lambda:contextlib.nullcontext()
@@ -555,6 +603,63 @@ class Workflow(unittest.TestCase):
         self.assertEqual(ports.events.count('failure'),1)
         self.assertEqual(ports.events.count('recovery_failure'),1)
         self.assertEqual(ui.messages.count('bridge_cancelled_retained'),1)
+
+    def test_yes_followed_by_partial_finalize_failure_never_undoes_or_retries_writes(self):
+        ports=Ports();ui=UI(['exit']);questions=[]
+        def confirm(key):questions.append(key);return True
+        def finish(*,restored):
+            ports.mark('partial_finish')
+            raise OSError('owned checkpoint already partly finalized')
+        ui.confirm=confirm;ports.finish=finish
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),2)
+        self.assertEqual(questions,['bridge_picture'])
+        self.assertEqual(ports.events.count('partial_finish'),1)
+        self.assertEqual(ports.events.count('prepared_health'),1)
+        self.assertNotIn('restore_files',ports.events)
+        self.assertNotIn('restart_original',ports.events)
+        self.assertNotIn('bridge_installed',ui.messages)
+        self.assertIn('bridge_finalize_incomplete',ui.messages)
+
+    def test_original_yes_finalize_failure_does_not_repeat_restore_or_restart(self):
+        ports=Ports();ui=UI(['exit'])
+        def finish(*,restored):
+            self.assertTrue(restored);ports.mark('partial_finish')
+            raise OSError('owned final recovery record unavailable')
+        ports.finish=finish
+        self.assertFalse(flow.Workflow(ports,ui).recover())
+        self.assertEqual(ports.events.count('restore_files'),1)
+        self.assertEqual(ports.events.count('restart_original'),1)
+        self.assertEqual(ports.events.count('original_health'),1)
+        self.assertEqual(ports.events.count('partial_finish'),1)
+        self.assertIn('bridge_finalize_incomplete',ui.messages)
+        self.assertNotIn('bridge_rolled_back',ui.messages)
+
+    def test_yes_finalize_retry_repeats_only_reconciled_finish_and_not_the_operation(self):
+        ports=Ports();ui=UI(['retry']);finish=ports.finish;calls=[]
+        def incomplete(*,restored):
+            calls.append(restored)
+            if len(calls)==1:raise OSError('owned lost finalization reply')
+            finish(restored=restored)
+        ports.finish=incomplete
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),0)
+        self.assertEqual(calls,[False,False])
+        self.assertEqual(ports.events.count('begin'),1)
+        self.assertEqual(ports.events.count('prepared_health'),1)
+        self.assertEqual(ports.events.count('restart_prepared'),1)
+        self.assertEqual(ports.events.count('prepare_install'),1)
+        self.assertNotIn('restore_files',ports.events)
+
+    def test_notice_failure_after_finalization_preserves_committed_success(self):
+        ports=Ports();ui=UI()
+        def say(key):
+            if key=='bridge_pc_stopped':raise RuntimeError('owned notification error')
+            ui.messages.append(key)
+        ui.say=say
+        self.assertEqual(flow.Workflow(ports,ui).run('install'),0)
+        self.assertEqual(ports.events.count('finished_prepared'),1)
+        self.assertNotIn('restore_files',ports.events)
+        self.assertNotIn('restart_original',ports.events)
+        self.assertIn('bridge_installed',ui.messages)
 
     def test_success_stages_then_restarts_then_checks(self):
         ports=Ports();ui=UI();self.assertEqual(flow.Workflow(ports,ui).run('install'),0)

@@ -71,3 +71,40 @@ Khronos specifies that the second scope of a barrier outside a render pass
 includes later commands in submission order, limited by its destination stage:
 [vkCmdPipelineBarrier](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdPipelineBarrier.html).
 Queue order alone is not used instead of the actual memory/layout barrier.
+
+
+## Native video reset recovery (0.2.3)
+
+The 0.2.2 paired hardware run on 2026-10-19 first delivers continuous exact
+coverage without upload, local-queue or frame-guard refusals. At 13:52:08 the
+ordinary receiver reports a frame outside its FEC backtrack window and requests
+a native video reset. PC logs confirm encoder reset and renewed transport;
+Frame metadata subsequently stops at 5,415 receipts while original video
+continues. The exact original reset syscall was not logged by 0.2.2.
+
+The pinned receiver's ordinary reset path stops and restarts OUTPUT without
+REQBUFS, QUERYBUF or mmap between those operations. The observer incorrectly
+handled STREAMOFF like physical pool destruction: it deleted the still-valid
+allocation sizes, offsets and mappings. Every later QBUF became unobservable,
+so a renewed authenticated session could never begin. Toggling the game option
+could not recreate native allocation events that had already happened.
+
+The fix separates allocation lifetime from queued-picture authority. A stream
+stop revokes old observations, source generation and capture leases, and clears
+queued/decoded ownership. It retains only established allocation facts. Fresh
+successful QBUF operations must prove new ownership, and exact certificates plus
+full mutual admission are still required. STREAMON alone grants no authority.
+Format/allocation replacement, close and unmap retain their conservative invalidation.
+The reset reason is carried as bounded scalar diagnostics to the cold worker;
+no logging or transport work is added to native decoder callbacks.
+
+The regression fixture feeds actual DecodeProvider OUTPUT and CAPTURE operations
+into the authenticated ReceiverWorker, confirms a session, performs the native
+stop/start sequence without remapping, rejects the old lease, and confirms a
+fresh session followed by steady exact pictures. Its previous-code failure is
+retained separately. Earlier fixtures manually fabricated a fresh source pool
+or fully reallocated buffers, so they could not detect this lost allocation
+history. Software success does not establish the new headset outcome.
+
+Public semantics: [V4L2 STREAMON/STREAMOFF](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/vidioc-streamon.html)
+and the [stateful decoder interface](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/dev-decoder.html).

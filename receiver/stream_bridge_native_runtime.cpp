@@ -28,6 +28,7 @@ struct ReceiverWorker::Impl {
     struct Sending {bool used=false,echo=false;std::uint64_t ticket=0;stream_bridge::Message message{};stream_bridge::ProbeMessage probe{};};
     RuntimeRequest request{};SourceProvider provider{};SourceIdentity source{};
     RuntimeNotice current{};bool enabled=false,blocked=false,backlog=false;SnapshotStats lastStats{};
+    ResetReason lastNativeReset=ResetReason::None;
     struct Early {bool used=false;CaptureObservation event{};};
     std::array<Early,MaxBuffers> early{};
     std::array<CaptureObservation,MaxBuffers> seenCapture{};
@@ -83,9 +84,9 @@ struct ReceiverWorker::Impl {
         return true;
     }
     void notice(RuntimeState state,stream_bridge::ControlStatus controlStatus,RuntimeReason reason=RuntimeReason::None){
-        if(current.state==state&&current.control==controlStatus&&current.reason==reason&&current.source.stream.connection==source.stream.connection
+        if(current.state==state&&current.control==controlStatus&&current.reason==reason&&current.lastNativeReset==lastNativeReset&&current.source.stream.connection==source.stream.connection
             &&current.source.stream.generation==source.stream.generation&&current.source.decoderFd==source.decoderFd)return;
-        current={state,source,controlStatus,reason,lastStats};
+        current={state,source,controlStatus,reason,lastStats,lastNativeReset};
         if(request.callbacks.notice)request.callbacks.notice(current,request.callbacks.context);
     }
     void notice(RuntimeState state,RuntimeReason reason=RuntimeReason::None){notice(state,control.status(),reason);}
@@ -190,6 +191,7 @@ struct ReceiverWorker::Impl {
             return;
         }
         if(event.kind==CaptureKind::SourceReset&&event.fd>=0&&event.sourcePoolGeneration){
+            lastNativeReset=event.resetReason;
             // Retire only this fd through its observed monotonic pool epoch.
             // Another live fd may have an older global generation and keeps
             // every token hazard. Bounded per-fd tombstones allow reuse without
@@ -214,6 +216,7 @@ struct ReceiverWorker::Impl {
         if(!matches(event.fd,event.sourcePoolGeneration))return;
         if(request.callbacks.capture)request.callbacks.capture(source,event,request.callbacks.context);
         if(event.kind==CaptureKind::Reset){
+            lastNativeReset=event.resetReason;
             if(!blocked)retryTransport(RuntimeReason::CapturePoolReset,RuntimeState::SourceLost);
             return;
         }
@@ -379,7 +382,7 @@ void ReceiverWorker::stop() noexcept{
     if(!impl_)return;
     impl_->clear(RuntimeState::Disabled,false);impl_->enabled=false;impl_->request={};impl_->provider={};
     impl_->quarantines={};impl_->retiredPools={};impl_->coveredDropped=impl_->coveredRejected=0;impl_->unscopedLoss=false;impl_->retryDelay=250;
-    impl_->routeSeen=impl_->routeWasReady=false;
+    impl_->routeSeen=impl_->routeWasReady=false;impl_->lastNativeReset=ResetReason::None;
 }
 RuntimeNotice ReceiverWorker::status()const noexcept{return impl_->current;}
 bool ReceiverWorker::immediateWorkPending()const noexcept{return impl_->enabled&&impl_->backlog;}

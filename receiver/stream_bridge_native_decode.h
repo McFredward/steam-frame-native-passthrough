@@ -34,6 +34,10 @@ struct Observation{
 };
 enum class CaptureKind:std::uint8_t{Reset,Requeue,Decoded,SourceReset,InputGap};
 enum class InputLoss:std::uint8_t{None,SnapshotFull,CopyRejected};
+enum class ResetReason:std::uint8_t{None,OutputFormat,OutputBuffers,OutputStreamOff,
+    CaptureFormat,CaptureBuffers,CaptureStreamOff,UnsupportedOutputQueue,
+    UnsupportedCaptureQueue,OutputUnmap,DecoderClose,CaptureClose,ProviderStop};
+const char* resetReasonName(ResetReason) noexcept;
 struct CaptureObservation{
     CaptureKind kind=CaptureKind::Reset;int fd=-1,dmabufFd=-1;
     std::uint32_t index=0,nativeTimestampToken=0;
@@ -42,6 +46,8 @@ struct CaptureObservation{
     // snapshot. Sequence is the corresponding post-success loss counter, not
     // an AU certificate, CAPTURE lease or permission to select an image.
     InputLoss inputLoss=InputLoss::None;std::uint64_t lossSequence=0;
+    // Cold worker diagnostics only; no per-frame logging or borrowed addresses.
+    ResetReason resetReason=ResetReason::None;
 };
 struct SnapshotStats{std::uint64_t accepted=0,dropped=0,rejected=0,captureDropped=0;};
 using CaptureSink=void(*)(const CaptureObservation&,void*) noexcept;
