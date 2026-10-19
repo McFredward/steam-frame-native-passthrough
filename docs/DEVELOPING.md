@@ -1,7 +1,7 @@
 # Developing Steam Link Native Passthrough
 
 Current development supports one **experimental paired Windows/NVIDIA/HEVC
-route**. [Installation](INSTALL.md) and [compatibility](COMPATIBILITY.md) are the
+route**. [Installation](../README.md#installation) and [compatibility](COMPATIBILITY.md) are the
 player entry points. The [retired atlas record](history/ATLAS-RECEIVER.md) preserves
 the earlier implementation and evidence; its formats are not runtime fallbacks.
 

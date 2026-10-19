@@ -24,13 +24,9 @@ Spiele unterstützte PC-VR-Spiele über Steam Link in deinem echten Zimmer.
 
 ## Native Transparenz, kein Farbersatz
 
-Das Spiel liefert seine Transparenz getrennt von den Farben; keine Farbe muss
-aus dem Bild entfernt werden. Die Frame verbindet das Spiel mit ihrem eigenen
-Kamerabild, auch bei Teiltransparenz; das Kamerabild bleibt auf der Brille.
-
-**[Installieren oder aktualisieren](docs/INSTALL.de.md)** ·
-**[Kompatibilität](docs/COMPATIBILITY.md)** ·
-**[Deinstallieren oder zurücknehmen](docs/PC-FRAME-SETUP.md#update-uninstall-and-undo)**
+Das Spiel sendet Transparenz getrennt von seinen Farben; keine Farbe wird aus
+dem Bild entfernt. Die Frame verbindet das Spiel mit ihrem eigenen Kamerabild,
+auch bei Teiltransparenz; das Kamerabild bleibt auf der Brille.
 
 ## Unterstützte Spiele
 
@@ -38,34 +34,49 @@ Kamerabild, auch bei Teiltransparenz; das Kamerabild bleibt auf der Brille.
 |---|---|---|
 | Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (angekündigt) |
 
-Andere Spiele benötigen eine eigene Integration. Der Patch allein ergänzt kein
-Mixed Reality in einem unveränderten Spiel.
+Andere Spiele benötigen eine Integration; der Patch allein reicht nicht aus.
 
-## Loslegen
+## Installation
 
-Füge diese Zeile in **PowerShell auf deinem PC** ein:
+**SSH einmalig auf der Steam Frame aktivieren:**
+
+1. Öffne **Steam-Einstellungen → System → Entwicklermodus aktivieren**.
+2. Öffne **Entwickler → Benutzerpasswort festlegen** und wähle ein Passwort.
+3. Öffne im Desktop-Modus ein Terminal und aktiviere SSH dauerhaft:
+
+   ```bash
+   sudo systemctl enable --now sshd.service
+   ```
+
+[Valves Geräteanleitung](https://partner.steamgames.com/doc/steamhardware/steamframe/setup) zeigt die Einstellungen.
+Lass die Frame eingeschaltet und im selben Netzwerk wie den PC; beende den VR-Stream.
+
+**Auf deinem Windows-Gaming-PC ausführen — PowerShell:**
 
 ```powershell
 irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.ps1 | iex
 ```
 
-1. Folge der [geführten Einrichtung](docs/PC-FRAME-SETUP.md#start-the-assistant).
-   Sie zeigt erkannte SteamVR-/Steam-Link-Laufzeiten und installierte sowie verfügbare Patch-Versionen und bietet Installation oder Update an.
-2. Starte Steam Link und ein unterstütztes Spiel. Aktiviere dort natives
-   Steam-Link-Passthrough. Mit derselben Option erhältst du das normale Bild zurück.
+**Bash — unter Linux für Prüfung und Wartung der Frame:**
 
-Der neue Weg lässt das vollständige Farbbild für das Spiel frei. **Die endgültige
-Bildqualität und die gleichzeitige Darstellung von Spiel und Steam-Menü werden
-noch auf der Brille geprüft.** Fehlt eine passende Komponente, bleibt das normale Videobild erhalten.
+```bash
+curl -fsSL https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.sh | bash
+```
 
-Nur dieser gekoppelte Weg wird weiterentwickelt und zur Installation angeboten.
-Der frühere reine Frame-Empfänger ist [eingestellt](docs/history/ATLAS-RECEIVER.md).
-Alte Releasearchive dokumentieren frühere Stände und sind keine empfohlene Alternative.
+Der Assistent findet die Frame, prüft beide Geräte und führt durch die Installation.
+Er lädt seine Werkzeuge selbst herunter. Gib auf Nachfrage das Frame-Passwort ein
+und lass sie bis zum Abschluss eingeschaltet. Ein nativer Linux-PC-Sender wird noch nicht unterstützt.
+
+Starte deinen Steam-Link-Stream und aktiviere natives Steam-Link-Passthrough im Spiel.
+Dieselbe Zeile bietet später **Update, Deinstallation oder Rücknahme** an.
+
+Experimentell: Gelegentliche Passthrough-Aussetzer und die gleichzeitige Darstellung
+von Spiel und Steam-Menü werden noch untersucht.
 
 ## Für Entwickler
 
-[Spiel integrieren](docs/DEVELOPING.md) ·
-[Protokoll und Laufzeitgrenzen](docs/COMPATIBILITY.md)
+[Spiel integrieren](docs/DEVELOPING.md) · [Kompatibilität](docs/COMPATIBILITY.md) ·
+[Referenz für Einrichtung und Wiederherstellung](docs/PC-FRAME-SETUP.md)
 
 ## Credits
 

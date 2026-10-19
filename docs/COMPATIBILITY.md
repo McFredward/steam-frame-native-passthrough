@@ -46,16 +46,13 @@ background-sampling shaders and every material family are not certified.
 Software checks exercise production native dispatch, source/texture ownership,
 authenticated control, accepted access units, receiver leases and guarded GPU
 coverage. The independent-mask route has user-confirmed visible room pictures,
-but is not yet continuously stable. Earlier readback, upload-pool and
-descriptor-pool fixes reduced the gaps; the latest 0.2.4 run still contains
-individual opaque frames, and camera recovery after standby required
-reconnecting the stream. The 0.2.5 candidate changes camera lifetime and
-descriptor tracking; those software fixes are not yet a confirmed headset result.
-See the [paired flicker review](research/coverage-pool-flicker-20261019.md),
-[readback history](research/readback-order-20261019.md) and
-[camera/continuity review](research/camera-lifetime-and-continuity-20261019.md).
-Stable final full-resolution headset output, sharpness and simultaneous local
-Steam menu/game mixed reality remain unconfirmed.
+but is not yet continuously stable. The paired 0.2.8 run confirms much improved
+continuity alongside occasional loading/gameplay interruptions and real native
+transport resets. Its coverage payload exceeded the original coded-video size.
+Version 0.2.9 adds negotiated lossless mask compression, preserving full image and
+mask resolution; its hardware outcome is not yet verified. See the
+[continuity evidence and limits](development/FRAME-CONTINUITY.md).
+Simultaneous local Steam menu/game mixed reality remains unconfirmed.
 
 The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)
 are historical results of a different, retired method. They must not be presented

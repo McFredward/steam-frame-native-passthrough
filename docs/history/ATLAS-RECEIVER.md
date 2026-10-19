@@ -1,7 +1,7 @@
 # Retired Frame-only atlas receiver
 
 Historical record, retired by the maintainer on 2026-10-19. This is not a current
-installation or game-integration guide. Use the [paired setup](../INSTALL.md).
+installation or game-integration guide. Use the [paired setup](../../README.md#installation).
 Old release assets may remain available as archives; they are not a fallback or
 an installation recommendation for the current development version.
 

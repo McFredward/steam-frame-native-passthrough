@@ -1,6 +1,7 @@
-# PC and Steam Frame setup assistant
+# Setup and recovery reference
 
-This is the only current installation route: an **experimental paired PC and
+User installation is described in the [README](../README.md#installation).
+This reference documents setup operations and recovery for the current route: an **experimental paired PC and
 Frame companion**, carrying transparency alongside the original colour video.
 Final headset sharpness and simultaneous game/menu composition are still being
 validated. The former [Frame-only atlas receiver](history/ATLAS-RECEIVER.md) is
@@ -18,7 +19,7 @@ retired; archived downloads are not an alternative installation route.
   [supported-games table](../README.md#supported-games); an old game-side
   integration cannot be upgraded by installing the companions alone.
 - Keep the Frame awake, connected to the same network, and stop the VR stream.
-  Enable [persistent SSH access](INSTALL.md#directly-on-the-frame)
+  Enable [persistent SSH access](../README.md#installation)
   first. The assistant does not change the Frame's SSH service or system image.
 
 ## Start the assistant
