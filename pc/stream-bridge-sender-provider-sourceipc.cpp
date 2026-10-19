@@ -54,7 +54,13 @@ struct SourceIpcServer::Impl {
         if(!reading)beginRead(); // An extra byte or EOF revokes this connection.
         if(!accepted||cancelling)return;
         if(writing){if(done(write,bytes)){writing=false;if(bytes!=128){cancel();return;}}else{if(GetLastError()!=ERROR_IO_INCOMPLETE){writing=false;cancel();}return;}}
-        const auto next=permission.update(client,GetCurrentProcessId(),state,prepared(client.processId,context));
+        // Permission is intentionally latched to this live kernel-checked pipe,
+        // not re-earned on every encoder tick. Re-querying prepared() after the
+        // grant only contended with native Submit's registry mutex; its result
+        // was ignored by the latched permission anyway. EOF/cancel still resets
+        // permission synchronously, and a new client must prepare again.
+        const bool sourcePrepared=permission.process()==client.processId||prepared(client.processId,context);
+        const auto next=permission.update(client,GetCurrentProcessId(),state,sourcePrepared);
         publish(permission.process());
         if(writes&&next==previous)return;
         if(writes>=256){cancel();return;} // Bounded connection telemetry, no timer.

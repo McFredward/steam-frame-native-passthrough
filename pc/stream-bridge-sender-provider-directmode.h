@@ -41,6 +41,9 @@ public:
     DirectModeFunctions entryPoints()const noexcept;
     void stop()noexcept;
     bool ownsProcess(std::uint32_t)const noexcept;
+    // Cold change detection only; never certifies a texture/frame. An unchanged
+    // registry needs no repeated lock/copy that can contend with native Submit.
+    std::uint64_t inventoryRevision()const noexcept;
     DirectInventory inventory()const noexcept;
     static const DirectFrame* currentFrame()noexcept;
 private:

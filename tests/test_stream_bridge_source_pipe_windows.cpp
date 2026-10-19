@@ -9,7 +9,7 @@
 using namespace stream_bridge;using namespace stream_bridge::sender;
 namespace {
 unsigned checks=0;void check(bool v,const char* why){++checks;if(!v)throw std::runtime_error(why);}
-struct State {SourceContract contract;bool ready=false;unsigned grants=0,revokes=0;};
+struct State {SourceContract contract;bool ready=false;unsigned grants=0,revokes=0,preparations=0;};
 struct Client {
     HANDLE pipe=INVALID_HANDLE_VALUE,event=nullptr;OVERLAPPED write{};
     explicit Client(const wchar_t* name){pipe=CreateFileW(name,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,nullptr);check(pipe!=INVALID_HANDLE_VALUE,"actual local pipe opens");event=CreateEventW(nullptr,TRUE,FALSE,nullptr);check(event!=nullptr,"actual client completion event");write.hEvent=event;}
@@ -27,7 +27,7 @@ struct Client {
 };
 SourceIpcMessage request(std::uint32_t pid,unsigned nonce){SourceIpcMessage out{};std::memcpy(out.data(),"SBN1",4);out[4]=1;out[6]=1;out[8]=128;out[12]=1;for(unsigned i=0;i<4;++i)out[16+i]=std::uint8_t(pid>>(8*i));out[24]=std::uint8_t(nonce);return out;}
 void run(){
- State observed;SourceIpcServer server([](std::uint32_t,void* p){return static_cast<State*>(p)->ready;},&observed,
+ State observed;SourceIpcServer server([](std::uint32_t,void* p){auto&s=*static_cast<State*>(p);++s.preparations;return s.ready;},&observed,
      [](std::uint32_t pid,void* p)noexcept{auto&s=*static_cast<State*>(p);s.contract.publish(pid);if(pid)++s.grants;else ++s.revokes;});
  SourceIpcState peer;peer.compatible=true;peer.generation=19;peer.binding[0]=31;
  wchar_t name[96]{};std::swprintf(name,96,L"\\\\.\\pipe\\SFNP.StreamBridge.V1.%lu",GetCurrentProcessId());
@@ -38,6 +38,9 @@ void run(){
      observed.ready=true;
      check(client.receive(server,peer)[10]==1,"same actual pipe receives ordinary-RGBA permission after preparation");
      first=observed.contract.snapshot(pid);check(first&&observed.grants==1,"real kernel PID activates exactly one source declaration");
+     const auto preparations=observed.preparations;
+     for(unsigned i=0;i<1000;++i)server.tick(peer);
+     check(observed.preparations==preparations,"live pipe grant never repeatedly contends for native render metadata");
      server.tick({});check(observed.contract.current(first,pid),"encoder loss does not revoke the live app format contract");
  }
  const auto closedDeadline=GetTickCount64()+3000;
@@ -45,7 +48,9 @@ void run(){
  check(!observed.contract.current(first,pid)&&observed.revokes==1,"real local EOF revokes frozen old source receipts");
  for(unsigned i=0;i<10;++i)server.tick(peer);
  {
+     const auto preparations=observed.preparations;
      Client client(name);const auto input=request(pid,8);client.send(input);check(client.receive(server,peer)[10]==1,"same actual kernel process reconnects with a new nonce");
+     check(observed.preparations>preparations,"new live client must revalidate native source preparation after EOF");
      check(observed.contract.snapshot(pid)!=first&&!observed.contract.current(first,pid),"native reconnect cannot revive the old capture declaration");
      server.stop();check(!observed.contract.snapshot(pid),"explicit native stop revokes immediately without another tick");
  }

@@ -391,12 +391,20 @@ SenderCoverage::SenderCoverage(DirectModeBoundary& d,NvencBoundary& b,ControlRun
 SenderCoverage::~SenderCoverage(){stop();(void)impl_.release();} // callbacks/COM retained until process exit
 bool SenderCoverage::configure(std::uintptr_t module)noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);if(impl_->module||!module)return false;impl_->module=module;return true;}
 void SenderCoverage::tick()noexcept{
-    auto& s=*impl_;const auto encoders=s.boundary.encoderStates();const auto inventory=s.direct.inventory();
+    auto& s=*impl_;const auto encoders=s.boundary.encoderStates();
     // Once prepared, an unchanged native encoder/inventory requires no render
     // metadata ownership. The old periodic diagnostic/worker lock alone could
     // invalidate a valid Map/Draw, even with no resource work to perform.
     EncoderState actual{};unsigned count=0;for(const auto& e:encoders)if(e.encoder&&e.hevc){actual=e;++count;}
-    if(s.enabled&&s.prepared&&count==1&&actual.width==s.width&&actual.height==s.height&&inventory.valid&&inventory.epoch==s.inventoryEpoch&&s.dispatchOwned())return;
+    // 0.2.7 still copied the entire inventory under its native metadata mutex
+    // every 8 ms BEFORE this fast path. A collision could invalidate native
+    // Submit/Present, or turn an unavailable snapshot into prepared=false for
+    // one tick: an isolated None certificate then flashed the camera opaque.
+    // Read only the atomic revision when unchanged. Actual draws still require
+    // their exact frame registry epoch, resources and live source contract;
+    // this observation never authorizes rendering or retains a changed source.
+    if(s.enabled&&s.prepared&&count==1&&actual.width==s.width&&actual.height==s.height&&s.direct.inventoryRevision()==s.inventoryEpoch&&s.dispatchOwned())return;
+    const auto inventory=s.direct.inventory();
     std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||s.stopped||!s.module)return;
     try{
         if(!s.device&&s.pendingDevice){s.device=s.pendingDevice;s.pendingDevice=nullptr;if(!s.installContext()){s.gates.refuse(CoverageGate::Context);s.stopped=true;s.state=3;return;}s.state=4;}

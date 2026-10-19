@@ -25,6 +25,10 @@ bool DirectModeBoundary::prepare(const DirectModeFunctions& f)noexcept{
 DirectModeFunctions DirectModeBoundary::entryPoints()const noexcept{return {create,destroy,destroyAll,next,submit,present,post,timing};}
 void DirectModeBoundary::stop()noexcept{enabled_=false;++registryEpoch_;}
 bool DirectModeBoundary::ownsProcess(std::uint32_t pid)const noexcept{std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);if(!lock||!enabled_||!pid)return false;for(const auto& s:swaps_)if(s.pid==pid&&s.generation)return true;return false;}
+std::uint64_t DirectModeBoundary::inventoryRevision()const noexcept{
+    return enabled_.load(std::memory_order_acquire)&&!tainted_.load(std::memory_order_acquire)
+        ?registryEpoch_.load(std::memory_order_acquire):0;
+}
 DirectInventory DirectModeBoundary::inventory()const noexcept{
     DirectInventory result;std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);
     if(!lock||!enabled_||tainted_)return result;
