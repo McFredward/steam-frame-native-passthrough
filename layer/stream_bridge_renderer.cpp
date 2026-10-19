@@ -19,6 +19,8 @@ namespace native=stream_bridge_native;
 namespace local=stream_bridge_local;
 namespace journal=frame_pixel_ssbo_journal;
 namespace stream_bridge_renderer {
+// Implemented by the isolated camera-client owner; this query is atomic only.
+bool cameraAlphaReady() noexcept;
 namespace {
 template<class T>std::uint64_t handle(T value){std::uint64_t n=0;static_assert(sizeof value<=sizeof n,"bounded native handle");std::memcpy(&n,&value,sizeof value);return n;}
 template<class T>T from(std::uint64_t value){T result{};std::memcpy(&result,&value,sizeof result);return result;}
@@ -67,7 +69,8 @@ struct Renderer::Impl {
     std::vector<std::uint32_t> coverageWords;
     VkDescriptorSetLayout controlLayout{};VkDescriptorPool controlPool{};VkCommandPool guardPool{};
     VkCommandBuffer zero{};VkQueue queue{};VkBuffer controlsBuffer{};VkDeviceMemory controlsMemory{};std::array<Control,128> controls{};
-    std::array<Memory,64> memories{};std::array<Image,64> images{};std::array<View,256> views{};std::array<Descriptor,256> descriptors{};
+    // Fixed cold metadata budgets; never evict a still-live native generation.
+    std::array<Memory,512> memories{};std::array<Image,512> images{};std::array<View,1024> views{};std::array<Descriptor,256> descriptors{};
     std::array<DescriptorAllocation,4096> descriptorAllocations{};std::uint64_t descriptorGeneration=0;
     std::array<Pipeline,128> pipelines{};std::array<Command,128> commands{};std::array<std::shared_ptr<const PreparedPicture>,native::MaxDevices*native::MaxBuffers> pictures{};
 
@@ -87,6 +90,9 @@ struct Renderer::Impl {
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(DrawRefusal::Count)> refusals{};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(SubmitRefusal::Count)> submitRefusals{};
+        std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(DescriptorRefusal::Count)> descriptorRefusals{};
+        std::atomic<std::uint64_t> imageCapacityRefused{0},memoryCapacityRefused{0},viewCapacityRefused{0},descriptorCapacityRefused{0};
+        std::atomic<std::uint64_t> descriptorUntrackedWrites{0},descriptorUntrackedCopies{0};
         std::atomic<std::uint64_t> collects{0},collected{0},coreSubmits{0},submits2{0};
         std::atomic<std::uint64_t> descriptorAllocated{0},descriptorAllocationRefused{0},descriptorPoolRetirements{0},descriptorSetsRetired{0},descriptorUnknownUpdates{0},descriptorCopies{0};
         std::atomic<std::uint32_t> firstNextType{0},firstRefusedNextType{0};
@@ -107,11 +113,14 @@ struct Renderer::Impl {
         COUNT(maskOpaque) COUNT(maskTransparent) COUNT(maskMixed)
         COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
         COUNT(collects) COUNT(collected) COUNT(coreSubmits) COUNT(submits2) COUNT(firstNextType) COUNT(firstRefusedNextType)
+        COUNT(imageCapacityRefused) COUNT(memoryCapacityRefused) COUNT(viewCapacityRefused) COUNT(descriptorCapacityRefused)
+        COUNT(descriptorUntrackedWrites) COUNT(descriptorUntrackedCopies)
         COUNT(descriptorAllocated) COUNT(descriptorAllocationRefused) COUNT(descriptorPoolRetirements) COUNT(descriptorSetsRetired) COUNT(descriptorUnknownUpdates) COUNT(descriptorCopies)
 #undef COUNT
         for(std::size_t n=0;n<out.drawRefusals.size();++n)out.drawRefusals[n]=counts.refusals[n].load(std::memory_order_relaxed);
         for(std::size_t n=0;n<out.collectRefusals.size();++n)out.collectRefusals[n]=counts.collectRefusals[n].load(std::memory_order_relaxed);
         for(std::size_t n=0;n<out.submitRefusals.size();++n)out.submitRefusals[n]=counts.submitRefusals[n].load(std::memory_order_relaxed);
+        for(std::size_t n=0;n<out.descriptorRefusals.size();++n)out.descriptorRefusals[n]=counts.descriptorRefusals[n].load(std::memory_order_relaxed);
         const auto gpu=pool.statusCold();out.pending=gpu.pending;out.copying=gpu.copying;out.ready=gpu.ready;out.quarantined=gpu.quarantined;
         out.poolUploaded=gpu.uploaded;out.poolRefused=gpu.refused;out.pipelines=admittedPipelines.load(std::memory_order_acquire);
         out.prepared=out.pipelines!=0;out.lost=lost.load(std::memory_order_acquire);return out;
@@ -144,6 +153,12 @@ struct Renderer::Impl {
             static_cast<unsigned long long>(s.maskOpaque),static_cast<unsigned long long>(s.maskTransparent),static_cast<unsigned long long>(s.maskMixed));
         std::fprintf(stderr,"[Steam Link Native Passthrough] descriptor flow: allocated/refused=%llu/%llu; pool-retire/set-retire=%llu/%llu; unknown-updates/copies=%llu/%llu\n",
             static_cast<unsigned long long>(s.descriptorAllocated),static_cast<unsigned long long>(s.descriptorAllocationRefused),static_cast<unsigned long long>(s.descriptorPoolRetirements),static_cast<unsigned long long>(s.descriptorSetsRetired),static_cast<unsigned long long>(s.descriptorUnknownUpdates),static_cast<unsigned long long>(s.descriptorCopies));
+        const auto descriptor=[&](DescriptorRefusal r){return static_cast<unsigned long long>(s.descriptorRefusals[static_cast<std::size_t>(r)]);};
+        std::fprintf(stderr,"[Steam Link Native Passthrough] renderer metadata: capacity image/memory/view/descriptor=%llu/%llu/%llu/%llu (limits=512/512/1024/256); skipped untracked writes/copies=%llu/%llu; draw descriptor missing-allocation/missing-entry/invalid-entry/missing-view/view-serial=%llu/%llu/%llu/%llu/%llu; camera draw/collect refused=%llu/%llu\n",
+            static_cast<unsigned long long>(s.imageCapacityRefused),static_cast<unsigned long long>(s.memoryCapacityRefused),static_cast<unsigned long long>(s.viewCapacityRefused),static_cast<unsigned long long>(s.descriptorCapacityRefused),
+            static_cast<unsigned long long>(s.descriptorUntrackedWrites),static_cast<unsigned long long>(s.descriptorUntrackedCopies),
+            descriptor(DescriptorRefusal::MissingAllocation),descriptor(DescriptorRefusal::MissingEntry),descriptor(DescriptorRefusal::InvalidEntry),descriptor(DescriptorRefusal::MissingView),descriptor(DescriptorRefusal::ViewSerial),
+            miss(DrawRefusal::Camera),static_cast<unsigned long long>(s.collectRefusals[static_cast<std::size_t>(CollectRefusal::Camera)]));
         const auto collect=[&](CollectRefusal r){return static_cast<unsigned long long>(s.collectRefusals[static_cast<std::size_t>(r)]);};
         const auto submit=[&](SubmitRefusal r){return static_cast<unsigned long long>(s.submitRefusals[static_cast<std::size_t>(r)]);};
         std::fprintf(stderr,"[Steam Link Native Passthrough] renderer submit: core/submit2=%llu/%llu; first-pNext/refused-pNext=%u/%u; unsupported busy/bounds/shape/extension/flags=%llu/%llu/%llu/%llu/%llu; collect accepted/attempts=%llu/%llu; collect miss cb/empty/ineligible/epoch/lease/descriptor/image/memory/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
@@ -274,6 +289,7 @@ struct Renderer::Impl {
         const auto refuse=[&](CollectRefusal reason){++counts.collectRefusals[static_cast<std::size_t>(reason)];return false;};
         auto* command=find(commands,handle(cb));if(!command)return refuse(CollectRefusal::Command);
         if(!command->used)return refuse(CollectRefusal::Empty);
+        if(!cameraAlphaReady())return refuse(CollectRefusal::Camera);
         CollectRefusal why=CollectRefusal::Count;
         const auto require=[&](bool condition,CollectRefusal reason){if(!condition&&why==CollectRefusal::Count)why=reason;};
         require(command->eligible,CollectRefusal::Ineligible);
@@ -395,7 +411,7 @@ void Renderer::imageCreated(VkImage value,const VkImageCreateInfo& info) noexcep
     for(unsigned n=0;node&&n<32;++n,node=node->pNext)if(node->sType==VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO)dma=(reinterpret_cast<const VkExternalMemoryImageCreateInfo*>(node)->handleTypes&VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)!=0;
     if(auto* source=sourceImages())source->created(handle(p.device),handle(value),{info.extent.width,info.extent.height,std::uint32_t(info.format),dma});
     if(!p.prepared||!dma||info.imageType!=VK_IMAGE_TYPE_2D||info.samples!=VK_SAMPLE_COUNT_1_BIT||info.mipLevels!=1||info.arrayLayers!=1)return;
-    std::lock_guard<std::mutex> lock(p.gate);if(auto* image=add(p.images,handle(value))){image->generation=++p.generation;image->width=info.extent.width;image->height=info.extent.height;}
+    std::lock_guard<std::mutex> lock(p.gate);if(auto* image=add(p.images,handle(value))){image->generation=++p.generation;image->width=info.extent.width;image->height=info.extent.height;}else if(!find(p.images,handle(value)))++p.counts.imageCapacityRefused;
 }
 void Renderer::imageDestroyed(VkImage value) noexcept{auto&p=*impl_;if(auto* source=sourceImages())source->destroyed(handle(p.device),handle(value));std::lock_guard<std::mutex> lock(p.gate);if(auto* image=find(p.images,handle(value)))*image={};}
 MemoryPreparation Renderer::memoryPreparing(const VkMemoryAllocateInfo& info) noexcept{
@@ -416,13 +432,14 @@ void Renderer::memoryAllocated(VkDeviceMemory value,const VkMemoryAllocateInfo& 
     if(preparation.duplicate<0)return;
     std::lock_guard<std::mutex> lock(p.gate);auto* memory=original==VK_SUCCESS?add(p.memories,handle(value)):nullptr;
     if(memory){memory->generation=++p.generation;memory->device=preparation.device;memory->inode=preparation.inode;memory->duplicate=preparation.duplicate;preparation.duplicate=-1;}
+    if(original==VK_SUCCESS&&!memory&&!find(p.memories,handle(value)))++p.counts.memoryCapacityRefused;
     if(preparation.duplicate>=0)close(preparation.duplicate);
     preparation={};
 }
 void Renderer::memoryFreed(VkDeviceMemory value) noexcept{auto&p=*impl_;if(auto* source=sourceImages())source->freed(handle(p.device),handle(value));std::lock_guard<std::mutex> lock(p.gate);if(auto* memory=find(p.memories,handle(value))){if(memory->duplicate>=0)close(memory->duplicate);*memory={};}}
 void Renderer::imageBound(VkImage value,VkDeviceMemory memory,VkDeviceSize offset) noexcept{auto&p=*impl_;if(auto* source=sourceImages())source->bound(handle(p.device),handle(value),handle(memory),offset);std::lock_guard<std::mutex> lock(p.gate);auto* image=find(p.images,handle(value));const auto* allocation=find(p.memories,handle(memory));if(image&&allocation&&!offset){image->memory=allocation->id;image->memoryGeneration=allocation->generation;}}
 void Renderer::memoryExported(VkDeviceMemory memory,int fd,VkExternalMemoryHandleTypeFlagBits type,std::uintptr_t caller) noexcept{auto&p=*impl_;if(auto* source=sourceImages())if(source->exported(handle(p.device),handle(memory),fd,std::uint32_t(type),caller))sourceExportedFd(fd);}
-void Renderer::viewCreated(VkImageView value,const VkImageViewCreateInfo& info) noexcept{auto&p=*impl_;if(!p.prepared)return;std::lock_guard<std::mutex> lock(p.gate);const auto* image=find(p.images,handle(info.image));if(!image||info.viewType!=VK_IMAGE_VIEW_TYPE_2D||info.subresourceRange.baseMipLevel||info.subresourceRange.levelCount!=1||info.subresourceRange.baseArrayLayer||info.subresourceRange.layerCount!=1)return;if(auto* view=add(p.views,handle(value))){view->image=image->id;view->generation=image->generation;view->serial=++p.generation;}}
+void Renderer::viewCreated(VkImageView value,const VkImageViewCreateInfo& info) noexcept{auto&p=*impl_;if(!p.prepared)return;std::lock_guard<std::mutex> lock(p.gate);const auto* image=find(p.images,handle(info.image));if(!image||info.viewType!=VK_IMAGE_VIEW_TYPE_2D||info.subresourceRange.baseMipLevel||info.subresourceRange.levelCount!=1||info.subresourceRange.baseArrayLayer||info.subresourceRange.layerCount!=1)return;if(auto* view=add(p.views,handle(value))){view->image=image->id;view->generation=image->generation;view->serial=++p.generation;}else if(!find(p.views,handle(value)))++p.counts.viewCapacityRefused;}
 void Renderer::viewDestroyed(VkImageView value) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);if(auto* view=find(p.views,handle(value)))*view={};}
 void Renderer::descriptorWrites(std::uint32_t count,const VkWriteDescriptorSet* writes,std::uint32_t copies,const VkCopyDescriptorSet* copy) noexcept{
     auto&p=*impl_;if(!p.prepared)return;std::lock_guard<std::mutex> lock(p.gate);
@@ -432,12 +449,15 @@ void Renderer::descriptorWrites(std::uint32_t count,const VkWriteDescriptorSet* 
     for(std::size_t first=0;first<count;first+=256)for(std::size_t n=first;n<std::min<std::size_t>(count,first+256);++n){const auto& write=writes[n];if(write.dstBinding!=9||write.dstArrayElement)continue;
         const auto* allocation=find(p.descriptorAllocations,handle(write.dstSet));
         auto* entry=find(p.descriptors,handle(write.dstSet));
-        if(!allocation){if(entry)entry->valid=false;++p.counts.descriptorUnknownUpdates;continue;}
+        if(!allocation){if(entry)*entry={};++p.counts.descriptorUnknownUpdates;continue;}
+        const bool supported=write.sType==VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET&&!write.pNext&&write.descriptorType==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE&&write.descriptorCount&&write.descriptorCount<=3&&write.pImageInfo;
+        const auto* view=supported?find(p.views,handle(write.pImageInfo[0].imageView)):nullptr;
+        // An unrelated UI view is not a video descriptor. Do not reserve empty
+        // metadata for it; overwriting this exact set still retires its old use.
+        if(!view){if(entry)*entry={};if(supported)++p.counts.descriptorUntrackedWrites;else ++p.counts.descriptorUnknownUpdates;continue;}
         if(!entry)entry=add(p.descriptors,handle(write.dstSet));
-        if(!entry)continue;
-        entry->valid=false;
-        if(allocation&&write.sType==VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET&&!write.pNext&&write.descriptorType==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE&&write.descriptorCount&&write.descriptorCount<=3&&write.pImageInfo){entry->view=handle(write.pImageInfo[0].imageView);const auto* view=find(p.views,entry->view);entry->valid=view!=nullptr;entry->viewSerial=view?view->serial:0;}
-        else ++p.counts.descriptorUnknownUpdates;
+        if(!entry){++p.counts.descriptorCapacityRefused;continue;}
+        *entry={handle(write.dstSet),view->id,view->serial,true};
     }
     // Vulkan applies writes first and then copies in the supplied order.
     for(std::size_t first=0;first<copies;first+=256)for(std::size_t n=first;n<std::min<std::size_t>(copies,first+256);++n){const auto& update=copy[n];++p.counts.descriptorCopies;
@@ -447,9 +467,14 @@ void Renderer::descriptorWrites(std::uint32_t count,const VkWriteDescriptorSet* 
         const auto* destinationAllocation=find(p.descriptorAllocations,handle(update.dstSet));
         // Save before creating/overwriting dst; src and dst may name one set.
         const auto prior=source?*source:Impl::Descriptor{};
-        auto* destination=find(p.descriptors,handle(update.dstSet));if(!destinationAllocation){if(destination)destination->valid=false;++p.counts.descriptorUnknownUpdates;continue;}if(!destination)destination=add(p.descriptors,handle(update.dstSet));if(!destination)continue;destination->valid=false;
-        if(update.sType==VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET&&!update.pNext&&update.srcBinding==9&&!update.srcArrayElement&&update.descriptorCount&&update.descriptorCount<=3&&sourceAllocation&&destinationAllocation&&prior.valid){destination->view=prior.view;destination->viewSerial=prior.viewSerial;destination->valid=true;}
-        else ++p.counts.descriptorUnknownUpdates;
+        auto* destination=find(p.descriptors,handle(update.dstSet));
+        if(!destinationAllocation){if(destination)*destination={};++p.counts.descriptorUnknownUpdates;continue;}
+        const bool supported=update.sType==VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET&&!update.pNext&&update.srcBinding==9&&!update.srcArrayElement&&update.descriptorCount&&update.descriptorCount<=3&&sourceAllocation;
+        const auto* view=supported&&prior.valid?find(p.views,prior.view):nullptr;
+        if(!view||view->serial!=prior.viewSerial){if(destination)*destination={};if(supported)++p.counts.descriptorUntrackedCopies;else ++p.counts.descriptorUnknownUpdates;continue;}
+        if(!destination)destination=add(p.descriptors,handle(update.dstSet));
+        if(!destination){++p.counts.descriptorCapacityRefused;continue;}
+        *destination={handle(update.dstSet),prior.view,prior.viewSerial,true};
     }
 }
 void Renderer::descriptorsAllocated(const VkDescriptorSetAllocateInfo& info,const VkDescriptorSet* values) noexcept{
@@ -485,13 +510,20 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     auto&p=*impl_;++p.counts.draws;Draw out;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
     if(!lock){p.refused(DrawRefusal::Busy);return out;}
     if(!p.prepared||p.lost.load(std::memory_order_acquire)){p.refused(DrawRefusal::Unavailable);return out;}
+    if(!cameraAlphaReady()){p.refused(DrawRefusal::Camera);return out;}
     auto* command=find(p.commands,handle(value));if(!command){p.refused(DrawRefusal::Command);return out;}
     if(command->epoch!=p.observationEpoch.load(std::memory_order_acquire)){p.refused(DrawRefusal::Epoch);return out;}
     auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline){p.refused(DrawRefusal::Pipeline);return out;}
     out.original=from<VkPipeline>(pipeline->id);
     if(!command->eligible||!command->control||!pipeline->coverage){p.refused(DrawRefusal::Ineligible);return out;}
-    const auto* descriptor=find(p.descriptors,command->set0);const auto* descriptorAllocation=find(p.descriptorAllocations,command->set0);if(!descriptor||!descriptor->valid||!descriptorAllocation){p.refused(DrawRefusal::Descriptor);return out;}
-    const auto* view=find(p.views,descriptor->view);if(!view||view->serial!=descriptor->viewSerial){p.refused(DrawRefusal::Image);return out;}
+    const auto descriptorMiss=[&](DescriptorRefusal why,DrawRefusal reason){++p.counts.descriptorRefusals[static_cast<std::size_t>(why)];p.refused(reason);};
+    const auto* descriptor=find(p.descriptors,command->set0);const auto* descriptorAllocation=find(p.descriptorAllocations,command->set0);
+    if(!descriptorAllocation){descriptorMiss(DescriptorRefusal::MissingAllocation,DrawRefusal::Descriptor);return out;}
+    if(!descriptor){descriptorMiss(DescriptorRefusal::MissingEntry,DrawRefusal::Descriptor);return out;}
+    if(!descriptor->valid){descriptorMiss(DescriptorRefusal::InvalidEntry,DrawRefusal::Descriptor);return out;}
+    const auto* view=find(p.views,descriptor->view);
+    if(!view){descriptorMiss(DescriptorRefusal::MissingView,DrawRefusal::Image);return out;}
+    if(view->serial!=descriptor->viewSerial){descriptorMiss(DescriptorRefusal::ViewSerial,DrawRefusal::Image);return out;}
     const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation){p.refused(DrawRefusal::Image);return out;}
     std::shared_ptr<const LocalPicture> picture;if(!p.matchingImage(image->id,picture)){p.refused(DrawRefusal::ExactPicture);return out;}
     Impl::Use* use=nullptr;

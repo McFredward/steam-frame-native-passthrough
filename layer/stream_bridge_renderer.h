@@ -15,9 +15,10 @@ struct Draw {
     bool ready=false;
 };
 struct MemoryPreparation {int duplicate=-1;std::uint64_t device=0,inode=0;};
-enum class DrawRefusal:std::uint8_t {Unavailable,Busy,Command,Epoch,Pipeline,Ineligible,Descriptor,Image,ExactPicture,ReadyMask,Capacity,Count};
-enum class CollectRefusal:std::uint8_t {Command,Empty,Ineligible,Epoch,Lease,Descriptor,Image,Memory,Capacity,Count};
+enum class DrawRefusal:std::uint8_t {Unavailable,Busy,Command,Epoch,Pipeline,Ineligible,Descriptor,Image,ExactPicture,ReadyMask,Capacity,Camera,Count};
+enum class CollectRefusal:std::uint8_t {Command,Empty,Ineligible,Epoch,Lease,Descriptor,Image,Memory,Capacity,Camera,Count};
 enum class SubmitRefusal:std::uint8_t {Busy,Bounds,Shape,Extension,Flags,Count};
+enum class DescriptorRefusal:std::uint8_t {MissingAllocation,MissingEntry,InvalidEntry,MissingView,ViewSerial,Count};
 struct RendererStats {
     std::uint64_t metadata=0,maskNone=0,maskDecoded=0,maskRejected=0,uploadAccepted=0,uploadRefused=0,pictures=0;
     std::uint64_t maskOpaque=0,maskTransparent=0,maskMixed=0;
@@ -25,6 +26,9 @@ struct RendererStats {
     std::array<std::uint64_t,static_cast<std::size_t>(DrawRefusal::Count)> drawRefusals{};
     std::array<std::uint64_t,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
     std::array<std::uint64_t,static_cast<std::size_t>(SubmitRefusal::Count)> submitRefusals{};
+    std::array<std::uint64_t,static_cast<std::size_t>(DescriptorRefusal::Count)> descriptorRefusals{};
+    std::uint64_t imageCapacityRefused=0,memoryCapacityRefused=0,viewCapacityRefused=0,descriptorCapacityRefused=0;
+    std::uint64_t descriptorUntrackedWrites=0,descriptorUntrackedCopies=0;
     std::uint64_t collects=0,collected=0,coreSubmits=0,submits2=0;
     std::uint64_t descriptorAllocated=0,descriptorAllocationRefused=0,descriptorPoolRetirements=0,descriptorSetsRetired=0,descriptorUnknownUpdates=0,descriptorCopies=0;
     std::uint32_t firstNextType=0,firstRefusedNextType=0;
