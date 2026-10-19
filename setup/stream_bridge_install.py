@@ -1302,7 +1302,15 @@ class FrameInstall:
                 view=SimpleNamespace(e=self.e,home=self.home,tx=tx,settings_path=self.settings_path,camera_value=self.camera_value)
             else:view=self
             legacy=legacy_helper.plan(view,checkpoint=pending)
-        if state is None and legacy is None:return {'reason':'not_installed','automatic_restart':False}
+        if state is None and legacy is None:
+            if purge_legacy:
+                artifacts=(self.root/LIBRARY,self.root/'libsfnp_stream_launch.so',self.root/'receiver.enable',
+                    self.config/'vulkan/implicit_layer.d'/MANIFEST,
+                    self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf',
+                    self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK)
+                self.e.require(not any(os.path.lexists(path) for path in artifacts),
+                    'The Frame removal receipt is missing; remaining patch components were preserved and complete uninstall could not be verified.')
+            return {'reason':'not_installed','automatic_restart':False}
         if not live:self.cold(steam=True)
         legacy_paths={op['path'] for op in legacy['operations']} if legacy else set()
         known={item['path']:item for item in pending['operations']} if pending else {}

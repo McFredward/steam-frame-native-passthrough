@@ -837,6 +837,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(result['reason'],'uninstalled');self.assertFalse(self.local.inventory()['registered'])
         self.assertTrue(installer.checkpoint().value()['registered'],'Explicit Undo retains the original registration authority')
 
+    def test_orphan_paired_activation_cannot_claim_successful_uninstall_without_ownership_receipt(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();self.unit.tx.path.unlink()
+        library=s.read(self.froot/b.LIBRARY);dropin=self.fhome/'.config/systemd/user/steam.service.d/85-steam-link-native-passthrough.conf'
+        original=s.read(dropin);camera=s.read(self.fsettings)
+        with self.assertRaisesRegex(s.SetupError,'Frame removal receipt is missing'):
+            b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertEqual(s.read(self.froot/b.LIBRARY),library);self.assertEqual(s.read(dropin),original)
+        self.assertEqual(s.read(self.fsettings),camera);self.assertFalse(self.unit.checkpoint().path.exists())
+
     def test_interrupted_retired_uninstall_keeps_receipt_last_and_continues_from_exact_checkpoint(self):
         _,config,dropin,link,payload=self.old_frame_only();replace=self.unit.tx.replace
         def interrupt(operation,reverse=False):
