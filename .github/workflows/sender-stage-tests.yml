@@ -1,0 +1,61 @@
+name: Exact native coverage stage ownership
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'tests/test_stream_bridge_sender_stage_pipeline.cpp'
+      - 'cmake/StreamBridge.cmake'
+      - '.github/workflows/sender-stage-tests.yml'
+  pull_request:
+    paths:
+      - 'pc/stream-bridge-sender-provider-coverage*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'tests/test_stream_bridge_sender_stage_pipeline.cpp'
+      - 'cmake/StreamBridge.cmake'
+      - '.github/workflows/sender-stage-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  stage-pipeline:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare pinned public NVENC header
+        shell: bash
+        run: |
+          mkdir -p build/nvenc-sdk
+          curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/FFmpeg/nv-codec-headers/43d91706e097565f57b311e567f0219838bcc2f6/include/ffnvcodec/nvEncodeAPI.h -o build/nvenc-sdk/nvEncodeAPI.h
+          echo 'be0c29a41ae3260fd016a9001fd959e747bac93ad21411759736abba4ffdea86  build/nvenc-sdk/nvEncodeAPI.h' | sha256sum --check --strict
+      - name: Build and run production native source pipeline on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cmake -S . -B build/stages -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
+          cmake --build build/stages --parallel 4 --target test_stream_bridge_sender_stage_pipeline
+          build/stages/test_stream_bridge_sender_stage_pipeline | tee build/stage-pipeline.log
+      - name: Build and run same production native source pipeline on Windows
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
+          if not defined SFNP_VS exit /b 1
+          call "%SFNP_VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_stage_pipeline.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/hevc_bridge_sei.cpp /Fe:build\stage-pipeline.exe /Fo:build\ /link
+          if errorlevel 1 exit /b 1
+          build\stage-pipeline.exe >build\stage-pipeline.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\stage-pipeline.log
+          exit /b %SFNP_RESULT%
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-stage-pipeline-${{ runner.os }}
+          path: build/stage-pipeline.log

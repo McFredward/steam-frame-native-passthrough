@@ -1,5 +1,6 @@
 #include "stream-bridge-sender-provider-coverage.h"
 #include "stream-bridge-sender-provider-coverage-render.h"
+#include "stream-bridge-sender-provider-coverage-stages.h"
 #include "stream-bridge-source-contract.h"
 #include <d3d11_4.h>
 #include <cstring>
@@ -118,20 +119,25 @@ std::uint32_t CoverageContextFacade::nativeMutationCount()const noexcept{
 struct SenderCoverage::Impl {
     DirectModeBoundary& direct;NvencBoundary& boundary;ControlRuntime& control;CoverageGateCounters gates;
     mutable std::mutex mutex;std::atomic<bool> enabled{false},prepared{false};std::atomic<unsigned> state{0};std::atomic<std::uint32_t> lastPid{0},preparedPid{0};
-    std::atomic<std::uint64_t> failedSerial{0};std::atomic<bool> retirePending{false};std::uintptr_t module=0;bool stopped=false;
+    std::atomic<std::uint64_t> failedSerial{0};std::uintptr_t module=0;std::atomic<bool> stopped{false};
     ID3D11Device* pendingDevice=nullptr;ID3D11Device* device=nullptr;ID3D11DeviceContext* context=nullptr;
     void* nativeDevicePointer=nullptr; // Comparison only; never dereferenced as a guessed interface.
     ID3D11Multithread* multithread=nullptr;CoverageContextFacade facade;
     SourceContract sourceContract;
     ID3D11Texture2D* target=nullptr;ID3D11RenderTargetView* targetView=nullptr;ID3D11BlendState* blend=nullptr;
-    std::uint32_t width=0,height=0;std::uint64_t activeSerial=0,activeEpoch=0;unsigned drawBits=0;std::uint64_t activeContract=0;bool invalid=false;
+    std::uint32_t width=0,height=0;std::uint64_t activeSerial=0,activeEpoch=0;unsigned drawBits=0;std::uint64_t activeContract=0;bool invalid=false,poolReady=false;
     IUnknown* nativeOutput=nullptr;std::uint32_t activePid=0;
     struct Opened {vr::SharedTextureHandle_t handle=0;std::uint64_t generation=0;std::uint32_t pid=0;ID3D11Texture2D* texture=nullptr;};
     std::array<Opened,MaxOpened> opened{};std::uint64_t inventoryEpoch=0;
     struct Constant {ID3D11Resource* resource=nullptr;void* pointer=nullptr;std::array<std::uint8_t,128> bytes{};std::uint64_t present=0;bool valid=false;};
     std::array<Constant,4> constants{};
-    struct Stage {std::uint64_t contract=0,copyMicros=0,submissionMicros=0;ID3D11Texture2D* texture=nullptr;ID3D11Query* completion=nullptr;bool queryIssued=false;IUnknown* input=nullptr;std::uint64_t present=0,submission=0,encoderGeneration=0;void* encoder=nullptr;std::uint32_t pid=0;};
-    std::array<Stage,StageCount> stages{};
+    struct StageResources {
+        ID3D11Texture2D* texture=nullptr;ID3D11Query* completion=nullptr;ID3D11DeviceContext* context=nullptr;
+        IUnknown* input=nullptr;
+        bool ready()const noexcept{return texture&&completion&&context;}
+    };
+    using Stages=CoverageStages<StageResources,StageCount>;
+    Stages stages;
     static std::atomic<Impl*> instance;
     Impl(DirectModeBoundary& d,NvencBoundary& b,ControlRuntime& c):direct(d),boundary(b),control(c){}
     bool site(void* address,std::uintptr_t rva)const{return module&&reinterpret_cast<std::uintptr_t>(address)==module+rva;}
@@ -143,17 +149,19 @@ struct SenderCoverage::Impl {
         if(!s.pendingDevice){s.pendingDevice=actual;s.nativeDevicePointer=value;s.state=2;}else release(actual);
     }
     static void inputCapture(const NvencOutputEvidence& e,void* opaque){
-        auto& s=*static_cast<Impl*>(opaque);std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);
-        if(!lock||!s.enabled||!e.exactInput||e.width!=s.width||e.height!=s.height||e.subresource)return;
+        auto& s=*static_cast<Impl*>(opaque);
+        if(!s.enabled||!e.exactInput||e.subresource)return;
         // The exact CopyResource receipt is consumed once, before Encode. It is
         // subsequently addressed only by accepted NVENC submission identity.
-        Stage* found=nullptr;for(auto& slot:s.stages)if(slot.present&&!slot.submission&&same(slot.input,static_cast<IUnknown*>(e.resource))){if(found)return;found=&slot;}
-        if(found){found->submissionMicros=clockMicros();found->submission=e.submission;found->encoderGeneration=e.encoderGeneration;found->encoder=e.encoder;s.gates.signal(CoverageSignal::MatchedInputs);}
+        auto* input=identity(static_cast<IUnknown*>(e.resource));
+        const bool matched=input&&s.stages.bind(reinterpret_cast<std::uintptr_t>(input),e.width,e.height,e.submission,e.encoder,e.encoderGeneration,clockMicros());
+        release(input);
+        if(matched)s.gates.signal(CoverageSignal::MatchedInputs);
         else s.gates.refuse(CoverageGate::InputReceipt);
     }
     static void inputRetire(const NvencOutputEvidence& e,void* opaque){
-        auto& s=*static_cast<Impl*>(opaque);std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.retirePending=true;return;}
-        for(auto& slot:s.stages)if(slot.submission==e.submission&&slot.encoderGeneration==e.encoderGeneration&&slot.encoder==e.encoder){release(slot.input);slot.present=slot.submission=slot.encoderGeneration=0;slot.encoder=nullptr;slot.queryIssued=false;}
+        auto& s=*static_cast<Impl*>(opaque);auto owned=s.stages.read(e.submission,e.encoder,e.encoderGeneration);
+        if(owned){release(owned->resources.input);owned->receipt={};owned.publish(Stages::Phase::Retired);}
     }
     static bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8_t>& output,void* opaque){
         auto& s=*static_cast<Impl*>(opaque);if(!e.exactInput||!e.submission||e.width>8192||e.height>8192)return s.gates.refuse(CoverageGate::InputReceipt);
@@ -163,31 +171,32 @@ struct SenderCoverage::Impl {
         // Certificate-only discovery must remain possible to bootstrap that
         // fresh handshake, without reading/compressing any coverage staging.
         if(!e.coverageSessionAuthorized){s.gates.refuse(CoverageGate::CoverageSession);const bool certified=s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;}
-        std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock)return s.gates.refuse(CoverageGate::Lock);if(!s.enabled)return s.gates.refuse(CoverageGate::Prepared);
-        std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;std::uint64_t maskContract=0;bool matched=false;
-        for(auto& slot:s.stages)if(slot.submission==e.submission&&slot.encoderGeneration==e.encoderGeneration&&slot.encoder==e.encoder&&slot.texture&&slot.present&&slot.queryIssued&&slot.completion){
-            matched=true;
-            // Format permission comes from the live kernel-validated app.
-            // Fully opaque eyes are legitimate; sparse pixel samples cannot
-            // establish the semantics of an entire submitted texture.
-            if(!s.sourceContract.current(slot.contract,slot.pid)){
-                s.gates.refuse(CoverageGate::SourceRevoked);break;
-            }
-            pixels.resize(std::size_t(s.width)*s.height);
-            const auto started=clockMicros();
-            CoverageReadbackResult receipt;
-            const auto result=readCoverageNonblocking(s.context,slot.texture,slot.completion,s.width,s.height,pixels.data(),pixels.size(),forwardGetData,forwardMap,forwardUnmap,receipt);
-            s.gates.completion(static_cast<std::uint32_t>(receipt.query),elapsedMicros(slot.copyMicros,started));
-            if(receipt.mapAttempted)s.gates.readback(static_cast<std::uint32_t>(result),elapsedMicros(slot.copyMicros,started),
-                elapsedMicros(slot.submissionMicros,started),elapsedMicros(started,clockMicros()));
-            if(SUCCEEDED(result)){maskPid=slot.pid;maskContract=slot.contract;}
-            else{s.gates.refuse(receipt.mapAttempted?CoverageGate::Readback:(receipt.query==S_FALSE?CoverageGate::QueryPending:CoverageGate::QueryError));pixels.clear();}
-            break; // Never block or substitute a later staging frame.
+        if(!s.enabled)return s.gates.refuse(CoverageGate::Prepared);
+        std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;std::uint64_t maskContract=0;
+        {
+            // Reading excludes reuse/resize of exactly this stage. It does not
+            // own the render/cold mutex while Map copies and inverts 5 MiB.
+            auto owned=s.stages.read(e.submission,e.encoder,e.encoderGeneration);
+            if(owned){
+                const auto& slot=owned->receipt;const auto& gpu=owned->resources;
+                // Format permission comes from the live kernel-validated app.
+                // Fully opaque eyes are legitimate; sparse pixel samples cannot
+                // establish the semantics of an entire submitted texture.
+                if(!s.sourceContract.current(slot.contract,slot.pid))s.gates.refuse(CoverageGate::SourceRevoked);
+                else if(gpu.ready()&&slot.width==e.width&&slot.height==e.height){
+                    pixels.resize(std::size_t(slot.width)*slot.height);
+                    const auto started=clockMicros();CoverageReadbackResult receipt;
+                    const auto result=readCoverageNonblocking(gpu.context,gpu.texture,gpu.completion,slot.width,slot.height,pixels.data(),pixels.size(),forwardGetData,forwardMap,forwardUnmap,receipt);
+                    s.gates.completion(static_cast<std::uint32_t>(receipt.query),elapsedMicros(slot.copyMicros,started));
+                    if(receipt.mapAttempted)s.gates.readback(static_cast<std::uint32_t>(result),elapsedMicros(slot.copyMicros,started),
+                        elapsedMicros(slot.submissionMicros,started),elapsedMicros(started,clockMicros()));
+                    if(SUCCEEDED(result)){maskPid=slot.pid;maskContract=slot.contract;}
+                    else{s.gates.refuse(receipt.mapAttempted?CoverageGate::Readback:(receipt.query==S_FALSE?CoverageGate::QueryPending:CoverageGate::QueryError));pixels.clear();}
+                }else s.gates.refuse(CoverageGate::StageReceipt);
+            }else s.gates.refuse(CoverageGate::StageReceipt);
         }
-        if(!matched)s.gates.refuse(CoverageGate::StageReceipt);
         // Do not hold the GPU metadata mutex while scanning/compressing the
         // CPU copy or authenticating it. Native Draw must never wait for RLE.
-        lock.unlock();
         if(!pixels.empty()){
             std::vector<std::uint8_t> rle;
             if(!encodeCoverageRle({pixels.data(),pixels.size()},rle))s.gates.refuse(CoverageGate::RleEncode);
@@ -238,22 +247,26 @@ struct SenderCoverage::Impl {
         // coverage from receipts captured before the changed context contract.
         enabled=false;prepared=false;lastPid=0;preparedPid=0;stopped=true;state=9;
         for(auto& constant:constants){constant.valid=false;constant.pointer=nullptr;}
-        for(auto& slot:stages){release(slot.input);slot.present=slot.submission=slot.encoderGeneration=0;slot.encoder=nullptr;slot.queryIssued=false;}
+        // A borrowed encoder callback can still own a Reading stage. Revoking
+        // authority never frees or overwrites its resources/receipt.
         gates.refuse(CoverageGate::Context);
     }
     bool allocate(std::uint32_t w,std::uint32_t h){
         if(!w||!h||w>8192||h>8192||std::size_t(w)*h>MaximumCoverageBytes)return false;
         // No in-flight readback is reused at another size. Retiring submitted
         // generations happens through the NVENC owner before resize admission.
-        for(const auto& slot:stages)if(slot.submission)return false;
-        prepared=false;preparedPid=0;state=4;release(targetView);release(target);for(auto& slot:stages){release(slot.texture);release(slot.completion);release(slot.input);slot={};}
+        Stages::PoolClaim all;if(!stages.maintenance(all))return false;
+        poolReady=false;prepared=false;preparedPid=0;state=4;release(targetView);release(target);
+        for(auto& slot:all){auto& gpu=slot->resources;release(gpu.texture);release(gpu.completion);release(gpu.input);gpu={};slot->receipt={};}
         D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_RENDER_TARGET;
         if(FAILED(device->CreateTexture2D(&desc,nullptr,&target))||FAILED(device->CreateRenderTargetView(target,nullptr,&targetView)))return false;
         desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         D3D11_QUERY_DESC query{};query.Query=D3D11_QUERY_EVENT;
-        for(auto& slot:stages)if(FAILED(device->CreateTexture2D(&desc,nullptr,&slot.texture))||FAILED(device->CreateQuery(&query,&slot.completion)))return false;
+        for(auto& slot:all){auto& gpu=slot->resources;gpu.context=context;if(FAILED(device->CreateTexture2D(&desc,nullptr,&gpu.texture))||FAILED(device->CreateQuery(&query,&gpu.completion)))return false;}
         if(!blend&&!createTransmittanceBlend(device,&blend))return false;
-        width=w;height=h;activeSerial=0;release(nativeOutput);prepared=true;return true;
+        width=w;height=h;activeSerial=0;release(nativeOutput);
+        for(auto& slot:all)slot.publish(Stages::Phase::Free);
+        poolReady=true;prepared=true;return true;
     }
     void refresh(const DirectInventory& inventory){
         if(!inventory.valid){gates.refuse(CoverageGate::Inventory);prepared=false;preparedPid=0;return;}
@@ -351,20 +364,24 @@ struct SenderCoverage::Impl {
         if(ctx!=s.context||!s.enabled||!caller||!frame){if(caller)s.gates.refuse(ctx!=s.context?CoverageGate::Context:CoverageGate::DirectFrame);forwardCopy(ctx,destination,source);return;}
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.gates.refuse(CoverageGate::Lock);forwardCopy(ctx,destination,source);return;}
         if(!s.prepared||s.invalid||frame->presentSerial!=s.activeSerial||frame->presentSerial==s.failedSerial||frame->registryEpoch!=s.activeEpoch||!same(source,s.nativeOutput)||s.drawBits!=((1u<<(2*frame->layerCount))-1)){s.gates.refuse(CoverageGate::CopyPair);forwardCopy(ctx,destination,source);return;}
-        // Frozen slots cannot be evicted by a resource pointer reused later.
-        Stage* free=nullptr;for(auto& slot:s.stages){if(!slot.submission&&same(slot.input,destination)){release(slot.input);slot.present=0;slot.queryIssued=false;}if(!slot.present&&!free)free=&slot;}
-        if(!free){s.gates.refuse(CoverageGate::StageFull);forwardCopy(ctx,destination,source);return;}
         if(!s.sourceContract.current(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);forwardCopy(ctx,destination,source);return;}
         auto* input=identity(destination);if(!input){s.gates.refuse(CoverageGate::InputReceipt);forwardCopy(ctx,destination,source);return;}
+        // A stage is frozen from the native input handoff through matching
+        // Unlock; another accepted frame and cold maintenance cannot evict it.
+        auto free=s.stages.capture(reinterpret_cast<std::uintptr_t>(input));
+        if(!free){release(input);s.gates.refuse(CoverageGate::StageFull);forwardCopy(ctx,destination,source);return;}
+        auto& gpu=free->resources;release(gpu.input);gpu.input=input;
+        free->receipt={};auto& receipt=free->receipt;
+        receipt.input=reinterpret_cast<std::uintptr_t>(input);receipt.contract=s.activeContract;receipt.present=frame->presentSerial;
+        receipt.pid=s.activePid;receipt.width=s.width;receipt.height=s.height;
         MultithreadScope protect(s.multithread);const auto captured=clockMicros();
         // Native NVENC completion is input-resource-specific. Explicitly submit
         // this independent readback and its own EVENT before the handoff; do
         // not infer completion from elapsed time or a finished bitstream.
-        free->queryIssued=false;
-        copyCoverageBeforeNative(ctx,destination,source,free->texture,s.target,free->completion,forwardCopy,forwardEnd,forwardFlush);
-        free->queryIssued=true;s.gates.submitted();
-        free->contract=s.activeContract;free->copyMicros=captured;free->submissionMicros=0;free->input=input;
-        free->present=frame->presentSerial;free->pid=s.activePid;s.gates.signal(CoverageSignal::CapturedCopies);
+        receipt.copyMicros=captured;
+        const CoveragePublication publication{[](void* value)noexcept{static_cast<Stages::Claim*>(value)->publish(Stages::Phase::Captured);},&free};
+        copyCoverageBeforeNative(ctx,destination,source,gpu.texture,s.target,gpu.completion,forwardCopy,forwardEnd,forwardFlush,publication);
+        s.gates.submitted();s.gates.signal(CoverageSignal::CapturedCopies);
     }
 };
 std::atomic<SenderCoverage::Impl*> SenderCoverage::Impl::instance{nullptr};
@@ -375,16 +392,19 @@ SenderCoverage::~SenderCoverage(){stop();(void)impl_.release();} // callbacks/CO
 bool SenderCoverage::configure(std::uintptr_t module)noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);if(impl_->module||!module)return false;impl_->module=module;return true;}
 void SenderCoverage::tick()noexcept{
     auto& s=*impl_;const auto encoders=s.boundary.encoderStates();const auto inventory=s.direct.inventory();
+    // Once prepared, an unchanged native encoder/inventory requires no render
+    // metadata ownership. The old periodic diagnostic/worker lock alone could
+    // invalidate a valid Map/Draw, even with no resource work to perform.
+    EncoderState actual{};unsigned count=0;for(const auto& e:encoders)if(e.encoder&&e.hevc){actual=e;++count;}
+    if(s.enabled&&s.prepared&&count==1&&actual.width==s.width&&actual.height==s.height&&inventory.valid&&inventory.epoch==s.inventoryEpoch&&s.dispatchOwned())return;
     std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||s.stopped||!s.module)return;
     try{
         if(!s.device&&s.pendingDevice){s.device=s.pendingDevice;s.pendingDevice=nullptr;if(!s.installContext()){s.gates.refuse(CoverageGate::Context);s.stopped=true;s.state=3;return;}s.state=4;}
         if(!s.enabled)return;
         if(!s.dispatchOwned()){s.loseDispatch();return;}
-        if(s.retirePending.exchange(false)){for(auto& slot:s.stages){release(slot.input);slot.present=slot.submission=slot.encoderGeneration=0;slot.encoder=nullptr;slot.queryIssued=false;}}
-        EncoderState actual{};unsigned count=0;for(const auto& e:encoders)if(e.encoder&&e.hevc){actual=e;++count;}
         if(count!=1){s.gates.refuse(CoverageGate::Encoder);s.prepared=false;s.preparedPid=0;s.state=4;return;}
-        if(s.width!=actual.width||s.height!=actual.height||!s.target){if(!s.allocate(actual.width,actual.height)){s.gates.refuse(CoverageGate::Prepared);s.state=5;return;}}
-        s.prepared=s.target&&s.targetView&&s.blend;for(const auto& slot:s.stages)s.prepared=s.prepared&&slot.texture&&slot.completion;
+        if(s.width!=actual.width||s.height!=actual.height||!s.poolReady){if(!s.allocate(actual.width,actual.height)){s.gates.refuse(CoverageGate::Prepared);s.state=5;return;}}
+        s.prepared=s.target&&s.targetView&&s.blend&&s.poolReady;
         s.refresh(inventory);
     }catch(...){s.prepared=false;s.state=5;}
 }
@@ -399,7 +419,9 @@ bool SenderCoverage::ready(std::uint32_t pid)const noexcept{return impl_->enable
 bool SenderCoverage::operational(std::uint32_t pid)const noexcept{return ready(pid)&&impl_->lastPid==pid;}
 CoverageGateStats SenderCoverage::gateStats()const noexcept{
     auto& s=*impl_;auto result=s.gates.snapshot();
-    std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock||!s.context)return result;
+    // Enabled publishes the immutable context/facade. They are retained until
+    // process exit; reading public dispatch metadata needs no render lock.
+    if(!s.enabled)return result;
     // A successfully installed context can later acquire another runtime
     // dispatch table. Observe its public interface, without following any
     // private renderer object fields or treating diagnostic reads as proof.
