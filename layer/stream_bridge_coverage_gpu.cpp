@@ -20,6 +20,16 @@ bool valid(const FrameIdentity&f,std::uint32_t w,std::uint32_t h,stream_bridge::
         std::uint64_t(w)*h==b.size&&b.size<=stream_bridge::MaximumCoverageBytes;
 }
 constexpr std::uint64_t RefMask=65535,GenerationLimit=(std::numeric_limits<std::uint64_t>::max()>>16);
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,"queue completion requires lock-free ticket publication");
+std::atomic<std::uint64_t> ownerSerial{1};
+std::uint64_t nextOwner() noexcept {
+    // Cold construction only. Do not recycle an owner epoch even if an old
+    // object address is reused, and permanently refuse on counter exhaustion.
+    auto serial=ownerSerial.load(std::memory_order_relaxed);
+    while(serial!=(std::numeric_limits<std::uint64_t>::max()))
+        if(ownerSerial.compare_exchange_weak(serial,serial+1,std::memory_order_relaxed))return serial;
+    return 0;
+}
 }
 struct Pool::Impl {
 #define GPU_FUNCTIONS(X) \
@@ -43,16 +53,26 @@ struct Pool::Impl {
         void* mapped=nullptr;std::size_t bytes=0;std::uint32_t width=0,height=0;bool coherent=false,initializedShaderReadLayout=false;VkDescriptorSet set{};
         VkCommandBuffer copy{};VkFence uploaded{};
     };
-    enum class TicketState { Free,Reserved,Submitted,Quarantined };
+    enum class TicketState:std::uint64_t { Free,Reserved,Completing,Submitted,Quarantined };
     struct Ticket {
-        TicketState state=TicketState::Free;VkFence fence{};std::uint32_t mask=0;
+        // Generation and state share one CAS word, so a stale/replayed
+        // completion can never claim a later reuse of the same fixed slot.
+        std::atomic<std::uint64_t> phase{0};std::uint64_t generation=0;
+        VkFence fence{};std::uint32_t mask=0;
         std::array<std::uint64_t,MaximumSlots> generations{};
+        TicketState state()const noexcept{return static_cast<TicketState>(phase.load(std::memory_order_acquire)&7);}
+        void state(TicketState value) noexcept{phase.store((generation<<3)|static_cast<std::uint64_t>(value),std::memory_order_release);}
+        bool claim(std::uint64_t value) noexcept{
+            auto expected=(value<<3)|static_cast<std::uint64_t>(TicketState::Reserved);
+            return phase.compare_exchange_strong(expected,(value<<3)|static_cast<std::uint64_t>(TicketState::Completing),std::memory_order_acq_rel);
+        }
     };
     mutable std::mutex gate;std::mutex cold;
     VkDevice device{};VkQueue queue{};VkPhysicalDeviceMemoryProperties memory{};
     VkDescriptorSetLayout layout{};VkDescriptorPool descriptors{};VkSampler sampler{};VkCommandPool commands{};
     std::array<Slot,MaximumSlots> slots{};std::array<Ticket,MaximumSubmissionFences> tickets{};
-    std::uint64_t serial=0,uploadedCount=0;std::atomic<std::uint64_t> refusals{0};bool prepared=false;
+    const std::uint64_t ownerGeneration=nextOwner();
+    std::uint64_t serial=0,ticketSerial=0,uploadedCount=0;std::atomic<std::uint64_t> refusals{0};bool prepared=false;
     bool load(VkDevice d,PFN_vkGetDeviceProcAddr get) noexcept {
 #define LOAD(n) n=reinterpret_cast<PFN_vk##n>(get(d,"vk" #n));if(!n)return false;
         GPU_FUNCTIONS(LOAD)
@@ -83,12 +103,8 @@ struct Pool::Impl {
         if(sampler)DestroySampler(device,sampler,nullptr);
         if(layout)DestroyDescriptorSetLayout(device,layout,nullptr);
         for(auto&s:slots){s.state=State::Free;s.frame={};s.generation=0;s.refs.store(0);s.quarantine.store(false);s.gpuRefs=0;s.set={};s.copy={};}
-        for(auto&t:tickets){t.state=TicketState::Free;t.mask=0;t.generations.fill(0);}
+        for(auto&t:tickets){t.mask=0;t.generations.fill(0);t.state(TicketState::Free);}
         prepared=false;device={};commands={};descriptors={};sampler={};layout={};queue={};
-    }
-    void quarantine(const Lease*ls,std::size_t n) noexcept {
-        if(!ls||n>MaximumSlots){for(auto&s:slots)s.quarantine.store(true,std::memory_order_release);return;}
-        for(std::size_t i=0;i<n;++i)if(ls[i].slot<MaximumSlots)slots[ls[i].slot].quarantine.store(true,std::memory_order_release);
     }
     bool leases(const Lease*ls,std::size_t n,std::uint32_t&mask,std::array<std::uint64_t,MaximumSlots>&gs)const noexcept {
         mask=0;gs.fill(0);if(!ls||!n||n>MaximumSlots)return false;
@@ -227,11 +243,11 @@ void Pool::reapCold() noexcept {
     auto&p=*impl_;std::lock_guard<std::mutex> cold(p.cold);std::lock_guard<std::mutex> lock(p.gate);if(!p.prepared)return;
     for(auto&s:p.slots)if(s.state==Impl::State::Copying){auto r=p.GetFenceStatus(p.device,s.uploaded);
         if(r==VK_SUCCESS){s.initializedShaderReadLayout=true;s.state=Impl::State::Ready;}else if(r!=VK_NOT_READY){s.quarantine.store(true,std::memory_order_release);++p.refusals;}}
-    for(auto&t:p.tickets)if(t.state==Impl::TicketState::Submitted){auto r=p.GetFenceStatus(p.device,t.fence);
+    for(auto&t:p.tickets)if(t.state()==Impl::TicketState::Submitted){auto r=p.GetFenceStatus(p.device,t.fence);
         if(r==VK_SUCCESS){for(std::size_t i=0;i<MaximumSlots;++i)if(t.mask&(1u<<i))--p.slots[i].gpuRefs;
-            if(p.ResetFences(p.device,1,&t.fence)==VK_SUCCESS){t.state=Impl::TicketState::Free;t.mask=0;}
-            else{t.state=Impl::TicketState::Quarantined;++p.refusals;}}
-        else if(r!=VK_NOT_READY){t.state=Impl::TicketState::Quarantined;for(std::size_t i=0;i<MaximumSlots;++i)if(t.mask&(1u<<i))p.slots[i].quarantine.store(true,std::memory_order_release);++p.refusals;}
+            if(p.ResetFences(p.device,1,&t.fence)==VK_SUCCESS){t.mask=0;t.state(Impl::TicketState::Free);}
+            else{t.state(Impl::TicketState::Quarantined);++p.refusals;}}
+        else if(r!=VK_NOT_READY){t.state(Impl::TicketState::Quarantined);for(std::size_t i=0;i<MaximumSlots;++i)if(t.mask&(1u<<i))p.slots[i].quarantine.store(true,std::memory_order_release);++p.refusals;}
     }
 }
 Lease Pool::acquire(const FrameIdentity&f) noexcept {
@@ -258,24 +274,32 @@ void Pool::releaseRecorded(const Lease&l) noexcept {
         if(s.refs.compare_exchange_weak(refs,refs-1,std::memory_order_acq_rel))return;}
     s.quarantine.store(true,std::memory_order_release);++impl_->refusals;
 }
-bool Pool::prepareSubmit(VkQueue q,const Lease*ls,std::size_t n) noexcept {
-    auto&p=*impl_;if(!n)return true;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
+Reservation Pool::prepareSubmit(VkQueue q,const Lease*ls,std::size_t n) noexcept {
+    auto&p=*impl_;if(!n)return {};std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
     std::uint32_t mask=0;std::array<std::uint64_t,MaximumSlots> gs{};
-    if(!lock||!p.prepared||q!=p.queue||!p.leases(ls,n,mask,gs)){p.quarantine(ls,n);++p.refusals;return false;}
-    for(auto&t:p.tickets)if(t.state==Impl::TicketState::Free){t.state=Impl::TicketState::Reserved;t.mask=mask;t.generations=gs;
+    // No sampling submit has been enabled yet. Refusing this reservation
+    // makes only this batch opaque; its recording references still retain
+    // immutable storage until the native recording is completed/retired.
+    if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}
+    for(std::uint32_t index=0;index<p.tickets.size();++index){auto&t=p.tickets[index];if(t.state()!=Impl::TicketState::Free)continue;
+        t.generation=++p.ticketSerial;t.mask=mask;t.generations=gs;
         for(std::size_t i=0;i<MaximumSlots;++i)if(mask&(1u<<i))++p.slots[i].gpuRefs;
-        return true;}
-    p.quarantine(ls,n);++p.refusals;return false;
+        t.state(Impl::TicketState::Reserved);return {index,t.generation,&p,p.ownerGeneration};}
+    ++p.refusals;return {};
 }
-void Pool::submitted(VkQueue q,const Lease*ls,std::size_t n,VkResult original) noexcept {
-    auto&p=*impl_;if(!n)return;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
-    if(!lock||!p.prepared||q!=p.queue||!ls||n>MaximumSlots){p.quarantine(ls,n);++p.refusals;return;}
+void Pool::submitted(const Reservation& reservation,VkQueue q,const Lease*ls,std::size_t n,VkResult original) noexcept {
+    auto&p=*impl_;if(!reservation||reservation.owner_!=&p||reservation.ownerGeneration_!=p.ownerGeneration){++p.refusals;return;}
+    auto&t=p.tickets[reservation.slot_];if(!t.claim(reservation.generation_)){++p.refusals;return;}
+    // Only this exact generation's queue owner can touch these immutable facts.
+    // The worker ignores Reserved/Completing and observes the release publish
+    // only after the real tail submit, without a second contended mutex.
+    const auto refuse=[&]{for(std::size_t i=0;i<MaximumSlots;++i)if(t.mask&(1u<<i))p.slots[i].quarantine.store(true,std::memory_order_release);t.state(Impl::TicketState::Quarantined);++p.refusals;};
+    if(!p.prepared||q!=p.queue||!ls||!n||n>MaximumSlots){refuse();return;}
     std::uint32_t mask=0;std::array<std::uint64_t,MaximumSlots> gs{};
-    for(std::size_t i=0;i<n;++i){if(!ls[i]){p.quarantine(ls,n);++p.refusals;return;}mask|=1u<<ls[i].slot;gs[ls[i].slot]=ls[i].generation;}
-    for(auto&t:p.tickets)if(t.state==Impl::TicketState::Reserved&&t.mask==mask&&t.generations==gs){
-        if(original==VK_SUCCESS&&p.QueueSubmit(q,0,nullptr,t.fence)==VK_SUCCESS)t.state=Impl::TicketState::Submitted;
-        else{t.state=Impl::TicketState::Quarantined;p.quarantine(ls,n);++p.refusals;}return;
-    }p.quarantine(ls,n);++p.refusals;
+    for(std::size_t i=0;i<n;++i){if(!ls[i]){refuse();return;}mask|=1u<<ls[i].slot;gs[ls[i].slot]=ls[i].generation;}
+    if(t.mask!=mask||t.generations!=gs){refuse();return;}
+    if(original==VK_SUCCESS&&p.QueueSubmit(q,0,nullptr,t.fence)==VK_SUCCESS)t.state(Impl::TicketState::Submitted);
+    else refuse();
 }
 Status Pool::statusCold()const noexcept {
     auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);Status out{};out.uploaded=p.uploadedCount;out.refused=p.refusals.load();
@@ -290,7 +314,7 @@ void Pool::abandonAfterDeviceDestroy() noexcept {
     p.prepared=false;p.device={};p.queue={};p.layout={};p.descriptors={};p.sampler={};p.commands={};
     for(auto&s:p.slots){s.image={};s.imageMemory={};s.view={};s.staging={};s.stagingMemory={};s.mapped=nullptr;s.uploaded={};s.copy={};s.set={};s.initializedShaderReadLayout=false;
         s.state=Impl::State::Free;s.frame={};s.generation=0;s.refs.store(0);s.gpuRefs=0;s.quarantine.store(false);}
-    for(auto&t:p.tickets){t.state=Impl::TicketState::Free;t.mask=0;t.generations.fill(0);}
+    for(auto&t:p.tickets){t.mask=0;t.generations.fill(0);t.state(Impl::TicketState::Free);}
     for(auto&t:p.tickets)t.fence={};
 }
 } // namespace stream_bridge_coverage_gpu

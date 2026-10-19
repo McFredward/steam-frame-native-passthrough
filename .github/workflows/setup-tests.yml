@@ -3,6 +3,7 @@ on:
   push:
     branches: [dev]
     paths:
+      - 'VERSION'
       - 'get.ps1'
       - 'get.sh'
       - 'get-preview.*'
@@ -39,6 +40,7 @@ on:
       - '.github/workflows/setup-tests.yml'
   pull_request:
     paths:
+      - 'VERSION'
       - 'get.ps1'
       - 'get.sh'
       - 'get-preview.*'

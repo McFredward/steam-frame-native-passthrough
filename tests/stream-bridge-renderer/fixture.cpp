@@ -22,6 +22,7 @@
 #include "layer/stream_bridge_renderer.h"
 #include "layer/stream_bridge_process.h"
 #include <fstream>
+#include <functional>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -39,6 +40,8 @@ struct Driver:Fake {
  VkSemaphore wait=handle<VkSemaphore>(0x9871),signalSemaphore=handle<VkSemaphore>(0x9872);VkFence appFence=handle<VkFence>(0x9998);
  bool failOriginal=false,failCoverage=false;unsigned forwardOriginal=0,waitPreserved=0,signalPreserved=0,barrierReads=0,khrCalls=0;
  std::atomic<bool> blockPipeline{false},insidePipeline{false};
+ std::atomic<bool> blockFenceStatus{false},insideFenceStatus{false};
+ std::function<void()> afterOriginal;
  static Driver* self;Driver(){self=this;Fake::active=this;}
  static VkResult VKAPI_CALL beginCommand(VkCommandBuffer cb,const VkCommandBufferBeginInfo* i){++self->calls;check(i->flags==VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT||i->flags==VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,"owned guard immutable-SIMULT or upload one-time");self->commands[number(cb)].clear();return VK_SUCCESS;}
  static void VKAPI_CALL bufferUpdate(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,VkDeviceSize size,const void* bytes){check(offset%256==0&&size==4,"one immutable aligned guard float");float v;std::memcpy(&v,bytes,4);check(v==0||v==1,"guard only boolean");self->commands[number(cb)].push_back({number(buffer),offset,v,false});}
@@ -62,20 +65,21 @@ struct Driver:Fake {
  static void VKAPI_CALL destroyLayout(VkDevice,VkPipelineLayout,const VkAllocationCallbacks*){}
  static VkResult VKAPI_CALL freeSets(VkDevice,VkDescriptorPool,std::uint32_t,const VkDescriptorSet*){return VK_SUCCESS;}
  static VkResult VKAPI_CALL idle(VkDevice){return VK_SUCCESS;}
+ static VkResult VKAPI_CALL fenceStatus(VkDevice device,VkFence fence){self->insideFenceStatus=true;while(self->blockFenceStatus.load())std::this_thread::yield();self->insideFenceStatus=false;return Fake::fenceStatus(device,fence);}
  static void execute(VkCommandBuffer cb){for(const auto& update:self->commands[number(cb)]){auto& bytes=self->memory.at(self->boundMemory.at(update.buffer));if(update.fill){check(self->bufferSizes.at(update.buffer)<=bytes.size(),"actual shared UBO fits queried allocation");std::memset(bytes.data(),0,std::size_t(self->bufferSizes.at(update.buffer)));}else{check(update.offset+4<=bytes.size(),"guard update inside allocation");std::memcpy(bytes.data()+update.offset,&update.value,4);}}auto app=self->appControl.find(number(cb));if(app!=self->appControl.end()){float v=0;auto& bytes=self->memory.at(self->boundMemory.at(app->second));std::memcpy(&v,bytes.data()+self->appOffset.at(number(cb)),4);self->reads.push_back(v);}}
  static VkResult VKAPI_CALL submit(VkQueue queue,std::uint32_t n,const VkSubmitInfo* ci,VkFence fence){auto& s=*self;++s.calls;++s.submits;check(queue==s.queue,"admitted original queue");s.allSubmitFences.push_back(fence);bool original=false;
   for(unsigned i=0;i<n;++i){if(ci[i].pNext)s.allForwardedExtensions.push_back(ci[i].pNext);if(ci[i].waitSemaphoreCount){check(ci[i].pWaitSemaphores&&*ci[i].pWaitSemaphores==s.wait&&ci[i].pWaitDstStageMask&&*ci[i].pWaitDstStageMask==VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,"original wait semaphore/stage retained");++s.waitPreserved;}
    if(ci[i].signalSemaphoreCount){check(ci[i].pSignalSemaphores&&*ci[i].pSignalSemaphores==s.signalSemaphore,"original signal retained");++s.signalPreserved;}
    for(unsigned k=0;k<ci[i].commandBufferCount;++k){original|=s.appControl.count(number(ci[i].pCommandBuffers[k]));execute(ci[i].pCommandBuffers[k]);}}
-  if(original){s.lastSubmitInfos.assign(ci,ci+n);s.lastSubmitCommands.clear();for(unsigned i=0;i<n;++i)if(ci[i].commandBufferCount)s.lastSubmitCommands.insert(s.lastSubmitCommands.end(),ci[i].pCommandBuffers,ci[i].pCommandBuffers+ci[i].commandBufferCount);for(unsigned i=0;i<n;++i)for(unsigned k=0;k<ci[i].commandBufferCount;++k)if(s.appControl.count(number(ci[i].pCommandBuffers[k])))s.originalNexts.push_back(ci[i].pNext);++s.forwardOriginal;s.originalFences.push_back(fence);s.nativeSubmitCounts.push_back(n);if(s.failOriginal)return VK_ERROR_DEVICE_LOST;}
+  if(original){s.lastSubmitInfos.assign(ci,ci+n);s.lastSubmitCommands.clear();for(unsigned i=0;i<n;++i)if(ci[i].commandBufferCount)s.lastSubmitCommands.insert(s.lastSubmitCommands.end(),ci[i].pCommandBuffers,ci[i].pCommandBuffers+ci[i].commandBufferCount);for(unsigned i=0;i<n;++i)for(unsigned k=0;k<ci[i].commandBufferCount;++k)if(s.appControl.count(number(ci[i].pCommandBuffers[k])))s.originalNexts.push_back(ci[i].pNext);++s.forwardOriginal;s.originalFences.push_back(fence);s.nativeSubmitCounts.push_back(n);if(s.afterOriginal)s.afterOriginal();if(s.failOriginal)return VK_ERROR_DEVICE_LOST;}
   if(fence){if(s.autoSignal)s.fences[number(fence)]=true;else s.pending.push_back(number(fence));}return VK_SUCCESS;
  }
- static VkResult VKAPI_CALL submit2(VkQueue q,std::uint32_t n,const VkSubmitInfo2* ci,VkFence fence){for(unsigned i=0;i<n;++i)for(unsigned k=0;k<ci[i].commandBufferInfoCount;++k)execute(ci[i].pCommandBufferInfos[k].commandBuffer);if(fence){if(self->autoSignal)self->fences[number(fence)]=true;else self->pending.push_back(number(fence));}check(q==self->queue,"submit2 exact queue");return self->failOriginal?VK_ERROR_DEVICE_LOST:VK_SUCCESS;}
+ static VkResult VKAPI_CALL submit2(VkQueue q,std::uint32_t n,const VkSubmitInfo2* ci,VkFence fence){bool original=false;for(unsigned i=0;i<n;++i)for(unsigned k=0;k<ci[i].commandBufferInfoCount;++k){original|=self->appControl.count(number(ci[i].pCommandBufferInfos[k].commandBuffer));execute(ci[i].pCommandBufferInfos[k].commandBuffer);}if(original&&self->afterOriginal)self->afterOriginal();if(fence){if(self->autoSignal)self->fences[number(fence)]=true;else self->pending.push_back(number(fence));}check(q==self->queue,"submit2 exact queue");return self->failOriginal?VK_ERROR_DEVICE_LOST:VK_SUCCESS;}
  static VkResult VKAPI_CALL submit2KHR(VkQueue q,std::uint32_t n,const VkSubmitInfo2* ci,VkFence fence){++self->khrCalls;return submit2(q,n,ci,fence);}
  static PFN_vkVoidFunction VKAPI_CALL get(VkDevice d,const char* n){
 #define FN(Name,Body) if(std::strcmp(n,"vk" #Name)==0)return reinterpret_cast<PFN_vkVoidFunction>(&Body);
   FN(BeginCommandBuffer,beginCommand) FN(CreateBuffer,createBuffer) FN(GetBufferMemoryRequirements,bufferReq) FN(CmdFillBuffer,fillBuffer) FN(CmdUpdateBuffer,bufferUpdate) FN(CmdPipelineBarrier,barrier) FN(BindBufferMemory,bind) FN(UpdateDescriptorSets,update)
-  FN(CreateShaderModule,createShader) FN(DestroyShaderModule,destroyShader) FN(CreateGraphicsPipelines,createPipelines) FN(DestroyPipeline,destroyPipeline) FN(CreatePipelineLayout,createLayout) FN(DestroyPipelineLayout,destroyLayout) FN(FreeDescriptorSets,freeSets) FN(DeviceWaitIdle,idle) FN(QueueSubmit,submit) FN(QueueSubmit2,submit2) FN(QueueSubmit2KHR,submit2KHR)
+  FN(CreateShaderModule,createShader) FN(DestroyShaderModule,destroyShader) FN(CreateGraphicsPipelines,createPipelines) FN(DestroyPipeline,destroyPipeline) FN(CreatePipelineLayout,createLayout) FN(DestroyPipelineLayout,destroyLayout) FN(FreeDescriptorSets,freeSets) FN(DeviceWaitIdle,idle) FN(GetFenceStatus,fenceStatus) FN(QueueSubmit,submit) FN(QueueSubmit2,submit2) FN(QueueSubmit2KHR,submit2KHR)
 #undef FN
   return Fake::get(d,n);
  }
@@ -180,6 +184,23 @@ void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint3
   f.record();f.writeView(handle<VkImageView>(0xdead));f.renderer.beforeDraw(f.cb);
   auto s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Command)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Epoch)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Ineligible)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Pipeline)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Descriptor)]==1,"unknown CB epoch pipeline eligibility and descriptor misses remain distinct");
   f.writeView(f.view);f.renderer.imageDestroyed(f.image);f.renderer.beforeDraw(f.cb);s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Image)]==1,"retired imported image has a distinct draw refusal");
+ }
+}
+void reservationRecovery(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ for(unsigned mode=0;mode<6;++mode){Integration f(vs,ps);check(f.record().ready,"reserve initial current exact picture");check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"first real guarded submit owns a retirement ticket");f.vk.signal();
+  check(f.record().ready,"native completed recording still selects this exact current picture");
+  f.vk.blockFenceStatus=true;std::thread cold;
+  const auto startCold=[&]{cold=std::thread([&]{consumer.tick(consumer.owner);});while(!f.vk.insideFenceStatus.load())std::this_thread::yield();};
+  if(mode<3)startCold();else f.vk.afterOriginal=startCold;
+  VkResult result;
+  if(mode%3==0)result=f.submit(false);
+  else{VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=f.cb;VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.commandBufferInfoCount=1;info.pCommandBufferInfos=&cb;result=f.renderer.submit2(f.vk.queue,1,&info,f.vk.appFence,mode%3==2);}
+  f.vk.blockFenceStatus=false;cold.join();
+  f.vk.afterOriginal={};
+  check(result==VK_SUCCESS&&f.vk.reads.back()==float(mode>=3),"contention before reservation is opaque; after reservation keeps the successful native guard without waiting");
+  const auto stats=f.renderer.statsCold();check(stats.quarantined==0,mode<3?"pre-submit reservation refusal cannot permanently quarantine a mask never enabled on GPU":"post-submit cold contention cannot lose its already reserved exact retirement ticket");
+  f.vk.signal();consumer.tick(consumer.owner);
+  check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"the same exact current picture recovers immediately after reservation contention");
  }
 }
 void timeline(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
@@ -306,6 +327,7 @@ int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inpu
  if(argc==5&&std::strcmp(argv[4],"telemetry")==0)telemetry(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"fallback-recovery")==0)fallbackRecovery(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"timeline")==0)timeline(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"reservation-recovery")==0)reservationRecovery(vs,ps);
  else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else {integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);}
+ else {integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

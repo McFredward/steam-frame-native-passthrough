@@ -26,6 +26,24 @@ A causal control reinstates the old whole-pool quarantine and must fail the
 fresh-picture assertion. Actual failed copy/tail-fence quarantine remains
 independent. `--fallback-recovery-only` selects just these recovery cases.
 
+`--reservation-recovery-only` holds a real production cold fence poll while
+the native queue owner submits, both before reservation and after an original
+successful guarded submit. Core Submit and both Submit2 dispatches are covered.
+A refused reservation changes only that batch to an immutable zero guard;
+recording references retain its sampled descriptors without permanently
+quarantining storage. A successful reservation returns a private owner/epoch/
+generation-bound ticket. The same externally synchronized queue owner completes
+it exactly once without taking the cold mutex. Its real tail-fence submit
+release-publishes `Submitted`; the cold worker acquire-reads only that state,
+polls actual completion, resets the fence and release-publishes `Free`.
+Stale, duplicate and foreign pool tokens cannot claim a reused ticket; original
+submit errors, tail failures and post-submit mismatches still retain/quarantine
+actual in-flight storage. Semantic controls reinstate pre-reservation poisoning
+or post-submit mutex failure and must fail the focused recovery assertion.
+`--thread-sanitize` optionally checks these deterministic threaded cases. A host
+that cannot initialize TSan's shadow mapping is explicitly recorded as
+unavailable, without claiming race-free execution.
+
 `--timeline-only` reproduces the production renderer's former blanket refusal
 of a legal `VkTimelineSemaphoreSubmitInfo`: a current selected recording never
 reached a guarded submit. The renderer now shares the original transaction's

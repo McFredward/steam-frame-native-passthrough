@@ -80,6 +80,50 @@ RETIRED_FRAME_FILES = frozenset({'legacy.spv',
     'docs/protocols/scene-contribution-atlas-v3.json'})
 
 
+def patch_version(value):
+    """Validate bounded SemVer metadata; file hashes remain install authority."""
+    if value is None:return None
+    if type(value)is not str or len(value)>80 or not re.fullmatch(
+            r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?',value):
+        raise ValueError('Invalid semantic patch version.')
+    pre=value.split('+',1)[0].partition('-')[2]
+    if any(p.isdigit() and len(p)>1 and p[0]=='0' for p in pre.split('.')):
+        raise ValueError('Invalid semantic patch version.')
+    return value
+
+
+def older_version(target,current):
+    """Compare known SemVer precedence, never guess an old unversioned build."""
+    if target is None or current is None:return False
+    def parts(value):
+        core,_,pre=patch_version(value).split('+',1)[0].partition('-')
+        return tuple(map(int,core.split('.'))),pre.split('.') if pre else []
+    a,ap=parts(target);b,bp=parts(current)
+    if a!=b:return a<b
+    if not ap or not bp:return bool(ap) and not bp
+    for x,y in zip(ap,bp):
+        if x==y:continue
+        if x.isdigit() and y.isdigit():return int(x)<int(y)
+        if x.isdigit()!=y.isdigit():return x.isdigit()
+        return x<y
+    return len(ap)<len(bp)
+
+
+def version_fields(value):
+    """Absent historical metadata stays absent in receipts and checkpoints."""
+    if 'version' in value and value['version'] is None:raise ValueError('Invalid semantic patch version.')
+    return {'version':patch_version(value['version'])} if 'version' in value else {}
+
+
+def blocked_version_update(target,current):
+    return current is not None and (target is None or older_version(target,current))
+
+
+def version_status(state,target):
+    return {'installed':state is not None,'installed_version':patch_version(state.get('version')) if state else None,
+            'target_version':patch_version(target.get('version'))}
+
+
 class Bundle:
     def __init__(self, root, engine):
         self.engine = engine
@@ -88,9 +132,10 @@ class Bundle:
         self.value = engine.parse(raw)
         self.pin = engine.sha(engine.encoded(self.value))
         v = self.value
-        engine.require(set(v)=={'schema','readiness','bridge_protocol','pc','frame','files'} and
+        engine.require(set(v)-{'version'}=={'schema','readiness','bridge_protocol','pc','frame','files'} and
                        v['schema']==SCHEMA and v['readiness'] in ('prototype','release'),
                        'Unknown full-resolution setup package.')
+        version_fields(v)
         self.protocol = engine.protocol(v['bridge_protocol'])
         engine.records(v['files'])
         self.files = {}
@@ -101,11 +146,11 @@ class Bundle:
             self.files[name] = raw
         engine.require(sum(map(len,self.files.values()))<=engine.MAX_TOTAL,'Package exceeds setup size limit.')
         self.pc, self.frame = v['pc'], v['frame']
-        engine.require(type(self.pc)is dict and set(self.pc)=={'reviewed','platform','files','runtime_files'} and
+        engine.require(type(self.pc)is dict and set(self.pc)-{'version'}=={'reviewed','platform','files','runtime_files'} and
                        self.pc['platform']=='windows-x86_64' and type(self.pc['reviewed'])is bool and
                        type(self.pc['files'])is list and set(self.pc['files'])==PC_FILES,
                        'Unsupported PC connection package.')
-        engine.require(type(self.frame)is dict and set(self.frame)=={'reviewed','files','runtime_files','generated'} and
+        engine.require(type(self.frame)is dict and set(self.frame)-{'version'}=={'reviewed','files','runtime_files','generated'} and
                        type(self.frame['reviewed'])is bool and type(self.frame['files'])is list and
                        len(self.frame['files'])==len(set(self.frame['files'])) and
                        set(self.frame['files'])==TOOLS|PROFILES|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} and
@@ -121,6 +166,7 @@ class Bundle:
         engine.require(provider.get('name')==NAME and provider.get('alwaysActivate') is True,
                        'Unsupported owned OpenVR provider manifest.')
         for side in (self.pc,self.frame):
+            version_fields(side)
             pins=side['runtime_files']
             engine.require(type(pins)is dict and 1<=len(pins)<=32,'Complete runtime file pins are required.')
             for role,pin in pins.items():
@@ -231,9 +277,10 @@ class LocalInstall:
     def state(self):
         if not self.receipt.exists():return None
         e=self.e;v=e.parse(e.read(self.receipt,2*1024*1024,private=True))
-        e.require(set(v)=={'schema','bundle','files','settings','registered_before','pair','vrpathreg'} and
+        e.require(set(v)-{'version'}=={'schema','bundle','files','settings','registered_before','pair','vrpathreg'} and
                   v['schema']==RECEIPT and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
                   set(v['files'])==PC_FILES,'Unknown PC connection receipt preserved.')
+        version_fields(v)
         e.records(v['files'])
         e.require(type(v['registered_before'])is bool and re.fullmatch('[0-9a-f]{32}',v['pair']),'Unknown PC ownership receipt.')
         e.require(type(v['vrpathreg'])is dict and set(v['vrpathreg'])=={'base','path','bytes','sha256'} and v['vrpathreg']['base']=='steamvr' and v['vrpathreg']['path']=='bin/win64/vrpathreg.exe','Unknown registration predecessor.')
@@ -271,6 +318,8 @@ class LocalInstall:
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before installing or updating the connection.')
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
         old=self.state();planned={name:bundle.files[name] for name in PC_FILES}
+        e.require(not blocked_version_update(bundle.pc.get('version'),old.get('version') if old else None),
+                  'The installed PC patch is newer or the package is unversioned; downgrade was not applied.')
         tool_pin=bundle.pc['runtime_files']['vrpathreg'];tool=self.local.verify_tool(pc,tool_pin)
         driver=self.local.root/'pc-provider'
         if driver.exists():
@@ -308,7 +357,7 @@ class LocalInstall:
             # The receipt is deterministic and can be in either absent or fully
             # published state if a response is lost during installation.
             _,_,baseline=edits.planned()
-            receipt={'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
+            receipt={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
                      'settings':{'path':str(self.settings_path()),'baseline':baseline},'registered_before':bool(pc.get('registered')),
                      'pair':pair['pair_id'],'vrpathreg':tool_pin}
             planned_ops.append(checkpoint.operation(self.receipt,[helper.file_value(e.encoded(receipt))]))
@@ -322,7 +371,7 @@ class LocalInstall:
             if not pc.get('registered'):
                 self.local.register(tool,'adddriver');registered=True
                 e.require(self.local.inventory()['registered'],'The PC provider registration could not be confirmed.')
-            value={'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
+            value={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
                    'settings':settings,'registered_before':bool(pc.get('registered')),'pair':pair['pair_id'],'vrpathreg':tool_pin}
             e.put(self.receipt,e.encoded(value))
         except BaseException:
@@ -336,6 +385,8 @@ class LocalInstall:
     def update(self,bundle,pc,pair,address,port,old,tool):
         """Retain the initial uninstall baseline and checkpoint this update."""
         e=self.e;helper=load_helper(e,'steam_link_setup_checkpoint')
+        e.require(not blocked_version_update(bundle.pc.get('version'),old.get('version')),
+                  'The installed PC patch is newer or the package is unversioned; downgrade was not applied.')
         e.require(old['pair']==pair['pair_id'],'The existing connection pairing must be preserved during an update.')
         e.require(e.parse(e.read(self.local.root/'pairings/active.json',4096,private=True))==
                   {'schema':e.ACTIVE,'pair_id':old['pair']},'The active connection changed; it was preserved.')
@@ -359,6 +410,7 @@ class LocalInstall:
                 replacement['settings']['baseline'][section]['keys'][key]['installed']=current[key]
         replacement.update(bundle=bundle.pin,files={n:bundle.value['files'][n] for n in PC_FILES},
                            vrpathreg=bundle.pc['runtime_files']['vrpathreg'])
+        replacement.pop('version',None);replacement.update(version_fields(bundle.pc))
         receipt_before=e.read(self.receipt,2*1024*1024,private=True);receipt_after=e.encoded(replacement)
         checkpoint=self.checkpoint(pair['pair_id'])
         operations=[checkpoint.operation(path,[helper.file_value(raw)]) for path,_,raw in changes]
@@ -426,11 +478,12 @@ class FrameTransaction:
     def state(self):
         if not self.path.exists():return None
         e=self.e;v=e.parse(e.read(self.path,64*1024*1024,private=True))
-        e.require(set(v)=={'schema','home','root','bundle','phase','operations','settings','pair'} and
+        e.require(set(v)-{'version'}=={'schema','home','root','bundle','phase','operations','settings','pair'} and
                   v['schema']==RECEIPT and v['home']==str(self.home) and v['root']==str(self.root) and
                   v['phase'] in ('pending','installed','removing') and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
                   re.fullmatch('[0-9a-f]{32}',v['pair']) and type(v['operations'])is list and
                   len(v['operations'])<=96,'Unknown Frame installation journal preserved.')
+        version_fields(v)
         allowed={self.home/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf',
                  self.home/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json',
                  self.home/'.config/SteamFrameNativePassthrough/control.json',
@@ -492,10 +545,11 @@ class FrameTransaction:
             path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             os.symlink(value['target'],path)
 
-    def begin(self,bundle,operations,settings,pair):
+    def begin(self,bundle,operations,settings,pair,*,version=None):
         e=self.e;e.require(self.state() is None,'A previous Frame connection must be repaired or removed first.')
         value={'schema':RECEIPT,'home':str(self.home),'root':str(self.root),'bundle':bundle,
                'phase':'pending','operations':operations,'settings':settings,'pair':pair}
+        if version is not None:value['version']=patch_version(version)
         e.put(self.path,e.encoded(value)) # Durable rollback authority before activation.
         try:
             for operation in operations:self.replace(operation)
@@ -655,7 +709,7 @@ class FrameInstall:
         if current:
             try:current=all(self.tx.current(Path(o['path']))==o['after'] for o in state['operations'])
             except (OSError,ValueError):current=False
-        return {'architecture':self.machine(),'runtime_compatible':compatible,
+        return {**version_status(state,bundle.frame),'architecture':self.machine(),'runtime_compatible':compatible,
                 'installed':state is not None,'files_current':current,
                 'recovery_pending':(self.root/'setup-restore.json').exists() or (self.root/'lifecycle.json').exists(),
                 'legacy_installed':(self.home/'.config/SteamFrameNativePassthrough/install.json').exists(),
@@ -772,6 +826,8 @@ class FrameInstall:
 
     def install(self,bundle,pair,address,port,*,backup=False,live=False):
         e=self.e;current=self.tx.state()
+        e.require(not blocked_version_update(bundle.frame.get('version'),current.get('version') if current else None),
+                  'The installed Frame patch is newer or the package is unversioned; downgrade was not applied.')
         if current:
             e.require(current['phase']=='installed' and current['pair']==pair['pair_id'],
                       'Repair or remove the previous Frame transaction before replacing it.')
@@ -796,11 +852,11 @@ class FrameInstall:
         operations,settings,(before,after)=self.plan(bundle,pair,address,port,live=live)
         if backup:
             helper=load_helper(e,'steam_link_setup_checkpoint')
-            transaction={'schema':RECEIPT,'home':str(self.home),'root':str(self.root),'bundle':bundle.pin,
+            transaction={**version_fields(bundle.frame),'schema':RECEIPT,'home':str(self.home),'root':str(self.root),'bundle':bundle.pin,
                          'phase':'pending','operations':operations,'settings':settings,'pair':pair['pair_id']}
             pending=helper.file_value(e.encoded(transaction));transaction['phase']='installed'
             self.backup('install',operations,settings,[pending,helper.file_value(e.encoded(transaction)),None])
-        self.tx.begin(bundle.pin,operations,settings,pair['pair_id'])
+        self.tx.begin(bundle.pin,operations,settings,pair['pair_id'],version=bundle.frame.get('version'))
         try:
             settings_path=Path(settings['path']);mode=stat.S_IMODE(settings_path.stat().st_mode) if settings_path.exists() else 0o600
             e.put(settings_path,after,before)
@@ -815,6 +871,8 @@ class FrameInstall:
     def update(self,bundle,pair,address,port,current):
         """Replace owned payloads live while retaining the initial predecessors."""
         e=self.e;bundle.admit('Windows');compatible,original=self.runtime(bundle)
+        e.require(not blocked_version_update(bundle.frame.get('version'),current.get('version')),
+                  'The installed Frame patch is newer or the package is unversioned; downgrade was not applied.')
         e.require(compatible and original is not None,'The Frame runtime does not match this package.')
         e.require(self.machine().lower() in ('aarch64','arm64'),'The selected device is not a supported Steam Frame.')
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
@@ -872,6 +930,7 @@ class FrameInstall:
                 observed=self.tx.current(path)
                 if observed!=op['after']:changes.append({**op,'before':observed})
         pending={**current,'bundle':bundle.pin,'operations':operations,'phase':'pending'}
+        pending.pop('version',None);pending.update(version_fields(bundle.frame))
         committed={**pending,'phase':'installed'};helper=load_helper(e,'steam_link_setup_checkpoint')
         previous=e.read(self.tx.path,64*1024*1024,private=True)
         self.backup('update',changes,settings,[helper.file_value(e.encoded(pending)),helper.file_value(e.encoded(committed))])
@@ -936,10 +995,12 @@ def load_module(raw,name):
 
 class ReadOnlyView:
     def __init__(self,engine,value):
-        e=engine;e.require(type(value)is dict and set(value)=={'schema','readiness','bridge_protocol','pc','frame','files'} and value['schema']==SCHEMA,'Unknown inventory manifest.')
+        e=engine;e.require(type(value)is dict and set(value)-{'version'}=={'schema','readiness','bridge_protocol','pc','frame','files'} and value['schema']==SCHEMA,'Unknown inventory manifest.')
+        version_fields(value)
         e.protocol(value['bridge_protocol']);e.records(value['files'])
         self.pin=e.sha(e.encoded(value));self.frame=value['frame'];self.value=value
-        e.require(type(self.frame)is dict and {'runtime_files','files','reviewed','generated'}==set(self.frame),'Unknown Frame inventory shape.')
+        e.require(type(self.frame)is dict and {'runtime_files','files','reviewed','generated'}==set(self.frame)-{'version'},'Unknown Frame inventory shape.')
+        version_fields(self.frame)
         pins=self.frame['runtime_files'];e.require(type(pins)is dict and 1<=len(pins)<=32,'Bounded runtime inventory required.')
         for pin in pins.values():
             e.require(type(pin)is dict and set(pin)=={'base','path','bytes','sha256'} and pin['base'] in ('steamvr','home','system'),'Unknown inventory root.')
@@ -1341,16 +1402,26 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
             context['frame_recovery']=path
     available=bundle.value['readiness']=='release' and bundle.pc['reviewed'] and bundle.frame['reviewed'] and local.system=='Windows'
     state=installed.state()
-    report={'schema':SCHEMA,'bridge_available':available,'automatic_restart':False,
-            'pc':{'compatible':installed.check(bundle,pc),'installed':state is not None},'frame':frame}
+    pc_versions=version_status(state,bundle.pc)
+    frame_versions={'installed':frame.get('installed'),'installed_version':patch_version(frame.get('installed_version')),
+                    'target_version':patch_version(bundle.frame.get('version'))} if frame is not None else {
+                    'installed':None,'installed_version':None,'target_version':patch_version(bundle.frame.get('version'))}
+    versions={'pc':pc_versions,'frame':frame_versions}
+    downgrade=any(blocked_version_update(v['target_version'],v['installed_version']) for v in versions.values())
+    if log:log.event('preflight','result',status='ok',versions=versions)
+    report={'schema':SCHEMA,'bridge_available':available,'automatic_restart':False,'version_update_blocked':downgrade,
+            'version':bundle.value.get('version'),'target_versions':{k:v['target_version'] for k,v in versions.items()},
+            'pc':{'compatible':installed.check(bundle,pc),**pc_versions},'frame':frame}
     if args.check or args.dry_run:
         print(json.dumps(report,sort_keys=True));return 0
     def display_inventory(current_pc,current_frame):
         if not hasattr(ui,'inventory'):return
+        observed_pc=version_status(installed.state(),bundle.pc)
         ui.inventory(pc={'steamvr':str(current_pc.get('steamvr') or ''),'platform':current_pc.get('platform'),
-                         'compatible':installed.check(bundle,current_pc),'installed':installed.state() is not None},
-                     frame=None if current_frame is None else {key:current_frame.get(key) for key in
-                         ('installed','legacy_installed','runtime_compatible','enabled','recovery_pending')}|{'host':str(address)},
+                         'compatible':installed.check(bundle,current_pc),**observed_pc},
+                     frame={**frame_versions} if current_frame is None else {key:current_frame.get(key) for key in
+                         ('installed','installed_version','legacy_installed','runtime_compatible','enabled','recovery_pending')}|{
+                         'host':str(address),'target_version':bundle.frame.get('version')},
                      report={'bridge_available':available,'automatic_restart':False})
     def refresh_inventory():
         # Presentation after a committed operation cannot turn a successful
@@ -1365,14 +1436,15 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if ui:
         if frame is not None:ui.status('receiver_ready' if frame.get('runtime_compatible') else 'receiver_changed','info')
         ui.status('bridge_available' if available else 'bridge_unavailable','info')
+        if downgrade:ui.say('version_downgrade')
         display_inventory(pc,frame)
     actions=['retry','check','exit']
     pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
     if pending and frame is not None:actions.insert(0,'rollback')
     if frame is not None and (state or frame.get('installed')):actions.insert(0,'uninstall')
-    if available and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
+    if available and not downgrade and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
         if state is None:actions.insert(0,'install')
-        elif state['bundle']==bundle.pin:actions.insert(0,'repair')
+        elif state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
         else:actions.insert(0,'update')
     recommended='rollback' if pending else 'install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'check'
     resumed=context.pop('confirmed_apply',None)
@@ -1406,6 +1478,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     else:
         bundle.admit(local.system)
         ui.say('bridge_install_plan')
+        if hasattr(ui,'version_plan'):ui.version_plan(pc=pc_versions,frame=frame_versions)
         if not confirm('bridge_confirm'):return 0
     ports=Automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
     flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
