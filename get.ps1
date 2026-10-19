@@ -7,6 +7,10 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
     $sfnpStage = $null
     $sfnpTls = [Net.ServicePointManager]::SecurityProtocol
     $sfnpRepo = 'McFredward/steam-link-native-passthrough'
+    $sfnpRepositoryCommit = 'c497d4b58c28c1f83b35d16be83d474d435d4ab4'
+    $sfnpRepositoryAsset = 'distribution/steam-link-native-passthrough.zip'
+    $sfnpRepositoryBytes = 18203820
+    $sfnpRepositorySha256 = '6d8f6ec93cc80a2220892184966d4b9b4568ed86a9e51e09382570e53da6b2df'
     $sfnpAsset = 'steam-link-native-passthrough-bridge-preview.zip'
     $sfnpEndpoint = '/releases/tags/stream-bridge-preview-v1'
     if ($sfnpInspection) {
@@ -27,6 +31,14 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
     function Require-Sfnp($Condition, [string] $Message) {
         if (-not $Condition) { throw $Message }
     }
+    function Get-SfnpRepositoryAsset {
+        # Keep the normal wizard independent of GitHub Releases.
+        return @{
+            browser_download_url = 'https://raw.githubusercontent.com/' + $sfnpRepo + '/' + $sfnpRepositoryCommit + '/' + $sfnpRepositoryAsset
+            size = $sfnpRepositoryBytes
+            digest = 'sha256:' + $sfnpRepositorySha256
+        }
+    }
     function Get-SfnpHash([byte[]] $Bytes) {
         $hasher = [Security.Cryptography.SHA256]::Create()
         try { return ([BitConverter]::ToString($hasher.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
@@ -45,7 +57,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
         $next = [Uri] $Url
         for ($redirect = 0; $redirect -le 5; $redirect++) {
             Require-Sfnp ($next.Scheme -eq 'https' -and $next.Port -eq 443 -and $next.UserInfo -eq '' -and
-                $next.Host -in @('api.github.com','github.com','release-assets.githubusercontent.com','objects.githubusercontent.com')) 'Unexpected download host.'
+                $next.Host -in @('api.github.com','github.com','raw.githubusercontent.com','release-assets.githubusercontent.com','objects.githubusercontent.com')) 'Unexpected download host.'
             $request = [Net.HttpWebRequest]::Create($next)
             $request.AllowAutoRedirect = $false
             $request.Timeout = 30000
@@ -207,19 +219,23 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
         elseif ($sfnpManage) { Write-Host 'Steam Link Native Passthrough - downloading the check/removal assistant...' }
         elseif ($sfnpInspection) { Write-Host 'Steam Link Native Passthrough - downloading read-only inspection (no installation or restart)...' }
         else { Write-Host 'Steam Link Native Passthrough - downloading the guided setup...' }
-        $releaseBytes = Receive-Sfnp ('https://api.github.com/repos/' + $sfnpRepo + $sfnpEndpoint) 1048576
-        $release = [Text.Encoding]::UTF8.GetString($releaseBytes) | ConvertFrom-Json
-        Require-Sfnp ($release.draft -eq $false -and $release.prerelease -eq ($sfnpInspection -or $sfnpManage -or $sfnpBridgePreview) -and
-            $release.tag_name -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') 'No matching public setup release is available.'
-        Require-Sfnp (-not $sfnpInspection -or $release.tag_name -ceq 'setup-inspection-v2') 'Unexpected inspection release tag.'
-        Require-Sfnp (-not $sfnpManage -or $release.tag_name -ceq 'setup-manager-v1') 'Unexpected manager release tag.'
-        Require-Sfnp (-not $sfnpBridgePreview -or $release.tag_name -ceq 'stream-bridge-preview-v1') 'Unexpected bridge preview release tag.'
-        $assets = @($release.assets | Where-Object { $_.name -ceq $sfnpAsset })
-        Require-Sfnp ($assets.Count -eq 1) 'This release has no complete PC/Frame setup package. Nothing was installed.'
-        $asset = $assets[0]
-        Require-Sfnp ($asset.state -eq 'uploaded' -and $asset.size -gt 0 -and $asset.size -le 134217728 -and
-            $asset.digest -cmatch '^sha256:[0-9a-f]{64}$' -and
-            $asset.browser_download_url -ceq ('https://github.com/' + $sfnpRepo + '/releases/download/' + $release.tag_name + '/' + $sfnpAsset)) 'Release asset lacks its exact URL, size or SHA-256 digest.'
+        if ($sfnpBridgePreview) {
+            $asset = Get-SfnpRepositoryAsset
+        } else {
+            $releaseBytes = Receive-Sfnp ('https://api.github.com/repos/' + $sfnpRepo + $sfnpEndpoint) 1048576
+            $release = [Text.Encoding]::UTF8.GetString($releaseBytes) | ConvertFrom-Json
+            Require-Sfnp ($release.draft -eq $false -and $release.prerelease -eq ($sfnpInspection -or $sfnpManage -or $sfnpBridgePreview) -and
+                $release.tag_name -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') 'No matching public setup release is available.'
+            Require-Sfnp (-not $sfnpInspection -or $release.tag_name -ceq 'setup-inspection-v2') 'Unexpected inspection release tag.'
+            Require-Sfnp (-not $sfnpManage -or $release.tag_name -ceq 'setup-manager-v1') 'Unexpected manager release tag.'
+            Require-Sfnp (-not $sfnpBridgePreview -or $release.tag_name -ceq 'stream-bridge-preview-v1') 'Unexpected bridge preview release tag.'
+            $assets = @($release.assets | Where-Object { $_.name -ceq $sfnpAsset })
+            Require-Sfnp ($assets.Count -eq 1) 'This release has no complete PC/Frame setup package. Nothing was installed.'
+            $asset = $assets[0]
+            Require-Sfnp ($asset.state -eq 'uploaded' -and $asset.size -gt 0 -and $asset.size -le 134217728 -and
+                $asset.digest -cmatch '^sha256:[0-9a-f]{64}$' -and
+                $asset.browser_download_url -ceq ('https://github.com/' + $sfnpRepo + '/releases/download/' + $release.tag_name + '/' + $sfnpAsset)) 'Release asset lacks its exact URL, size or SHA-256 digest.'
+        }
         $sfnpStage = Join-Path ([IO.Path]::GetTempPath()) ('sfnp-setup-' + [Guid]::NewGuid().ToString('N'))
         $directory = [IO.Directory]::CreateDirectory($sfnpStage)
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User

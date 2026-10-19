@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the actual online bootstrap parsers against local release/ZIP fixtures."""
+"""Run the actual online bootstrap parsers against local repository, release and ZIP fixtures."""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -123,6 +123,27 @@ class BootstrapTests(unittest.TestCase):
         zipped = self.path / 'download.zip'; zipped.write_bytes(raw)
         bootstrap.extract(zipped, target, inspection, maintenance, bridge_preview)
         return target
+
+    def test_repository_payload_is_immutable_and_matches_powershell(self):
+        import re
+        asset = bootstrap.repository_asset()
+        self.assertRegex(bootstrap.REPOSITORY_COMMIT, r'^[0-9a-f]{40}$')
+        self.assertEqual(asset['browser_download_url'], 'https://raw.githubusercontent.com/' +
+                         bootstrap.REPO + '/' + bootstrap.REPOSITORY_COMMIT + '/' + bootstrap.REPOSITORY_ASSET)
+        self.assertGreater(asset['size'], 0); self.assertLessEqual(asset['size'], bootstrap.MAX_ZIP)
+        self.assertRegex(asset['digest'], r'^sha256:[0-9a-f]{64}$')
+        powershell = (ROOT / 'get.ps1').read_text()
+        for name, value in [('Commit', bootstrap.REPOSITORY_COMMIT), ('Asset', bootstrap.REPOSITORY_ASSET),
+                            ('Bytes', bootstrap.REPOSITORY_BYTES), ('Sha256', bootstrap.REPOSITORY_SHA256)]:
+            expected = str(value) if type(value) is int else "'" + value + "'"
+            self.assertIn('$sfnpRepository' + name + ' = ' + expected, powershell)
+        self.assertIn("'raw.githubusercontent.com'", powershell)
+        self.assertRegex(powershell, r'if \(\$sfnpBridgePreview\) \{\s*\$asset = Get-SfnpRepositoryAsset\s*\} else \{\s*\$releaseBytes')
+
+    def test_repository_payload_matches_checked_in_bytes(self):
+        raw = (ROOT / bootstrap.REPOSITORY_ASSET).read_bytes()
+        self.assertEqual(len(raw), bootstrap.REPOSITORY_BYTES)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), bootstrap.REPOSITORY_SHA256)
 
     def test_exact_public_asset(self):
         self.assertEqual(bootstrap.select_asset(self.release())['size'], 512)
@@ -269,7 +290,11 @@ class BootstrapTests(unittest.TestCase):
         import urllib.request
         redirect = bootstrap.Redirect()
         request = urllib.request.Request('https://github.com/release')
-        for url in ('http://github.com/file', 'https://example.org/file', 'https://user:password@github.com/file'):
+        raw = bootstrap.repository_asset()['browser_download_url']
+        self.assertEqual(redirect.redirect_request(request, None, 302, '', {}, raw).full_url, raw)
+        for url in ('http://github.com/file', 'http://raw.githubusercontent.com/file',
+                    'https://example.org/file', 'https://user:password@github.com/file',
+                    'https://raw.githubusercontent.com.example.org/file'):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 redirect.redirect_request(request, None, 302, '', {}, url)
 
@@ -299,10 +324,11 @@ class BootstrapTests(unittest.TestCase):
         del files['LICENSE.txt']; missing = runtime(files)
         with self.assertRaises(ValueError): packaging.windows_python(missing, hashlib.sha256(missing).hexdigest(), url)
 
-    def piped_bootstrap(self, inspection, maintenance=False, bridge_preview=False):
+    def piped_bootstrap(self, inspection, maintenance=False, bridge_preview=False, corrupt_pin=None):
         import pty
         import signal
         report = self.path / 'terminal-result.json'
+        requests = self.path / 'requests.json'
         files = manager_contents() if maintenance else inspection_contents() if inspection else contents()
         files['setup/steam_link_setup.py'] = (
             'import sys,json,pathlib\n'
@@ -315,13 +341,28 @@ class BootstrapTests(unittest.TestCase):
         endpoint = '/releases/tags/' + bootstrap.BRIDGE_TAG if bridge_preview else '/releases/tags/' + bootstrap.MANAGER_TAG if maintenance else '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/tags/' + bootstrap.BRIDGE_TAG
         api_url = 'https://api.github.com/repos/' + bootstrap.REPO + endpoint
         asset_url = release['assets'][0]['browser_download_url']
-        # Only network I/O is replaced. Execute the actual Bash argv/heredoc,
-        # Python core and a real child through curl|bash-shaped pipe input.
-        injected = ('def fixture_download(url, limit):\n'
-                    f'    if url == {api_url!r}: return {json.dumps(release).encode()!r}\n'
-                    f'    if url == {asset_url!r}: return {raw!r}\n'
-                    '    raise ValueError("Unexpected fixture endpoint")\n'
-                    'download = fixture_download\n')
+        # Only network I/O and the fixture archive's exact pins are replaced.
+        # The default must request the immutable repository URL without asking
+        # GitHub Releases (which can be empty). Keep real terminal/child behavior.
+        direct = not inspection and not maintenance
+        if direct:
+            asset_url = bootstrap.repository_asset()['browser_download_url']
+            size = len(raw) + (1 if corrupt_pin == 'size' else 0)
+            digest = '0' * 64 if corrupt_pin == 'digest' else hashlib.sha256(raw).hexdigest()
+            injected = f'REPOSITORY_BYTES = {size!r}\nREPOSITORY_SHA256 = {digest!r}\n'
+        else:
+            injected = ''
+        injected += ('fixture_requests = []\n'
+                     'def fixture_download(url, limit):\n'
+                     '    fixture_requests.append([url, limit])\n'
+                     f'    Path({str(requests)!r}).write_text(json.dumps(fixture_requests))\n')
+        if not direct:
+            injected += f'    if url == {api_url!r}: return {json.dumps(release).encode()!r}\n'
+        injected += (f'    if url == {asset_url!r}:\n'
+                     f'        require(len({raw!r}) <= limit, "Download exceeds size bound.")\n'
+                     f'        return {raw!r}\n'
+                     '    raise ValueError("Unexpected fixture endpoint")\n'
+                     'download = fixture_download\n')
         script = (ROOT / 'get.sh').read_text().replace("if __name__ == '__main__':", injected + "if __name__ == '__main__':")
         master, slave = pty.openpty()
         def controlling_terminal():
@@ -337,6 +378,14 @@ class BootstrapTests(unittest.TestCase):
                     child.communicate(script.encode(), timeout=15)
                 except BaseException:
                     os.killpg(child.pid, signal.SIGKILL); child.wait(); raise
+            requested = json.loads(requests.read_text())
+            if direct:
+                self.assertEqual(requested, [[asset_url, size]], 'Default requests only the immutable repository archive')
+            if corrupt_pin:
+                self.assertEqual(child.returncode, 2, (self.path / 'terminal.log').read_text())
+                self.assertFalse(report.exists(), 'Unverified archive must never start the wizard')
+                self.assertIn('SHA-256 check', (self.path / 'terminal.log').read_text())
+                return
             self.assertEqual(child.returncode, 0, (self.path / 'terminal.log').read_text())
             data = json.loads(report.read_text())
             self.assertTrue(data['tty']); self.assertEqual(data['args'][0], '--bundle')
@@ -348,6 +397,12 @@ class BootstrapTests(unittest.TestCase):
     @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
     def test_piped_bootstrap_gives_wizard_actual_terminal(self):
         self.piped_bootstrap(False)
+
+    @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
+    def test_repository_bootstrap_refuses_wrong_size_or_digest_before_wizard(self):
+        for corrupt in ('size', 'digest'):
+            with self.subTest(pin=corrupt):
+                self.piped_bootstrap(False, corrupt_pin=corrupt)
 
     @unittest.skipUnless(os.name == 'posix', 'Actual controlling-terminal test uses POSIX PTY')
     def test_piped_inspection_preserves_terminal_and_explicit_mode(self):
@@ -494,6 +549,13 @@ $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[re
 if ($parseErrors.Count -ne 0) { throw 'Bootstrap did not parse.' }
 $functions=$ast.FindAll({ param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] },$true)
 foreach ($fn in $functions) { Invoke-Expression $fn.Extent.Text }
+$pinNames=@('sfnpRepo','sfnpRepositoryCommit','sfnpRepositoryAsset','sfnpRepositoryBytes','sfnpRepositorySha256')
+$pins=$ast.FindAll({ param($item) $item -is [Management.Automation.Language.AssignmentStatementAst] -and $item.Left -is [Management.Automation.Language.VariableExpressionAst] -and $item.Left.VariablePath.UserPath -in $pinNames },$true)
+if ($pins.Count -ne $pinNames.Count) { throw 'Repository pins are ambiguous.' }
+foreach ($pin in $pins) { Invoke-Expression $pin.Extent.Text }
+$repository=Get-SfnpRepositoryAsset
+if ($repository.browser_download_url -cne ('https://raw.githubusercontent.com/'+$sfnpRepo+'/'+$sfnpRepositoryCommit+'/'+$sfnpRepositoryAsset) -or
+    $repository.size -ne 18203820 -or $repository.digest -cne 'sha256:6d8f6ec93cc80a2220892184966d4b9b4568ed86a9e51e09382570e53da6b2df') { throw 'Repository URL/size/hash pin differs.' }
 $target=Join-Path $Output 'ps-valid'; [void][IO.Directory]::CreateDirectory($target)
 $runtime=Expand-SfnpPackage $Valid $target
 if ($runtime -ne 'setup/runtime/python/python.exe') { throw 'Wrong verified runtime.' }
