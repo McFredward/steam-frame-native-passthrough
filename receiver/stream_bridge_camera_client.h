@@ -7,8 +7,8 @@
 namespace stream_bridge_camera {
 struct ClockSample {std::uint64_t bootNanoseconds=0,monotonicNanoseconds=0;};
 using ClockReader=bool(*)(ClockSample&,void*) noexcept;
-// A cold-worker-owned subprocess session. Only ready() may be called from a
-// recording/submission thread; it performs a single atomic acquire, never I/O.
+// A cold-worker-owned subprocess session. Only ready()/epoch() may be called
+// from a recording/submission thread; each is one atomic acquire, never I/O.
 // No OpenVR library or initialization is performed in the native Valve process.
 class Client {
 public:
@@ -23,6 +23,9 @@ public:
     // This never signals/restarts Steam, SteamVR, or another user's process.
     void stopCold() noexcept;
     bool ready()const noexcept;
+    // A current acknowledged request sequence, never a reused boolean grant.
+    // Zero revokes permission; helper/source/resume renewal receives a new ID.
+    std::uint64_t epoch()const noexcept;
     bool runningCold()const noexcept;
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

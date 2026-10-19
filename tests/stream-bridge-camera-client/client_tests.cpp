@@ -104,5 +104,24 @@ void isolation(){
     check(std::string(getenv("LD_LIBRARY_PATH"))=="/sfnp-fixture-foreign-libraries","native parent environment remains byte-for-byte untouched");
     stop(client,root);close(native);
 }
+void grants(){
+    Root root;Clock clock;stream_bridge_camera::Client client(Clock::read,&clock);
+    check(client.epoch()==0&&!client.ready(),"new camera owner has no grant or boolean readiness");
+    client.request(true);check(!client.epoch(),"current intent without API acknowledgment has epoch zero");
+    until(client,root,true,[&]{return client.ready();},"actual helper first enable acknowledgment grants a nonzero epoch");const auto first=client.epoch();
+    check(first!=0,"first successful request sequence is the actual grant");
+    for(unsigned n=0;n<32;++n)client.tickCold(root.path,true);
+    check(client.epoch()==first,"unchanged acknowledged session retains one stable grant across worker cycles");
+    client.request(false);check(client.epoch()==0&&!client.ready(),"explicit None revokes the grant in the same atomic truth as readiness");
+    client.request(true);until(client,root,true,[&]{return client.ready();},"fresh enable after None receives its own exact acknowledgment");const auto second=client.epoch();
+    check(second>first,"false-true readiness cannot reuse a prior command-buffer authorization grant");
+    clock.sample.bootNanoseconds+=2000000000ULL;client.tickCold(root.path,true);
+    check(!client.epoch()&&!client.ready(),"resume revokes the old camera grant before requesting baseline restoration");
+    until(client,root,true,[&]{return client.ready();},"resume restore and re-enable obtains a newly acknowledged epoch");const auto third=client.epoch();
+    check(third>second,"D-ack-E-ack after native camera rebuild never revives a pre-resume grant");
+    stop(client,root);check(!client.epoch(),"helper teardown revokes every prior authorization epoch");
+    client.request(true);until(client,root,true,[&]{return client.ready();},"same process owner can prepare a fresh helper after its previous process exited");
+    check(client.epoch()>third,"helper respawn preserves monotonic sequence and cannot resurrect old recorded command authorization");stop(client,root);
 }
-int main(int argc,char** argv){try{if(argc==2&&std::string(argv[1])=="resume")resume();else if(argc==2&&std::string(argv[1])=="isolation")isolation();else{lifecycle();stale();refusal();resume();health();isolation();}std::printf("%u actual camera client subprocess checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+}
+int main(int argc,char** argv){try{if(argc==2&&std::string(argv[1])=="resume")resume();else if(argc==2&&std::string(argv[1])=="isolation")isolation();else if(argc==2&&std::string(argv[1])=="grants")grants();else{lifecycle();stale();refusal();resume();health();isolation();grants();}std::printf("%u actual camera client subprocess checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

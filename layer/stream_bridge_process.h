@@ -24,6 +24,7 @@ bool prepareProcessCold() noexcept;
 bool enabled() noexcept;
 // Renderer-only readiness observation. No settings/library/process or I/O work.
 bool cameraAlphaReady() noexcept;
+std::uint64_t cameraAlphaEpoch() noexcept;
 ProcessKind processKind() noexcept;
 stream_bridge_native::NativeImages* sourceImages() noexcept;
 void sourceExportedFd(int) noexcept;

@@ -17,13 +17,15 @@ def main():
     cases={'normal':original}
     if args.sanitize:cases['sanitize']=original
     if args.mutants:
-        cases['early-api-admission']=original.replace('void Client::request(bool enabled) noexcept{impl_->set(enabled);}', 'void Client::request(bool enabled) noexcept{impl_->set(enabled);if(enabled)impl_->ready.store(true);}')
+        cases['early-api-admission']=original.replace('void Client::request(bool enabled) noexcept{impl_->set(enabled);}', 'void Client::request(bool enabled) noexcept{impl_->set(enabled);if(enabled)impl_->grant.store(1);}')
         cases['stale-ack-admitted']=original.replace('if(value!=request||value!=sent)return true;', 'if(false)return true;').replace("if(bytes[0]=='A'&&target())","if(bytes[0]=='A')")
         cases['resume-never-restores']=original.replace('offset-sleepOffset>5000000ULL','offset-sleepOffset>~std::uint64_t(0)')
         cases['stall-is-suspend']=original.replace('sample.bootNanoseconds>sample.monotonicNanoseconds?sample.bootNanoseconds-sample.monotonicNanoseconds:0','sample.bootNanoseconds')
         cases['clock-preemption-is-suspend']=original.replace('if(!clockKnown||offset>sleepOffset)sleepOffset=offset;','sleepOffset=offset;')
         cases['native-fd-inherited']=original.replace('posix_spawn_file_actions_addclosefrom_np(&files.actions,3)','posix_spawn_file_actions_addclose(&files.actions,files.pair[1])')
         cases['foreign-library-path']=original.replace('||!std::strncmp(entry,"LD_LIBRARY_PATH=",16)','')
+        cases['camera-grant-aba']=original.replace('grant.store(value,std::memory_order_release)','grant.store(1,std::memory_order_release)')
+        cases['helper-reuses-camera-grant']=original.replace('sent=acknowledged=0;next();return true;','sent=acknowledged=0;sequence=0;next();return true;')
     with tempfile.TemporaryDirectory(prefix='sfnp-camera-client-tests-') as directory:
         temp=Path(directory)
         for name,text in cases.items():
@@ -32,7 +34,7 @@ def main():
             command=['g++','-std=c++17','-Wall','-Wextra','-Wpedantic','-Werror','-I'+str(root),'-I'+str(root/'receiver'),'-pthread',*flags,str(root/'tests/stream-bridge-camera-client/client_tests.cpp'),str(modified),'-o',str(binary)]
             with (out/(name+'-build.log')).open('w') as log:subprocess.run(command,check=True,stdout=log,stderr=subprocess.STDOUT,timeout=60)
             result=subprocess.run([str(binary)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=20);(out/(name+'.log')).write_text(result.stdout)
-            expected={'early-api-admission':'enable request alone cannot admit rendering before API acknowledgment','stale-ack-admitted':'stale enable acknowledgment never revives explicitly disabled session','resume-never-restores':'real suspend offset revokes old ready acknowledgment immediately despite unchanged MR demand','stall-is-suspend':'pure scheduling stall advances both clocks and never renews settings','clock-preemption-is-suspend':'preemption between native clock reads never lowers resume baseline or invents renewal','native-fd-inherited':'native non-CLOEXEC resource never leaks into independent helper','foreign-library-path':'Steam library search paths are absent from independent system Python helper'}.get(name)
+            expected={'early-api-admission':'enable request alone cannot admit rendering before API acknowledgment','stale-ack-admitted':'stale enable acknowledgment never revives explicitly disabled session','resume-never-restores':'real suspend offset revokes old ready acknowledgment immediately despite unchanged MR demand','stall-is-suspend':'pure scheduling stall advances both clocks and never renews settings','clock-preemption-is-suspend':'preemption between native clock reads never lowers resume baseline or invents renewal','native-fd-inherited':'native non-CLOEXEC resource never leaks into independent helper','foreign-library-path':'Steam library search paths are absent from independent system Python helper','camera-grant-aba':'false-true readiness cannot reuse a prior command-buffer authorization grant','helper-reuses-camera-grant':'helper respawn preserves monotonic sequence and cannot resurrect old recorded command authorization'}.get(name)
             if expected:assert result.returncode and expected in result.stdout,(name,result.stdout)
             else:assert result.returncode==0,(name,result.stdout)
             results[name]={'exit_status':result.returncode,'expected_red':bool(expected)}

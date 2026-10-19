@@ -47,7 +47,8 @@ struct SpawnFiles {
 };
 }
 struct Client::Impl {
-    std::atomic<bool> ready{false};int fd=-1;pid_t child=-1;
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free,"Render authorization must be a lock-free scalar");
+    std::atomic<std::uint64_t> grant{0};int fd=-1;pid_t child=-1;
     bool wanted=false,connected=false,hello=false,closing=false,terminal=false,recoveryDemand=false,restoreBarrier=false,clockKnown=false,failed=false;
     ClockReader clock=clockSample;void* clockContext=nullptr;std::uint64_t sleepOffset=0;
     std::uint64_t sequence=0,request=0,sent=0,acknowledged=0;
@@ -56,12 +57,12 @@ struct Client::Impl {
     std::chrono::steady_clock::time_point retry{};unsigned notes=0;
     void note(const char* text){if(notes++<8)std::fprintf(stderr,"[Steam Link Native Passthrough] camera session: %s\n",text);}
     bool next(){
-        ready.store(false,std::memory_order_release);
+        grant.store(0,std::memory_order_release);
         if(sequence==~std::uint64_t(0)){terminal=true;return false;}
         request=++sequence;return true;
     }
-    void set(bool value){if(value!=wanted){wanted=value;next();}if(!value)ready.store(false,std::memory_order_release);}
-    void closeChannel(){ready.store(false,std::memory_order_release);if(fd>=0){close(fd);fd=-1;}hello=false;inputBytes=outputBytes=outputAt=0;sent=acknowledged=0;}
+    void set(bool value){if(value!=wanted){wanted=value;next();}if(!value)grant.store(0,std::memory_order_release);}
+    void closeChannel(){grant.store(0,std::memory_order_release);if(fd>=0){close(fd);fd=-1;}hello=false;inputBytes=outputBytes=outputAt=0;sent=acknowledged=0;}
     void fail(const char* text){note(text);failed=recoveryDemand=true;closeChannel();retry=std::chrono::steady_clock::now()+std::chrono::seconds(1);}
     bool target()const{return wanted&&!restoreBarrier&&connected&&!closing;}
     void checkResume(){
@@ -69,7 +70,7 @@ struct Client::Impl {
         ClockSample sample{};if(!clock(sample,clockContext)){fail("Linux resume clock unavailable; camera readiness withdrawn");return;}
         const auto offset=sample.bootNanoseconds>sample.monotonicNanoseconds?sample.bootNanoseconds-sample.monotonicNanoseconds:0;
         if(clockKnown&&offset>sleepOffset&&offset-sleepOffset>5000000ULL){
-            ready.store(false,std::memory_order_release);restoreBarrier=true;next();note("resume observed; restore acknowledgment required before native alpha renewal");
+            grant.store(0,std::memory_order_release);restoreBarrier=true;next();note("resume observed; restore acknowledgment required before native alpha renewal");
         }
         // Preemption between these two clock reads can only lower their
         // observed offset. Never adopt that lower sample as a new baseline:
@@ -107,9 +108,9 @@ struct Client::Impl {
         // An older enable response may follow a newer disable request. It can
         // never republish readiness or acknowledge the wrong source session.
         if(value!=request||value!=sent)return true;
-        if(bytes[0]=='A'&&target()){acknowledged=value;ready.store(true,std::memory_order_release);}
+        if(bytes[0]=='A'&&target()){acknowledged=value;grant.store(value,std::memory_order_release);}
         else if(bytes[0]=='D'&&!target()){
-            acknowledged=value;ready.store(false,std::memory_order_release);
+            acknowledged=value;grant.store(0,std::memory_order_release);
             if(restoreBarrier){restoreBarrier=false;if(wanted&&connected&&!closing)next();}
         }
         else return false;
@@ -142,7 +143,7 @@ Client::~Client(){impl_->closeChannel();impl_->reap();}
 void Client::request(bool enabled) noexcept{impl_->set(enabled);}
 void Client::tickCold(const std::filesystem::path& root,bool peer) noexcept{
     auto&p=*impl_;try{
-        if(peer!=p.connected){if(peer&&p.closing)p.closeChannel();p.connected=peer;p.ready.store(false,std::memory_order_release);p.next();if(!peer){p.set(false);p.closing=true;}}
+        if(peer!=p.connected){if(peer&&p.closing)p.closeChannel();p.connected=peer;p.grant.store(0,std::memory_order_release);p.next();if(!peer){p.set(false);p.closing=true;}}
         p.checkResume();
         p.reap();
         if(p.terminal){p.closeChannel();return;}
@@ -153,6 +154,7 @@ void Client::tickCold(const std::filesystem::path& root,bool peer) noexcept{
     }catch(...){p.fail("cold helper operation refused; native camera preference preserved");}
 }
 void Client::stopCold() noexcept{auto&p=*impl_;p.set(false);p.connected=false;p.closing=true;p.closeChannel();p.reap();}
-bool Client::ready()const noexcept{return impl_->ready.load(std::memory_order_acquire);}
+std::uint64_t Client::epoch()const noexcept{return impl_->grant.load(std::memory_order_acquire);}
+bool Client::ready()const noexcept{return epoch()!=0;}
 bool Client::runningCold()const noexcept{return impl_->child>0;}
 }

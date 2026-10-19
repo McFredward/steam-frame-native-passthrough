@@ -338,7 +338,8 @@ bool prepareProcessCold() noexcept{
     return p.prepared;
 }
 bool enabled() noexcept{const auto* p=process();return p&&p->kind.load(std::memory_order_acquire)!=ProcessKind::Off;}
-bool cameraAlphaReady() noexcept{const auto* p=process();return p&&p->kind.load(std::memory_order_acquire)==ProcessKind::Compositor&&p->camera.ready();}
+std::uint64_t cameraAlphaEpoch() noexcept{const auto* p=process();return p&&p->kind.load(std::memory_order_acquire)==ProcessKind::Compositor?p->camera.epoch():0;}
+bool cameraAlphaReady() noexcept{return cameraAlphaEpoch()!=0;}
 ProcessKind processKind() noexcept{const auto* p=process();return p?p->kind.load(std::memory_order_acquire):ProcessKind::Off;}
 native::NativeImages* sourceImages() noexcept{auto* p=process();return p&&p->kind==ProcessKind::Vrlink?&p->images:nullptr;}
 void sourceExportedFd(int fd) noexcept{auto* p=process();if(p&&p->kind==ProcessKind::Vrlink)p->writer.associateResourceFd(fd);}
