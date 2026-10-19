@@ -353,6 +353,112 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(engine.SetupError, 'not ready for its client'): self.instance().restart()
         self.assertEqual(self.system.actions, [])
 
+    def test_health_authority_is_durable_before_first_service_action(self):
+        health = {'baseline':{'invocation':'before'}, 'checkpoint':{'offset':12}}
+        original = json.loads(json.dumps(health))
+        seen = []
+        self.system.before_action = lambda *_:seen.append(self.record()['activation']['health'])
+        result = self.lifecycle.restart(health_receipt=health)
+        self.assertEqual(result['health_receipt'], original)
+        self.assertTrue(seen)
+        self.assertTrue(all(value == original for value in seen))
+        health['baseline']['invocation'] = 'caller changed'
+        result['health_receipt']['checkpoint']['offset'] = 999
+        self.assertEqual(self.instance().snapshot()['health_receipt'], original)
+
+    def test_lost_restart_reply_keeps_original_health_across_new_session(self):
+        fixture = load(ROOT / 'tests/test_compositor_startup_health.py', 'sfnp_frame_native_health_fixture')
+        health = {'baseline':fixture.baseline(), 'checkpoint':{'original-log-offset':17}}
+        health['baseline']['unit']['InvocationID'] = self.system.units['steamvr.service']['InvocationID']
+        self.system.lost_reply_after = ('start', 'steam.service')
+        with self.assertRaises(engine.SetupError):self.lifecycle.restart(restoring=True, health_receipt=health)
+        actions = list(self.system.actions)
+        sample = fixture.sample()
+        sample['unit']['InvocationID'] = self.system.units['steamvr.service']['InvocationID']
+        # A new setup/SSH process observes the current invocation. It must not
+        # replace the pre-activation health authority with that fresh sample.
+        new_health = json.loads(json.dumps(health))
+        new_health['baseline']['unit']['InvocationID'] = sample['unit']['InvocationID']
+        result = self.instance().restart(restoring=True, health_receipt=new_health)
+        self.assertEqual(self.system.actions, actions)
+        self.assertEqual(result['health_receipt'], health)
+        self.assertTrue(fixture.M.StartupGate(result['health_receipt']['baseline']).consume(sample, stable_seconds=0)['ready'])
+        self.assertEqual(fixture.M.StartupGate(new_health['baseline']).consume(sample, stable_seconds=0)['reason'],
+                         'Waiting for a fresh service invocation')
+        # A lost final RPC response after awaiting-health is equally read-only.
+        self.assertEqual(self.instance().restart(restoring=True, health_receipt=new_health)['health_receipt'], health)
+        self.assertEqual(self.system.actions, actions)
+
+    def test_intent_changes_take_new_health_without_changing_original_recovery_baseline(self):
+        first = {'baseline':{'generation':'prepared-before'}, 'checkpoint':{'cursor':'a'}}
+        original = {'baseline':{'generation':'original-before'}, 'checkpoint':{'cursor':'b'}}
+        updated = {'baseline':{'generation':'next-prepared-before'}, 'checkpoint':{'cursor':'c'}}
+        self.lifecycle.restart(health_receipt=first)
+        baseline = self.record()['baseline']
+        self.assertEqual(self.instance().restore(health_receipt=original)['health_receipt'], original)
+        self.assertEqual(self.record()['baseline'], baseline)
+        self.assertEqual(self.instance().restart(health_receipt=updated)['health_receipt'], updated)
+        self.assertEqual(self.record()['baseline'], baseline)
+        actions = list(self.system.actions)
+        self.assertEqual(self.instance().restart(health_receipt=first)['health_receipt'], updated)
+        self.assertEqual(self.system.actions, actions)
+
+    def test_bounded_large_health_receipt_survives_private_journal_reload(self):
+        health = {'baseline':{'native-log-proof':'x' * 20000}, 'checkpoint':{'offset':40}}
+        self.lifecycle.restart(health_receipt=health)
+        self.assertGreater(self.journal.stat().st_size, 16384)
+        self.assertEqual(self.instance().snapshot()['health_receipt'], health)
+        actions = list(self.system.actions)
+        self.assertEqual(self.instance().restart()['health_receipt'], health)
+        self.assertEqual(self.system.actions, actions)
+
+    def test_invalid_health_never_creates_journal_or_changes_services(self):
+        for health in ({}, {'baseline':{},'checkpoint':{},'other':{}},
+                       {'baseline':[], 'checkpoint':{}}, {'baseline':{}, 'checkpoint':[]},
+                       {'baseline':{'oversize':'x' * 65536}, 'checkpoint':{}}):
+            with self.subTest(health_type=type(health)), self.assertRaises(engine.SetupError):
+                self.lifecycle.restart(health_receipt=health)
+            self.assertFalse(self.journal.exists())
+            self.assertEqual(self.system.actions, [])
+
+    def test_legacy_started_activation_cannot_adopt_current_health_baseline(self):
+        health = {'baseline':{'generation':'already-current'}, 'checkpoint':{}}
+        baseline = json.loads(json.dumps(self.system.units))
+        for modern in (False, True):
+            for phase in ('restarting-vr', 'starting-steam', 'awaiting-health'):
+                with self.subTest(modern=modern, phase=phase):
+                    value = {'schema':frame.SCHEMA, 'baseline':baseline, 'restart_steam':True, 'phase':phase}
+                    if modern:value['activation'] = {'kind':'prepared', 'baseline':baseline}
+                    raw = engine.encoded(value);engine.put(self.journal,raw)
+                    with self.assertRaisesRegex(engine.SetupError, 'new Frame activation intent'):
+                        self.instance().restart(health_receipt=health)
+                    self.assertEqual(engine.read(self.journal), raw)
+                    self.assertEqual(self.system.actions, [])
+                    self.journal.unlink()
+
+    def test_legacy_unstarted_activation_can_durably_prepare_health(self):
+        old_baseline = json.loads(json.dumps(self.system.units))
+        self.system.fresh('steamvr.service')
+        current = self.system.units['steamvr.service']['InvocationID']
+        engine.put(self.journal, engine.encoded({'schema':frame.SCHEMA, 'baseline':old_baseline,
+            'restart_steam':True, 'phase':'prepared'}))
+        health = {'baseline':{'invocation':current}, 'checkpoint':{'offset':2}}
+        result = self.instance().restart(health_receipt=health)
+        self.assertEqual(result['health_receipt'], health)
+        self.assertEqual(self.record()['baseline'], old_baseline)
+        self.assertNotEqual(self.system.units['steamvr.service']['InvocationID'], current)
+
+    def test_legacy_completed_activation_can_change_to_original_intent_with_fresh_health(self):
+        baseline = json.loads(json.dumps(self.system.units))
+        engine.put(self.journal, engine.encoded({'schema':frame.SCHEMA, 'baseline':baseline,
+            'restart_steam':True, 'phase':'awaiting-health'}))
+        health = {'baseline':{'invocation':'before-undo'}, 'checkpoint':{'offset':3}}
+        self.assertEqual(self.instance().restore(health_receipt=health)['health_receipt'], health)
+        self.assertEqual(self.record()['activation']['kind'], 'original')
+        self.assertEqual(self.record()['baseline'], baseline)
+        self.assertEqual(self.system.actions, [('stop', 'steam.service'),
+            ('restart', 'steamvr.service'), ('start', 'steam.service')])
+
     def test_fixed_error_messages_never_surface_process_output(self):
         self.system.command_error = True
         with self.assertRaises(engine.SetupError) as failure: self.lifecycle.snapshot()

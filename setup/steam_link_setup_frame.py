@@ -122,7 +122,7 @@ class FrameLifecycle:
         self._raw = self._value = None
         if not os.path.lexists(self.path):
             return None
-        raw = self.e.read(self.path, 16384, private=True)
+        raw = self.e.read(self.path, 128 * 1024, private=True)
         value = self.e.parse(raw)
         self.e.require(set(value) in ({'schema', 'baseline', 'restart_steam', 'phase'},
                                    {'schema', 'baseline', 'restart_steam', 'phase', 'activation'}) and
@@ -134,13 +134,31 @@ class FrameLifecycle:
             self._validate_unit(value['baseline'][unit], unit)
         if 'activation' in value:
             activation = value['activation']
-            self.e.require(type(activation) is dict and set(activation) == {'kind', 'baseline'} and
+            self.e.require(type(activation) is dict and set(activation) in ({'kind', 'baseline'}, {'kind', 'baseline', 'health'}) and
                            activation['kind'] in ('prepared', 'original') and
                            type(activation['baseline']) is dict and set(activation['baseline']) == set(UNITS),
                            'Unknown Frame activation recovery record preserved.')
             for unit in UNITS:
                 self._validate_unit(activation['baseline'][unit], unit)
+            if 'health' in activation:
+                self._health_receipt(activation['health'])
         self._raw, self._value = raw, value
+        return value
+
+    def _health_receipt(self, value):
+        self.e.require(type(value) is dict and set(value) == {'baseline', 'checkpoint'} and
+                       type(value['baseline']) is dict and type(value['checkpoint']) is dict,
+                       'A bounded startup health receipt is required.')
+        raw = self.e.encoded(value)
+        self.e.require(len(raw) <= 64 * 1024, 'The startup health receipt exceeds its bound.')
+        # Preserve a private immutable JSON snapshot, not the caller's mutable
+        # dict. Detailed native evidence is validated by the existing observer.
+        return self.e.parse(raw)
+
+    @staticmethod
+    def _activation(kind, baseline, health):
+        value = {'kind':kind, 'baseline':baseline}
+        if health is not None:value['health'] = health
         return value
 
     def _private_root(self):
@@ -188,9 +206,12 @@ class FrameLifecycle:
         raise self.e.SetupError('Frame SteamVR did not restart. Recovery details were kept.')
 
     def _result(self, units, *, complete=False, healthy=False):
-        return {'schema':SNAPSHOT, 'units':units, 'running':all(self._running(v) for v in units.values()),
+        result = {'schema':SNAPSHOT, 'units':units, 'running':all(self._running(v) for v in units.values()),
                 'pending':self._value is not None, 'phase':self._value['phase'] if self._value else None,
                 'complete':complete, 'healthy':healthy, 'needs_health_check':not healthy}
+        activation = self._value.get('activation', {}) if self._value else {}
+        if 'health' in activation:result['health_receipt'] = self._health_receipt(activation['health'])
+        return result
 
     def snapshot(self):
         self._load()
@@ -211,7 +232,7 @@ class FrameLifecycle:
             self._run(['stop', '--no-block', 'steam.service'])
             self._wait('steam.service', self._stopped, self.clock() + self.timeout, stopping=True)
 
-    def restart(self, *, restoring=False):
+    def restart(self, *, restoring=False, health_receipt=None):
         """Activate staged files without restarting VR under a running client.
 
         Steam explicitly depends on SteamVR. Stop the client, make the already
@@ -220,14 +241,17 @@ class FrameLifecycle:
         neither a fresh VR invocation nor a completed activation is replayed.
         """
         self.e.require(type(restoring) is bool, 'An exact Frame activation intent is required.')
+        health = self._health_receipt(health_receipt) if health_receipt is not None else None
         self._load()
         before = self._units()
         kind = 'original' if restoring else 'prepared'
         prior = self._value
         if prior is None:
             self._save({'schema':SCHEMA, 'baseline':before, 'restart_steam':True, 'phase':'prepared',
-                        'activation':{'kind':kind, 'baseline':before}})
+                        'activation':self._activation(kind, before, health)})
         elif 'activation' not in prior:
+            self.e.require(health is None or restoring or prior['phase'] == 'prepared',
+                           'Fresh startup health authority requires a new Frame activation intent; recovery details were kept.')
             # Old journal phases remain recoverable. A finished old activation
             # only awaits its independent health check; never replay it merely
             # because its RPC response was lost. An explicit Undo is a new
@@ -237,15 +261,24 @@ class FrameLifecycle:
                                'Frame Steam and SteamVR are not both running. Recovery details were kept.')
                 return self._result(before)
             baseline = dict(before)
-            if not restoring:
+            if not restoring and health is None:
                 baseline['steamvr.service'] = prior['baseline']['steamvr.service']
             value = dict(prior)
-            value.update(phase='prepared', activation={'kind':kind, 'baseline':baseline})
+            value.update(phase='prepared', activation=self._activation(kind, baseline, health))
             self._save(value)
         elif prior['activation']['kind'] != kind:
             value = dict(prior)
-            value.update(phase='prepared', activation={'kind':kind, 'baseline':before})
+            value.update(phase='prepared', activation=self._activation(kind, before, health))
             self._save(value)
+        elif health is not None and 'health' not in prior['activation']:
+            self.e.require(prior['phase'] == 'prepared',
+                           'Fresh startup health authority requires a new Frame activation intent; recovery details were kept.')
+            value = dict(prior)
+            value['activation'] = self._activation(kind, before, health)
+            self._save(value)
+        # The same activation always retains its original health baseline and
+        # log checkpoint, even after a lost reply or a new setup/SSH process.
+        # A newly observed current generation cannot replace that authority.
 
         phase = self._value['phase']
         baseline = self._value['activation']['baseline']
@@ -307,10 +340,10 @@ class FrameLifecycle:
                        'Frame Steam and SteamVR are not both running. Recovery details were kept.')
         return self._result(units)
 
-    def restore(self):
+    def restore(self, *, health_receipt=None):
         # The caller has restored the exact original files/settings FIRST.
         # A distinct activation intent must not reuse the prepared generation.
-        return self.restart(restoring=True)
+        return self.restart(restoring=True, health_receipt=health_receipt)
 
     def restored(self, *, health_ok=False):
         self.e.require(type(health_ok) is bool, 'A fresh Frame startup health result is required.')
