@@ -27,7 +27,10 @@ struct ReceiverWorker::Impl {
     struct Pending {bool used=false,certified=false;Observation submitted{};stream_bridge::FrameDescriptor descriptor{};};
     struct Sending {bool used=false,echo=false;std::uint64_t ticket=0;stream_bridge::Message message{};stream_bridge::ProbeMessage probe{};};
     RuntimeRequest request{};SourceProvider provider{};SourceIdentity source{};
-    RuntimeNotice current{};bool enabled=false,blocked=false;SnapshotStats lastStats{};
+    RuntimeNotice current{};bool enabled=false,blocked=false,backlog=false;SnapshotStats lastStats{};
+    struct Early {bool used=false;CaptureObservation event{};};
+    std::array<Early,MaxBuffers> early{};
+    std::array<CaptureObservation,MaxBuffers> seenCapture{};
     // Transport readiness is not source proof. A late listener can recover on a
     // fresh successful QBUF, at a bounded rate, without admitting any old AU.
     bool reconnect=false;std::uint64_t retryAt=0;std::uint32_t retryDelay=250;
@@ -75,6 +78,7 @@ struct ReceiverWorker::Impl {
         unscopedLoss=true;for(auto& q:quarantines)if(q.fd>=0)q.hard=true;
     }
     bool retirePending(){
+        for(const auto& e:early)if(e.used&&!retire(e.event.fd,e.event.sourcePoolGeneration,e.event.nativeTimestampToken))return false;
         for(const auto& p:pending)if(p.used&&!retire(p.submitted.fd,p.submitted.poolGeneration,p.submitted.nativeTimestampToken))return false;
         return true;
     }
@@ -91,7 +95,7 @@ struct ReceiverWorker::Impl {
             &&reason!=RuntimeReason::CopyGap&&reason!=RuntimeReason::CapturePoolReset){
             for(auto& q:quarantines)if(q.fd==source.decoderFd&&q.pool==source.outputPoolGeneration)q.hard=true;
         }
-        receiver.end();control.stop();pending={};sending={};authority={};blocked=keepSource;
+        receiver.end();control.stop();pending={};early={};seenCapture={};sending={};authority={};blocked=keepSource;
         reconnect=false;retryAt=0;
         notice(state,observed,reason);if(!keepSource)source={};
     }
@@ -128,6 +132,40 @@ struct ReceiverWorker::Impl {
         blocked=false;notice(RuntimeState::Negotiating);return true;
     }
     bool matches(int fd,std::uint64_t pool) const {return source.decoderFd==fd&&source.outputPoolGeneration==pool&&pool!=0;}
+    bool retireExact(int fd,std::uint64_t pool,std::uint32_t token){
+        if(!retire(fd,pool,token))return false;
+        for(auto& p:pending)if(p.used&&p.submitted.fd==fd&&p.submitted.poolGeneration==pool
+            &&p.submitted.nativeTimestampToken==token)p={};
+        for(auto& e:early)if(e.used&&e.event.fd==fd&&e.event.sourcePoolGeneration==pool
+            &&e.event.nativeTimestampToken==token)e={};
+        return true;
+    }
+    // Missing input bytes may still be in the independent owned OUTPUT queue.
+    // Keep an exact native lease, never a newest frame/token approximation.
+    bool decode(const CaptureObservation& event){
+        if(!matches(event.fd,event.sourcePoolGeneration)||blocked)return true;
+        auto* q=quarantine(event.fd,event.sourcePoolGeneration);
+        if(!q){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return true;}
+        if(event.nativeTimestampToken>0xffff||q->hard||q->tokens.test(event.nativeTimestampToken))return true;
+        Pending* found=nullptr;unsigned count=0;
+        for(auto& p:pending)if(p.used&&p.submitted.nativeTimestampToken==event.nativeTimestampToken){found=&p;++count;}
+        if(count!=1||!found)return false;
+        if(event.dmabufFd<0||!event.capturePoolGeneration||!event.contentGeneration){clear(RuntimeState::SourceLost,true,RuntimeReason::InvalidCapture);return true;}
+        // Original CAPTURE may have been requeued while crypto/control work ran.
+        // Its public pool/cycle/kernel identity must still be current NOW.
+        if(!provider.captureCurrent(event,provider.context)){
+            if(!retireExact(event.fd,event.sourcePoolGeneration,event.nativeTimestampToken)){
+                unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);
+            }
+            return true;
+        }
+        const DecodedFrame frame{source,found->descriptor,found->submitted,event,receiver.snapshot().peerConfirmed};
+        if(request.callbacks.decoded)request.callbacks.decoded(frame,request.callbacks.context);
+        found->used=false;return true;
+    }
+    void flushEarly(){
+        for(auto& e:early)if(e.used){const auto fact=e.event;e={};if(!decode(fact)&&!blocked)e={true,fact};}
+    }
     void capture(const CaptureObservation& event){
         if(event.kind==CaptureKind::InputGap){
             auto* covered=event.inputLoss==InputLoss::SnapshotFull?&coveredDropped:
@@ -141,10 +179,14 @@ struct ReceiverWorker::Impl {
                 *covered=event.lossSequence;
             }
             if(retired(event.fd,event.sourcePoolGeneration))return;
-            if(!retire(event.fd,event.sourcePoolGeneration,event.nativeTimestampToken)){
+            if(!retireExact(event.fd,event.sourcePoolGeneration,event.nativeTimestampToken)){
                 unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
+            // A fully scoped gap cannot revoke unrelated certified pictures or
+            // authenticated control. Its exact token remains quarantined until
+            // the real source pool retires, including every 16-bit wrap/late DQ.
             if(matches(event.fd,event.sourcePoolGeneration)&&!blocked)
-                retryTransport(event.inputLoss==InputLoss::SnapshotFull?RuntimeReason::SnapshotGap:RuntimeReason::CopyGap,RuntimeState::SourceLost);
+                notice(receiver.snapshot().peerConfirmed?RuntimeState::PeerConfirmed:RuntimeState::Negotiating,
+                       event.inputLoss==InputLoss::SnapshotFull?RuntimeReason::SnapshotGap:RuntimeReason::CopyGap);
             return;
         }
         if(event.kind==CaptureKind::SourceReset&&event.fd>=0&&event.sourcePoolGeneration){
@@ -175,18 +217,35 @@ struct ReceiverWorker::Impl {
             if(!blocked)retryTransport(RuntimeReason::CapturePoolReset,RuntimeState::SourceLost);
             return;
         }
-        if(event.kind!=CaptureKind::Decoded||blocked)return;
-        const auto* q=quarantine(event.fd,event.sourcePoolGeneration);
-        if(!q){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
-        if(event.nativeTimestampToken>0xffff||q->tokens.test(event.nativeTimestampToken))return;
-        Pending* found=nullptr;unsigned matches=0;
-        for(auto& p:pending)if(p.used&&p.submitted.nativeTimestampToken==event.nativeTimestampToken){found=&p;++matches;}
-        if(matches!=1||!found)return;
-        if(event.dmabufFd<0||!event.capturePoolGeneration||!event.contentGeneration){clear(RuntimeState::SourceLost,true,RuntimeReason::InvalidCapture);return;}
-        const DecodedFrame frame{source,found->descriptor,found->submitted,event,receiver.snapshot().peerConfirmed};
-        if(request.callbacks.decoded)request.callbacks.decoded(frame,request.callbacks.context);
-        found->used=false;
+        if(event.kind==CaptureKind::Requeue&&event.index<early.size()){
+            auto& waiting=early[event.index];
+            if(waiting.used&&!retireExact(waiting.event.fd,waiting.event.sourcePoolGeneration,waiting.event.nativeTimestampToken)){
+                unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;
+            }
+            seenCapture[event.index]=event;return;
+        }
+        if(event.kind!=CaptureKind::Decoded||blocked||event.index>=early.size())return;
+        auto* q=quarantine(event.fd,event.sourcePoolGeneration);
+        if(!q||q->hard||event.nativeTimestampToken>0xffff||q->tokens.test(event.nativeTimestampToken))return;
+        const auto& seen=seenCapture[event.index];
+        if(seen.sourcePoolGeneration==event.sourcePoolGeneration&&seen.capturePoolGeneration==event.capturePoolGeneration
+            &&(seen.contentGeneration>event.contentGeneration
+                ||(seen.kind==CaptureKind::Decoded&&seen.contentGeneration==event.contentGeneration)))return;
+        seenCapture[event.index]=event;
+        if(decode(event))return;
+        if(!provider.captureCurrent(event,provider.context)){
+            if(!retireExact(event.fd,event.sourcePoolGeneration,event.nativeTimestampToken)){
+                unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);
+            }
+            return;
+        }
+        auto& waiting=early[event.index];
+        if(waiting.used&&!retireExact(waiting.event.fd,waiting.event.sourcePoolGeneration,waiting.event.nativeTimestampToken)){
+            unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;
+        }
+        waiting={true,event};
     }
+
     void input(const Observation& fact){
         if(fact.fd<0||!fact.poolGeneration||fact.nativeTimestampToken>0xffff||!fact.contentGeneration
             ||!fact.bufferCapacity||fact.usedBytes==0||fact.usedBytes>bytes.size()||fact.usedBytes>fact.bufferCapacity){
@@ -280,12 +339,13 @@ ReceiverWorker::~ReceiverWorker(){stop();}
 bool ReceiverWorker::prepare(const RuntimeRequest& request,SourceProvider provider) noexcept{
     stop();if(!request.explicitlyEnabled)return true;
     if(!request.buildId||request.pairingsDirectory.empty()||!request.producerPort
-        ||!provider.poll||!provider.capture||!provider.stats||!provider.random)return false;
+        ||!provider.poll||!provider.capture||!provider.stats||!provider.random||!provider.captureCurrent)return false;
     try{impl_->request=request;impl_->provider=provider;impl_->enabled=true;impl_->lastStats=provider.stats(provider.context);
         impl_->coveredDropped=impl_->lastStats.dropped;impl_->coveredRejected=impl_->lastStats.rejected;
         impl_->notice(RuntimeState::WaitingNativeSource);return true;}catch(...){stop();return false;}
 }
 void ReceiverWorker::tick() noexcept{
+    impl_->backlog=false;
     if(!impl_->enabled)return;
     try{
         const bool ready=impl_->request.imageRoutePrepared&&impl_->request.imageRoutePrepared(impl_->request.imageRouteContext);
@@ -303,11 +363,16 @@ void ReceiverWorker::tick() noexcept{
             impl_->routeWasReady=true;impl_->notice(RuntimeState::WaitingNativeSource);return;
         }
         impl_->routeSeen=impl_->routeWasReady=true;
-        impl_->collect();
-        Observation fact{};
-        for(unsigned i=0;i<SnapshotCapacity&&impl_->provider.poll(fact,impl_->bytes.data(),impl_->bytes.size(),impl_->provider.context);++i)impl_->input(fact);
-        impl_->collect();
-        impl_->controlTick();
+        impl_->collect();impl_->controlTick();
+        Observation fact{};unsigned consumed=0;
+        for(;consumed<SnapshotCapacity&&impl_->provider.poll(fact,impl_->bytes.data(),impl_->bytes.size(),impl_->provider.context);++consumed){
+            impl_->input(fact);
+            // Native leases and control continue progressing during an input
+            // burst instead of waiting behind every certificate/hash operation.
+            impl_->collect();impl_->flushEarly();impl_->controlTick();
+        }
+        impl_->collect();impl_->flushEarly();impl_->controlTick();
+        impl_->backlog=consumed==SnapshotCapacity;
     }catch(...){impl_->clear(RuntimeState::SourceLost,true,RuntimeReason::Exception);}
 }
 void ReceiverWorker::stop() noexcept{
@@ -317,6 +382,7 @@ void ReceiverWorker::stop() noexcept{
     impl_->routeSeen=impl_->routeWasReady=false;
 }
 RuntimeNotice ReceiverWorker::status()const noexcept{return impl_->current;}
+bool ReceiverWorker::immediateWorkPending()const noexcept{return impl_->enabled&&impl_->backlog;}
 namespace {
 std::mutex lifetime;std::unique_ptr<ReceiverWorker> worker;std::thread thread;
 std::atomic<bool> running{false};std::condition_variable wake;std::mutex sleepMutex;
@@ -324,6 +390,7 @@ struct StopAtExit {~StopAtExit(){stopPinnedReceiver();}} stopAtExit;
 bool poll(Observation& out,std::uint8_t* bytes,std::size_t n,void*) noexcept{return pollPinnedProcess(out,bytes,n);}
 bool capture(CaptureObservation& out,void*) noexcept{return pollPinnedCapture(out);}
 SnapshotStats stats(void*) noexcept{return pinnedSnapshotStats();}
+bool currentCapture(const CaptureObservation& fact,void*) noexcept{return pinnedCaptureLeaseCurrentOnWorker(fact);}
 bool random(void* out,std::size_t n,void*) noexcept{return stream_bridge::bridgeSystemRandom(out,n);}
 }
 bool startPinnedReceiver(const RuntimeRequest& request) noexcept{
@@ -331,10 +398,11 @@ bool startPinnedReceiver(const RuntimeRequest& request) noexcept{
     std::lock_guard<std::mutex> lock(lifetime);if(running.load(std::memory_order_acquire))return false;
     try{
         auto candidate=std::make_unique<ReceiverWorker>();
-        if(!candidate->prepare(request,{poll,capture,stats,random,nullptr})||!publishPinnedDecodeImports())return false;
+        if(!candidate->prepare(request,{poll,capture,stats,random,nullptr,nullptr,currentCapture})||!publishPinnedDecodeImports())return false;
         worker=std::move(candidate);running.store(true,std::memory_order_release);
         try{thread=std::thread([]{while(running.load(std::memory_order_acquire)){
-            worker->tick();std::unique_lock<std::mutex> lock(sleepMutex);
+            worker->tick();if(worker->immediateWorkPending())continue;
+            std::unique_lock<std::mutex> lock(sleepMutex);
             wake.wait_for(lock,std::chrono::milliseconds(2),[]{return !running.load(std::memory_order_acquire);});}
             worker->stop();});}
         catch(...){running.store(false,std::memory_order_release);worker.reset();restorePinnedDecodeImports();return false;}

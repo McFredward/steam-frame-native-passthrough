@@ -31,7 +31,7 @@ struct Event {nd::Observation fact{};std::vector<std::uint8_t> coded;};
 struct Fixture {
     Files files;std::deque<Event> input;std::deque<nd::CaptureObservation> capture;
     nd::SnapshotStats counts{};unsigned polls=0,capturePolls=0,randomCalls=0,certified=0,decoded=0;
-    bool randomFails=false,routeReady=true,publishGapAfterEmptyPoll=false;std::uint64_t clock=100;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
+    bool randomFails=false,routeReady=true,publishGapAfterEmptyPoll=false,leaseCurrent=true;unsigned leaseChecks=0;std::uint64_t clock=100;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
     nd::DecodedFrame lastDecoded{};nd::CertifiedFrame lastCertified{};sb::CertifiedAccessUnit retained{};
     sb::ControlRuntime producer;nd::ReceiverWorker worker;sb::Handshake sender;
     sb::LocalConfig local{};sb::LocalSendAuthority authority{};std::uint64_t content=0,sourceFrame=1000;
@@ -44,7 +44,7 @@ struct Fixture {
     nd::RuntimeRequest request(){nd::RuntimeRequest r;r.explicitlyEnabled=true;r.buildId=712;r.pairingsDirectory=files.receiver;r.producerPort=producer.localPort();std::strcpy(r.producerAddress.data(),"127.0.0.1");
         r.imageRoutePrepared=[](void* v) noexcept{return static_cast<Fixture*>(v)->routeReady;};r.imageRouteContext=this;
         r.callbacks={onCertified,onDecoded,onCapture,onNotice,this};return r;}
-    nd::SourceProvider provider(){return {poll,pollCapture,stats,random,this,monotonic};}
+    nd::SourceProvider provider(){return {poll,pollCapture,stats,random,this,monotonic,currentCapture};}
     static std::uint64_t monotonic(void* v) noexcept{return static_cast<Fixture*>(v)->clock;}
     static bool poll(nd::Observation& out,std::uint8_t* destination,std::size_t capacity,void* v) noexcept {
         auto& f=*static_cast<Fixture*>(v);++f.polls;if(f.input.empty())return false;const auto& front=f.input.front();if(front.coded.size()>capacity)return false;
@@ -53,6 +53,7 @@ struct Fixture {
         if(f.publishGapAfterEmptyPoll){f.publishGapAfterEmptyPoll=false;++f.counts.dropped;
             f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,300,7,0,0,nd::InputLoss::SnapshotFull,f.counts.dropped});}
         return false;}out=f.capture.front();f.capture.pop_front();return true;}
+    static bool currentCapture(const nd::CaptureObservation& fact,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.leaseChecks;return f.leaseCurrent&&fact.kind==nd::CaptureKind::Decoded&&fact.fd>=0&&fact.dmabufFd>=0;}
     static nd::SnapshotStats stats(void* v) noexcept{return static_cast<Fixture*>(v)->counts;}
     static bool random(void* out,std::size_t n,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.randomCalls;if(f.randomFails)return false;std::memset(out,static_cast<int>(f.randomCalls),n);return true;}
     static void onCertified(const nd::CertifiedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.certified;f.lastCertified=frame;f.retained=*frame.certificate;f.lastCertified.certificate=&f.retained;}
@@ -127,6 +128,14 @@ void ordinaryWithoutCapture(){
     check(f.certified==before+1&&f.decoded==4,"fresh exact certified picture survives an arbitrary ordinary input run");
 }
 
+void earlyDecodedOrdering(){
+    Fixture f;f.negotiate();const auto before=f.decoded;
+    f.enqueue(f.certifiedFrame(),40);
+    f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});
+    f.pump();
+    check(f.decoded==before+1,"owned input and native decoded result queued before one worker tick must join exact picture once");
+}
+
 void lifecycleAndLoss(){
     Fixture f;f.negotiate();const auto before=f.certified;
     f.capture.push_back({nd::CaptureKind::Reset,23,-1,0,0,7,22,0});f.pump();
@@ -143,45 +152,48 @@ void lifecycleAndLoss(){
     Fixture eof;eof.negotiate();eof.producer.stop();eof.pump();check(eof.worker.status().state==nd::RuntimeState::SenderUnavailable,"actual reverse transport EOF revokes confirmed session");
 }
 void knownGapRecovery(){
-    Fixture f;f.negotiate();const auto old=f.worker.status().source;const auto port=f.producer.localPort();
-    const auto oldCertificate=f.certifiedFrame();f.enqueue(f.certifiedFrame(),40);f.pump();
-    const auto before=f.certified,decoded=f.decoded;
+    Fixture f;f.negotiate();const auto source=f.worker.status().source;
+    f.enqueue(f.certifiedFrame(),40);f.pump();const auto certified=f.certified,decoded=f.decoded;
+    const auto notices=f.notices.size();
     ++f.counts.dropped;f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,41,7,0,0,nd::InputLoss::SnapshotFull,1});f.pump();
-    check(f.worker.status().state==nd::RuntimeState::SourceLost&&f.worker.status().reason==nd::RuntimeReason::SnapshotGap
-        &&f.worker.status().statistics.dropped==1,"exact successful lost QBUF identifies bounded recoverable source gap");
-    check(f.invalidations.empty()||f.invalidations.back().kind!=nd::CaptureKind::InputGap,"OUTPUT gap is never misreported as CAPTURE lease");
-    f.relisten(port);f.clock+=250;f.enqueue(ordinary,42);f.pump();
-    check(f.randomCalls==2&&f.worker.status().source.stream.connection!=old.stream.connection
-        &&f.worker.status().source.stream.generation>old.stream.generation,"known source gap creates a new nonce and generation before any image proof");
-    f.enqueue(oldCertificate,43);f.pump();check(f.certified==before,"old session certificate cannot cross source-gap re-admission");
-    for(std::uint32_t token=50;token<53;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();
-        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
-    check(f.sender.confirmed()&&f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.decoded==decoded+3,
-        "source gap recovers only after actual new HELLO ACK COMMIT probe and exact decoded receipts");
-    const auto fresh=f.certified;
-    for(unsigned token:{40U,41U,43U}){
-        f.enqueue(f.certifiedFrame(),token);f.pump();
-        for(unsigned late=0;late<2;++late){f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,900+late});f.pump();}
-        f.enqueue(f.certifiedFrame(),token);f.pump();
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.randomCalls==1
+        &&f.worker.status().source.stream.connection==source.stream.connection
+        &&f.worker.status().source.stream.generation==source.stream.generation,"fully scoped gap preserves confirmed source control and nonce");
+    bool reported=false;for(std::size_t i=notices;i<f.notices.size();++i){
+        check(f.notices[i].state!=nd::RuntimeState::SourceLost&&f.notices[i].state!=nd::RuntimeState::SenderUnavailable,"known gap cannot globally revoke current image epoch");
+        reported|=f.notices[i].reason==nd::RuntimeReason::SnapshotGap&&f.notices[i].statistics.dropped==1;
     }
-    check(f.certified==fresh&&f.decoded==decoded+3,"old pending gap and unverified tokens stay quarantined despite multiple late native completions");
-    f.enqueue(f.certifiedFrame(),60);f.pump();f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,60,7,21,60});f.pump();
-    check(f.decoded==decoded+4,"fresh unrelated picture retains complete exact pipeline after recovery");
-    Fixture raced;raced.negotiate();raced.publishGapAfterEmptyPoll=true;raced.worker.tick();
-    check(raced.worker.status().reason==nd::RuntimeReason::SnapshotGap,"gap published after first empty drain is never mistaken for unknown counter loss");
-    raced.worker.tick();check(raced.worker.status().reason==nd::RuntimeReason::SnapshotGap,"later counter snapshot finds its already-covered gap cursor");
+    check(reported,"bounded notice retains exact known gap cause/counter without disconnect");
+    check(f.invalidations.empty()||f.invalidations.back().kind!=nd::CaptureKind::InputGap,"OUTPUT gap is not a CAPTURE invalidation");
+    f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+    check(f.decoded==decoded+1,"unrelated already certified pending frame remains usable across another token gap");
+    for(unsigned attempt=0;attempt<3;++attempt){
+        f.enqueue(f.certifiedFrame(),41);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,41,7,21,900+attempt});f.pump();
+    }
+    check(f.certified==certified&&f.decoded==decoded+1,"every late completion and wrapped reuse of lost exact token remains quarantined");
+    f.enqueue(f.certifiedFrame(),50);f.pump();const auto pendingCount=f.certified;
+    ++f.counts.dropped;f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,50,7,0,0,nd::InputLoss::SnapshotFull,2});f.pump();
+    f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,50,7,21,1000});f.pump();
+    f.enqueue(f.certifiedFrame(),50);f.pump();
+    check(f.certified==pendingCount&&f.decoded==decoded+1,"a known gap colliding with an existing pending token retires only that ambiguous token");
+    ++f.counts.rejected;f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,51,7,0,0,nd::InputLoss::CopyRejected,1});f.pump();
+    f.enqueue(f.certifiedFrame(),51);f.pump();
+    check(f.certified==pendingCount&&f.randomCalls==1,"known owned-copy failure has same exact quarantine without transport reset");
+    f.enqueue(f.certifiedFrame(),60);f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,60,7,21,60});f.pump();
+    check(f.decoded==decoded+2&&f.worker.status().state==nd::RuntimeState::PeerConfirmed,"next intact real certificate and early decode join immediately without new handshake");
+    Fixture raced;raced.negotiate();raced.publishGapAfterEmptyPoll=true;raced.worker.tick();raced.worker.tick();
+    check(raced.randomCalls==1&&raced.worker.status().state==nd::RuntimeState::PeerConfirmed,"gap published after empty drain stays covered without false unknown loss or reconnect");
     Fixture unknown;unknown.negotiate();++unknown.counts.dropped;unknown.pump();unknown.clock+=10000;
     unknown.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,80,7,0,0,nd::InputLoss::SnapshotFull,1});unknown.pump();
-    unknown.enqueue(ordinary,81);unknown.pump();check(unknown.randomCalls==1&&unknown.worker.status().reason==nd::RuntimeReason::UnknownSnapshotLoss,
-        "late gap cannot resurrect already hard-refused unknown loss");
-    unknown.enqueue(ordinary,82,8);unknown.pump();check(unknown.randomCalls==1,"unattributed global loss cannot be erased by an unrelated or later pool");
-    Fixture overflow;overflow.negotiate();++overflow.counts.captureDropped;
-    ++overflow.counts.dropped;overflow.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,90,7,0,0,nd::InputLoss::SnapshotFull,1});overflow.pump();
-    overflow.clock+=10000;overflow.enqueue(ordinary,91);overflow.pump();
-    check(overflow.randomCalls==1&&overflow.worker.status().reason==nd::RuntimeReason::CaptureEventsLost,"capture queue overflow stays hard refused despite a known gap");
+    unknown.enqueue(ordinary,81);unknown.pump();check(unknown.randomCalls==1&&unknown.worker.status().reason==nd::RuntimeReason::UnknownSnapshotLoss,"late known fact cannot resurrect prior unknown loss");
+    unknown.enqueue(ordinary,82,8);unknown.pump();check(unknown.randomCalls==1,"unknown global loss survives later source pools");
+    Fixture overflow;overflow.negotiate();++overflow.counts.captureDropped;++overflow.counts.dropped;
+    overflow.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,90,7,0,0,nd::InputLoss::SnapshotFull,1});overflow.pump();
+    check(overflow.worker.status().reason==nd::RuntimeReason::CaptureEventsLost,"event overflow remains hard refused despite scoped gap");
     Fixture missing;missing.negotiate();missing.counts.dropped=2;
     missing.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,100,7,0,0,nd::InputLoss::SnapshotFull,2});missing.pump();
-    check(missing.worker.status().state==nd::RuntimeState::SourceLost&&missing.randomCalls==1,"noncontiguous gap sequence never proves the omitted input token");
+    check(missing.worker.status().state==nd::RuntimeState::SourceLost,"noncontiguous exact-loss cursor remains global refusal");
 }
 
 void routeQuarantineAndBackoff(){
@@ -201,9 +213,9 @@ void routeQuarantineAndBackoff(){
     ++unknown.counts.rejected;unknown.pump();unknown.relisten(unknownPort);unknown.routeReady=true;unknown.pump();
     unknown.enqueue(ordinary,90);unknown.pump();check(unknown.randomCalls==1,"unknown loss during paused route cannot be hidden by route baseline replacement");
     Fixture retry;retry.negotiate();const auto retryPort=retry.producer.localPort();
-    ++retry.counts.dropped;retry.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,100,7,0,0,nd::InputLoss::SnapshotFull,1});retry.pump();
+    retry.producer.stop();retry.pump();
     retry.relisten(retryPort);retry.clock+=249;
-    ++retry.counts.dropped;retry.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,101,7,0,0,nd::InputLoss::SnapshotFull,2});retry.pump();
+    ++retry.counts.dropped;retry.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,101,7,0,0,nd::InputLoss::SnapshotFull,1});retry.pump();
     retry.clock+=1;retry.enqueue(ordinary,102);retry.pump();
     check(retry.randomCalls==2,"additional known gap cannot postpone an already scheduled bounded transport retry");
     Fixture reset;reset.negotiate();const auto resetPort=reset.producer.localPort();const auto previous=reset.worker.status().source;
@@ -365,4 +377,4 @@ void transportRecoveryRejectsOldProof(){
         "transport retry never retries authenticated-control rejection or grants pixels");
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--early-decoded")==0){earlyDecodedOrdering();std::cout<<checks<<" early decoded checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
