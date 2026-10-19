@@ -630,6 +630,22 @@ class Tests(unittest.TestCase):
         paths=s.parse(s.read(self.local.registry));paths['external_drivers']=[];s.put(self.local.registry,s.encoded(paths),s.read(self.local.registry))
         result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'repair')
 
+    def test_public_openvr_change_recommends_repair_without_a_native_patch_update(self):
+        self.install_component_fixture();before=self.unit.tx.path.read_bytes()
+        s.put(self.runtime/'version.vrmanifest',s.encoded({'version':'2.17.10'}))
+        s.put(self.fsvr/'version.vrmanifest',s.encoded({'version':'2.18.2'}))
+        path,_=self.change_runtime('frame','openvr')
+        observed=self.unit.inventory(self.bundle)
+        self.assertTrue(observed['patch_payload_current']);self.assertTrue(observed['runtime_admitted'])
+        self.assertFalse(observed['runtime_configuration_current'])
+        result,ui=self.wizard(action=None);self.assertEqual(result,0)
+        self.assertEqual(ui.choices[0][1]['recommended'],'repair');self.assertNotIn('update',ui.choices[0][0])
+        self.assertEqual(ui.questions,[]);self.assertEqual(self.unit.tx.path.read_bytes(),before)
+        with self.fake_generation():result,ui=self.wizard(action='repair')
+        self.assertEqual(result,0);self.assertIn('bridge_untested_confirm',ui.questions)
+        self.assertEqual(s.parse(s.read(self.froot/b.CAMERA_CONFIG))['library']['sha256'],s.sha(path.read_bytes()))
+        self.assertTrue(self.unit.inventory(self.bundle)['runtime_configuration_current']);self.assertTrue((self.froot/'receiver.enable').exists())
+
     def test_one_older_component_still_recommends_update(self):
         self.install_component_fixture(pc='0.2.10');self.version_bundle('0.2.11','0.2.11')
         result,ui=self.wizard(action=None);self.assertEqual(result,0)

@@ -990,11 +990,23 @@ class FrameInstall:
                 value=operations.get(str(self.root/name))
                 raw=base64.b64decode(value['bytes'],validate=True) if value and value['kind']=='file' else b''
                 patch_current=patch_current and len(raw)==pin['bytes'] and self.e.sha(raw)==pin['sha256']
+        configuration_current=state is not None
+        if state and state.get('activation_mode','active')=='active':
+            provider=bundle.frame['runtime_files']['openvr'];observed=snapshot['openvr']
+            base={'steamvr':self.steamvr,'home':self.home,'system':Path('/')}[provider['base']]
+            expected={'path':str(base/self.e.relative(provider['path'])),
+                'bytes':observed.get('bytes'),'sha256':observed.get('sha256')}
+            config=operations.get(str(self.root/CAMERA_CONFIG))
+            try:
+                configuration_current=bool(observed['format_valid'] and config and config['kind']=='file' and
+                    self.e.parse(base64.b64decode(config['bytes'],validate=True)).get('library')==expected)
+            except (ValueError,TypeError,AttributeError):configuration_current=False
         return {**version_status(state,bundle.frame),**activation_status(admitted,state),'runtime_snapshot':snapshot,
                 'architecture':self.machine(),'runtime_compatible':compatible,
                 'runtime_versions':self.e.runtime_versions(self.steamvr),
                 'installed':state is not None,'files_current':current,
                 'patch_payload_current':patch_current,'owned_files_current':intact,
+                'runtime_configuration_current':configuration_current,
                 'recovery_pending':(self.root/'setup-restore.json').exists() or (self.root/'lifecycle.json').exists(),
                 'legacy_installed':(self.home/'.config/SteamFrameNativePassthrough/install.json').exists(),
                 'recovery_path':str(self.root/'setup-restore.json'),
@@ -2307,7 +2319,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         elif components_current or state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
         else:actions.insert(0,'update')
     recommended='install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'rollback' if pending else 'check'
-    if components_current and not pending and report['pc']['owned_files_current'] and frame.get('owned_files_current') is True and bool(pc.get('registered'))==(report['pc']['activation_mode']=='active') and all(
+    if components_current and not pending and report['pc']['owned_files_current'] and frame.get('owned_files_current') is True and frame.get('runtime_configuration_current') is True and bool(pc.get('registered'))==(report['pc']['activation_mode']=='active') and all(
             item['runtime_admitted']==(item['activation_mode']=='active') for item in (report['pc'],frame)):
         recommended='check'
     resumed=context.pop('confirmed_apply',None)
