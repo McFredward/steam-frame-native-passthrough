@@ -13,15 +13,23 @@ bool textureShape(ID3D11Resource* resource,const SharedTextureShape& expected)no
     ID3D11Texture2D* texture=nullptr;
     if(!resource||FAILED(resource->QueryInterface(IID_ID3D11Texture2D,reinterpret_cast<void**>(&texture)))||!texture)return false;
     D3D11_TEXTURE2D_DESC actual{};texture->GetDesc(&actual);texture->Release();
-    return actual.Width==expected.width&&actual.Height==expected.height&&actual.Format==static_cast<DXGI_FORMAT>(expected.format)
-        &&actual.SampleDesc.Count==expected.samples&&actual.ArraySize==1&&actual.MipLevels==1;
+    return sharedTextureDescriptionMatches(actual,expected);
 }
+}
+bool sharedTextureDescriptionMatches(const D3D11_TEXTURE2D_DESC& actual,
+    const SharedTextureShape& expected)noexcept{
+    return expected.width&&expected.width<=16384&&expected.height&&expected.height<=16384
+        &&expected.format&&expected.arraySize==1
+        &&(expected.samples==1||expected.samples==2||expected.samples==4)
+        &&actual.Width==expected.width&&actual.Height==expected.height
+        &&actual.Format==static_cast<DXGI_FORMAT>(expected.format)
+        &&actual.SampleDesc.Count==expected.samples&&actual.ArraySize==expected.arraySize&&actual.MipLevels==1;
 }
 bool submittedSharedResource(ID3D11Resource* native,ID3D11Texture2D* held,
     const SharedTextureOwner& opened,const SharedTextureOwner& submitted,const SharedTextureShape& shape)noexcept{
     if(!native||!held||!submitted.handle||!submitted.generation||!submitted.processId
         ||opened.handle!=submitted.handle||opened.generation!=submitted.generation||opened.processId!=submitted.processId
-        ||!shape.width||!shape.height||shape.width>16384||shape.height>16384||!shape.format||shape.samples!=1)return false;
+        ||!shape.width||!shape.height||shape.width>16384||shape.height>16384||!shape.format||shape.samples!=1||shape.arraySize!=1)return false;
     return textureShape(native,shape)&&textureShape(held,shape)
         &&allocationHandle(native,submitted.handle)&&allocationHandle(held,submitted.handle);
 }

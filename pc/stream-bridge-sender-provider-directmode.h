@@ -1,10 +1,15 @@
 #pragma once
 #include <openvr_driver.h>
+#include "stream-bridge-sender-provider-swap-shape.h"
 #include <array>
 #include <atomic>
 #include <mutex>
 namespace stream_bridge::sender {
 using DirectMode=vr::IVRDriverDirectModeComponent;
+inline bool decodeSwapTextureSetDesc(const DirectMode::SwapTextureSetDesc_t& d,
+    SharedTextureShape& shape)noexcept{
+    return decodePinnedSwapShape(d.nWidth,d.nHeight,d.nFormat,d.nSampleCount,shape);
+}
 struct DirectEye {
     DirectMode::SubmitLayerPerEye_t submitted{};
     DirectMode::SwapTextureSetDesc_t description{};

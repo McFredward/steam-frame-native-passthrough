@@ -254,13 +254,16 @@ struct SenderCoverage::Impl {
         gates.signal(CoverageSignal::InventoryRefreshes);
         prepared=false;preparedPid=0;state=4;
         for(auto& old:opened){if(!old.handle)continue;bool still=false;for(const auto& set:inventory.swaps)if(set.generation==old.generation)for(auto h:set.handles)if(h==old.handle)still=true;if(!still){release(old.texture);old={};}}
-        for(const auto& set:inventory.swaps)if(set.generation)for(auto handle:set.handles){bool exists=false;for(const auto& old:opened)exists|=old.handle==handle&&old.generation==set.generation;if(exists)continue;
+        for(const auto& set:inventory.swaps)if(set.generation){
+            SharedTextureShape shape{};if(!decodeSwapTextureSetDesc(set.description,shape))continue;
+            for(auto handle:set.handles){bool exists=false;for(const auto& old:opened)exists|=old.handle==handle&&old.generation==set.generation;if(exists)continue;
             ID3D11Texture2D* texture=nullptr;
             if(FAILED(device->OpenSharedResource(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(handle)),IID_ID3D11Texture2D,reinterpret_cast<void**>(&texture)))){gates.refuse(CoverageGate::SharedResource);continue;}
             D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
-            if(desc.Width!=set.description.nWidth||desc.Height!=set.description.nHeight||desc.Format!=static_cast<DXGI_FORMAT>(set.description.nFormat)||desc.SampleDesc.Count!=set.description.nSampleCount){release(texture);continue;}
+            if(!sharedTextureDescriptionMatches(desc,shape)){release(texture);continue;}
             for(auto& slot:opened)if(!slot.handle){slot={handle,set.generation,set.processId,texture};texture=nullptr;break;}
             release(texture);
+            }
         }
         inventoryEpoch=inventory.epoch;prepared=target&&targetView&&blend;
     }
@@ -280,7 +283,7 @@ struct SenderCoverage::Impl {
         const bool bgra=viewDesc.Format==DXGI_FORMAT_B8G8R8A8_UNORM||viewDesc.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         if((!rgba&&!bgra)||sourceDesc.ArraySize!=1||sourceDesc.MipLevels!=1||sourceDesc.SampleDesc.Count!=1||viewDesc.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D||viewDesc.Texture2D.MostDetailedMip){release(resource);return gates.refuse(CoverageGate::SourceShape);}
         unsigned sourceBit=0,sourceIndex=0;std::uint32_t pid=0;vr::VRTextureBounds_t bounds{};
-        for(unsigned layer=0;layer<frame.layerCount;++layer){const auto& requested=frame.layers[layer][eye];for(const auto& known:opened)if(known.handle==requested.submitted.hTexture&&known.generation==requested.swapGeneration&&submittedSharedResource(resource,known.texture,{known.handle,known.generation,known.pid},{requested.submitted.hTexture,requested.swapGeneration,requested.processId},{requested.description.nWidth,requested.description.nHeight,requested.description.nFormat,requested.description.nSampleCount})){if(sourceBit){release(resource);return gates.refuse(CoverageGate::AmbiguousSource);}sourceIndex=2*layer+eye;sourceBit=1u<<sourceIndex;pid=requested.processId;bounds=requested.submitted.bounds;}}
+        for(unsigned layer=0;layer<frame.layerCount;++layer){const auto& requested=frame.layers[layer][eye];SharedTextureShape shape{};if(!decodeSwapTextureSetDesc(requested.description,shape))continue;for(const auto& known:opened)if(known.handle==requested.submitted.hTexture&&known.generation==requested.swapGeneration&&submittedSharedResource(resource,known.texture,{known.handle,known.generation,known.pid},{requested.submitted.hTexture,requested.swapGeneration,requested.processId},shape)){if(sourceBit){release(resource);return gates.refuse(CoverageGate::AmbiguousSource);}sourceIndex=2*layer+eye;sourceBit=1u<<sourceIndex;pid=requested.processId;bounds=requested.submitted.bounds;}}
         if(!sourceBit){release(resource);return gates.refuse(CoverageGate::SharedResource);}
         if(drawBits&sourceBit){release(resource);return gates.refuse(CoverageGate::RepeatedSource);}
         if(activePid&&activePid!=pid){release(resource);return gates.refuse(CoverageGate::MixedProcess);}

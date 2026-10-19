@@ -7,10 +7,14 @@
 #endif
 #include <d3d11.h>
 #include <cstdint>
+#include "stream-bridge-sender-provider-swap-shape.h"
 namespace stream_bridge::sender {
 using NativeDraw=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT);
 struct SharedTextureOwner {std::uint64_t handle=0,generation=0;std::uint32_t processId=0;};
-struct SharedTextureShape {std::uint32_t width=0,height=0,format=0,samples=0;};
+// Cold import compares the public kernel texture description against normalized
+// pinned DirectMode metadata. This shape check alone grants no frame authority.
+bool sharedTextureDescriptionMatches(const D3D11_TEXTURE2D_DESC&,
+    const SharedTextureShape&)noexcept;
 // Separately opened DXGI resource wrappers have different IUnknown identities.
 // Admit only the SAME legacy shared-allocation handle on the actual native SRV
 // resource AND the held open, plus the current DirectMode generation/PID/shape.

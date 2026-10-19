@@ -5,7 +5,7 @@ namespace stream_bridge::sender {
 std::atomic<DirectModeBoundary*> DirectModeBoundary::instance_{nullptr};
 thread_local const DirectFrame* DirectModeBoundary::current_=nullptr;
 namespace {
-bool description(const DirectMode::SwapTextureSetDesc_t& d){return d.nWidth&&d.nWidth<=16384&&d.nHeight&&d.nHeight<=16384&&d.nFormat&&d.nSampleCount&&d.nSampleCount<=8&&(d.nSampleCount&(d.nSampleCount-1))==0;}
+bool description(const DirectMode::SwapTextureSetDesc_t& d){SharedTextureShape shape{};return decodeSwapTextureSetDesc(d,shape);}
 bool geometry(const DirectMode::SubmitLayerPerEye_t& e){
     const auto& b=e.bounds;
     if(!std::isfinite(b.uMin)||!std::isfinite(b.uMax)||!std::isfinite(b.vMin)||!std::isfinite(b.vMax)||b.uMin<0||b.uMax>1||b.vMin<0||b.vMax>1||b.uMax<=b.uMin||b.vMax<=b.vMin||!std::isfinite(e.flHmdPosePredictionTimeInSecondsFromNow))return false;
