@@ -590,10 +590,15 @@ class FrameTransaction:
         previous=self.e.read(self.path,64*1024*1024,private=True)
         state['phase']='installed';self.e.put(self.path,self.e.encoded(state),previous)
 
-    def rollback(self):
+    def rollback(self,*,skip_paths=()):
         state=self.state()
         if state is None:return
-        for operation in reversed(state['operations']):self.replace(operation,reverse=True)
+        self.e.require(type(skip_paths) in (tuple,list,set,frozenset) and
+                       all(type(path)is str for path in skip_paths) and
+                       set(skip_paths)<={op['path'] for op in state['operations']},
+                       'Unknown transaction removal scope preserved.')
+        for operation in reversed(state['operations']):
+            if operation['path'] not in skip_paths:self.replace(operation,reverse=True)
         self.e.remove_owned(self.path,self.e.read(self.path,64*1024*1024,private=True))
 
 
@@ -712,6 +717,7 @@ class FrameInstall:
 
     def checkpoint(self):
         helper=load_helper(self.e,'steam_link_setup_checkpoint')
+        legacy_helper=load_helper(self.e,'steam_link_setup_legacy')
         external={self.settings_path(),self.home/'.local/share/Steam/config/steamvr.vrsettings',
                   self.home/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf',
                   self.home/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json',
@@ -723,6 +729,7 @@ class FrameInstall:
                'receiver.enable','pairings/active.json','install.json',CAMERA_CONFIG,'camera-session.pause'}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}|RETIRED_FRAME_FILES
         def allowed(path):
             if path in external:return True
+            if legacy_helper.allowed(self.home,path):return True
             if not path.is_relative_to(self.root):return False
             name=path.relative_to(self.root).as_posix()
             return name in names or re.fullmatch('pairings/[0-9a-f]{32}[.]json',name) is not None
@@ -751,7 +758,7 @@ class FrameInstall:
                     return super().restore()
         return FrameCheckpoint(self.e,self.root/'setup-restore.json',allowed,current,replace)
 
-    def backup(self,action,operations,settings,transaction_values,*,pause_settings=None,target=None):
+    def backup(self,action,operations,settings,transaction_values,*,pause_settings=None,target=None,camera_override=None):
         e=self.e;helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint()
         # A pause is mutable helper state, not an uninstall payload. Journal its
         # exact predecessor so Undo can restore an old target after config
@@ -772,6 +779,14 @@ class FrameInstall:
                 if item['section']=='camera' and item['key']=='forceSceneAlphaBlending':
                     original=settings['baseline']['camera']['keys']['forceSceneAlphaBlending']
                     item['after'].append({'present':original['present'],'value':original['value']})
+        if camera_override is not None:
+            desired=camera_override['desired'];before=camera_override['before']
+            item=checkpoint.setting(Path(camera_override['settings']),'camera','forceSceneAlphaBlending',
+                                    [{'present':desired is not None,'value':desired}])
+            e.require(item['before']=={'present':before is not None,'value':before},
+                      'The old camera preference changed before uninstall could be prepared.')
+            entries_settings=[entry for entry in entries_settings if
+                (entry['path'],entry['section'],entry['key'])!=(item['path'],item['section'],item['key'])]+[item]
         checkpoint.begin(action,entries,entries_settings,target=target)
 
     def runtime(self,bundle):
@@ -925,6 +940,15 @@ class FrameInstall:
             yield module,self.root
             return
         payload=getattr(self,'_camera_payload',None)
+        if state is None and checkpoint:
+            owned=[item for item in checkpoint['settings'] if
+                   item['section']=='camera' and item['key']=='forceSceneAlphaBlending']
+            if owned:
+                e.require(len(owned)==1,'Ambiguous original camera checkpoint preserved.')
+                # A legacy-only Uninstall has no paired install.json. Its exact
+                # checkpoint grants this key through the current pinned API,
+                # rather than rewriting an active native preference offline.
+                state={'operations':[],'settings':{'path':owned[0]['path'],'policy':SESSION_POLICY}}
         if state is None:
             yield None;return
         e.require(payload is not None,'A verified camera helper is required to restore this older installation safely.')
@@ -1209,24 +1233,33 @@ class FrameInstall:
         return {'reason':'prepared-update','pair_id':current['pair'],'automatic_restart':False,
                 'manual_restart_required':True,'coverage_operational':False}
 
-    def undo(self,*,backup=False,live=False):
-        state=self.tx.state()
-        if state is None:return {'reason':'not_installed','automatic_restart':False}
+    def undo(self,*,backup=False,live=False,purge_legacy=False):
+        state=self.tx.state();legacy=None;legacy_helper=None
+        if purge_legacy:
+            legacy_helper=load_helper(self.e,'steam_link_setup_legacy');legacy=legacy_helper.plan(self)
+        if state is None and legacy is None:return {'reason':'not_installed','automatic_restart':False}
         if not live:self.cold(steam=True)
+        legacy_paths={op['path'] for op in legacy['operations']} if legacy else set()
         if backup:
-            operations=[{**op,'after':op['before']} for op in state['operations']]
-            self.backup('uninstall',operations,state['settings'],[None])
-        with self.camera_context(state=state) as camera:
-            if camera:self.camera_call(camera,'restore_owned')
+            operations={op['path']:{**op,'after':None if op['path'] in legacy_paths else op['before']}
+                        for op in state['operations']} if state else {}
+            if legacy:operations.update({op['path']:op for op in legacy['operations']})
+            settings=state['settings'] if state else {'path':str(self.settings_path()),'policy':SESSION_POLICY}
+            self.backup('uninstall',list(operations.values()),settings,[None],camera_override=legacy['camera'] if legacy else None)
+        if state:
+            with self.camera_context(state=state) as camera:
+                if camera:self.camera_call(camera,'restore_owned')
+        if legacy:legacy_helper.apply_camera(self,legacy)
         # Revoke new activation first; never restore the old layer while the new
         # compositor is still using the same native descriptor path.
         marker=self.root/'receiver.enable'
-        if marker.exists():
+        if state and marker.exists():
             expected=next(o['after'] for o in state['operations'] if o['path']==str(marker))
             self.e.require(self.tx.current(marker)==expected,'Changed enable marker preserved.')
             self.e.remove_owned(marker,MARKER)
-        settings=state['settings']
-        try:SettingsChange.restore(self.e,settings)
+        settings=state['settings'] if state else None
+        try:
+            if settings and not (legacy and legacy['camera']):SettingsChange.restore(self.e,settings)
         except self.e.SetupError:
             # Pending transaction may have failed before the settings write.
             current=self.e.parse(self.e.read(Path(settings['path']),2*1024*1024))
@@ -1235,7 +1268,9 @@ class FrameInstall:
                 self.e.require(all((key in values)==entry['present'] and
                     (not entry['present'] or values[key]==entry['value']) for key,entry in spec['keys'].items()),
                     'The camera preference changed; it was preserved and recovery remains available.')
-        self.tx.rollback()
+        if state:self.tx.rollback(skip_paths=legacy_paths & {op['path'] for op in state['operations']})
+        if legacy:
+            for operation in legacy['operations']:self.tx.replace(operation)
         self.system('daemon-reload')
         return {'reason':'uninstalled','automatic_restart':False,'manual_restart_required':True}
 
@@ -1328,7 +1363,8 @@ def remote_request(engine,request,*,unit=None):
         state=unit.tx.state()
         return {**result,'installed':state is not None,'installed_version':patch_version(state.get('version')) if state else None}
     if command=='bridge-checkpoint-finish':unit.checkpoint().finish(restored=request.get('restored') is True);return {'reason':'complete'}
-    if command=='bridge-undo':return unit.undo(backup=request.get('automated') is True,live=request.get('automated') is True)
+    if command=='bridge-undo':return unit.undo(backup=request.get('automated') is True,live=request.get('automated') is True,
+                                               purge_legacy=request.get('automated') is True)
     if command=='bridge-commit':unit.tx.commit();return {'reason':'committed','automatic_restart':False}
     files=request.get('files',{});e.require(type(files)is dict and 1<=len(files)<=64,'Bounded package inventory required.')
     # RPC payload staging has no service or library side effects. Its complete
@@ -1356,7 +1392,7 @@ class Remote:
         self.engine_source=Path(engine.__file__).read_bytes()
         self.bridge_source=Path(__file__).read_bytes()
         self.helper_sources={name:Path(__file__).with_name(name+'.py').read_bytes() for name in
-                             ('steam_link_setup_checkpoint','steam_link_setup_frame')}
+                             ('steam_link_setup_checkpoint','steam_link_setup_frame','steam_link_setup_legacy')}
         self.camera_source=local_camera_source()
         self.checks=fixed_checks(self.engine_source,self.bridge_source,self.camera_source,*self.helper_sources.values())
 
@@ -1790,7 +1826,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     actions=['retry','check','exit']
     pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
     if pending and frame is not None:actions.insert(0,'rollback')
-    if frame is not None and (state or frame.get('installed')):actions.insert(0,'uninstall')
+    if frame is not None and (state or frame.get('installed') or frame.get('legacy_installed')):actions.insert(0,'uninstall')
     if available and not downgrade and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
         if state is None:actions.insert(0,'install')
         elif state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')

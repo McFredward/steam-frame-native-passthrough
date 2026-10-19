@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 import contextlib
+import os
 import types
 import sys
 
@@ -593,6 +594,42 @@ class Files(fixtures.Tests):
                 {'log':None,'peers':[],'stage':'runtime_start'},None,'192.168.1.25','steamos')
         ports.restart_prepared()
         self.assertEqual(commands,['bridge-runtime-restart'])
+
+    def test_legacy_only_installation_offers_uninstall_and_finishes_with_one_restart(self):
+        _,config,dropin,link,_=self.old_frame_only();commands=[];questions=[];offered=[]
+        class Screen:
+            def banner(inner,**kw):pass
+            def status(inner,*a):pass
+            def path(inner,*a,**kw):pass
+            def say(inner,*a):pass
+            def suspend(inner):return contextlib.nullcontext()
+            def choose_action(inner,actions,**kw):offered.append(actions);return 'uninstall'
+            def confirm_uninstall(inner):return True
+            def confirm(inner,key):questions.append(key);return True
+        class Runtime:
+            def __init__(inner,*a):pass
+            def snapshot(inner):pass
+            def stop(inner):pass
+            def start(inner):self.fail('Uninstall must not start PC SteamVR')
+            def finish(inner):pass
+        class Peer:
+            def call(inner,request):
+                command=request['command'];commands.append(command)
+                if command=='bridge-health-baseline':return {}
+                if command=='bridge-health':return {'software_ready':True}
+                if command.startswith('bridge-runtime-'):return {'running':True}
+                return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        actual=b.load_helper
+        def helper(engine,name):
+            return types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else actual(engine,name)
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())),mock.patch.object(b,'load_helper',side_effect=helper):
+            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        self.assertIn('uninstall',offered[0]);self.assertEqual(questions,['bridge_picture'])
+        self.assertEqual(commands.count('bridge-runtime-restart'),1)
+        self.assertFalse(dropin.exists());self.assertFalse(os.path.lexists(link))
+        self.assertFalse((config/'install.json').exists());self.assertFalse(self.unit.checkpoint().path.exists())
 
 
 class UI:

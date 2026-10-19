@@ -748,6 +748,65 @@ class Tests(unittest.TestCase):
         self.unit.tx.commit();self.unit.undo()
         self.assertEqual(s.read(dropin),old_dropin);self.assertEqual(s.read(control),old_control);self.assertEqual(os.readlink(link),target);self.assertEqual(s.read(receipt),old_receipt)
 
+    def old_frame_only(self):
+        data=self.fhome/'.local/share/SteamFrameNativePassthrough'
+        config=self.fhome/'.config/SteamFrameNativePassthrough'
+        dropin=self.fhome/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf'
+        link=self.fhome/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json'
+        payload=data/'package/library.so';s.put(payload,b'owned retired fixture; never loaded')
+        s.put(dropin,b'[Service]\nExecCondition=/owned/retired-activation\n')
+        s.put(config/'control.json',s.encoded({'schema':'sfnp-user-control-v1','enabled':True}))
+        target='/run/user/'+str(os.getuid())+'/steam-frame-native-passthrough/receiver.json'
+        link.parent.mkdir(parents=True,mode=0o700,exist_ok=True);os.symlink(target,link)
+        s.put(config/'install.json',s.encoded({'schema':'sfnp-user-install-v1','home':str(self.fhome),'data':str(data),
+            'manifest_link':target,'package_sha256':'a'*64,'files':{str(payload):s.sha(s.read(payload)),str(dropin):s.sha(s.read(dropin))}}))
+        s.put(config/'camera-before.json',s.encoded({'schema':'sfnp-camera-key-v1','settings':str(self.fsettings),
+            'previous':{'present':False,'value':None},'write_intent':True}))
+        before=s.read(self.fsettings);prefs=s.parse(before);prefs['camera']['forceSceneAlphaBlending']=True
+        s.put(self.fsettings,s.encoded(prefs),before)
+        return data,config,dropin,link,payload
+
+    def test_explicit_uninstall_removes_both_generations_without_reactivating_retired_layer(self):
+        data,config,dropin,link,payload=self.old_frame_only()
+        foreign=data/'untracked-user-file';s.put(foreign,b'keep')
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();installed=s.read(self.unit.tx.path)
+        self.assertFalse(dropin.exists());self.assertFalse(os.path.lexists(link))
+        replace=self.unit.tx.replace
+        def never_reactivate(operation,reverse=False):
+            if reverse and operation['path'] in (str(dropin),str(link),str(config/'control.json')):
+                self.fail('Explicit Uninstall must never restore the retired activation, even briefly')
+            return replace(operation,reverse=reverse)
+        with mock.patch.object(self.unit.tx,'replace',side_effect=never_reactivate):
+            result=b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertEqual(result['reason'],'uninstalled')
+        for path in (dropin,link,payload,config/'install.json',config/'control.json',config/'camera-before.json'):
+            self.assertFalse(os.path.lexists(path),str(path))
+        self.assertFalse((self.froot/b.LIBRARY).exists());self.assertEqual(s.read(foreign),b'keep')
+        self.assertNotIn('forceSceneAlphaBlending',s.parse(s.read(self.fsettings)).get('camera',{}))
+        self.assertEqual(self.camera_native_calls[-1],None)
+        # Explicit Undo of a failed Uninstall restores the exact pre-Uninstall
+        # paired state. It does not turn the old inactive layer back on.
+        b.remote_request(s,b.request(self.bundle,'bridge-restore'),unit=self.unit)
+        self.unit.checkpoint().verify_restored()
+        self.assertEqual(s.read(self.unit.tx.path),installed)
+        self.assertFalse(dropin.exists());self.assertFalse(os.path.lexists(link))
+        self.assertFalse(s.parse(s.read(config/'control.json'))['enabled'])
+
+    def test_legacy_only_uninstall_and_undo_use_pinned_native_camera_api(self):
+        data,config,dropin,link,payload=self.old_frame_only()
+        original={path:s.read(path) for path in (payload,dropin,config/'install.json',config/'control.json',config/'camera-before.json')}
+        result=b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertEqual(result['reason'],'uninstalled');self.assertTrue(self.unit.checkpoint().path.exists())
+        self.assertFalse(dropin.exists());self.assertFalse(os.path.lexists(link))
+        self.assertNotIn('forceSceneAlphaBlending',s.parse(s.read(self.fsettings)).get('camera',{}))
+        b.remote_request(s,b.request(self.bundle,'bridge-restore'),unit=self.unit)
+        self.unit.checkpoint().verify_restored()
+        self.assertIs(s.parse(s.read(self.fsettings))['camera']['forceSceneAlphaBlending'],True)
+        self.assertEqual(self.camera_native_calls,[None,True])
+        self.assertTrue(os.path.islink(link))
+        for path,raw in original.items():self.assertEqual(s.read(path),raw)
+
 
 
     def test_generation_is_coverage_only_and_ignores_cached_tools(self):
