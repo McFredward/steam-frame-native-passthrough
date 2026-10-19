@@ -163,8 +163,9 @@ def runtime_snapshot(engine,pins,bases,*,side,versions):
     tested='2.17.10' if side=='pc' else '2.18.2'
     native_build='1789498647' if side=='pc' else '1791331621'
     # Steam package buildids and native timestamp builds are separate namespaces.
-    # Retain both in consent, but compare only the reviewed native label source.
+    # No package buildid has a reviewed reference; require consent for that label.
     result['_runtime_versions']={'value':versions,'matches':(version is None or version==tested) and
+        (label.get('build_source')!='appmanifest_250820.acf' or build is None) and
         (label.get('build_source')!='bin/version.txt' or build is None or build==native_build)}
     return result
 
