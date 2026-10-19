@@ -368,8 +368,8 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(files,['setup-inspection.json'])
         report=s.parse(s.read(self.local.root/'setup-inspection.json',private=True))
         self.assertTrue(report['inspection_only']);self.assertNotIn('pair',json.dumps(report))
-        self.assertIn('nothing will be installed',output.getvalue())
-        self.assertIn('has not been installed',output.getvalue())
+        self.assertIn('no patch will be installed or removed',output.getvalue())
+        self.assertIn('Nothing was installed, removed or restarted',output.getvalue())
         self.assertFalse(any('subnet' in prompt.lower() for prompt in prompts))
         self.assertEqual(report['frame']['host'],'192.168.1.5')
 

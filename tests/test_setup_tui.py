@@ -242,12 +242,12 @@ class Menus(unittest.TestCase):
         for lang in ('en', 'de'):
             for key in required:
                 self.assertTrue(ui.TEXT[lang][key])
-        self.assertIn('automatically restores', ui.TEXT['en']['bridge_install_plan'])
-        self.assertIn('automatisch wiederhergestellt', ui.TEXT['de']['bridge_install_plan'])
-        self.assertIn('nothing will be installed', ui.TEXT['en']['inspection'])
+        self.assertIn('tries to restore the previous setup and restart its interface', ui.TEXT['en']['bridge_install_plan'])
+        self.assertIn('den vorherigen Zustand wiederherzustellen und dessen Oberfläche neu zu starten', ui.TEXT['de']['bridge_install_plan'])
+        self.assertIn('no patch will be installed or removed', ui.TEXT['en']['inspection'])
         self.assertIn('not restarted', ui.TEXT['en']['remove_done'])
         self.assertIn('while your Frame interface stays running', ui.TEXT['en']['bridge_install_plan'])
-        self.assertIn('während die Frame-Oberfläche weiterläuft', ui.TEXT['de']['bridge_install_plan'])
+        self.assertIn('bei laufender Frame-Oberfläche vorbereitet', ui.TEXT['de']['bridge_install_plan'])
         self.assertNotIn('Close SteamVR on the PC and Steam on the Frame', str(ui.TEXT))
 
 
