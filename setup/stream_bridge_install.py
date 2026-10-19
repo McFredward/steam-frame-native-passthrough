@@ -66,12 +66,18 @@ SETTINGS_SECTION = 'driver_steam_link_native_passthrough'
 PC_FILES = {'pc-provider/driver.vrdrivermanifest',
             'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'}
 TOOLS = frozenset('frame/tools/'+name+'.py' for name in (
-    'app_payload_probe','compositor_startup_health','native_fragment_atlas_probe',
-    'native_fragment_packed_output','native_fragment_r1_presenter','native_fragment_scene_presenter',
+    'app_payload_probe','compositor_startup_health','native_fragment_count1_interface',
     'native_fragment_ssa_probe','native_fragment_stream_coverage','pixel_payload_recovery'))
-PROFILES = frozenset('frame/docs/protocols/scene-contribution-atlas-v'+str(n)+'.json' for n in (1,3))
-GENERATED = {'coverage.spv': {'bytes':7188,'sha256':'316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e'},
-             'legacy.spv': {'bytes':31384,'sha256':'44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49'}}
+PROFILES = frozenset()
+GENERATED = {'coverage.spv': {'bytes':7188,'sha256':'316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e'}}
+# Removal/recovery allowlist only. These files are never generated, installed or
+# selected by this version. An owned update removes them while retaining their
+# exact predecessors in the transaction so explicit Undo remains safe.
+RETIRED_FRAME_FILES = frozenset({'legacy.spv',
+    'tools/native_fragment_atlas_probe.py','tools/native_fragment_packed_output.py',
+    'tools/native_fragment_r1_presenter.py','tools/native_fragment_scene_presenter.py',
+    'docs/protocols/scene-contribution-atlas-v1.json',
+    'docs/protocols/scene-contribution-atlas-v3.json'})
 
 
 class Bundle:
@@ -105,7 +111,7 @@ class Bundle:
                        set(self.frame['files'])==TOOLS|PROFILES|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} and
                        self.frame['generated']==GENERATED and
                        {'frame/'+LIBRARY,'frame/tools/native_fragment_stream_coverage.py',
-                        'frame/tools/native_fragment_scene_presenter.py','frame/libsfnp_stream_launch.so',
+                        'frame/tools/native_fragment_count1_interface.py','frame/libsfnp_stream_launch.so',
                         'frame/tools/compositor_startup_health.py'}<=set(self.frame['files']) and
                        all(n in PROFILES|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} or re.fullmatch(r'frame/tools/[a-z0-9_]+[.]py',n)
                            for n in self.frame['files']), 'Unsupported Frame connection package.')
@@ -534,14 +540,11 @@ def generate_shaders(engine,bundle,original,stage):
     loaded={name:sys.modules.pop(name) for name in names if name in sys.modules}
     try:
         sys.path.insert(0,str(stage/'tools'))
-        modules=[]
-        for filename in ('native_fragment_stream_coverage.py','native_fragment_scene_presenter.py'):
-            name='sfnp_install_'+filename[:-3]
-            spec=importlib.util.spec_from_file_location(name,stage/'tools'/filename)
-            module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module);modules.append(module)
-        coverage,_=modules[0].transform(original)
-        legacy,_=modules[1].transform_robust(original,True,1)
-        outputs={'coverage.spv':coverage,'legacy.spv':legacy}
+        filename='native_fragment_stream_coverage.py';name='sfnp_install_'+filename[:-3]
+        spec=importlib.util.spec_from_file_location(name,stage/'tools'/filename)
+        module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module)
+        coverage,_=module.transform(original)
+        outputs={'coverage.spv':coverage}
         for name,raw in outputs.items():
             e.require(len(raw)==GENERATED[name]['bytes'] and e.sha(raw)==GENERATED[name]['sha256'],
                       'The locally generated shader differs from the reviewed output.')
@@ -610,8 +613,8 @@ class FrameInstall:
                   self.home/'.config/SteamFrameNativePassthrough/control.json',
                   self.config/'vulkan/implicit_layer.d'/MANIFEST,
                   self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf'}
-        names={LIBRARY,'libsfnp_stream_launch.so','coverage.spv','legacy.spv','receiver.conf','launch.conf',
-               'receiver.enable','pairings/active.json','install.json'}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}
+        names={LIBRARY,'libsfnp_stream_launch.so','coverage.spv','receiver.conf','launch.conf',
+               'receiver.enable','pairings/active.json','install.json'}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}|RETIRED_FRAME_FILES
         def allowed(path):
             if path in external:return True
             if not path.is_relative_to(self.root):return False
@@ -823,6 +826,19 @@ class FrameInstall:
             e.require(observed==op['after'] or observed is None and op['before'] is None and
                       op['after'] is not None and op['after']['kind']=='file',
                       'Changed Frame files were preserved; only owned components can be updated.')
+        # A retired receiver installed after the original bridge receipt must
+        # not become an untracked second layer. Refuse before staging or writes;
+        # the checked legacy removal path can revoke it independently first.
+        old_config=self.home/'.config/SteamFrameNativePassthrough'
+        retired_paths=(self.home/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf',
+                       self.home/'.local/share/vulkan/implicit_layer.d/VkLayer_SteamFrameNativePassthrough.json')
+        e.require(not any(os.path.lexists(path) for path in retired_paths),
+                  'A retired Frame receiver is active; remove it with checked maintenance before updating.')
+        old_control=old_config/'control.json'
+        if old_control.exists():
+            value=e.parse(e.read(old_control,4096,private=True))
+            e.require(value.get('schema')=='sfnp-user-control-v1' and value.get('enabled') is False,
+                      'A retired Frame receiver is active; remove it with checked maintenance before updating.')
         settings=current['settings'];preferences=e.parse(e.read(Path(settings['path']),2*1024*1024))
         for section,spec in settings['baseline'].items():
             values=preferences.get(section)
@@ -848,6 +864,11 @@ class FrameInstall:
         for op in operations:
             path=Path(op['path'])
             if path not in wanted:
+                if path.is_relative_to(self.root) and path.relative_to(self.root).as_posix() in RETIRED_FRAME_FILES:
+                    # The earlier exact-current comparison above proves that
+                    # this is our unchanged old artifact. Preserve op['before']
+                    # for uninstall and the checkpoint's full old state for Undo.
+                    op['after']=None
                 observed=self.tx.current(path)
                 if observed!=op['after']:changes.append({**op,'before':observed})
         pending={**current,'bundle':bundle.pin,'operations':operations,'phase':'pending'}

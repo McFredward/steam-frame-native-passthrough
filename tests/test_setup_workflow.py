@@ -125,6 +125,58 @@ class Files(fixtures.Tests):
         self.unit.checkpoint().finish();self.unit.undo(live=True)
         self.assertEqual(s.parse(s.read(self.fsettings)),initial);self.assertFalse((self.froot/b.LIBRARY).exists())
 
+    def seed_retired_bridge_files(self):
+        # Historical receipt from the previous paired package. Never execute an
+        # old shader generator; only the exact owned migration is under test.
+        state=self.unit.tx.state();before=s.read(self.unit.tx.path)
+        for name in sorted(b.RETIRED_FRAME_FILES):
+            path=self.froot/name;raw=('owned obsolete '+name).encode()
+            operation=self.unit.tx.operation(path,raw)
+            self.unit.tx.replace(operation);state['operations'].append(operation)
+        s.put(self.unit.tx.path,s.encoded(state),before)
+        self.unit.tx.commit()
+
+    def test_update_removes_retired_owned_files_and_undo_restores_exact_previous_version(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();self.seed_retired_bridge_files()
+        receipt=s.read(self.unit.tx.path)
+        previous={self.froot/name:s.read(self.froot/name) for name in b.RETIRED_FRAME_FILES}
+        next_bundle=self.newer_bundle();self.active=True
+        with self.fake_generation():
+            self.unit.install(next_bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        self.assertTrue(all(not path.exists() for path in previous))
+        self.assertTrue((self.froot/'coverage.spv').exists())
+        self.assertTrue(self.unit.inventory(next_bundle)['files_current']);self.assertTrue(self.active)
+        self.unit.checkpoint().restore();self.unit.checkpoint().verify_restored()
+        self.assertEqual(s.read(self.unit.tx.path),receipt)
+        self.assertTrue(all(s.read(path)==raw for path,raw in previous.items()))
+        self.unit.checkpoint().finish(restored=True)
+
+    def test_changed_retired_file_refuses_update_before_any_write(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();self.seed_retired_bridge_files();next_bundle=self.newer_bundle()
+        path=self.froot/'legacy.spv';s.put(path,b'foreign changed shader',s.read(path))
+        receipt=s.read(self.unit.tx.path)
+        with self.fake_generation(),self.assertRaisesRegex(s.SetupError,'Changed Frame files'):
+            self.unit.install(next_bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.assertEqual(s.read(path),b'foreign changed shader');self.assertEqual(s.read(self.unit.tx.path),receipt)
+        self.assertFalse(self.unit.checkpoint().path.exists())
+
+    def test_update_refuses_a_retired_receiver_reactivated_after_bridge_install(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();next_bundle=self.newer_bundle()
+        # Historical helper always used home/.config, independent of XDG.
+        self.unit.config=self.fhome/'different-xdg-config'
+        old=self.fhome/'.config/systemd/user/steamvr.service.d/80-steam-frame-native-passthrough.conf'
+        s.put(old,b'[Service]\n# separately installed old receiver\n');receipt=s.read(self.unit.tx.path)
+        image=s.read(self.froot/b.LIBRARY)
+        with self.fake_generation(),self.assertRaisesRegex(s.SetupError,'retired Frame receiver is active'):
+            self.unit.install(next_bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.assertEqual(s.read(old),b'[Service]\n# separately installed old receiver\n')
+        self.assertEqual(s.read(self.unit.tx.path),receipt);self.assertEqual(s.read(self.froot/b.LIBRARY),image)
+        self.assertFalse(self.unit.checkpoint().path.exists())
+
     def test_failed_frame_update_restores_previous_version_and_transaction(self):
         with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
         self.unit.tx.commit();receipt=s.read(self.unit.tx.path);image=s.read(self.froot/b.LIBRARY)

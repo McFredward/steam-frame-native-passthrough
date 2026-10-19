@@ -80,7 +80,8 @@ class Tests(unittest.TestCase):
         raw,receipt=self.build();self.assertEqual(receipt['readiness'],'prototype');self.assertFalse(receipt['native_installable']);self.assertFalse(receipt['hardware_verified']);self.assertFalse(receipt['online_bootstrap_currently_accepts_schema'])
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             names=set(z.namelist());self.assertFalse(any(n.endswith('.spv') for n in names))
-            self.assertIn('frame/docs/protocols/scene-contribution-atlas-v3.json',names)
+            self.assertIn('frame/tools/native_fragment_count1_interface.py',names)
+            self.assertFalse(any('scene-contribution-atlas' in n or 'scene_presenter' in n or n.endswith('legacy.spv') for n in names))
             self.assertIn('setup/stream_bridge_install.py',names);self.assertIn('LICENSE',names)
             outer=json.loads(z.read('bootstrap-package.json'));self.assertEqual(outer['schema'],p.BOOTSTRAP);self.assertEqual(outer['readiness'],'prototype')
             self.assertEqual(set(outer['files']),names-{'bootstrap-package.json'})
@@ -117,7 +118,7 @@ class Tests(unittest.TestCase):
     def test_source_change_and_missing_transitive_source_refused(self):
         source=self.root/'setup/stream_bridge_install.py';original=source.read_bytes();source.write_bytes(original+b'\n# fixture edit\n')
         with self.assertRaisesRegex(ValueError,'differ'):self.build()
-        source.write_bytes(original);self.profile['source_pins'].pop('docs/protocols/scene-contribution-atlas-v1.json');self.save_profile()
+        source.write_bytes(original);self.profile['source_pins'].pop('tools/native_fragment_count1_interface.py');self.save_profile()
         with self.assertRaisesRegex(ValueError,'transitive'):self.build()
 
     def test_tampered_native_and_wrong_arch_refused(self):

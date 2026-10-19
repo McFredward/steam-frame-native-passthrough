@@ -33,7 +33,7 @@ ACTIVE = 'sfnp-active-pairing-v1'
 INSPECTION = 'sfnp-setup-inspection-v1'
 MAINTENANCE = 'sfnp-setup-maintenance-v1'
 MAINTENANCE_HELPER = 'setup/frame_native_uninstall.py'
-MAINTENANCE_PIN = {'bytes':42169,'sha256':'396b26b1bdeea0f64eb235b0cf6fb91bddd8685d8b0a27ee425a174f7e9f18c1'}
+MAINTENANCE_PIN = {'bytes': 28921, 'sha256': '2a85a9469694e8077ddb31d35231551a2a1e38044adba96dc91e9a13d2caa503'}
 MAX_FILE = 32 * 1024 * 1024
 MAX_TOTAL = 64 * 1024 * 1024
 MAX_OUTPUT = 128 * 1024
@@ -344,16 +344,7 @@ class Bundle:
         require(expected == pins, 'Frame runtime pins differ from package profile.')
 
     def admit(self, pc):
-        require(self.value['readiness'] == 'release', 'Prototype bundle: checks and plans only; no installation or pairing.')
-        require(pc == 'windows-x86_64', 'Native Linux sender provider is not reviewed; no Windows DLL will be installed on Linux.')
-        require(pc in self.platforms and all(item['reviewed'] and item['native_bridge']
-                for item in (self.platforms[pc], self.frame)), 'Both reviewed native bridge roles are required.')
-        marker = 'frame-package/bridge-component.json'
-        require(marker in self.frame['files'], 'A legacy Frame scene-atlas package is not a negotiated native receiver.')
-        component = parse(self.files[marker])
-        require(component == {'schema':'sfnp-bridge-component-v1','role':'receiver',
-                              'bridge_protocol':self.protocol,'provider':'vrlink-complete-au-v1'},
-                'Negotiated Frame receiver variant differs from the reviewed bundle.')
+        raise SetupError('Retired setup bundle: use the paired stream-bridge release. No legacy transport can be installed.')
 
     def installed_frame_files(self):
         package = parse(self.files['frame-package/package.json'])
@@ -688,51 +679,7 @@ def inventory(request):
 def module(path,name):
  spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
 def apply(request):
- need(request['readiness']=='release','prototype refuses all writes')
- removing=request['action']=='uninstall'
- if removing:
-  if (HOME/'.config/SteamFrameNativePassthrough/install.json').exists():need(owned_receipt() is not None,'unknown owned receipt')
- else:runtime(request['runtime_files'])
- files=request['files'];need(type(files)is dict and 1<=len(files)<=64,'file bound')
- contents={};total=0
- for name,item in files.items():
-  n=rel(name);need(n.startswith('frame-package/'),'package root');b=base64.b64decode(item['data'],validate=True);total+=len(b)
-  need(total<=67108864 and len(b)==item['bytes'] and digest(b)==item['sha256'],'payload pin mismatch');contents[n]=b
- need('frame-package/tools/native_passthrough_setup.py' in contents,'setup missing')
- pair=request.get('pairing')
- if not removing:need(type(pair)is dict and set(pair)=={'schema','pair_id','key_hex','role','protocol_major'} and pair['schema']=='sfnp-pairing-v1' and pair['role']=='receiver' and pair['protocol_major']==1 and re.fullmatch('[0-9a-f]{32}',pair['pair_id']) and re.fullmatch('[0-9a-f]{64}',pair['key_hex']),'pairing contract')
- base=HOME/'.local/share/steam-link-native-passthrough/staging';safe(base,HOME,True)
- stage=base/secrets.token_hex(16);stage.mkdir(mode=0o700)
- written={}
- try:
-  for name,b in contents.items():p=stage/name;put(p,b);written[p]=b
-  package=stage/'frame-package'
-  if not removing:
-   verifier=module(package/'tools/prepare_native_release.py','sfnp_wizard_verifier');verifier.verify_package(package)
-  # Removal uses the checked helper and owned receipt, not a new runtime grant.
-  # Every activation/credential publication still requires the real verifier.
-  setup=module(package/'tools/native_passthrough_setup.py','sfnp_wizard_setup');unit=setup.Setup(HOME)
-  with unit.locked():result=unit.uninstall() if request['action']=='uninstall' else unit.install(package)
-  if request['action']=='uninstall':return {'reason':result.get('reason'),'automatic_restart':False}
-  pairdir=HOME/'.config/steam-link-native-passthrough/pairings';safe(pairdir,HOME,True)
-  key=pairdir/(pair['pair_id']+'.json');payload=data(pair)
-  old=raw(key) if key.exists() else None;need(old is None or json.loads(old)==pair,'foreign credential preserved')
-  active=pairdir/'active.json';previous=raw(active) if active.exists() else None
-  journal=pairdir/'transaction.json';need(not journal.exists(),'pending pairing repair required')
-  transaction={'token':request['transaction'],'pair_id':pair['pair_id'],'created':old is None,'previous':base64.b64encode(previous).decode() if previous else None,'key_sha256':digest(payload)}
-  put(journal,data(transaction))
-  if old is None:put(key,payload)
-  put(active,data({'schema':'sfnp-active-pairing-v1','pair_id':pair['pair_id']}),previous)
-  return {'reason':result.get('reason'),'pair_id':pair['pair_id'],'automatic_restart':False}
- finally:
-  for p,b in sorted(written.items(),key=lambda i:len(i[0].parts),reverse=True):
-   if p.exists() and raw(p)==b:p.unlink()
-  for p in sorted(stage.rglob('*'),key=lambda p:len(p.parts),reverse=True):
-   if p.is_dir():
-    try:p.rmdir()
-    except OSError:pass
-  try:stage.rmdir()
-  except OSError:pass
+ need(False,'retired setup RPC: use the paired stream-bridge release')
 def maintenance_plan(request):
  receipt=owned_receipt()
  if receipt is None:return {'schema':'sfnp-maintenance-plan-v1','installed':False,'can_remove':False,'receipt_sha256':None}
@@ -755,7 +702,7 @@ def maintenance_plan(request):
 def maintenance_remove(request):
  plan=maintenance_plan(request)
  need(plan.get('can_remove') is True and plan['receipt_sha256']==request['receipt_sha256'],'changed removal plan')
- item=request['helper'];need(set(item)=={'bytes','sha256','data'} and item['bytes']==42169 and item['sha256']=='396b26b1bdeea0f64eb235b0cf6fb91bddd8685d8b0a27ee425a174f7e9f18c1','unknown removal helper')
+ item=request['helper'];need(set(item)=={'bytes','sha256','data'} and item['bytes']==28921 and item['sha256']=='2a85a9469694e8077ddb31d35231551a2a1e38044adba96dc91e9a13d2caa503','unknown removal helper')
  payload=base64.b64decode(item['data'],validate=True)
  need(len(payload)==item['bytes'] and digest(payload)==item['sha256'],'removal helper pin')
  base=HOME/'.local/share/steam-link-native-passthrough/maintenance';safe(base,HOME,True)
@@ -907,60 +854,7 @@ class Local:
         require(code == 0, 'OpenVR registration failed. Owned payload/receipt retained for repair.')
 
     def install(self, bundle, info):
-        item = bundle.platforms[info['platform']]
-        tool = self.verify_tool(info, item['vrpathreg'])
-        old = self.state()
-        expected = old['files'] if old else {}
-        planned = {name: bundle.files[name] for name in item['files']}
-        if old and any(not (self.root / relative(name)).exists() or
-                       read(self.root / relative(name)) != raw for name, raw in planned.items()):
-            require(not self.runner.runtime_running(), 'Close SteamVR before replacing installed provider code, then run again.')
-        # Complete collision check before the first local write.
-        driver = self.root / 'pc-provider'
-        if driver.exists():
-            present = {str(p.relative_to(self.root)).replace('\\','/') for p in driver.rglob('*') if p.is_file() or p.is_symlink()}
-            require(present <= set(expected), 'Unknown provider files preserved.')
-        for name, pin in expected.items():
-            path = self.root / relative(name)
-            if path.exists():
-                require(sha(read(path)) == pin['sha256'], 'Changed provider payload preserved.')
-        code, _ = self.runner.run([str(tool), 'finddriver', DRIVER_NAME], timeout=10)
-        require(code in (0, 1), 'Driver collision query failed.')
-        paths = parse(read(self.registry, 128 * 1024)) if self.registry.exists() else {}
-        for entry in paths.get('external_drivers', []):
-            if entry == str(driver):
-                continue
-            manifest = Path(entry) / 'driver.vrdrivermanifest'
-            if manifest.exists():
-                require(parse(read(manifest, 128 * 1024)).get('name') != DRIVER_NAME, 'Another same-name OpenVR driver is registered; it was preserved.')
-        undo = []
-        try:
-            for name, raw in planned.items():
-                path = self.root / relative(name)
-                before = read(path) if path.exists() else None
-                if before != raw:
-                    put(path, raw, before); undo.append((path, raw, before))
-            receipt = encoded({'schema': STATE, 'driver': str(driver), 'manifest_sha256': bundle.pin,
-                               'files': item['files'], 'vrpathreg': item['vrpathreg'], 'bridge_protocol': bundle.protocol})
-            state_path = self.root / 'install.json'
-            previous = read(state_path) if state_path.exists() else None
-            if not info['registered']:
-                self.register(tool, 'adddriver')
-                require(self.inventory()['registered'], 'Registration readback did not contain the owned provider.')
-            if previous != receipt:
-                put(state_path, receipt, previous); undo.append((state_path, receipt, previous))
-        except BaseException:
-            if not info['registered']:
-                try:
-                    self.register(tool, 'removedriver')
-                except SetupError:
-                    pass
-            for path, after, before in reversed(undo):
-                if before is None:
-                    remove_owned(path, after)
-                else:
-                    put(path, before, after)
-            raise
+        raise SetupError('Retired setup bundle: use the paired stream-bridge release.')
 
     def uninstall(self, info):
         state = self.state()
@@ -1050,75 +944,7 @@ def plan(pc, frame, bundle):
 
 
 def apply(action, bundle, local, remote, pc, frame, challenge):
-    require(bundle is not None, 'A verified release bundle is required for Frame actions.')
-    bundle.admit(pc['platform'])
-    require(remote is not None and frame is not None and frame.get('architecture') in ('aarch64','arm64'),
-            'A verified Frame SSH inventory is required.')
-    if action == 'uninstall':
-        require(not frame.get('installed') or frame.get('owned_receipt_valid'),
-                'Frame ownership receipt could not be verified. Use the checked Frame setup emergency-off and manual recovery; no complete removal is claimed.')
-    else:
-        require(frame.get('runtime_compatible'), 'A compatible Frame SSH inventory is required.')
-    local.verify_tool(pc, bundle.platforms[pc['platform']]['vrpathreg'])
-    same_pair = pair_matches(local, frame, challenge) if action != 'uninstall' else False
-    require(same_pair or action in ('install', 'repair') and not (pc['active_pair'] or frame.get('active_pair')) or
-            action == 'repair' or action == 'uninstall', 'Pairing mismatch: choose explicit Repair; old credentials are preserved.')
-    item = bundle.platforms[pc['platform']]
-    if action != 'uninstall' and same_pair and pc['installed'] and pc['registered'] and \
-            pc['state']['manifest_sha256'] == bundle.pin and \
-            frame.get('files_current') is True and \
-            frame.get('package_sha256') == sha(bundle.files['frame-package/package.json']) and \
-            frame.get('bridge_component') == parse(bundle.files['frame-package/bridge-component.json']) and \
-            all((local.root / relative(name)).exists() and sha(read(local.root / relative(name))) == pin['sha256']
-                for name, pin in item['files'].items()):
-        return {'reason':'current','pair_id':pc['active_pair'],'changed':False,'automatic_restart':False}
-    pair = None if action == 'uninstall' else local.pairing(pc['active_pair']) if same_pair else {
-        'schema': PAIR, 'pair_id': secrets.token_hex(16), 'key_hex': secrets.token_hex(32), 'role': 'producer', 'protocol_major': 1}
-    transaction = secrets.token_hex(16)
-    request = {'command': 'apply', 'action': action, 'readiness': bundle.value['readiness'],
-               'runtime_files': bundle.frame['runtime_files'], 'transaction': transaction,
-               'pairing': {**pair, 'role': 'receiver'} if pair else None, 'files': {name: {
-                   **bundle.frame['files'][name], 'data': base64.b64encode(bundle.files[name]).decode()}
-                   for name in bundle.frame['files']}}
-    local.apply_started = True  # Only after all release/payload/capability checks.
-    # Staging+real Frame verifier precede activation, PC registration and pairing.
-    try:
-        result = remote.call(request)
-    except BaseException:
-        # No journal is a safe no-op; a partially written owned pair can be undone.
-        if action != 'uninstall':
-            remote.call({'command': 'rollback-pair', 'transaction': transaction})
-        raise
-    if action == 'uninstall':
-        require(result.get('reason') in ('uninstalled', 'not_installed'),
-                'Frame removal is pending. Use the checked Frame setup emergency-off, stop SteamVR manually and retry Uninstall; no complete removal is claimed.')
-        local.uninstall(pc)
-        return {'reason': 'uninstalled', 'automatic_restart': False}
-    require(result.get('reason') == 'installed' and result.get('pair_id') == pair['pair_id'], 'Frame setup did not commit its checked payload.')
-    active = local.root / 'pairings/active.json'
-    key = local.root / 'pairings' / (pair['pair_id'] + '.json')
-    old_active = read(active, private=True) if active.exists() else None
-    old_key = read(key, private=True) if key.exists() else None
-    key_bytes = encoded(pair)
-    try:
-        local.install(bundle, pc)
-        if old_key is None:
-            put(key, key_bytes)
-        else:
-            require(parse(old_key) == pair, 'Existing pairing credential differs; it was preserved.')
-        put(active, encoded({'schema': ACTIVE, 'pair_id': pair['pair_id']}), old_active)
-        remote.call({'command': 'commit-pair', 'transaction': transaction})
-    except BaseException:
-        if active.exists() and parse(read(active)).get('pair_id') == pair['pair_id']:
-            if old_active is None:
-                remove_owned(active, read(active))
-            else:
-                put(active, old_active, read(active))
-        if old_key is None and key.exists():
-            remove_owned(key, key_bytes)
-        remote.call({'command': 'rollback-pair', 'transaction': transaction})
-        raise
-    return {'reason': 'current', 'pair_id': pair['pair_id'], 'automatic_restart': False}
+    raise SetupError('Retired setup bundle: use the paired stream-bridge release. For old installations use checked maintenance removal.')
 
 
 def load_presentation():

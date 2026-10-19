@@ -68,7 +68,6 @@ class Tests(unittest.TestCase):
                   'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll':b'fixture provider, never loaded',
                   'frame/'+b.LIBRARY:bytes(elf),'frame/libsfnp_stream_launch.so':bytes(elf),
                   'frame/tools/native_fragment_stream_coverage.py':b'# fixture module\n',
-                  'frame/tools/native_fragment_scene_presenter.py':b'# fixture module\n',
                   'frame/tools/compositor_startup_health.py':b'# fixture module\n'}
         for name in b.PROFILES:payloads[name]=b'{}\n'
         for name in b.TOOLS:payloads.setdefault(name,b'# owned fixture source, not native execution\n')
@@ -91,7 +90,7 @@ class Tests(unittest.TestCase):
     def fake_generation(self):
         # Only the transaction boundary is exercised here. Actual pinned shader
         # derivation is covered by the parent's separate native GPU evidence.
-        with mock.patch.object(b,'generate_shaders',return_value={'coverage.spv':b'fixture coverage','legacy.spv':b'fixture legacy'}):yield
+        with mock.patch.object(b,'generate_shaders',return_value={'coverage.spv':b'fixture coverage'}):yield
 
     def test_prototype_never_applies(self):
         self.manifest['readiness']='prototype';s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'))
@@ -191,22 +190,21 @@ class Tests(unittest.TestCase):
 
 
 
-    def test_generation_stages_protocol_json_and_ignores_cached_tools(self):
+    def test_generation_is_coverage_only_and_ignores_cached_tools(self):
         import types,sys
-        coverage=b'owned fixture coverage';legacy=b'owned fixture legacy'
+        coverage=b'owned fixture coverage'
         files={name:b'# unused own fixture source\n' for name in b.TOOLS}
         files['frame/tools/native_fragment_ssa_probe.py']=b'IDENTITY="owned"\n'
         files['frame/tools/native_fragment_stream_coverage.py']=b'import native_fragment_ssa_probe as s\ndef transform(original):\n assert s.IDENTITY=="owned"\n return b"owned fixture coverage",{}\n'
-        files['frame/tools/native_fragment_scene_presenter.py']=b'from pathlib import Path\ndef transform_robust(original,enabled,count):\n root=Path(__file__).resolve().parents[1]\n for version in (1,3):\n  assert (root/"docs/protocols"/("scene-contribution-atlas-v"+str(version)+".json")).read_bytes()==b"owned profile"\n return b"owned fixture legacy",{}\n'
         for name in b.PROFILES:files[name]=b'owned profile'
         bundle=types.SimpleNamespace(frame={'files':sorted(files)},files=files)
-        pins={name:{'bytes':len(raw),'sha256':s.sha(raw)} for name,raw in [('coverage.spv',coverage),('legacy.spv',legacy)]}
+        pins={name:{'bytes':len(raw),'sha256':s.sha(raw)} for name,raw in [('coverage.spv',coverage)]}
         cached=types.ModuleType('native_fragment_ssa_probe');cached.IDENTITY='foreign';cached.__file__='/foreign/cached.py'
         previous=sys.modules.get('native_fragment_ssa_probe');sys.modules['native_fragment_ssa_probe']=cached
         try:
             with tempfile.TemporaryDirectory(prefix='sfnp-own-source-') as stage,mock.patch.object(b,'GENERATED',pins):
                 result=b.generate_shaders(s,bundle,b'owned fixture input',Path(stage))
-            self.assertEqual(result,{'coverage.spv':coverage,'legacy.spv':legacy});self.assertIs(sys.modules['native_fragment_ssa_probe'],cached)
+            self.assertEqual(result,{'coverage.spv':coverage});self.assertIs(sys.modules['native_fragment_ssa_probe'],cached)
         finally:
             if previous is None:sys.modules.pop('native_fragment_ssa_probe',None)
             else:sys.modules['native_fragment_ssa_probe']=previous
