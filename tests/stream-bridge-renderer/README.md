@@ -44,6 +44,29 @@ or post-submit mutex failure and must fail the focused recovery assertion.
 that cannot initialize TSan's shadow mapping is explicitly recorded as
 unavailable, without claiming race-free execution.
 
+`--continuous-only` follows 128 successive source frames through the production
+pool's eight slots. Its public Vulkan fake executes actual recorded staging
+copies and checks each changed R8 marker in both native eye draws, including
+legal flags=0 repeats. Every active exact frame must retain coverage; explicit
+inactive `None` intervals are a separate control with precisely matching opaque
+positions. A real cold poll of the previous tail fence stays blocked through
+the next initialized frame's recording, copy, reservation, original submit and
+tail submission, for all three dispatches. Reintroducing a cold mutex at acquire,
+copy or reservation must fail this whole-frame assertion.
+
+Hot acquisition owns a recording reference before reading any slot metadata.
+The cold writer CAS-claims zero references before replacement and rechecks GPU
+ownership; state/layout and GPU counts are atomic. Queue copies own
+`Pending -> Submitting -> Copying`; fixed tickets own `Free -> Initializing`
+before publishing their immutable reservation. A worker poll cannot take away
+an otherwise ready exact frame. Separate pool tests overlap 4,088 cold uploads
+with retained hot references and block an actual `Submitting` copy while cold
+reap/duplicate upload and seven other masks proceed. First-use layout remains
+strictly completion-proven; the warmed continuous test is not a promise that
+an uninitialized first upload can be sampled. Source/decoder admission must
+also prevent an active frame without its exact coverage from reaching this
+stage. This fixture does not certify the hardware's message timing or picture.
+
 `--timeline-only` reproduces the production renderer's former blanket refusal
 of a legal `VkTimelineSemaphoreSubmitInfo`: a current selected recording never
 reached a guarded submit. The renderer now shares the original transaction's

@@ -8,11 +8,11 @@ The existing standalone native-fragment and R8 GPU proofs remain separate.
 import argparse, hashlib, json, pathlib, shutil, subprocess
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--thread-sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');p.add_argument('--reservation-recovery-only',action='store_true');a=p.parse_args()
- if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only,a.reservation_recovery_only))>1:p.error('choose one focused subset')
+ p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--thread-sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');p.add_argument('--reservation-recovery-only',action='store_true');p.add_argument('--continuous-only',action='store_true');a=p.parse_args()
+ if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only,a.reservation_recovery_only,a.continuous_only))>1:p.error('choose one focused subset')
  here=pathlib.Path(__file__).resolve().parent;root=a.native_root.resolve();out=a.output.resolve();cache=out/'cache';cache.mkdir(parents=True,exist_ok=True);source=out/'source';source.mkdir(exist_ok=True)
  fixtures=here/'fixture.cpp';shutil.copy2(fixtures,source/'fixture.cpp')
- files=['layer/stream_bridge_renderer.cpp','layer/stream_bridge_renderer.h','layer/stream_bridge_process.h','layer/stream_bridge_artifacts.h','layer/stream_bridge_coverage_gpu.cpp','layer/stream_bridge_coverage_gpu.h','layer/native_presenter_pipeline.h','layer/submit_timeline_contract.h']
+ files=['layer/stream_bridge_renderer.cpp','layer/stream_bridge_renderer.h','layer/stream_bridge_process.h','layer/stream_bridge_artifacts.h','layer/stream_bridge_coverage_gpu.cpp','layer/stream_bridge_coverage_gpu.h','layer/native_presenter_pipeline.h','layer/submit_timeline_contract.h','tests/stream-bridge-coverage-gpu/pool_tests.cpp']
  pins={}
  for relative in files:
   original=root/relative;target=source/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,target);pins[relative]=hashlib.sha256(original.read_bytes()).hexdigest()
@@ -24,6 +24,7 @@ def main():
  if a.telemetry_only:args+=['telemetry']
  if a.timeline_only:args+=['timeline']
  if a.reservation_recovery_only:args+=['reservation-recovery']
+ if a.continuous_only:args+=['continuous']
  input_pins={str(path.resolve()):hashlib.sha256(path.read_bytes()).hexdigest() for path in [a.vs,a.ps,a.coverage]}
  def run(name,production,sanitize=False,negative=False,thread_sanitize=False):
   binary=cache/name;command=['c++','-std=c++17','-O1','-g','-Wall','-Wextra','-Wpedantic','-Werror','-Wno-missing-field-initializers','-I'+str(source),'-I'+str(root),'-I'+str(root/'layer'),'-pthread']
@@ -55,18 +56,22 @@ def main():
    'native-handle-replaced':('entry->layout=coverageLayout;create(p.coverageWords,entry->layout,entry->coverage);','entry->layout=coverageLayout;create(p.coverageWords,entry->layout,entry->coverage);original=entry->coverage;'),
    'unsupported-submit-poisons-future':('if(!supported){','if(!supported){p.pool.prepareSubmit(queue,nullptr,gpu::MaximumSlots+1);'),
    'pending-misreported-ready':('out.ready=gpu.ready;','out.ready=gpu.ready+gpu.pending;'),
-   'pre-reservation-poisons-pool':('if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}', 'if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){for(std::size_t i=0;ls&&i<n&&i<MaximumSlots;++i)if(ls[i])p.slots[ls[i].slot].quarantine.store(true);++p.refusals;return {};}'),
+   'pre-reservation-poisons-pool':('auto&p=*impl_;if(!n)return {};', 'auto&p=*impl_;if(!n)return {};std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){for(std::size_t i=0;ls&&i<n&&i<MaximumSlots;++i)if(ls[i])p.slots[ls[i].slot].quarantine.store(true);return {};}'),
    'post-submit-mutex-poisons-pool':('if(!p.prepared||q!=p.queue||!ls||!n||n>MaximumSlots){refuse();return;}', 'std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){refuse();return;}if(!p.prepared||q!=p.queue||!ls||!n||n>MaximumSlots){refuse();return;}'),
+   'acquire-takes-cold-mutex':('return impl_->acquire(f,true);','std::unique_lock<std::mutex> lock(impl_->gate,std::try_to_lock);if(!lock)return {};return impl_->acquire(f,true);'),
+   'copy-takes-cold-mutex':('auto&p=*impl_;if(!p.prepared||q!=p.queue)return;', 'auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared||q!=p.queue)return;'),
+   'reserve-takes-cold-mutex':('auto&p=*impl_;if(!n)return {};', 'auto&p=*impl_;if(!n)return {};std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock)return {};'),
    'canonical-timeline-rejected':('if(timeline==stream_bridge_submit::TimelineStatus::Extension)why=SubmitRefusal::Extension;','if(info.pNext)why=SubmitRefusal::Extension;'),
    'none-misreported-mask':('++p.counts.maskNone;return;','++p.counts.maskDecoded;return;'),
   }
   if a.artifact_fallback_only:mutations={}
   if a.reservation_recovery_only:mutations={name:value for name,value in mutations.items() if name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool')}
+  if a.continuous_only:mutations={name:value for name,value in mutations.items() if name in ('acquire-takes-cold-mutex','copy-takes-cold-mutex','reserve-takes-cold-mutex')}
   if a.timeline_only:mutations={name:value for name,value in mutations.items() if name=='canonical-timeline-rejected'}
   if a.fallback_recovery_only:mutations={name:value for name,value in mutations.items() if name=='unsupported-submit-poisons-future'}
   if a.telemetry_only:mutations={name:value for name,value in mutations.items() if name in ('pending-misreported-ready','none-misreported-mask')}
   for name,(old,new) in mutations.items():
-   pool_mutant=name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool');original_text=pool.read_text() if pool_mutant else text
+   pool_mutant=name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool','acquire-takes-cold-mutex','copy-takes-cold-mutex','reserve-takes-cold-mutex');original_text=pool.read_text() if pool_mutant else text
    if old not in original_text:raise AssertionError('semantic control anchor missing: '+name)
    path=source/(name+'.cpp');path.write_text(original_text.replace(old,new,1))
    if pool_mutant:
@@ -74,7 +79,7 @@ def main():
     try:results[name]=run(name,renderer,negative=True)
     finally:pool=original_pool
    elif name=='unsupported-submit-poisons-future':
-    original_pool=pool;pool_text=pool.read_text();anchor=mutations['pre-reservation-poisons-pool'][0] if 'pre-reservation-poisons-pool' in mutations else 'if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}'
+    original_pool=pool;pool_text=pool.read_text();anchor='if(!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}'
     if anchor not in pool_text:raise AssertionError('unsupported submit whole-pool causal anchor missing')
     pool=source/(name+'-pool.cpp');pool.write_text(pool_text.replace(anchor,anchor.replace('++p.refusals;', 'if(!ls||n>MaximumSlots)for(auto& s:p.slots)s.quarantine.store(true);++p.refusals;'),1))
     try:results[name]=run(name,path,negative=True)

@@ -34,6 +34,12 @@ struct Driver:Fake {
  struct Update{std::uint64_t buffer;VkDeviceSize offset;float value;bool fill=false;};
  std::map<std::uint64_t,std::vector<Update>> commands;
  std::map<std::uint64_t,std::uint64_t> boundMemory,setBuffer,appControl;std::map<std::uint64_t,VkDeviceSize> bufferSizes,setOffset,appOffset;
+ struct Copy{VkBuffer buffer;VkImage image;VkDeviceSize offset;std::size_t bytes;};
+ std::map<std::uint64_t,std::vector<Copy>> imageCopies;
+ std::map<std::uint64_t,std::uint64_t> viewImage,coverageView;
+ std::map<std::uint64_t,std::vector<std::uint8_t>> imageBytes;
+ std::map<std::uint64_t,std::vector<VkDescriptorSet>> appMasks;
+ std::vector<std::vector<std::uint8_t>> sampledMasks;std::vector<VkCommandBuffer> executedCommands;
  std::vector<float> reads;std::vector<VkFence> originalFences;std::vector<std::size_t> nativeSubmitCounts;std::vector<const void*> originalNexts,allForwardedExtensions;std::vector<VkFence> allSubmitFences;
  std::vector<VkSubmitInfo> lastSubmitInfos;std::vector<VkCommandBuffer> lastSubmitCommands;
  std::vector<VkPipeline> createdPipelines,destroyedPipelines;
@@ -51,8 +57,11 @@ struct Driver:Fake {
  static VkResult VKAPI_CALL bind(VkDevice d,VkBuffer buffer,VkDeviceMemory memory,VkDeviceSize at){self->boundMemory[number(buffer)]=number(memory);return Fake::bindBuffer(d,buffer,memory,at);}
  static void VKAPI_CALL update(VkDevice d,std::uint32_t n,const VkWriteDescriptorSet* writes,std::uint32_t copies,const VkCopyDescriptorSet* c){
   if(n==1&&writes->descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER){check(writes->pBufferInfo&&writes->pBufferInfo->range==16,"control descriptor is sixteen-byte UBO");self->setBuffer[number(writes->dstSet)]=number(writes->pBufferInfo->buffer);self->setOffset[number(writes->dstSet)]=writes->pBufferInfo->offset;check(writes->pBufferInfo->offset%256==0,"each control descriptor has independent aligned byte offset");return;}
+  if(n==1&&writes->descriptorType==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER&&writes->pImageInfo)self->coverageView[number(writes->dstSet)]=number(writes->pImageInfo->imageView);
   Fake::update(d,n,writes,copies,c);
  }
+ static VkResult VKAPI_CALL createView(VkDevice device,const VkImageViewCreateInfo* info,const VkAllocationCallbacks* allocator,VkImageView* view){const auto result=Fake::createImageView(device,info,allocator,view);if(result==VK_SUCCESS)self->viewImage[number(*view)]=number(info->image);return result;}
+ static void VKAPI_CALL copyImage(VkCommandBuffer cb,VkBuffer buffer,VkImage image,VkImageLayout layout,std::uint32_t count,const VkBufferImageCopy* regions){Fake::copy(cb,buffer,image,layout,count,regions);check(!regions->bufferRowLength&&!regions->bufferImageHeight,"trace copy uses production tightly packed R8 rows");auto& copies=self->imageCopies[number(cb)];copies.clear();copies.push_back({buffer,image,regions->bufferOffset,std::size_t(regions->imageExtent.width)*regions->imageExtent.height});}
  static void VKAPI_CALL barrier(VkCommandBuffer cb,VkPipelineStageFlags src,VkPipelineStageFlags dst,VkDependencyFlags dep,std::uint32_t nm,const VkMemoryBarrier* m,std::uint32_t nb,const VkBufferMemoryBarrier* b,std::uint32_t ni,const VkImageMemoryBarrier* image){
   if(nb){check(nb==1&&b->srcQueueFamilyIndex==VK_QUEUE_FAMILY_IGNORED&&b->dstQueueFamilyIndex==VK_QUEUE_FAMILY_IGNORED,"guard queue ownership not guessed");check((src==VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT&&dst==VK_PIPELINE_STAGE_TRANSFER_BIT&&b->srcAccessMask==VK_ACCESS_UNIFORM_READ_BIT&&b->dstAccessMask==VK_ACCESS_TRANSFER_WRITE_BIT)||(src==VK_PIPELINE_STAGE_TRANSFER_BIT&&dst==VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT&&b->srcAccessMask==VK_ACCESS_TRANSFER_WRITE_BIT&&b->dstAccessMask==VK_ACCESS_UNIFORM_READ_BIT),"guard has read-write and write-read GPU visibility");++self->barrierReads;return;}
   Fake::barrier(cb,src,dst,dep,nm,m,nb,b,ni,image);
@@ -66,7 +75,7 @@ struct Driver:Fake {
  static VkResult VKAPI_CALL freeSets(VkDevice,VkDescriptorPool,std::uint32_t,const VkDescriptorSet*){return VK_SUCCESS;}
  static VkResult VKAPI_CALL idle(VkDevice){return VK_SUCCESS;}
  static VkResult VKAPI_CALL fenceStatus(VkDevice device,VkFence fence){self->insideFenceStatus=true;while(self->blockFenceStatus.load())std::this_thread::yield();self->insideFenceStatus=false;return Fake::fenceStatus(device,fence);}
- static void execute(VkCommandBuffer cb){for(const auto& update:self->commands[number(cb)]){auto& bytes=self->memory.at(self->boundMemory.at(update.buffer));if(update.fill){check(self->bufferSizes.at(update.buffer)<=bytes.size(),"actual shared UBO fits queried allocation");std::memset(bytes.data(),0,std::size_t(self->bufferSizes.at(update.buffer)));}else{check(update.offset+4<=bytes.size(),"guard update inside allocation");std::memcpy(bytes.data()+update.offset,&update.value,4);}}auto app=self->appControl.find(number(cb));if(app!=self->appControl.end()){float v=0;auto& bytes=self->memory.at(self->boundMemory.at(app->second));std::memcpy(&v,bytes.data()+self->appOffset.at(number(cb)),4);self->reads.push_back(v);}}
+ static void execute(VkCommandBuffer cb){self->executedCommands.push_back(cb);for(const auto& copy:self->imageCopies[number(cb)]){const auto& bytes=self->memory.at(self->boundMemory.at(number(copy.buffer)));check(copy.offset+copy.bytes<=bytes.size(),"actual R8 copy is within its mapped staging allocation");self->imageBytes[number(copy.image)]={bytes.begin()+copy.offset,bytes.begin()+copy.offset+copy.bytes};}for(const auto& update:self->commands[number(cb)]){auto& bytes=self->memory.at(self->boundMemory.at(update.buffer));if(update.fill){check(self->bufferSizes.at(update.buffer)<=bytes.size(),"actual shared UBO fits queried allocation");std::memset(bytes.data(),0,std::size_t(self->bufferSizes.at(update.buffer)));}else{check(update.offset+4<=bytes.size(),"guard update inside allocation");std::memcpy(bytes.data()+update.offset,&update.value,4);}}auto app=self->appControl.find(number(cb));if(app!=self->appControl.end()){float v=0;auto& bytes=self->memory.at(self->boundMemory.at(app->second));std::memcpy(&v,bytes.data()+self->appOffset.at(number(cb)),4);self->reads.push_back(v);if(v==1)for(auto set:self->appMasks[number(cb)])self->sampledMasks.push_back(self->imageBytes.at(self->viewImage.at(self->coverageView.at(number(set)))));}}
  static VkResult VKAPI_CALL submit(VkQueue queue,std::uint32_t n,const VkSubmitInfo* ci,VkFence fence){auto& s=*self;++s.calls;++s.submits;check(queue==s.queue,"admitted original queue");s.allSubmitFences.push_back(fence);bool original=false;
   for(unsigned i=0;i<n;++i){if(ci[i].pNext)s.allForwardedExtensions.push_back(ci[i].pNext);if(ci[i].waitSemaphoreCount){check(ci[i].pWaitSemaphores&&*ci[i].pWaitSemaphores==s.wait&&ci[i].pWaitDstStageMask&&*ci[i].pWaitDstStageMask==VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,"original wait semaphore/stage retained");++s.waitPreserved;}
    if(ci[i].signalSemaphoreCount){check(ci[i].pSignalSemaphores&&*ci[i].pSignalSemaphores==s.signalSemaphore,"original signal retained");++s.signalPreserved;}
@@ -78,7 +87,7 @@ struct Driver:Fake {
  static VkResult VKAPI_CALL submit2KHR(VkQueue q,std::uint32_t n,const VkSubmitInfo2* ci,VkFence fence){++self->khrCalls;return submit2(q,n,ci,fence);}
  static PFN_vkVoidFunction VKAPI_CALL get(VkDevice d,const char* n){
 #define FN(Name,Body) if(std::strcmp(n,"vk" #Name)==0)return reinterpret_cast<PFN_vkVoidFunction>(&Body);
-  FN(BeginCommandBuffer,beginCommand) FN(CreateBuffer,createBuffer) FN(GetBufferMemoryRequirements,bufferReq) FN(CmdFillBuffer,fillBuffer) FN(CmdUpdateBuffer,bufferUpdate) FN(CmdPipelineBarrier,barrier) FN(BindBufferMemory,bind) FN(UpdateDescriptorSets,update)
+  FN(BeginCommandBuffer,beginCommand) FN(CreateBuffer,createBuffer) FN(GetBufferMemoryRequirements,bufferReq) FN(CmdFillBuffer,fillBuffer) FN(CmdUpdateBuffer,bufferUpdate) FN(CmdPipelineBarrier,barrier) FN(BindBufferMemory,bind) FN(UpdateDescriptorSets,update) FN(CreateImageView,createView) FN(CmdCopyBufferToImage,copyImage)
   FN(CreateShaderModule,createShader) FN(DestroyShaderModule,destroyShader) FN(CreateGraphicsPipelines,createPipelines) FN(DestroyPipeline,destroyPipeline) FN(CreatePipelineLayout,createLayout) FN(DestroyPipelineLayout,destroyLayout) FN(FreeDescriptorSets,freeSets) FN(DeviceWaitIdle,idle) FN(GetFenceStatus,fenceStatus) FN(QueueSubmit,submit) FN(QueueSubmit2,submit2) FN(QueueSubmit2KHR,submit2KHR)
 #undef FN
   return Fake::get(d,n);
@@ -186,6 +195,54 @@ void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint3
   f.writeView(f.view);f.renderer.imageDestroyed(f.image);f.renderer.beforeDraw(f.cb);s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Image)]==1,"retired imported image has a distinct draw refusal");
  }
 }
+void continuous(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ for(unsigned mode=0;mode<2;++mode){Integration f(vs,ps,1,true,true,false,false,false);
+  const auto publish=[&](bool active,std::uint8_t marker){sb::CertifiedAccessUnit certificate;certificate.descriptor=f.picture.metadata.descriptor;certificate.binding=f.picture.metadata.binding;certificate.coverageEncoding=active?sb::CoverageEncoding::Raw:sb::CoverageEncoding::None;if(active)certificate.coverage.assign(32,marker);consumer.coverage(consumer.owner,certificate);};
+  // Cold startup prewarms every finite slot through actual queue copy/fence
+  // completion. The tested active stream never relies on a first-use image.
+  for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSlots;++n){++f.picture.metadata.descriptor.sourceFrame;publish(true,static_cast<std::uint8_t>(n+1));f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);f.vk.signal();consumer.tick(consumer.owner);}
+  check(f.renderer.statsCold().ready==8,"continuous stream starts with eight actual initialized images");const auto allocations=f.vk.allocations;unsigned activeFrames=0,inactiveFrames=0;
+  for(unsigned frame=0;frame<128;++frame){const bool active=!mode||frame%11!=3;const auto marker=static_cast<std::uint8_t>((frame*37)%253+1);
+   ++f.picture.metadata.descriptor.sourceFrame;f.picture.metadata.lease.sequence=++leaseSequence;publish(active,marker);consumer.picture(consumer.owner,f.picture);
+   f.vk.appControl.erase(number(f.cb));f.vk.appMasks.erase(number(f.cb));
+   const auto left=f.record();const auto right=f.renderer.beforeDraw(f.cb);
+   check(left.ready==active&&right.ready==active,"every active exact frame records both eyes; explicit inactive source records neither");
+   if(active){f.vk.appMasks[number(f.cb)]={left.coverage,right.coverage};++activeFrames;}else ++inactiveFrames;
+   const auto samples=f.vk.sampledMasks.size();const auto commands=std::count(f.vk.executedCommands.begin(),f.vk.executedCommands.end(),f.cb);const auto guards=f.renderer.statsCold().guardAccepted;
+   check(f.submit(false)==VK_SUCCESS,"continuous original native frame result is preserved");
+   check(std::count(f.vk.executedCommands.begin(),f.vk.executedCommands.end(),f.cb)==commands+1,"each native frame executes exactly once in original queue order");
+   check(f.renderer.statsCold().guardAccepted==guards+unsigned(active)&&f.vk.sampledMasks.size()==samples+2*unsigned(active),"only active exact frame enables its two eye samples");
+   if(active)for(std::size_t eye=0;eye<2;++eye)check(f.vk.sampledMasks[samples+eye]==std::vector<std::uint8_t>(32,marker),"both native eye draws sample this frame's changed R8 bytes, never a previous mask");
+   f.vk.signal();consumer.tick(consumer.owner);
+   if(frame%7==5){const auto repeated=f.vk.sampledMasks.size();check(f.submit(false)==VK_SUCCESS,"same still-current source supports legal flags0 repeat");check(f.vk.sampledMasks.size()==repeated+2*unsigned(active),"repeat retains exact active/inactive source instead of inventing another mask");if(active)for(std::size_t eye=0;eye<2;++eye)check(f.vk.sampledMasks[repeated+eye]==std::vector<std::uint8_t>(32,marker),"repeated native frame samples its own retained exact mask");f.vk.signal();consumer.tick(consumer.owner);}
+   const auto stats=f.renderer.statsCold();check(!stats.quarantined&&!stats.uploadRefused&&!stats.guardRefused,"continuous finite-pool reuse loses no active frame to quarantine or reservation refusal");
+  }
+  check(activeFrames+inactiveFrames==128&&(!mode?inactiveFrames==0:inactiveFrames>0),"all-ready active stream and explicit inactive intervals are independent controls");check(f.vk.allocations==allocations,"long stream reuses bounded initialized image storage without per-frame GPU allocation");
+ }
+ // Keep the previous real tail-fence poll blocked through this COMPLETE
+ // new frame: record, pending copy, reservation, native submit and tail fence.
+ for(unsigned mode=0;mode<3;++mode){Integration f(vs,ps,1,true,true,false,false,false);
+  const auto publish=[&](std::uint8_t marker){sb::CertifiedAccessUnit certificate;certificate.descriptor=f.picture.metadata.descriptor;certificate.binding=f.picture.metadata.binding;certificate.coverageEncoding=sb::CoverageEncoding::Raw;certificate.coverage.assign(32,marker);consumer.coverage(consumer.owner,certificate);};
+  for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSlots;++n){++f.picture.metadata.descriptor.sourceFrame;publish(static_cast<std::uint8_t>(n+1));f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);f.vk.signal();consumer.tick(consumer.owner);}
+  consumer.picture(consumer.owner,f.picture);check(f.record().ready&&f.submit(false)==VK_SUCCESS,"cold-contention sequence has a genuine previous guarded submit");f.vk.signal();
+  ++f.picture.metadata.descriptor.sourceFrame;f.picture.metadata.lease.sequence=++leaseSequence;publish(201);consumer.picture(consumer.owner,f.picture);
+  check(f.renderer.statsCold().pending==1,"new exact marker is pending before cold-worker contention");
+  const auto samples=f.vk.sampledMasks.size();const auto previous=f.renderer.statsCold().guardAccepted;
+  VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};f.renderer.commandBegin(f.cb,&begin);f.renderer.pipelineBound(f.cb,VK_PIPELINE_BIND_POINT_GRAPHICS,f.publicPipeline);f.renderer.setsBound(f.cb,VK_PIPELINE_BIND_POINT_GRAPHICS,0,1,&f.set,0);
+  f.vk.appControl.erase(number(f.cb));f.vk.blockFenceStatus=true;std::thread cold([&]{consumer.tick(consumer.owner);});while(!f.vk.insideFenceStatus.load())std::this_thread::yield();
+  const auto left=f.renderer.beforeDraw(f.cb),right=f.renderer.beforeDraw(f.cb);
+  if(left.ready&&right.ready){f.vk.appControl[number(f.cb)]=f.vk.setBuffer.at(number(left.control));f.vk.appOffset[number(f.cb)]=f.vk.setOffset.at(number(left.control));f.vk.appMasks[number(f.cb)]={left.coverage,right.coverage};}
+  VkResult result;
+  if(!mode)result=f.submit(false);
+  else{VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=f.cb;VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.commandBufferInfoCount=1;info.pCommandBufferInfos=&cb;result=f.renderer.submit2(f.vk.queue,1,&info,f.vk.appFence,mode==2);}
+  f.vk.blockFenceStatus=false;cold.join();
+  check(left.ready&&right.ready,"an already published exact mask remains recordable while cold fence status is blocked");
+  check(result==VK_SUCCESS&&f.renderer.statsCold().guardAccepted==previous+1,"cold fence poll cannot interrupt exact copy/reservation/native/tail submission");
+  check(f.vk.sampledMasks.size()==samples+2&&f.vk.sampledMasks[samples]==std::vector<std::uint8_t>(32,201)&&f.vk.sampledMasks[samples+1]==std::vector<std::uint8_t>(32,201),"complete blocked-worker frame samples its new exact R8 bytes in both eyes");
+  f.vk.signal();consumer.tick(consumer.owner);const auto stats=f.renderer.statsCold();check(!stats.quarantined&&!stats.guardRefused&&!stats.uploadRefused&&stats.ready==8,"complete blocked-worker cycle retires normally without lost pool slots");
+ }
+
+}
 void reservationRecovery(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  for(unsigned mode=0;mode<6;++mode){Integration f(vs,ps);check(f.record().ready,"reserve initial current exact picture");check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"first real guarded submit owns a retirement ticket");f.vk.signal();
   check(f.record().ready,"native completed recording still selects this exact current picture");
@@ -197,7 +254,7 @@ void reservationRecovery(const std::vector<std::uint32_t>& vs,const std::vector<
   else{VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=f.cb;VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.commandBufferInfoCount=1;info.pCommandBufferInfos=&cb;result=f.renderer.submit2(f.vk.queue,1,&info,f.vk.appFence,mode%3==2);}
   f.vk.blockFenceStatus=false;cold.join();
   f.vk.afterOriginal={};
-  check(result==VK_SUCCESS&&f.vk.reads.back()==float(mode>=3),"contention before reservation is opaque; after reservation keeps the successful native guard without waiting");
+  check(result==VK_SUCCESS&&f.vk.reads.back()==1,"cold fence contention preserves the exact native guard before and after reservation without waiting");
   const auto stats=f.renderer.statsCold();check(stats.quarantined==0,mode<3?"pre-submit reservation refusal cannot permanently quarantine a mask never enabled on GPU":"post-submit cold contention cannot lose its already reserved exact retirement ticket");
   f.vk.signal();consumer.tick(consumer.owner);
   check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"the same exact current picture recovers immediately after reservation contention");
@@ -328,6 +385,7 @@ int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inpu
  else if(argc==5&&std::strcmp(argv[4],"fallback-recovery")==0)fallbackRecovery(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"timeline")==0)timeline(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"reservation-recovery")==0)reservationRecovery(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"continuous")==0)continuous(vs,ps);
  else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else {integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);}
+ else {integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);continuous(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

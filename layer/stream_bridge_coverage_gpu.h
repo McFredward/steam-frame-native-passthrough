@@ -47,11 +47,13 @@ public:
     bool upload(const FrameIdentity&,std::uint32_t width,std::uint32_t height,
         stream_bridge::Bytes rawR8) noexcept;
     // Called under the admitted ORIGINAL queue's external synchronization.
-    // Submit pending copies while native draws remain on the original fallback.
+    // Enqueue pending copies before sampling on this exact ordered queue.
     void drainUploads(VkQueue) noexcept;
     // Worker only: nonblocking fence polling makes completed uploads acquirable.
     void reapCold() noexcept;
-    // Draw/recording: try-lock only, no allocation/wait/API. Ready immutable data
+    // Draw/recording: bounded reference CAS, no mutex/allocation/wait/API.
+    // Claim ownership before reading immutable metadata; a cold writer claims
+    // zero references exclusively before replacing it. Ready immutable data
     // only. One successful acquire owns one recording reference until release.
     Lease acquire(const FrameIdentity&) noexcept;
     // Renderer-only recording preview. Pending/Copying is allowed solely for
@@ -65,7 +67,8 @@ public:
     // still retain storage. Call submitted ONLY after a successful reservation.
     // Post-submit ambiguity/tail failure quarantines data that may be in flight.
     // The generation-bound reservation must be completed exactly once by this
-    // same externally synchronized queue owner. Completion never takes a lock.
+    // same externally synchronized queue owner. Neither queue operation takes
+    // the cold worker's mutex; fixed ticket fields publish only after init.
     Reservation prepareSubmit(VkQueue,const Lease*,std::size_t) noexcept;
     void submitted(const Reservation&,VkQueue,const Lease*,std::size_t,VkResult originalResult) noexcept;
     Status statusCold()const noexcept;
