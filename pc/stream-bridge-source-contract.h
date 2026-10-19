@@ -4,6 +4,12 @@
 #include <limits>
 
 namespace stream_bridge::sender {
+enum class SourceContractStatus : unsigned { Current, NoDeclaration, DifferentProcess, RevokedGeneration, Count };
+struct SourceContractObservation {
+    SourceContractStatus status=SourceContractStatus::NoDeclaration;
+    std::uint32_t declaredProcess=0,nativeProcess=0;
+    bool current()const noexcept{return status==SourceContractStatus::Current;}
+};
 // Format permission comes from the kernel-validated live local application,
 // never from finding a translucent pixel. This is NOT video/frame authority.
 // One cold owner publishes; native callbacks only read one lock-free identity.
@@ -25,7 +31,23 @@ public:
         return pid&&static_cast<std::uint32_t>(value)==pid?value:0;
     }
     bool current(std::uint64_t receipt,std::uint32_t pid) const noexcept {
-        return receipt&&snapshot(pid)==receipt;
+        return inspect(receipt,pid).current();
+    }
+    SourceContractObservation inspect(std::uint64_t receipt,std::uint32_t pid) const noexcept {
+        // One coherent atomic observation both decides the original permission
+        // and explains a refusal. A second diagnostic load could instead name a
+        // later declaration and misattribute a loading/source transition.
+        const auto value=identity_.load(std::memory_order_acquire);
+        SourceContractObservation out{SourceContractStatus::NoDeclaration,static_cast<std::uint32_t>(value),pid};
+        if(value){
+            if(!pid||out.declaredProcess!=pid)out.status=SourceContractStatus::DifferentProcess;
+            // A zero capture receipt never held a declaration. Reserve the
+            // revoked-generation reason for a genuinely captured old lease.
+            else if(!receipt)out.status=SourceContractStatus::NoDeclaration;
+            else if(receipt!=value)out.status=SourceContractStatus::RevokedGeneration;
+            else out.status=SourceContractStatus::Current;
+        }
+        return out;
     }
 private:
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free,"native source contract must not lock");

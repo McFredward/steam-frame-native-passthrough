@@ -1,6 +1,7 @@
 #pragma once
 #include "stream-bridge-sender-provider-directmode.h"
 #include "stream-bridge-sender-provider-core.h"
+#include "stream-bridge-source-contract.h"
 #include "bridge/stream_bridge_control.h"
 #include <memory>
 #include <limits>
@@ -56,6 +57,8 @@ struct CoverageGateStats {
     std::uint64_t submittedReadbacks=0,queryReady=0,queryPending=0,queryErrors=0,lastQueryAgeUs=0,maxQueryAgeUs=0;
     std::uint32_t lastQueryResult=0,lastReadbackResult=0;
     std::uint64_t maskedVideoBytes=0,maskedWireBytes=0,maskRleBytes=0,maxMaskedWireBytes=0;
+    std::array<std::uint64_t,static_cast<unsigned>(SourceContractStatus::Count)> sourceRefusals{},sourceProcessPairs{};
+    std::uint32_t sourceCauses=0;
     bool contextTableReadable=false,contextTableStable=false,nativeDeviceSame=false;
 };
 class CoverageGateCounters {
@@ -69,6 +72,15 @@ public:
     void signal(CoverageSignal signal)noexcept{const auto at=static_cast<unsigned>(signal);if(at<signals_.size())increment(signals_[at]);}
     bool refuse(CoverageGate gate)noexcept{
         const auto at=static_cast<unsigned>(gate);if(at&&at<refusals_.size()){increment(refusals_[at]);last_.store(at,std::memory_order_relaxed);}return false;
+    }
+    void sourceRefusal(const SourceContractObservation& observed)noexcept{
+        const auto at=static_cast<unsigned>(observed.status);
+        if(!at||at>=sourceRefusals_.size())return;
+        increment(sourceRefusals_[at]);
+        sourceProcessPairs_[at].store((std::uint64_t(observed.declaredProcess)<<32)|observed.nativeProcess,std::memory_order_relaxed);
+        // A first cause must survive simultaneous approximate counter samples.
+        // This bitset is diagnostic only and can never grant source permission.
+        sourceCauses_.fetch_or(std::uint32_t(1)<<at,std::memory_order_release);
     }
     void constantBytes(std::uint32_t bytes)noexcept{constant_.store(bytes,std::memory_order_relaxed);}
     void source(std::uint32_t width,std::uint32_t height,std::uint32_t format)noexcept{sourceWidth_.store(width,std::memory_order_relaxed);sourceHeight_.store(height,std::memory_order_relaxed);sourceFormat_.store(format,std::memory_order_relaxed);}
@@ -96,6 +108,8 @@ public:
         static_assert(sizeof values/sizeof values[0]==static_cast<unsigned>(CoverageSignal::Count),"all diagnostic signals are exposed");
         for(unsigned i=0;i<signals_.size();++i)*values[i]=signals_[i].load(std::memory_order_relaxed);
         for(unsigned i=0;i<refusals_.size();++i)out.refusals[i]=refusals_[i].load(std::memory_order_relaxed);
+        out.sourceCauses=sourceCauses_.load(std::memory_order_acquire);
+        for(unsigned i=0;i<sourceRefusals_.size();++i){out.sourceRefusals[i]=sourceRefusals_[i].load(std::memory_order_relaxed);out.sourceProcessPairs[i]=sourceProcessPairs_[i].load(std::memory_order_relaxed);}
         out.lastRefusal=static_cast<CoverageGate>(last_.load(std::memory_order_relaxed));out.lastConstantBytes=constant_.load(std::memory_order_relaxed);
         out.lastSourceWidth=sourceWidth_.load(std::memory_order_relaxed);out.lastSourceHeight=sourceHeight_.load(std::memory_order_relaxed);out.lastSourceFormat=sourceFormat_.load(std::memory_order_relaxed);
         out.lastOutputWidth=outputWidth_.load(std::memory_order_relaxed);out.lastOutputHeight=outputHeight_.load(std::memory_order_relaxed);out.lastOutputFormat=outputFormat_.load(std::memory_order_relaxed);out.readbackReady=readbackReady_.load(std::memory_order_relaxed);out.readbackBusy=readbackBusy_.load(std::memory_order_relaxed);out.readbackErrors=readbackErrors_.load(std::memory_order_relaxed);
@@ -120,7 +134,26 @@ private:
     // coherent frame proofs. No caller may use them to authorize rendering.
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(CoverageSignal::Count)> signals_{};
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(CoverageGate::Count)> refusals_{};
+    std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(SourceContractStatus::Count)> sourceRefusals_{},sourceProcessPairs_{};
+    std::atomic<std::uint32_t> sourceCauses_{0};
     std::atomic<unsigned> last_{0};std::atomic<std::uint32_t> constant_{0},sourceWidth_{0},sourceHeight_{0},sourceFormat_{0},outputWidth_{0},outputHeight_{0},outputFormat_{0};
+};
+// Cold caller already enforces its five-second cadence. Keep first observations
+// of every source cause, plus at most eight changing-counter snapshots, separate
+// from the much larger generic coverage report's exhausted sampling budget.
+class CoverageSourceReportBudget {
+public:
+    bool observe(const CoverageGateStats& stats,bool final=false)noexcept{
+        if(!stats.sourceCauses)return false;
+        const bool newCause=(stats.sourceCauses&~seen_)!=0;
+        const bool changed=stats.sourceRefusals!=reported_;
+        if(!final&&!newCause&&(!changed||changes_>=8))return false;
+        if(!newCause&&!final)++changes_;
+        seen_|=stats.sourceCauses;reported_=stats.sourceRefusals;return true;
+    }
+private:
+    std::uint32_t seen_=0;unsigned changes_=0;
+    std::array<std::uint64_t,static_cast<unsigned>(SourceContractStatus::Count)> reported_{};
 };
 // A writable, object-local facade. Every public method forwards through the
 // original runtime table at call time; no system-code/table entry is changed.

@@ -8,6 +8,30 @@ namespace {
 unsigned checks=0;void check(bool value,const char* why){++checks;if(!value)throw std::runtime_error(why);}
 void run(){
     CoverageGateCounters counters;auto cold=counters.snapshot();
+    CoverageSourceReportBudget sourceReports;
+    check(!sourceReports.observe(cold)&&!sourceReports.observe(cold,true),"source diagnostics have no empty periodic or final report");
+    SourceContract source;
+    counters.sourceRefusal(source.inspect(0,123));
+    auto sourceStats=counters.snapshot();
+    const auto missing=static_cast<unsigned>(SourceContractStatus::NoDeclaration);
+    const auto foreign=static_cast<unsigned>(SourceContractStatus::DifferentProcess);
+    const auto revoked=static_cast<unsigned>(SourceContractStatus::RevokedGeneration);
+    check(sourceStats.sourceCauses==(1u<<missing)&&sourceStats.sourceRefusals[missing]==1&&sourceStats.sourceProcessPairs[missing]==123,
+        "a missing declaration records its actual refusing native PID without inventing a declared source");
+    check(sourceReports.observe(sourceStats)&&!sourceReports.observe(sourceStats),"first actual source cause is reported once without repeating unchanged counters");
+    unsigned changedReports=0;
+    for(unsigned i=0;i<20;++i){counters.sourceRefusal(source.inspect(0,123));if(sourceReports.observe(counters.snapshot()))++changedReports;}
+    check(changedReports==8,"continuing missing-format refusals have exactly eight changing-counter reports, never an unbounded diagnostic stream");
+    source.publish(123);const auto firstSource=source.snapshot(123);
+    counters.sourceRefusal(source.inspect(firstSource,321));sourceStats=counters.snapshot();
+    check(sourceReports.observe(sourceStats)&&sourceStats.sourceRefusals[foreign]==1&&sourceStats.sourceProcessPairs[foreign]==((std::uint64_t(123)<<32)|321),
+        "a first foreign loading source remains visible after ordinary counter reporting is exhausted, with one coherent declared/native PID pair");
+    source.publish(0);source.publish(123);counters.sourceRefusal(source.inspect(firstSource,123));sourceStats=counters.snapshot();
+    check(sourceReports.observe(sourceStats)&&sourceStats.sourceRefusals[revoked]==1&&sourceStats.sourceProcessPairs[revoked]==((std::uint64_t(123)<<32)|123),
+        "a genuinely revoked same-PID generation has its own first-cause report after both other causes");
+    counters.sourceRefusal(source.inspect(source.snapshot(123),123));
+    check(counters.snapshot().sourceRefusals==sourceStats.sourceRefusals&&!sourceReports.observe(counters.snapshot())&&sourceReports.observe(counters.snapshot(),true),
+        "successful permissions never become refusals; final source totals remain available independently of the exhausted changing-counter budget");
     check(!cold.maskedVideoBytes&&!cold.maskedWireBytes&&!cold.maskRleBytes&&!cold.maxMaskedWireBytes,"payload accounting starts empty without estimating network load");
     counters.payload(2000,500,2700);counters.payload(100,40,340);
     auto payload=counters.snapshot();check(payload.maskedVideoBytes==2100&&payload.maskRleBytes==540&&payload.maskedWireBytes==3040&&payload.maxMaskedWireBytes==2700,
@@ -46,11 +70,13 @@ void run(){
     check(full.load()==std::numeric_limits<std::uint64_t>::max(),"diagnostic counter can reach its bound without wrapping");CoverageGateCounters::increment(full);
     check(full.load()==std::numeric_limits<std::uint64_t>::max(),"bounded counter never wraps at saturation");
     CoverageGateCounters concurrent;std::thread threads[4];
-    for(auto& thread:threads)thread=std::thread([&]{for(unsigned i=0;i<10000;++i){concurrent.signal(CoverageSignal::NativeDraws);concurrent.refuse(CoverageGate::ConstantBuffer);}});
+    for(auto& thread:threads)thread=std::thread([&]{for(unsigned i=0;i<10000;++i){concurrent.signal(CoverageSignal::NativeDraws);concurrent.refuse(CoverageGate::ConstantBuffer);concurrent.sourceRefusal(source.inspect(firstSource,123));}});
     for(auto& thread:threads)thread.join();
     snapshot=concurrent.snapshot();
     check(snapshot.nativeDraws>0&&snapshot.nativeDraws<=40000&&snapshot.refusals[static_cast<unsigned>(CoverageGate::ConstantBuffer)]>0
         &&snapshot.refusals[static_cast<unsigned>(CoverageGate::ConstantBuffer)]<=40000,"contended one-attempt diagnostics remain bounded metadata, not coherent frame proof");
+    check(snapshot.sourceCauses==(1u<<revoked)&&snapshot.sourceRefusals[revoked]>0&&snapshot.sourceRefusals[revoked]<=40000
+        &&snapshot.sourceProcessPairs[revoked]==((std::uint64_t(123)<<32)|123),"simultaneous approximate refusal counters cannot lose the first source-cause bit or split the declared/native process identity");
 }
 }
 int main(){try{run();std::printf("sender native coverage gate diagnostics: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"coverage diagnostics failed after %u: %s\n",checks,e.what());return 1;}}

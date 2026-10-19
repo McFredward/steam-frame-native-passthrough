@@ -241,10 +241,28 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         // secondary frame-epoch/copy failures without guessing source support.
         std::uint64_t seenSignals=0,seenRefusals=0,nextGateSample=1;
         unsigned gateTransitions=0,gateSamples=0;
+        stream_bridge::sender::CoverageSourceReportBudget sourceReports;
         auto nextGateReport=std::chrono::steady_clock::now()+std::chrono::seconds(2);
         const auto reportCoverage=[&](bool final){
             const auto now=std::chrono::steady_clock::now();if(!final&&now<nextGateReport)return;
+            // Quiet reports must still advance the sampling deadline. Otherwise
+            // exhaustion of the verbose report budget polls public COM metadata
+            // on every 8 ms worker tick instead of this cold five-second cadence.
+            nextGateReport=now+std::chrono::seconds(5);
             const auto stats=coverage_.gateStats();
+            if(sourceReports.observe(stats,final)){
+                using Source=stream_bridge::sender::SourceContractStatus;
+                const auto at=[](Source why){return static_cast<unsigned>(why);};
+                const auto count=[&](Source why){return static_cast<unsigned long long>(stats.sourceRefusals[at(why)]);};
+                const auto declared=[&](Source why){return static_cast<unsigned>(stats.sourceProcessPairs[at(why)]>>32);};
+                const auto native=[&](Source why){return static_cast<unsigned>(stats.sourceProcessPairs[at(why)]);};
+                char sourceText[456]{};std::snprintf(sourceText,sizeof sourceText,
+                    "coverage source refusals: no-declaration=%llu (native-pid=%u); foreign-process=%llu (declared/native-pid=%u/%u); revoked-generation=%llu (declared/native-pid=%u/%u); observed-causes=0x%x; approximate counters, not frame proof",
+                    count(Source::NoDeclaration),native(Source::NoDeclaration),
+                    count(Source::DifferentProcess),declared(Source::DifferentProcess),native(Source::DifferentProcess),
+                    count(Source::RevokedGeneration),declared(Source::RevokedGeneration),native(Source::RevokedGeneration),stats.sourceCauses);
+                report(sourceText);
+            }
             const std::uint64_t signals[]{stats.deviceOpened,stats.contextsReady,stats.hookDraws,stats.nativeDraws,
                 stats.sourceFrames,stats.constantMaps,stats.constantCaptures,stats.eyeDraws,stats.completePairs,
                 stats.nativeCopies,stats.capturedCopies,stats.matchedInputs,stats.certifiedMasks,stats.nativeMaps,stats.inventoryRefreshes};
@@ -263,7 +281,6 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             if(sample)++gateSamples;
             seenSignals|=signalBits;seenRefusals|=refusalBits;
             nextGateSample=stats.hookDraws>~std::uint64_t(0)/8?~std::uint64_t(0):stats.hookDraws*8;
-            nextGateReport=now+std::chrono::seconds(5);
             char text[344]{};std::snprintf(text,sizeof text,
                 "coverage gates: device=%llu, context=%llu, draws=%llu/%llu, source=%llu, constants=%llu/%llu, eyes=%llu, pairs=%llu, copies=%llu/%llu, inputs=%llu, masks=%llu; last=%s",
                 static_cast<unsigned long long>(stats.deviceOpened),static_cast<unsigned long long>(stats.contextsReady),

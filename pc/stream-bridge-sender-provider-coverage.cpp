@@ -140,6 +140,11 @@ struct SenderCoverage::Impl {
     Stages stages;
     static std::atomic<Impl*> instance;
     Impl(DirectModeBoundary& d,NvencBoundary& b,ControlRuntime& c):direct(d),boundary(b),control(c){}
+    bool sourceCurrent(std::uint64_t receipt,std::uint32_t pid)noexcept{
+        const auto observed=sourceContract.inspect(receipt,pid);
+        if(!observed.current())gates.sourceRefusal(observed);
+        return observed.current();
+    }
     bool site(void* address,std::uintptr_t rva)const{return module&&reinterpret_cast<std::uintptr_t>(address)==module+rva;}
     static void deviceOpened(void*,std::uint64_t,void* value,NV_ENC_DEVICE_TYPE type,void* opaque){
         auto& s=*static_cast<Impl*>(opaque);s.gates.signal(CoverageSignal::DeviceOpened);if(type!=NV_ENC_DEVICE_TYPE_DIRECTX||!value){s.gates.refuse(CoverageGate::Device);s.state=1;return;}
@@ -182,7 +187,7 @@ struct SenderCoverage::Impl {
                 // Format permission comes from the live kernel-validated app.
                 // Fully opaque eyes are legitimate; sparse pixel samples cannot
                 // establish the semantics of an entire submitted texture.
-                if(!s.sourceContract.current(slot.contract,slot.pid))s.gates.refuse(CoverageGate::SourceRevoked);
+                if(!s.sourceCurrent(slot.contract,slot.pid))s.gates.refuse(CoverageGate::SourceRevoked);
                 else if(gpu.ready()&&slot.width==e.width&&slot.height==e.height){
                     pixels.resize(std::size_t(slot.width)*slot.height);
                     const auto started=clockMicros();CoverageReadbackResult receipt;
@@ -200,13 +205,13 @@ struct SenderCoverage::Impl {
         if(!pixels.empty()){
             std::vector<std::uint8_t> rle;
             if(!encodeCoverageRle({pixels.data(),pixels.size()},rle))s.gates.refuse(CoverageGate::RleEncode);
-            else if(!s.sourceContract.current(maskContract,maskPid))s.gates.refuse(CoverageGate::SourceRevoked);
+            else if(!s.sourceCurrent(maskContract,maskPid))s.gates.refuse(CoverageGate::SourceRevoked);
             else if(!s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::Rle,{rle.data(),rle.size()},output))s.gates.refuse(CoverageGate::FrameCertificate);
             else{
                 // Local EOF can revoke the format during compression or MAC.
                 // Only publish the still-current capture; no stale mask leaves
                 // this callback even when its original GPU readback was valid.
-                if(!s.sourceContract.current(maskContract,maskPid)){output.clear();s.gates.refuse(CoverageGate::SourceRevoked);return false;}
+                if(!s.sourceCurrent(maskContract,maskPid)){output.clear();s.gates.refuse(CoverageGate::SourceRevoked);return false;}
                 s.lastPid=maskPid;s.state=7;s.gates.payload(candidate.size,rle.size(),output.size());s.gates.signal(CoverageSignal::CertifiedMasks);return true;
             }
         }
@@ -364,7 +369,7 @@ struct SenderCoverage::Impl {
         if(ctx!=s.context||!s.enabled||!caller||!frame){if(caller)s.gates.refuse(ctx!=s.context?CoverageGate::Context:CoverageGate::DirectFrame);forwardCopy(ctx,destination,source);return;}
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.gates.refuse(CoverageGate::Lock);forwardCopy(ctx,destination,source);return;}
         if(!s.prepared||s.invalid||frame->presentSerial!=s.activeSerial||frame->presentSerial==s.failedSerial||frame->registryEpoch!=s.activeEpoch||!same(source,s.nativeOutput)||s.drawBits!=((1u<<(2*frame->layerCount))-1)){s.gates.refuse(CoverageGate::CopyPair);forwardCopy(ctx,destination,source);return;}
-        if(!s.sourceContract.current(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);forwardCopy(ctx,destination,source);return;}
+        if(!s.sourceCurrent(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);forwardCopy(ctx,destination,source);return;}
         auto* input=identity(destination);if(!input){s.gates.refuse(CoverageGate::InputReceipt);forwardCopy(ctx,destination,source);return;}
         // A stage is frozen from the native input handoff through matching
         // Unlock; another accepted frame and cold maintenance cannot evict it.
