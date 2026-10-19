@@ -12,7 +12,8 @@ No GitHub Release is needed to deliver routine candidates:
 3. Pin that immutable full commit URL, exact byte size and SHA256 in `get.ps1`
    and `get.sh`. Run the focused bootstrap tests, including the ordinary entry.
 4. Update the compatibility aliases to the new bootstrap commit and hashes.
-   Publish the validated source and payload to `main`.
+   Publish the validated source and payload to `dev` while optimization is in
+   progress. Update `main` only after explicit maintainer release approval.
 
 The archive's own source revision describes its native/setup contents; a later
 bootstrap-only commit does not require rebuilding unchanged native components.
