@@ -146,56 +146,57 @@ void identityAndOwnership(){
     check(p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&offset.b)==0,"valid public data-offset buffer forwarded");poll(*p,0x75);
 }
 void boundsAndLoss(){
-    auto p=provider();setup(*p);for(unsigned i=0;i<4;++i)map(*p,i);
-    for(unsigned i=0;i<3;++i){fake.memory[i].fill(static_cast<std::uint8_t>(0x31+i));queue(*p,i);}
-    check(p->stats().accepted==2&&p->stats().dropped==1,"two fixed snapshots bound pending coded input without eviction");
-    poll(*p,0x31);poll(*p,0x32);const auto reads=fake.dataReads;queue(*p,2);
-    check(fake.dataReads==reads,"slot-full QBUF still transfers buffer ownership to kernel");noObservation(*p,"slot-full item cannot be opportunistically recopied");
-    dequeue(*p,2);fake.memory[2].fill(0x43);queue(*p,2);const auto old=poll(*p,0x43);
-    dequeue(*p,2);fake.memory[2].fill(0x54);queue(*p,2);
+    auto p=provider();setup(*p,nd::MaxBuffers);for(unsigned i=0;i<nd::MaxBuffers;++i)map(*p,i);
+    for(unsigned i=0;i<nd::SnapshotCapacity;++i){fake.memory[i].fill(static_cast<std::uint8_t>(0x31+i));queue(*p,i);}
+    check(p->stats().accepted==nd::MaxBuffers&&p->stats().dropped==0,"one full native OUTPUT-buffer burst retains every owned snapshot without worker scheduling");
+    dequeue(*p,0);fake.memory[0].fill(0x98);queue(*p,0);
+    check(p->stats().accepted==nd::SnapshotCapacity&&p->stats().dropped==1,"bounded queue never evicts older snapshots when producer exceeds one complete native burst");
+    for(unsigned i=0;i<nd::SnapshotCapacity;++i)poll(*p,static_cast<std::uint8_t>(0x31+i));
+    const auto reads=fake.dataReads;queue(*p,0);
+    check(fake.dataReads==reads,"slot-full QBUF still transfers ownership exactly once");noObservation(*p,"full-slot input cannot later be opportunistically recopied");
+    dequeue(*p,0);fake.memory[0].fill(0x43);queue(*p,0);const auto old=poll(*p,0x43);
+    dequeue(*p,0);fake.memory[0].fill(0x54);queue(*p,0);
     int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;fake.result=-1;fake.error=EBUSY;
     check(p->invokeIoctl(base+0x312e8,23,VIDIOC_STREAMOFF,&type)==-1&&errno==EBUSY,"failed STREAMOFF still forwarded exactly");
-    noObservation(*p,"even attempted stream reset invalidates old queued evidence");
+    noObservation(*p,"attempted real stream reset invalidates old queued evidence");
     fake.result=0;fake.error=EOVERFLOW;setup(*p);map(*p,0);fake.memory[0].fill(0x65);queue(*p,0);const auto fresh=poll(*p,0x65);
-    check(fresh.poolGeneration>old.poolGeneration,"new output pool generation monotonically distinct");
+    check(fresh.poolGeneration>old.poolGeneration,"new native OUTPUT pool obtains new lifetime");
     dequeue(*p,0);queue(*p,0);errno=EALREADY;
-    check(p->invokeMunmap(0x999,fake.memory[0].data()+1,10)==0&&errno==fake.error&&fake.receivedErrno==EALREADY,"any caller partial unmap invalidates before exact original forwarding");
-    noObservation(*p,"partial unmap clears old copied evidence");queue(*p,0);noObservation(*p,"unmapped buffer cannot publish");
+    check(p->invokeMunmap(0x999,fake.memory[0].data()+1,10)==0&&errno==fake.error&&fake.receivedErrno==EALREADY,"partial unmap exact original and errno");
+    noObservation(*p,"partial unmap clears copied evidence");queue(*p,0);noObservation(*p,"unmapped native buffer publishes no evidence");
     setup(*p);map(*p,0);queue(*p,0);errno=EALREADY;
-    check(p->invokeClose(0x999,23)==0&&fake.receivedErrno==EALREADY&&errno==fake.error,"close exact forwarding");
-    noObservation(*p,"close invalidates device and all pending evidence");
-    setup(*p);map(*p,0);fake.revokeDuringQbuf=p.get();queue(*p,0);noObservation(*p,"late successful QBUF cannot revive stopped generation");
-    check(!p->knownIoctl(base+0x31e0c,VIDIOC_QBUF),"stop keeps unknown calls on original tail route");
+    check(p->invokeClose(0x999,23)==0&&fake.receivedErrno==EALREADY&&errno==fake.error,"close exact original and errno");
+    noObservation(*p,"close invalidates native device snapshots");
+    setup(*p);map(*p,0);fake.revokeDuringQbuf=p.get();queue(*p,0);noObservation(*p,"late original success cannot revive stopped source");
+    check(!p->knownIoctl(base+0x31e0c,VIDIOC_QBUF),"stopped observer keeps forwarding native calls");
 }
+
 void exactSuccessfulGaps(){
-    auto p=provider();check(p->setCaptureSink([](const nd::CaptureObservation& fact,void*) noexcept{++fake.sinkCalls;fake.lastSink=fact;},nullptr),"gap fixture sink registered");
-    setup(*p);for(unsigned i=0;i<4;++i)map(*p,i);
+    auto p=provider();check(p->setCaptureSink([](const nd::CaptureObservation& fact,void*) noexcept{++fake.sinkCalls;fake.lastSink=fact;},nullptr),"gap fixture sink before native lifecycle");
+    setup(*p,nd::MaxBuffers);for(unsigned i=0;i<nd::MaxBuffers;++i)map(*p,i);
     nd::CaptureObservation event{};while(p->pollCapture(event)){}
-    queue(*p,0);queue(*p,1);const auto originalCalls=fake.ioctlCalls,sinks=fake.sinkCalls;
-    fake.inspectDuringQbuf=p.get();queue(*p,2);
-    check(fake.duringCounts.dropped==0&&!fake.duringGap,"snapshot loss is never published while original QBUF is still running");
-    check(fake.ioctlCalls==originalCalls+1&&p->stats().dropped==1,"successful original OUTPUT transfers exactly one missing-byte counter");
+    for(unsigned i=0;i<nd::SnapshotCapacity;++i)queue(*p,i);
+    dequeue(*p,0);const auto originalCalls=fake.ioctlCalls,sinks=fake.sinkCalls;
+    fake.inspectDuringQbuf=p.get();queue(*p,0);
+    check(fake.duringCounts.dropped==0&&!fake.duringGap,"loss is published only after native QBUF returned success");
+    check(fake.ioctlCalls==originalCalls+1&&p->stats().dropped==1,"full burst overflow preserves original QBUF exactly once");
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::InputGap&&event.inputLoss==nd::InputLoss::SnapshotFull
-        &&event.lossSequence==1&&event.fd==23&&event.sourcePoolGeneration&&event.index==2
-        &&event.nativeTimestampToken==0x12345678&&event.dmabufFd==-1&&!event.capturePoolGeneration,
-        "full snapshot slot publishes exact successful source pool token and loss sequence without a CAPTURE lease");
-    check(fake.sinkCalls==sinks,"INPUT gap never enters the synchronous CAPTURE-lease sink");
-    fake.result=-1;queue(*p,3);check(p->stats().dropped==1&&!p->pollCapture(event),"failed native full-slot QBUF creates neither loss nor recovery authority");
-    fake.result=0;fake.inspectDuringQbuf=nullptr;poll(*p,0);poll(*p,0);
-    fake.dataReadFails=true;queue(*p,3);
+        &&event.lossSequence==1&&event.fd==23&&event.sourcePoolGeneration&&event.index==0
+        &&event.nativeTimestampToken==0x12345678&&event.dmabufFd==-1&&!event.capturePoolGeneration,"overflow publishes only exact source/token gap without invented CAPTURE lease");
+    check(fake.sinkCalls==sinks,"input gap never enters synchronous CAPTURE lease sink");
+    dequeue(*p,1);fake.result=-1;queue(*p,1);check(p->stats().dropped==1&&!p->pollCapture(event),"native rejected full-slot QBUF publishes no successful gap");
+    fake.result=0;fake.inspectDuringQbuf=nullptr;for(unsigned i=0;i<nd::SnapshotCapacity;++i)poll(*p,0);
+    fake.dataReadFails=true;queue(*p,1);
     check(p->stats().rejected==1&&p->pollCapture(event)&&event.kind==nd::CaptureKind::InputGap
-        &&event.inputLoss==nd::InputLoss::CopyRejected&&event.lossSequence==1&&event.index==3,
-        "known scalar ownership plus failed byte copy gives exact post-success gap without reading other memory");
-    dequeue(*p,3);fake.result=-1;queue(*p,3);check(p->stats().rejected==1&&!p->pollCapture(event),"native-rejected copy failure publishes no successful gap");
-    fake.result=0;fake.dataReadFails=false;dequeue(*p,2);
-    Buffer malformed(2);malformed.b.timestamp.tv_usec=1;p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&malformed.b);
-    check(p->stats().rejected==2&&!p->pollCapture(event),"unknown timestamp shape is a hard unattributed counter never a fabricated gap");
-    // Bounded metadata queue overflow remains explicit and hard refused by the
-    // worker, even though native video continues unchanged.
-    setup(*p);map(*p,0);map(*p,1);map(*p,2);while(p->pollCapture(event)){}
-    queue(*p,0);queue(*p,1);
-    for(unsigned i=0;i<65;++i){dequeue(*p,2);queue(*p,2);}
-    check(p->stats().captureDropped==1,"known gap ring overflow is bounded and explicitly reported as lost evidence");
+        &&event.inputLoss==nd::InputLoss::CopyRejected&&event.lossSequence==1&&event.index==1,"known scalar ownership plus failed copy gives exact successful gap");
+    dequeue(*p,1);fake.result=-1;queue(*p,1);check(p->stats().rejected==1&&!p->pollCapture(event),"native rejected copy failure gives no successful gap");
+    fake.result=0;fake.dataReadFails=false;dequeue(*p,2);Buffer malformed(2);malformed.b.timestamp.tv_usec=1;
+    p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&malformed.b);
+    check(p->stats().rejected==2&&!p->pollCapture(event),"unknown malformed timestamp remains unattributed hard loss");
+    setup(*p,nd::MaxBuffers);for(unsigned i=0;i<nd::MaxBuffers;++i)map(*p,i);while(p->pollCapture(event)){}
+    for(unsigned i=0;i<nd::SnapshotCapacity;++i)queue(*p,i);
+    for(unsigned i=0;i<65;++i){dequeue(*p,0);queue(*p,0);}
+    check(p->stats().captureDropped==1,"metadata gap ring overflow stays bounded and explicit");
 }
 
 void unsafeShapes(){
@@ -241,13 +242,13 @@ void captureOwnership(){
     fake.dequeue=0;check(p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0,"actual capture result original once");
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Decoded&&event.dmabufFd==73&&event.nativeTimestampToken==0x4321
         &&event.capturePoolGeneration==generation&&event.contentGeneration==1,"decoded timestamp distinct from capture index and content lease");
-    const auto validLease=event;check(p->captureLeaseCurrent(validLease),"immediate scalar check admits only successful actual current DQBUF lease");
+    const auto validLease=event;check(p->captureLeaseCurrent(validLease)&&p->captureLeaseCurrentOnWorker(validLease),"render and worker scalar checks admit only successful actual current DQBUF lease");
     auto wrongLease=validLease;++wrongLease.nativeTimestampToken;
     check(!p->captureLeaseCurrent(wrongLease),"current scalar lease also binds actual timestamp token");
     check(p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0&&!p->pollCapture(event),"unqueued duplicate capture gives no evidence");
     queue(*p,0);poll(*p,0x42); // Capture setup must not destroy unrelated OUTPUT mappings.
     fake.result=-1;check(p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==-1,"failed capture queue original preserved");
-    check(!p->captureLeaseCurrent(validLease),"attempted QBUF invalidates selected old lease before worker event consumption even on failure");
+    check(!p->captureLeaseCurrent(validLease)&&!p->captureLeaseCurrentOnWorker(validLease),"attempted QBUF invalidates old lease for both renderer and worker before delayed consumption");
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Requeue,"attempted reuse conservatively invalidates old image");
     fake.result=0;p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);
     check(!p->pollCapture(event),"failed queue cannot establish decoded ownership");

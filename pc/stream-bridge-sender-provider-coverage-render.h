@@ -16,6 +16,7 @@ using NativeEnd=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous
 using NativeFlush=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*);
 using NativeGetData=HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*,void*,UINT,UINT);
 struct CoverageReadbackResult {HRESULT query=E_PENDING;bool mapAttempted=false;};
+struct CoveragePublication {void (*publish)(void*)noexcept=nullptr;void* context=nullptr;};
 using NativeUnmap=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT);
 // Caller owns the same protected immediate-context interval. The optional
 // companion copy, exact event End and asynchronous Flush precede the native
@@ -24,7 +25,7 @@ using NativeUnmap=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,
 // Flush submits work; it does not establish completion.
 void copyCoverageBeforeNative(ID3D11DeviceContext*,ID3D11Resource* nativeDestination,
     ID3D11Resource* nativeSource,ID3D11Resource* readback,ID3D11Resource* coverage,ID3D11Query*,
-    NativeCopy,NativeEnd,NativeFlush)noexcept;
+    NativeCopy,NativeEnd,NativeFlush,CoveragePublication={})noexcept;
 // The exact event must complete before one nonblocking Map, and one Unmap
 // follows Map success. One DONOTFLUSH GetData; no Flush, wait,
 // retry, allocation or later-frame substitution. Destination receives A=255-T.

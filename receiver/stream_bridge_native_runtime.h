@@ -75,6 +75,9 @@ struct SourceProvider {
     // Optional worker-only monotonic clock. Production uses steady_clock;
     // deterministic lifecycle fixtures need not sleep or run a real headset.
     std::uint64_t (*monotonicMilliseconds)(void*) noexcept=nullptr;
+    // Required exact scalar revalidation immediately before decoded publish.
+    // Production uses the pinned provider worker lock, never renderer waits.
+    bool (*captureCurrent)(const CaptureObservation&,void*) noexcept=nullptr;
 };
 // Serialized, explicitly ticked worker core, containing the actual authenticated
 // control runtime. Tests can supply public-call observations without a headset;
@@ -87,6 +90,9 @@ public:
     ReceiverWorker& operator=(const ReceiverWorker&)=delete;
     bool prepare(const RuntimeRequest&,SourceProvider) noexcept;
     void tick() noexcept;
+    // Worker scheduling hint: one bounded burst was consumed; do not sleep
+    // before checking for more owned inputs. False on idle/refused paths.
+    bool immediateWorkPending() const noexcept;
     void stop() noexcept;
     RuntimeNotice status() const noexcept;
 private:

@@ -288,6 +288,12 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             std::snprintf(text,sizeof text,
                 "coverage completion: submitted=%llu, ready=%llu, pending=%llu, errors=%llu, last-hr=0x%08x; copy-age-us=%llu/max%llu",
                 static_cast<unsigned long long>(stats.submittedReadbacks),static_cast<unsigned long long>(stats.queryReady),static_cast<unsigned long long>(stats.queryPending),static_cast<unsigned long long>(stats.queryErrors),stats.lastQueryResult,static_cast<unsigned long long>(stats.lastQueryAgeUs),static_cast<unsigned long long>(stats.maxQueryAgeUs));report(text);
+            const auto refused=[&](stream_bridge::sender::CoverageGate gate){return static_cast<unsigned long long>(stats.refusals[static_cast<unsigned>(gate)]);};
+            std::snprintf(text,sizeof text,
+                "coverage lifecycle refusals: render-lock=%llu, copy-pair=%llu, stage-full=%llu, input=%llu, stage=%llu, session=%llu, source=%llu/%llu, rle=%llu, certificate=%llu",
+                refused(stream_bridge::sender::CoverageGate::Lock),refused(stream_bridge::sender::CoverageGate::CopyPair),refused(stream_bridge::sender::CoverageGate::StageFull),
+                refused(stream_bridge::sender::CoverageGate::InputReceipt),refused(stream_bridge::sender::CoverageGate::StageReceipt),refused(stream_bridge::sender::CoverageGate::CoverageSession),
+                refused(stream_bridge::sender::CoverageGate::SourceContract),refused(stream_bridge::sender::CoverageGate::SourceRevoked),refused(stream_bridge::sender::CoverageGate::RleEncode),refused(stream_bridge::sender::CoverageGate::FrameCertificate));report(text);
             // Public COM table metadata only; never query a new immediate
             // context here, since even a diagnostic getter may change dispatch.
             std::snprintf(text,sizeof text,

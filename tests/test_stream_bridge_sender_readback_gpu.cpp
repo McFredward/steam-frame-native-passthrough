@@ -29,13 +29,14 @@ struct Fixture {
  ID3D11Query* nativeReady=nullptr;ID3D11Query* workDone=nullptr;ID3D11Query* completion=nullptr;
  NativeCopy originalCopy=nullptr;NativeMap originalMap=nullptr;NativeUnmap originalUnmap=nullptr;
  unsigned nativeCalls=0,coverageCalls=0,maps=0,unmaps=0,ends=0,flushes=0,queries=0,order=0;
- unsigned copyOrder=0,endOrder=0,flushOrder=0,nativeOrder=0;bool workload=true,exact=true;
+ unsigned copyOrder=0,endOrder=0,flushOrder=0,nativeOrder=0,publications=0;bool workload=true,exact=true,published=false,requirePublication=true;
  HRESULT lastResult=E_FAIL;
 };
 Fixture* active=nullptr;
 void STDMETHODCALLTYPE nativeCopy(ID3D11DeviceContext* context,ID3D11Resource* destination,ID3D11Resource* source){
  auto& f=*active;f.exact=f.exact&&context==f.context;
  if(destination==f.nativeDestination){
+  check(!f.requirePublication||f.published,"current receipt is published before actual native resource handoff");
   ++f.nativeCalls;f.nativeOrder=++f.order;f.exact=f.exact&&source==f.nativeSource;
   f.originalCopy(context,destination,source);
   // This is an explicit fixture native-input handoff model, not NVENC itself.
@@ -53,6 +54,7 @@ void STDMETHODCALLTYPE nativeEnd(ID3D11DeviceContext* context,ID3D11Asynchronous
 void STDMETHODCALLTYPE nativeFlush(ID3D11DeviceContext* context){
  auto& f=*active;++f.flushes;f.flushOrder=++f.order;f.exact=f.exact&&context==f.context;context->Flush();
 }
+void publish(void*)noexcept{auto& f=*active;f.published=true;f.exact=f.exact&&f.flushOrder==3;++f.publications;}
 HRESULT STDMETHODCALLTYPE nativeGetData(ID3D11DeviceContext* context,ID3D11Asynchronous* query,void* data,UINT size,UINT flags){
  auto& f=*active;++f.queries;f.exact=f.exact&&context==f.context&&query==f.completion&&size==sizeof(BOOL)&&flags==D3D11_ASYNC_GETDATA_DONOTFLUSH;return context->GetData(query,data,size,flags);
 }
@@ -97,7 +99,8 @@ void run(){
   // Real work before the capture creates a genuine incomplete EVENT window.
   // There is no assumption that NVENC output completion fences this device.
   context->Dispatch(64,1,1);f.order=0;
-  multithread->Enter();copyCoverageBeforeNative(context.p,nativeDestination.p,nativeSource.p,staging.p,coverage.p,completion.p,nativeCopy,nativeEnd,nativeFlush);multithread->Leave();
+  f.published=false;
+  multithread->Enter();copyCoverageBeforeNative(context.p,nativeDestination.p,nativeSource.p,staging.p,coverage.p,completion.p,nativeCopy,nativeEnd,nativeFlush,{publish,nullptr});multithread->Leave();
   check(f.copyOrder==1&&f.endOrder==2&&f.flushOrder==3&&f.nativeOrder==4,
       "active-MR production dispatch is copy, exact event End, one Flush, unchanged native copy");
   std::fill(pixels.begin(),pixels.end(),std::uint8_t{0x5a});CoverageReadbackResult receipt;
@@ -119,9 +122,9 @@ void run(){
   wait(context.p,workDone.p);wait(context.p,nativeReady.p);
  }
  check(pendingWindows!=0,"real asynchronous completion-pending window observed; no manufactured readiness proof");
- check(f.nativeCalls==4&&f.coverageCalls==4&&f.ends==4&&f.flushes==4&&f.queries==8&&f.maps==f.unmaps&&f.maps>=4&&f.maps<=8&&f.exact,
+ check(f.nativeCalls==4&&f.coverageCalls==4&&f.ends==4&&f.flushes==4&&f.publications==4&&f.queries==8&&f.maps==f.unmaps&&f.maps>=4&&f.maps<=8&&f.exact,
      "exact active-only submission and nonblocking completion/readback dispatch");
- f.workload=false;const auto flushes=f.flushes,ends=f.ends;
+ f.workload=false;f.requirePublication=false;const auto flushes=f.flushes,ends=f.ends;
  copyCoverageBeforeNative(context.p,nativeDestination.p,nativeSource.p,nullptr,nullptr,nullptr,nativeCopy,nativeEnd,nativeFlush);
  copyCoverageBeforeNative(context.p,nativeDestination.p,nativeSource.p,staging.p,coverage.p,nullptr,nativeCopy,nativeEnd,nativeFlush);
  context->Flush();wait(context.p,nativeReady.p);

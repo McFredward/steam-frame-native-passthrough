@@ -64,6 +64,14 @@ struct DecodeProvider::Impl{
         revokeCapture(d,true);d.buffers={};d.count=0;d.content=0;
         if(generation==~std::uint64_t(0)){d.generation=0;active=false;}else d.generation=++generation;
     }
+    bool captureCurrent(const CaptureObservation& fact){
+        if(!active||fact.kind!=CaptureKind::Decoded||fact.fd<0||fact.dmabufFd<0||!fact.sourcePoolGeneration
+            ||!fact.capturePoolGeneration||!fact.contentGeneration||fact.index>=MaxBuffers)return false;
+        const auto* d=find(fact.fd);if(!d||!d->hevc||d->generation!=fact.sourcePoolGeneration
+            ||d->captureGeneration!=fact.capturePoolGeneration||fact.index>=d->captureCount)return false;
+        const auto& buffer=d->capture[fact.index];return buffer.queried&&buffer.decoded&&!buffer.queued
+            &&buffer.dmabuf==fact.dmabufFd&&buffer.cycle==fact.contentGeneration&&buffer.token==fact.nativeTimestampToken;
+    }
     bool read(void* out,const void* source,std::size_t n){return reader.copy&&source&&reader.copy(out,reinterpret_cast<std::uintptr_t>(source),n,reader.context);}
     bool shape(void* source,v4l2_buffer& b,v4l2_plane& plane){return read(&b,source,sizeof b)&&ordinaryBuffer(b)&&read(&plane,b.m.planes,sizeof plane);}
 };
@@ -276,13 +284,11 @@ bool DecodeProvider::pollCapture(CaptureObservation& out) noexcept{
     out=impl_->captureEvents[impl_->captureHead];impl_->captureHead=(impl_->captureHead+1)%impl_->captureEvents.size();--impl_->captureSize;return true;
 }
 bool DecodeProvider::captureLeaseCurrent(const CaptureObservation& fact)const noexcept{
-    if(fact.kind!=CaptureKind::Decoded||fact.fd<0||fact.dmabufFd<0||!fact.sourcePoolGeneration
-        ||!fact.capturePoolGeneration||!fact.contentGeneration||fact.index>=MaxBuffers)return false;
-    std::unique_lock<std::mutex> lock(impl_->mutex,std::try_to_lock);if(!lock||!impl_->active)return false;
-    const auto* d=impl_->find(fact.fd);if(!d||!d->hevc||d->generation!=fact.sourcePoolGeneration
-        ||d->captureGeneration!=fact.capturePoolGeneration||fact.index>=d->captureCount)return false;
-    const auto& buffer=d->capture[fact.index];return buffer.queried&&buffer.decoded&&!buffer.queued
-        &&buffer.dmabuf==fact.dmabufFd&&buffer.cycle==fact.contentGeneration&&buffer.token==fact.nativeTimestampToken;
+    std::unique_lock<std::mutex> lock(impl_->mutex,std::try_to_lock);
+    return lock&&impl_->captureCurrent(fact);
+}
+bool DecodeProvider::captureLeaseCurrentOnWorker(const CaptureObservation& fact)const noexcept{
+    std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->captureCurrent(fact);
 }
 bool DecodeProvider::setCaptureSink(CaptureSink sink,void* context) noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -336,6 +342,7 @@ bool pollPinnedProcess(Observation& fact,std::uint8_t* output,std::size_t size) 
 bool pollPinnedCapture(CaptureObservation& fact) noexcept{return runtime&&runtime->pollCapture(fact);}
 SnapshotStats pinnedSnapshotStats() noexcept{return runtime?runtime->stats():SnapshotStats{};}
 bool pinnedCaptureLeaseCurrent(const CaptureObservation& fact) noexcept{return runtime&&runtime->captureLeaseCurrent(fact);}
+bool pinnedCaptureLeaseCurrentOnWorker(const CaptureObservation& fact) noexcept{return runtime&&runtime->captureLeaseCurrentOnWorker(fact);}
 bool setPinnedCaptureSink(CaptureSink sink,void* context) noexcept{return runtime&&runtime->setCaptureSink(sink,context);}
 std::uintptr_t preparedImageBase() noexcept{return runtime?runtime->imageBase():0;}
 Entries preparedEntries() noexcept{

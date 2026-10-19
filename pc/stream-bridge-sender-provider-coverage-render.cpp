@@ -34,11 +34,15 @@ bool submittedSharedResource(ID3D11Resource* native,ID3D11Texture2D* held,
 }
 void copyCoverageBeforeNative(ID3D11DeviceContext* context,ID3D11Resource* nativeDestination,
     ID3D11Resource* nativeSource,ID3D11Resource* readback,ID3D11Resource* coverage,ID3D11Query* completion,
-    NativeCopy nativeCopy,NativeEnd nativeEnd,NativeFlush nativeFlush)noexcept{
+    NativeCopy nativeCopy,NativeEnd nativeEnd,NativeFlush nativeFlush,CoveragePublication publication)noexcept{
     if(readback&&coverage&&completion){
         nativeCopy(context,readback,coverage);
         nativeEnd(context,completion);
         nativeFlush(context);
+        // Publish the immutable receipt before handing the native input to
+        // another encoder thread. Publishing after nativeCopy returns races a
+        // consumer which can already observe that native resource handoff.
+        if(publication.publish)publication.publish(publication.context);
     }
     nativeCopy(context,nativeDestination,nativeSource);
 }

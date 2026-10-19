@@ -44,6 +44,16 @@
   establish persistent-installation, update safety or arbitrary-game support.
 - Keep allocations, queued frames, reassembly and logging bounded. No file I/O,
   socket waits or shader compilation on a compositor rendering thread.
+- The maintainer's 2026-10-19 continuity requirement makes every active-MR game
+  frame's exact coverage mandatory. Routine mutex contention, snapshot bursts
+  or known individual gaps must not repeatedly reset the whole paired session
+  or make normal gameplay flash opaque. Fix availability/ownership rather than
+  substituting stale masks or weakening unknown-loss/frame/eye proof. A genuine
+  unscoped proof or connection failure retains the emergency opaque path.
+- Keep semantic versions and per-PC/Frame installation status, but do not create
+  separate version-tagged GitHub Releases for routine candidates (2026-10-19).
+  Publish the stable repository installation line in both READMEs and update its
+  existing delivery channels after validation.
 - Clean completed temporary test artifacts after every run (maintainer request,
   2026-10-11). Retain small validation records and only the build outputs still
   needed for review/deployment. Protect active workers, hardware logs, source

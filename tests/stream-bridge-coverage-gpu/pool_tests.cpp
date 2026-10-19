@@ -131,6 +131,42 @@ void reservations(){
         check(f.vk.submits==before&&f.pool.statusCold().submitted==1&&!f.pool.statusCold().quarantined,"completed previous lifecycle token cannot claim re-prepared pool");f.pool.submitted(fresh,f.vk.queue,&l,1,VK_SUCCESS);check(f.vk.submits==before+1,"fresh lifecycle token remains usable after old token refusal");f.vk.signal();f.pool.reapCold();f.pool.releaseRecorded(l);}
     {Fixture f;check(!f.pool.prepareSubmit(f.vk.queue,nullptr,0)&&!f.pool.statusCold().quarantined,"ordinary empty batch needs no sampling reservation or quarantine");}
 }
+void warmSlots(Fixture& f){for(unsigned n=1;n<=MaximumSlots;++n){auto lease=f.ready(n);f.pool.releaseRecorded(lease);}}
+void gpuReferencedReuse(){Fixture f;std::array<Lease,MaximumSlots> leases{};for(unsigned n=0;n<MaximumSlots;++n)leases[n]=f.ready(n+1);
+    for(const auto& lease:leases){const auto reservation=f.pool.prepareSubmit(f.vk.queue,&lease,1);check(bool(reservation),"actual in-flight GPU reservation owns its exact source");f.pool.submitted(reservation,f.vk.queue,&lease,1,VK_SUCCESS);f.pool.releaseRecorded(lease);}
+    const auto allocations=f.vk.allocations,destroys=f.vk.destroys;check(f.pool.statusCold().submitted==MaximumSlots&&!f.pool.statusCold().recorded,"all exact sources remain GPU-owned after recording references release");
+    check(!f.upload(9)&&f.vk.allocations==allocations&&f.vk.destroys==destroys,"post-claim GPU ownership prevents any cold resource replacement");
+    f.vk.signal();f.pool.reapCold();check(f.upload(9),"only real GPU retirement permits cold replacement");
+}
+void submitting(){Fixture f;warmSlots(f);check(f.upload(9),"initialized next source is pending");f.vk.block=true;std::thread queue([&]{f.pool.drainUploads(f.vk.queue);});while(!f.vk.inside.load())std::this_thread::yield();
+    // The native copy submit has not returned. Its slot is not idle, even
+    // though no recording or GPU sampling reference owns it yet.
+    const auto calls=f.vk.calls;f.pool.reapCold();check(f.vk.calls==calls,"cold reap cannot poll a Submitting copy fence before native success");check(f.upload(9)&&f.vk.calls==calls,"duplicate certificate cannot reset or rewrite a Submitting copy");
+    auto preview=f.pool.acquireScheduled(f.frame(9));check(bool(preview)&&!f.pool.acquire(f.frame(9)),"initialized Submitting image permits recording preview but no completed-upload claim");f.pool.releaseRecorded(preview);
+    for(unsigned n=10;n<17;++n)check(f.upload(n),"other idle slots can receive independent exact masks while copy submit is blocked");
+    const bool refused=!f.upload(17);f.vk.block=false;queue.join();check(refused,"Submitting slot cannot be recycled even after all seven other idle slots are consumed");
+    f.vk.signal();f.pool.reapCold();auto lease=f.pool.acquire(f.frame(9));check(bool(lease)&&f.pool.statusCold().ready==8,"original Submitting source survives through real success and completion");f.pool.releaseRecorded(lease);
+}
+void concurrentReuse(){Fixture f;warmSlots(f);std::atomic<std::uint64_t> published{8};std::atomic<bool> start{false},done{false},invalid{false};std::atomic<unsigned> held{0};
+    std::thread cold([&]{while(!start.load())std::this_thread::yield();for(std::uint64_t id=9;id<=4096;++id){if(!f.upload(id)){invalid=true;break;}f.pool.drainUploads(f.vk.queue);f.vk.signal();f.pool.reapCold();published.store(id,std::memory_order_release);}done=true;});
+    // Establish one owned claim BEFORE releasing the worker, so even a
+    // single-core scheduler proves overlapping lifetime rather than racing
+    // the main thread against completion of the whole short cold loop.
+    auto initial=f.pool.acquire(f.frame(8));if(!initial)invalid=true;else ++held;
+    start=true;
+    while(!done.load(std::memory_order_acquire)&&published.load(std::memory_order_acquire)<24)std::this_thread::yield();
+    auto retained=f.pool.acquire(f.frame(8));if(!retained||retained.slot!=initial.slot||retained.generation!=initial.generation||retained.set!=initial.set)invalid=true;
+    if(retained)f.pool.releaseRecorded(retained);
+    if(initial)f.pool.releaseRecorded(initial);
+    while(!done.load(std::memory_order_acquire)){const auto id=published.load(std::memory_order_acquire);auto first=f.pool.acquire(f.frame(id));if(!first)continue;
+        ++held;const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        while(!done.load(std::memory_order_acquire)&&published.load(std::memory_order_acquire)<id+16&&std::chrono::steady_clock::now()<until)std::this_thread::yield();
+        auto second=f.pool.acquire(f.frame(id));if(!second||second.slot!=first.slot||second.generation!=first.generation||second.set!=first.set)invalid=true;
+        if(second)f.pool.releaseRecorded(second);
+        f.pool.releaseRecorded(first);
+    }
+    cold.join();check(!invalid&&held.load()>0,"concurrent cold slot reuse never changes metadata protected by a hot reference claim");check(!f.pool.statusCold().quarantined,"concurrent ref/writer claims retain bounded storage without quarantine");
+}
 void nonblocking(){Fixture f;check(f.upload(1),"pending for contention");f.vk.block=true;std::thread queue([&]{f.pool.drainUploads(f.vk.queue);});while(!f.vk.inside.load())std::this_thread::yield();auto start=std::chrono::steady_clock::now();check(!f.pool.acquire(f.frame(1)),"busy queue state refuses draw");check(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(50),"draw never waits for queue owner");f.vk.block=false;queue.join();}
 }
-int main(){try{lifecycle();inputs();bounded();failure();scheduled();reservations();nonblocking();std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{lifecycle();inputs();bounded();failure();scheduled();reservations();gpuReferencedReuse();submitting();concurrentReuse();nonblocking();std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

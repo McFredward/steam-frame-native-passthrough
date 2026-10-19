@@ -5,11 +5,17 @@ independent of SteamVR's supported runtime version, GloomhavenVR's minimum mod
 version, the wire protocol version, and the source revision. The product remains
 experimental; a semantic version is not a compatibility or hardware guarantee.
 
-Increment `VERSION` for **every externally published patch candidate**. Use
-`0.2.1` for the next corrective release and `0.3.0` for a new minor feature set.
+Increment `VERSION` for **every externally published patch candidate**. Increment
+the patch component for corrections and the minor component for a new feature set.
 Publishing changed native artifacts under the same version is not the normal
 release workflow. The installer still handles that defensively by offering
 Update whenever the exact checked package differs.
+
+Routine candidates are delivered through the stable repository installation
+line in the English/German READMEs. The maintainer does not want a separate
+version-tagged GitHub Release for every candidate. Existing installer download
+channels remain delivery infrastructure; package and installed-component
+versions remain independently inspectable.
 
 The package assembler source-pins `VERSION` and stamps it in the outer package's
 owned `VERSION` file, source/packaging receipts, and the two component entries in

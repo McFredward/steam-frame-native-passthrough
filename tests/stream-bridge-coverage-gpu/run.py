@@ -56,13 +56,33 @@ def main():
                 env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1:abort_on_error=1')
                 result['sanitized'] = json.loads(run('sanitized', [san], env=env))
                 run('arm64-strict', ['aarch64-linux-gnu-g++', *FLAGS, '-I/usr/include', '-c', source, '-o', work / 'pool-arm64.o'])
+                # Force the early GPU-ref observation stale, while retaining
+                # the real post-writer-claim check. The fixture populates actual
+                # submitted refs; no guessed/model GPU counter is injected.
+                early = '&&!s.gpuRefs.load(std::memory_order_acquire)'
+                late = 'if(selected->gpuRefs.load(std::memory_order_acquire))'
+                text = source.read_text()
+                if text.count(early) != 1 or text.count(late) != 1:
+                    raise RuntimeError('writer GPU-reference causal anchors changed')
+                stale = text.replace(early, '')
+                variant = work / 'stale-gpu-precheck.cpp'
+                variant.write_text(stale)
+                run('stale-gpu-precheck-build', ['g++', *FLAGS, '-I' + str(ROOT / 'layer'), core, variant, '-o', work / 'stale-gpu-precheck'])
+                result['stale_gpu_precheck'] = json.loads(run('stale-gpu-precheck', [work / 'stale-gpu-precheck']))
+                variant.write_text(stale.replace(late, 'if(false)'))
+                run('missing-post-claim-gpu-build', ['g++', *FLAGS, '-I' + str(ROOT / 'layer'), core, variant, '-o', work / 'missing-post-claim-gpu'])
+                run('missing-post-claim-gpu', [work / 'missing-post-claim-gpu'], expected=1,
+                    message='post-claim GPU ownership prevents any cold resource replacement')
+                result['post_claim_gpu_control'] = 'stale early observation remains safe; removing the post-claim check fails'
                 mutants = [
+                    ('cold-overwrites-in-flight-copy', '(s.state==Impl::State::Free||s.state==Impl::State::Ready)',
+                     '(s.state==Impl::State::Free||s.state==Impl::State::Ready||s.state==Impl::State::Submitting)', 'Submitting slot cannot be recycled'),
                     ('bind-before-copy', 'selected->state=ok?Impl::State::Pending:Impl::State::Free',
                      'selected->state=ok?Impl::State::Ready:Impl::State::Free', 'pending is never sampled'),
                     ('retire-before-fence', 'if(r==VK_SUCCESS){for(std::size_t i=0;i<MaximumSlots;',
                      'if(r==VK_SUCCESS||r==VK_NOT_READY){for(std::size_t i=0;i<MaximumSlots;', 'tail fence required'),
-                    ('stale-release', '(refs>>16)!=l.generation||!(refs&RefMask)',
-                     '!(refs&RefMask)', 'stale release cannot decrement new slot'),
+                    ('stale-release', 'for(unsigned tries=0;tries<8;++tries){if((refs>>16)!=l.generation||!(refs&RefMask))return;',
+                     'for(unsigned tries=0;tries<8;++tries){if(!(refs&RefMask))return;', 'stale release cannot decrement new slot'),
                 ]
                 result['negative_controls'] = []
                 for name, old, new, intended in mutants:
@@ -78,8 +98,8 @@ def main():
             if args.suite in ('all', 'core', 'scheduled-controls'):
                 scheduled_mutants = [
                     ('scheduled-first-uninitialized',
-                     '((s.state==Impl::State::Pending||s.state==Impl::State::Copying)&&s.initializedShaderReadLayout)',
-                     '(s.state==Impl::State::Pending||s.state==Impl::State::Copying)',
+                     'scheduled&&s.initializedShaderReadLayout.load(std::memory_order_acquire)&&',
+                     'scheduled&&',
                      'scheduled never exposes first uninitialized image'),
                     ('scheduled-before-copy-submit',
                      's.state==State::Ready||(s.state==State::Copying&&s.initializedShaderReadLayout)',

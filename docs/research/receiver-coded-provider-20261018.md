@@ -75,8 +75,10 @@ Fixed-signature `mmap`, `munmap` and `close` retain their ordinary signatures.
 
 ## Bounded ownership and loss
 
-The registry has two decoder fds, at most sixteen buffers per fd and two owned
-snapshot slots of at most 2 MiB each, allocated during preparation. This is a
+The registry has two decoder fds and at most sixteen buffers per fd. The initial
+two owned snapshot slots were enlarged by the
+[continuous-coverage repair](continuous-coverage-20261019.md) to one complete
+native burst: sixteen slots of at most 2 MiB, allocated during preparation. This is a
 bounded prototype limit, not a claim that all valid HEVC pictures fit 2 MiB.
 Larger/unsupported input stays completely ordinary and unobserved. With no free
 snapshot slot, copying is skipped; no old slot is evicted. Successful QBUF still

@@ -19,7 +19,7 @@ bool valid(const FrameIdentity&f,std::uint32_t w,std::uint32_t h,stream_bridge::
         w==f.descriptor.codedWidth&&h==f.descriptor.codedHeight&&b.data&&
         std::uint64_t(w)*h==b.size&&b.size<=stream_bridge::MaximumCoverageBytes;
 }
-constexpr std::uint64_t RefMask=65535,GenerationLimit=(std::numeric_limits<std::uint64_t>::max()>>16);
+constexpr std::uint64_t RefMask=32767,Writer=32768,GenerationLimit=(std::numeric_limits<std::uint64_t>::max()>>16);
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free,"queue completion requires lock-free ticket publication");
 std::atomic<std::uint64_t> ownerSerial{1};
 std::uint64_t nextOwner() noexcept {
@@ -44,16 +44,16 @@ struct Pool::Impl {
 #define MEMBER(n) PFN_vk##n n=nullptr;
     GPU_FUNCTIONS(MEMBER)
 #undef MEMBER
-    enum class State { Free,Allocating,Pending,Copying,Ready };
+    enum class State { Free,Allocating,Pending,Submitting,Copying,Ready };
     struct Slot {
-        State state=State::Free;FrameIdentity frame{};std::uint64_t generation=0;
+        std::atomic<State> state{State::Free};FrameIdentity frame{};std::uint64_t generation=0;
         std::atomic<std::uint64_t> refs{0};std::atomic<bool> quarantine{false};
-        std::uint32_t gpuRefs=0;VkImage image{};VkDeviceMemory imageMemory{};
+        std::atomic<std::uint32_t> gpuRefs{0};VkImage image{};VkDeviceMemory imageMemory{};
         VkImageView view{};VkBuffer staging{};VkDeviceMemory stagingMemory{};
-        void* mapped=nullptr;std::size_t bytes=0;std::uint32_t width=0,height=0;bool coherent=false,initializedShaderReadLayout=false;VkDescriptorSet set{};
+        void* mapped=nullptr;std::size_t bytes=0;std::uint32_t width=0,height=0;bool coherent=false;std::atomic<bool> initializedShaderReadLayout{false};VkDescriptorSet set{};
         VkCommandBuffer copy{};VkFence uploaded{};
     };
-    enum class TicketState:std::uint64_t { Free,Reserved,Completing,Submitted,Quarantined };
+    enum class TicketState:std::uint64_t { Free,Reserved,Completing,Submitted,Quarantined,Initializing };
     struct Ticket {
         // Generation and state share one CAS word, so a stale/replayed
         // completion can never claim a later reuse of the same fixed slot.
@@ -65,6 +65,11 @@ struct Pool::Impl {
         bool claim(std::uint64_t value) noexcept{
             auto expected=(value<<3)|static_cast<std::uint64_t>(TicketState::Reserved);
             return phase.compare_exchange_strong(expected,(value<<3)|static_cast<std::uint64_t>(TicketState::Completing),std::memory_order_acq_rel);
+        }
+        bool initialize(std::uint64_t value) noexcept {
+            auto expected=phase.load(std::memory_order_acquire);
+            return (expected&7)==static_cast<std::uint64_t>(TicketState::Free)&&
+                phase.compare_exchange_strong(expected,(value<<3)|static_cast<std::uint64_t>(TicketState::Initializing),std::memory_order_acq_rel);
         }
     };
     mutable std::mutex gate;std::mutex cold;
@@ -109,14 +114,38 @@ struct Pool::Impl {
     bool leases(const Lease*ls,std::size_t n,std::uint32_t&mask,std::array<std::uint64_t,MaximumSlots>&gs)const noexcept {
         mask=0;gs.fill(0);if(!ls||!n||n>MaximumSlots)return false;
         for(std::size_t i=0;i<n;++i){const auto&l=ls[i];if(!l)return false;const auto&s=slots[l.slot];
+            // Each supplied lease owns a recording reference throughout this
+            // native submission. Check that epoch/ref first; a cold writer
+            // cannot mutate any metadata while those references are retained.
+            const auto refs=s.refs.load(std::memory_order_acquire);
+            if((refs&Writer)||(refs>>16)!=l.generation||!(refs&RefMask))return false;
             // Copying means our own prior queue submit returned VK_SUCCESS.
             // It is usable before CPU reap only on that same ordered queue,
             // and only when a previous completed upload initialized this image.
             const bool usable=s.state==State::Ready||(s.state==State::Copying&&s.initializedShaderReadLayout);
             if(!usable||s.generation!=l.generation||s.set!=l.set||
-                s.quarantine.load(std::memory_order_acquire)||!(s.refs.load(std::memory_order_acquire)&RefMask))return false;
+                s.quarantine.load(std::memory_order_acquire))return false;
             mask|=1u<<l.slot;gs[l.slot]=l.generation;
         }return true;
+    }
+    Lease acquire(const FrameIdentity& frame,bool scheduled) noexcept {
+        if(!prepared)return {};
+        for(std::uint32_t index=0;index<slots.size();++index){auto& s=slots[index];auto refs=s.refs.load(std::memory_order_acquire);
+            // Claim BEFORE reading non-atomic frame/set/generation metadata.
+            // The only writer first CAS-claims Writer from zero references.
+            for(unsigned attempt=0;attempt<8;++attempt){
+                if((refs&Writer)||!(refs>>16)||(refs&RefMask)==RefMask)break;
+                if(!s.refs.compare_exchange_strong(refs,refs+1,std::memory_order_acq_rel))continue;
+                const auto state=s.state.load(std::memory_order_acquire);
+                const bool usable=state==State::Ready||(scheduled&&s.initializedShaderReadLayout.load(std::memory_order_acquire)&&
+                    (state==State::Pending||state==State::Submitting||state==State::Copying));
+                if(usable&&!s.quarantine.load(std::memory_order_acquire)&&same(s.frame,frame))return {index,refs>>16,s.set};
+                // This claim still owns one reference, so neither the writer
+                // bit nor its generation can change until this decrement.
+                s.refs.fetch_sub(1,std::memory_order_release);break;
+            }
+        }
+        return {};
     }
     bool makeResource(Slot&s,std::uint32_t w,std::uint32_t h,stream_bridge::Bytes bytes) noexcept {
         const bool reuse=s.image&&s.view&&s.staging&&s.mapped&&s.width==w&&s.height==h&&s.bytes==bytes.size;
@@ -218,25 +247,35 @@ bool Pool::upload(const FrameIdentity&f,std::uint32_t w,std::uint32_t h,stream_b
         if(!match)++p.refusals;
         return match;
     }
-    {std::lock_guard<std::mutex> lock(p.gate);
-        for(auto&s:p.slots)if(!s.quarantine.load(std::memory_order_acquire)&&!s.gpuRefs&&!(s.refs.load(std::memory_order_acquire)&RefMask)&&
-            (s.state==Impl::State::Free||s.state==Impl::State::Ready)&&(!selected||s.generation<selected->generation))selected=&s;
-        if(!selected||p.serial==GenerationLimit){++p.refusals;return false;}
+    {std::lock_guard<std::mutex> lock(p.gate);std::uint32_t skipped=0;if(p.serial==GenerationLimit){++p.refusals;return false;}
+        for(unsigned attempt=0;attempt<MaximumSlots;++attempt){selected=nullptr;unsigned index=0;
+            for(unsigned n=0;n<p.slots.size();++n){auto& s=p.slots[n];if(!(skipped&(1u<<n))&&!s.quarantine.load(std::memory_order_acquire)&&!s.gpuRefs.load(std::memory_order_acquire)&&!(s.refs.load(std::memory_order_acquire)&(RefMask|Writer))&&
+                (s.state==Impl::State::Free||s.state==Impl::State::Ready)&&(!selected||s.generation<selected->generation)){selected=&s;index=n;}}
+            if(!selected)break;
+            auto refs=selected->refs.load(std::memory_order_acquire);const auto original=refs;
+            if((refs&(RefMask|Writer))||!selected->refs.compare_exchange_strong(refs,refs|Writer,std::memory_order_acq_rel)){skipped|=1u<<index;selected=nullptr;continue;}
+            // A final recording release can race the first GPU-ref check.
+            // Claiming its release sequence makes that prior increment visible.
+            if(selected->gpuRefs.load(std::memory_order_acquire)){selected->refs.store(original,std::memory_order_release);skipped|=1u<<index;selected=nullptr;continue;}
+            break;
+        }
+        if(!selected){++p.refusals;return false;}
         selected->state=Impl::State::Allocating;selected->frame=f;selected->generation=++p.serial;
-        selected->refs.store(selected->generation<<16,std::memory_order_release);
     }
     bool ok=p.makeResource(*selected,w,h,b);
     if(!ok)p.releaseResource(*selected);
     {std::lock_guard<std::mutex> lock(p.gate);selected->state=ok?Impl::State::Pending:Impl::State::Free;
+        selected->refs.store(selected->generation<<16,std::memory_order_release);
         if(ok)++p.uploadedCount;else ++p.refusals;}
     return ok;
 }
 void Pool::drainUploads(VkQueue q) noexcept {
-    auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared||q!=p.queue)return;
-    for(auto&s:p.slots)if(s.state==Impl::State::Pending&&!s.quarantine.load(std::memory_order_acquire)){
+    auto&p=*impl_;if(!p.prepared||q!=p.queue)return;
+    for(auto&s:p.slots){auto expected=Impl::State::Pending;
+        if(s.quarantine.load(std::memory_order_acquire)||!s.state.compare_exchange_strong(expected,Impl::State::Submitting,std::memory_order_acq_rel))continue;
         VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submit.commandBufferCount=1;submit.pCommandBuffers=&s.copy;
         if(p.QueueSubmit(q,1,&submit,s.uploaded)==VK_SUCCESS)s.state=Impl::State::Copying;
-        else{s.quarantine.store(true,std::memory_order_release);++p.refusals;}
+        else{s.quarantine.store(true,std::memory_order_release);s.state=Impl::State::Pending;++p.refusals;}
     }
 }
 void Pool::reapCold() noexcept {
@@ -251,21 +290,10 @@ void Pool::reapCold() noexcept {
     }
 }
 Lease Pool::acquire(const FrameIdentity&f) noexcept {
-    auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared)return {};
-    for(std::uint32_t i=0;i<MaximumSlots;++i){auto&s=p.slots[i];if(s.state!=Impl::State::Ready||!same(s.frame,f)||s.quarantine.load(std::memory_order_acquire))continue;
-        auto refs=s.refs.load(std::memory_order_acquire);if((refs&RefMask)==RefMask){++p.refusals;return {};}
-        s.refs.fetch_add(1,std::memory_order_acq_rel);return {i,s.generation,s.set};
-    }return {};
+    return impl_->acquire(f,false);
 }
 Lease Pool::acquireScheduled(const FrameIdentity&f) noexcept {
-    auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared)return {};
-    for(std::uint32_t i=0;i<MaximumSlots;++i){auto&s=p.slots[i];
-        const bool eligible=s.state==Impl::State::Ready||
-            ((s.state==Impl::State::Pending||s.state==Impl::State::Copying)&&s.initializedShaderReadLayout);
-        if(!eligible||!same(s.frame,f)||s.quarantine.load(std::memory_order_acquire))continue;
-        auto refs=s.refs.load(std::memory_order_acquire);if((refs&RefMask)==RefMask){++p.refusals;return {};}
-        s.refs.fetch_add(1,std::memory_order_acq_rel);return {i,s.generation,s.set};
-    }return {};
+    return impl_->acquire(f,true);
 }
 void Pool::releaseRecorded(const Lease&l) noexcept {
     if(!l)return;
@@ -275,13 +303,16 @@ void Pool::releaseRecorded(const Lease&l) noexcept {
     s.quarantine.store(true,std::memory_order_release);++impl_->refusals;
 }
 Reservation Pool::prepareSubmit(VkQueue q,const Lease*ls,std::size_t n) noexcept {
-    auto&p=*impl_;if(!n)return {};std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
+    auto&p=*impl_;if(!n)return {};
     std::uint32_t mask=0;std::array<std::uint64_t,MaximumSlots> gs{};
     // No sampling submit has been enabled yet. Refusing this reservation
     // makes only this batch opaque; its recording references still retain
     // immutable storage until the native recording is completed/retired.
-    if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}
-    for(std::uint32_t index=0;index<p.tickets.size();++index){auto&t=p.tickets[index];if(t.state()!=Impl::TicketState::Free)continue;
+    if(!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}
+    // The original queue's external synchronization also owns ticketSerial.
+    // Claim a Free slot before changing fields; the cold worker never reads
+    // Initializing and only publishes Free after completed/reset retirement.
+    for(std::uint32_t index=0;index<p.tickets.size();++index){auto&t=p.tickets[index];if(!t.initialize(p.ticketSerial+1))continue;
         t.generation=++p.ticketSerial;t.mask=mask;t.generations=gs;
         for(std::size_t i=0;i<MaximumSlots;++i)if(mask&(1u<<i))++p.slots[i].gpuRefs;
         t.state(Impl::TicketState::Reserved);return {index,t.generation,&p,p.ownerGeneration};}

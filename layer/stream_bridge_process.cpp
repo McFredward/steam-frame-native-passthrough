@@ -80,7 +80,7 @@ void decoded(const native::DecodedFrame& frame,void* context) noexcept{
     native::ImageLease image;local::LeaseReference lease;
     if(!p.images.join(frame.capture,image)){count(p,Flow::ImageMiss);return;}
     if(!p.writer.reference(frame.capture,lease)){count(p,Flow::LeaseMiss);return;}
-    if(!native::pinnedCaptureLeaseCurrent(frame.capture)){count(p,Flow::NativeStale);return;}
+    if(!native::pinnedCaptureLeaseCurrentOnWorker(frame.capture)){count(p,Flow::NativeStale);return;}
     try{std::lock_guard<std::mutex> lock(p.gate);
         // The exact certificate was queued first; recover its binding only by
         // matching this same source+submission+descriptor, never newest frame.

@@ -108,12 +108,13 @@ class Tests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             version=z.read('VERSION').decode().strip()
             bundle=json.loads(z.read('stream-bridge-bundle.json'))
-            self.assertEqual(version,'0.2.0');self.assertEqual(receipt['version'],version)
+            self.assertEqual(version,(ROOT/'VERSION').read_text().strip());self.assertEqual(receipt['version'],version)
             self.assertEqual(bundle['version'],version)
             self.assertEqual(bundle['pc']['version'],version);self.assertEqual(bundle['frame']['version'],version)
             self.assertEqual(json.loads(z.read('stream-bridge-package-source.json'))['version'],version)
             self.assertEqual(receipt['source_pins']['VERSION'],p.pin(z.read('VERSION')))
-        (self.root/'VERSION').write_text('0.2.1\n')
+        changed='0.0.1' if version=='0.0.0' else '0.0.0'
+        (self.root/'VERSION').write_text(changed+'\n')
         with self.assertRaisesRegex(ValueError,'sources differ'):self.build()
 
     def test_release_requires_exact_complete_receipts(self):

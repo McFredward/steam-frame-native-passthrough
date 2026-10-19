@@ -6,7 +6,10 @@
 #include <sys/types.h>
 
 namespace stream_bridge_native {
-constexpr std::size_t MaxDevices=2,MaxBuffers=16,SnapshotCapacity=2;
+constexpr std::size_t MaxDevices=2,MaxBuffers=16;
+// Cold 32 MiB reservation: retain one complete native OUTPUT-buffer burst.
+// Slots are never evicted and no allocation occurs in decoder callbacks.
+constexpr std::size_t SnapshotCapacity=MaxBuffers;
 constexpr std::size_t MaxCodedBytes=2*1024*1024;
 using Hash=std::array<std::uint8_t,32>;
 extern const Hash ExpectedVrlinkHash;
@@ -65,6 +68,9 @@ public:
     bool poll(Observation&,std::uint8_t* output,std::size_t capacity) noexcept;
     bool pollCapture(CaptureObservation&) noexcept;
     bool captureLeaseCurrent(const CaptureObservation&) const noexcept;
+    // Worker only: serialize the scalar check rather than mistake temporary
+    // mutex contention for a stale lease. Never call this from rendering.
+    bool captureLeaseCurrentOnWorker(const CaptureObservation&) const noexcept;
     bool setCaptureSink(CaptureSink,void*) noexcept;
     SnapshotStats stats() const noexcept;
     OriginalIoctl originalIoctl() const noexcept;
@@ -82,6 +88,7 @@ bool pollPinnedProcess(Observation&,std::uint8_t*,std::size_t) noexcept;
 bool pollPinnedCapture(CaptureObservation&) noexcept;
 SnapshotStats pinnedSnapshotStats() noexcept;
 bool pinnedCaptureLeaseCurrent(const CaptureObservation&) noexcept;
+bool pinnedCaptureLeaseCurrentOnWorker(const CaptureObservation&) noexcept;
 bool setPinnedCaptureSink(CaptureSink,void*) noexcept;
 struct Entries{void* ioctl=nullptr;OriginalMmap mmap=nullptr;OriginalMunmap munmap=nullptr;OriginalClose close=nullptr;};
 Entries preparedEntries() noexcept;

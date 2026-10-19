@@ -43,8 +43,14 @@ Mixed Reality in einem unveränderten Spiel.
 
 ## Loslegen
 
-1. Starte die [geführte Einrichtung auf deinem PC](docs/PC-FRAME-SETUP.md#start-the-assistant).
-   Sie installiert passende Komponenten auf PC und Frame und hilft bei der Verbindung.
+Füge diese Zeile in **PowerShell auf deinem PC** ein:
+
+```powershell
+irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/main/get.ps1 | iex
+```
+
+1. Folge der [geführten Einrichtung](docs/PC-FRAME-SETUP.md#start-the-assistant).
+   Sie zeigt installierte und verfügbare Patch-Versionen für PC und Frame und bietet Installation oder Update an.
 2. Starte Steam Link und ein unterstütztes Spiel. Aktiviere dort natives
    Steam-Link-Passthrough. Mit derselben Option erhältst du das normale Bild zurück.
 

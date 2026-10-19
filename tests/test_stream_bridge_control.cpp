@@ -1,10 +1,14 @@
 #include "../bridge/stream_bridge_control.h"
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -14,6 +18,14 @@
 // Test-only libc interposition makes the selection replacement occur exactly
 // during the real credential read; production has no timing/test callback.
 namespace {bool replaceSelection=false,selectionReplaced=false;std::array<char,4096> selectionPath{},retiredPath{};}
+namespace {std::atomic<bool> holdNextRecv{false};std::mutex recvGate;std::condition_variable recvChanged;bool recvEntered=false,releaseRecv=false;}
+extern "C" ssize_t recv(int fd,void* buffer,std::size_t length,int flags){
+    if(holdNextRecv.exchange(false)){
+        std::unique_lock<std::mutex> lock(recvGate);recvEntered=true;recvChanged.notify_all();
+        recvChanged.wait(lock,[]{return releaseRecv;});
+    }
+    return static_cast<ssize_t>(syscall(SYS_recvfrom,fd,buffer,length,flags,nullptr,nullptr));
+}
 extern "C" ssize_t read(int fd,void* buffer,std::size_t length){
     if(replaceSelection&&length>128){
         replaceSelection=false;
@@ -141,6 +153,33 @@ void partialAndInvalid(){
     check(send(raw,invalid.data()+40,invalid.size()-40,0)==static_cast<ssize_t>(invalid.size()-40),"fixture remaining TCP bytes");for(unsigned i=0;i<30;++i)runtime.tick();
     sb::VerifiedControl output;check(runtime.status()==sb::ControlStatus::AuthenticationRefused&&!runtime.peerVerified()&&!runtime.pollVerified(output),"complete unauthenticated packet closes trust without an output");close(raw);
 }
+void certificationDuringSocketPoll(){
+    Files files;sb::ControlRuntime p,r;auto rp=request(files.producer,sb::Role::Producer);
+    rp.offered=rp.required=sb::KnownCapabilities;
+    check(p.prepare(rp)==sb::ControlStatus::Listening,"contention producer prepared");
+    auto rr=request(files.receiver,sb::Role::Receiver);rr.port=p.localPort();rr.offered=rr.required=sb::KnownCapabilities;rr.nativeAccessUnitCapacity=4096;
+    check(r.prepare(rr)==sb::ControlStatus::Connecting||r.status()==sb::ControlStatus::WaitingVideo,"contention actual receiver connected");pump(p,r);
+    check(p.peerAccessUnitCapacity()==4096,"contention native capacity negotiated before signer publication");
+    sb::Pairing pair;sb::AuthSession verifier;
+    check(sb::loadPrivatePairing(files.receiver,sb::Role::Receiver,pair)==sb::CredentialStatus::Ok&&verifier.prepareReceiver(pair,rr.video)==sb::AuthStatus::Ok,"independent actual certificate verifier prepared");
+    recvEntered=releaseRecv=false;holdNextRecv=true;
+    std::thread poller([&]{p.tick();});bool entered=false;
+    {std::unique_lock<std::mutex> lock(recvGate);entered=recvChanged.wait_for(lock,std::chrono::seconds(5),[]{return recvEntered;});}
+    bool complete=entered;
+    if(entered)for(unsigned frame=1;frame<=64;++frame){
+        std::vector<std::uint8_t> raw(64*64,std::uint8_t(frame)),rle,encoded;
+        sb::CertifiedAccessUnit verified;
+        complete=sb::encodeCoverageRle(bytes(raw),rle)&&p.certifyAccessUnit(bytes(ordinary),{frame,9,64,64},sb::CoverageEncoding::Rle,bytes(rle),encoded)&&
+            sb::inspectCertifiedFrame(bytes(encoded),verifier,verified)==sb::FrameStatus::Ok&&verified.descriptor.sourceFrame==frame&&verified.coverageEncoding==sb::CoverageEncoding::Rle&&complete;
+    }
+    {std::lock_guard<std::mutex> lock(recvGate);releaseRecv=true;}recvChanged.notify_all();poller.join();holdNextRecv=false;
+    check(entered,"production control tick held inside actual socket poll");
+    check(complete,"all64 exact frame certificates survive held cold socket mutex without None/original fallback");
+    p.stop();std::vector<std::uint8_t> untouched{97};
+    check(!p.certifyAccessUnit(bytes(ordinary),{65,9,64,64},sb::CoverageEncoding::None,{},untouched)&&untouched==std::vector<std::uint8_t>{97},"stop revokes published signer transactionally");
+    check(p.prepare(rp)==sb::ControlStatus::Listening,"fresh producer preparation after signer revocation");
+    check(!p.certifyAccessUnit(bytes(ordinary),{66,9,64,64},sb::CoverageEncoding::None,{},untouched)&&untouched==std::vector<std::uint8_t>{97},"old native budget cannot authorize new generation signer");
+}
 void fixedEndpointRevocation(){
     Files files;sb::ControlRuntime p,r;auto rp=request(files.producer,sb::Role::Producer);
     rp.offered=rp.required=sb::KnownCapabilities;
@@ -188,4 +227,4 @@ void fixedEndpointRevocation(){
     }
 }
 }
-int main(){try{credentials();defaultsAndAddress();capabilities();loopbackHandshake();loopbackHandshake(true);partialAndInvalid();fixedEndpointRevocation();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{credentials();defaultsAndAddress();capabilities();loopbackHandshake();loopbackHandshake(true);partialAndInvalid();certificationDuringSocketPoll();fixedEndpointRevocation();std::cout<<checks<<" private credential and actual loopback control checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
