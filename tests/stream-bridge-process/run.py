@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--causal", action="store_true")
     parser.add_argument("--handoff-only", action="store_true")
     parser.add_argument("--handoff-control", choices=("early-receipt", "single-packet", "stale-receipt", "camera-receipt"))
+    parser.add_argument("--camera-control", choices=("future-metadata", "early-none", "old-epoch"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     root = args.source_root.resolve()
@@ -45,9 +46,22 @@ def main():
         if source.count(old) != 1:
             raise RuntimeError("handoff causal source anchor changed: " + args.handoff_control)
         source = source.replace(old, new)
+    camera_controls = {
+        "future-metadata": (b"p.cameraPeer=true;", b"p.cameraPeer=true;p.camera.request(certificate.coverageEncoding!=sb::CoverageEncoding::None);",
+                            "future signed None certificate cannot revoke camera from the current exact decoded active picture"),
+        "early-none": (b"const bool wanted=p.cameraPeer&&(p.cameraDemand||activePicture);", b"const bool wanted=p.cameraPeer&&p.cameraDemand;",
+                       "decoded opaque picture defers global camera withdrawal while an exact active native buffer is still current"),
+        "old-epoch": (b"requestCamera(p,false,Flow::CameraLease);p.currentLeases.reset();", b"requestCamera(p,false,Flow::CameraLease);",
+                      "actual source epoch loss revokes once and clears the obsolete epoch observation"),
+    }
+    if args.camera_control:
+        old, new, _ = camera_controls[args.camera_control]
+        if source.count(old) != 1:
+            raise RuntimeError("camera causal source anchor changed: " + args.camera_control)
+        source = source.replace(old, new)
     print(json.dumps({"process_sha256": hashlib.sha256(source).hexdigest(),
                       "process_header_sha256": hashlib.sha256(header).hexdigest(),
-                      "causal": args.causal, "handoff_control": args.handoff_control,
+                      "causal": args.causal, "handoff_control": args.handoff_control, "camera_control": args.camera_control,
                       "sanitized": args.sanitized}), flush=True)
     with tempfile.TemporaryDirectory(prefix="sfnp-process-fixture-") as directory:
         temp = Path(directory)
@@ -82,7 +96,7 @@ def main():
                 "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
                 "local_transport_sha256": hashlib.sha256((root / "receiver/stream_bridge_local.cpp").read_bytes()).hexdigest(),
                 "sanitized": args.sanitized, "handoff_only": args.handoff_only,
-                "causal": args.causal, "handoff_control": args.handoff_control,
+                "causal": args.causal, "handoff_control": args.handoff_control, "camera_control": args.camera_control,
                 "exit_status": result.returncode,
                 "scope": "Actual Process source, authenticated Unix channels, AU signing/inspection and shared exact leases; final GPU consumer publication is an explicit test port. Not a Frame picture test.",
                 "cache": "TemporaryDirectory removes owned executables after child processes are reaped.",
@@ -93,6 +107,9 @@ def main():
         elif args.handoff_control:
             if result.returncode != 1 or controls[args.handoff_control][2] not in result.stdout:
                 raise RuntimeError("handoff causal mutation was not caught at intended assertion: " + args.handoff_control)
+        elif args.camera_control:
+            if result.returncode != 1 or camera_controls[args.camera_control][2] not in result.stdout:
+                raise RuntimeError("camera causal mutation was not caught at intended assertion: " + args.camera_control)
         elif result.returncode:
             raise RuntimeError("actual process lifecycle fixture failed")
     return 0

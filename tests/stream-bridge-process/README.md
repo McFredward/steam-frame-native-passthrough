@@ -16,6 +16,19 @@ explicitly counted emergency timeout. The final GPU consumer publication is a
 test port; the actual same-queue copy/barrier/native draw is exercised separately
 by the Renderer/Pool fixture.
 
+Camera demand follows authenticated, kernel-validated decoded pictures, rather
+than certificates that can run ahead of the displayed video. A future signed
+`None` certificate cannot withdraw the camera from a current active picture.
+Even after an opaque picture is decoded, withdrawal waits for current active
+native buffer leases to retire. Ordinary active requeue retains demand; a real
+source-epoch loss revokes immediately and fresh exact decoded content can recover.
+This changes only the global camera session: opaque pictures remain opaque, and
+no missing mask is substituted with older coverage.
+`--camera-control future-metadata`, `early-none`, and `old-epoch` restore each
+fault independently and must fail its intended assertion. Camera transitions
+are counted by active/opaque demand and source/channel/lease revocation in the
+existing bounded cold-flow report.
+
 `--handoff-control early-receipt`, `single-packet`, and `stale-receipt` each remove
 one production condition. The runner requires failure at the corresponding
 publication, burst, or exact-identity assertion. `--sanitized` adds ASan/UBSan;
