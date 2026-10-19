@@ -108,3 +108,59 @@ history. Software success does not establish the new headset outcome.
 
 Public semantics: [V4L2 STREAMON/STREAMOFF](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/vidioc-streamon.html)
 and the [stateful decoder interface](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/dev-decoder.html).
+
+## Ahead-of-display camera withdrawal and cold sender polling (0.2.8)
+
+The paired 2026-10-19 run uses game710 and verified patch0.2.7, compositor
+PID7151 from19:02:50. Mask uploads have zero refusals and the32-slot pool
+returns Ready storage normally. This is not the fixed Pending-pool stall.
+At19:07:55 two signed None certificates coincide with five new opaque submits;
+at19:08:25 one coincides with four. Camera-client health failures are absent.
+
+Previously the receiver drove the global camera switch from each certificate,
+before its corresponding decoded image was necessarily being displayed. Future
+None metadata could therefore revoke the camera grant for still-current active
+buffers. Demand now follows authenticated decoded/kernel/lease-validated
+pictures. An opaque picture releases the switch only after all still-current
+active buffers retire. This preserves camera availability, never substitutes an
+old mask, and never makes a None-certified frame transparent. Source/channel
+loss still revokes immediately. An obsolete shared-epoch observation is cleared
+after revocation so it cannot cancel every subsequent same-source recovery.
+Cold bounded counters attribute request changes to active/None/source/channel/
+lease causes and count deferred withdrawals.
+
+The sender also fetched its complete native swap inventory under the render
+metadata mutex every8ms, even when its generation had not changed. An unavailable
+snapshot could revoke preparation for one tick, and the cold reader itself could
+collide with native Submit/Present. The unchanged-generation path now reads an
+atomic revision before acquiring/copying inventory. Every actual draw retains
+its exact registry-epoch, texture, live source and encode-input checks. Once the
+kernel-checked application pipe has a latched format permission, its unused
+preparation query also stops; EOF/new client still requires fresh preparation.
+
+The actual Process fixture tests future metadata, current buffer retirement,
+requeue, genuine epoch loss and recovery. It passes267 checks normally and with
+ASan/UBSan; three causal controls fail at their intended assertions. Actual
+Windows named-pipe checks cover the stopped cold polling and fresh EOF admission.
+No shader, resolution, stereo mapping, native camera helper or game camera
+ownership is changed.
+
+### Remaining hardware limits
+
+This capture also contains genuine native FEC failures before decoder and
+control-source resets:19:05:34.090 and19:05:48.422 report too many missing
+packets to retransmit. Hundreds of following lines repeat those aborts, not
+hundreds of independent connection failures. The receiver then reports OUTPUT
+STREAMOFF and later capture-format resets. Camera-demand fixes cannot prove the
+network/data path repaired; these gaps remain a separate investigation.
+The contribution of added exact-coverage payload to those losses is not yet
+measured and must not be dismissed as an unrelated WLAN fault.
+
+The game also genuinely replaces its head camera across intro/menu/loading/
+scenario transitions; five verified two-eye cohort admissions match those head
+replacements with no source-render/material failure. Retaining a destroyed
+head or borrowing the previous eye pair would revive the earlier stereo bug.
+This release removes identified avoidable withdrawal/polling, but does not
+claim uninterrupted loading or packet-loss resilience verified on hardware.
+The good live install was read only; updating remains a user-directed setup
+action. No timer, unattended restart or diagnostic module was deployed.
