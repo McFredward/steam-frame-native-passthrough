@@ -475,7 +475,7 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
         return VK_SUCCESS;
     }
     p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
-    const bool reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
+    const auto reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
     if(!reserved){
         // Fenced retirement is part of admission, not just resource accounting.
         // Clear all one guards on refusal while retaining ordinary native RGB.
@@ -485,7 +485,8 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
     if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);
     else p.counts.guardRefused.fetch_add(guards,std::memory_order_relaxed);
     if(!guards||!reserved)++p.counts.opaqueSubmits;
-    p.pool.submitted(queue,p.submittedLeases.data(),p.submittedCount,result);p.submittedCount=0;return result;
+    if(reserved)p.pool.submitted(reserved,queue,p.submittedLeases.data(),p.submittedCount,result);
+    p.submittedCount=0;return result;
 }
 VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2* infos,VkFence fence,bool khr) noexcept{
     auto&p=*impl_;const auto forward=khr?p.QueueSubmit2KHR:p.QueueSubmit2;if(!forward)return VK_ERROR_EXTENSION_NOT_PRESENT;
@@ -523,7 +524,7 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
         return VK_SUCCESS;
     }
     p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
-    const bool reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
+    const auto reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
     if(!reserved){
         for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one)commands[n].commandBuffer=p.zero;
     }
@@ -531,7 +532,8 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
     if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);
     else p.counts.guardRefused.fetch_add(guards,std::memory_order_relaxed);
     if(!guards||!reserved)++p.counts.opaqueSubmits;
-    p.pool.submitted(queue,p.submittedLeases.data(),p.submittedCount,result);p.submittedCount=0;return result;
+    if(reserved)p.pool.submitted(reserved,queue,p.submittedLeases.data(),p.submittedCount,result);
+    p.submittedCount=0;return result;
 }
 void Renderer::stopCold() noexcept{
     auto&p=*impl_;if(p.registered){unregisterConsumerCold(&p);p.registered=false;}

@@ -8,8 +8,8 @@ The existing standalone native-fragment and R8 GPU proofs remain separate.
 import argparse, hashlib, json, pathlib, shutil, subprocess
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');a=p.parse_args()
- if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only))>1:p.error('choose one focused subset')
+ p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--thread-sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');p.add_argument('--reservation-recovery-only',action='store_true');a=p.parse_args()
+ if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only,a.reservation_recovery_only))>1:p.error('choose one focused subset')
  here=pathlib.Path(__file__).resolve().parent;root=a.native_root.resolve();out=a.output.resolve();cache=out/'cache';cache.mkdir(parents=True,exist_ok=True);source=out/'source';source.mkdir(exist_ok=True)
  fixtures=here/'fixture.cpp';shutil.copy2(fixtures,source/'fixture.cpp')
  files=['layer/stream_bridge_renderer.cpp','layer/stream_bridge_renderer.h','layer/stream_bridge_process.h','layer/stream_bridge_artifacts.h','layer/stream_bridge_coverage_gpu.cpp','layer/stream_bridge_coverage_gpu.h','layer/native_presenter_pipeline.h','layer/submit_timeline_contract.h']
@@ -23,16 +23,21 @@ def main():
  if a.fallback_recovery_only:args+=['fallback-recovery']
  if a.telemetry_only:args+=['telemetry']
  if a.timeline_only:args+=['timeline']
+ if a.reservation_recovery_only:args+=['reservation-recovery']
  input_pins={str(path.resolve()):hashlib.sha256(path.read_bytes()).hexdigest() for path in [a.vs,a.ps,a.coverage]}
- def run(name,production,sanitize=False,negative=False):
+ def run(name,production,sanitize=False,negative=False,thread_sanitize=False):
   binary=cache/name;command=['c++','-std=c++17','-O1','-g','-Wall','-Wextra','-Wpedantic','-Werror','-Wno-missing-field-initializers','-I'+str(source),'-I'+str(root),'-I'+str(root/'layer'),'-pthread']
   if sanitize:command+=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
+  if thread_sanitize:command+=['-fsanitize=thread','-fno-omit-frame-pointer']
   command += [str(source/'fixture.cpp'),str(production),str(pool)]+list(map(str,shared))+['-o',str(binary)]
   with (out/(name+'-build.log')).open('w') as log:subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True)
   with (out/(name+'.log')).open('w') as log:status=subprocess.run([str(binary)]+args,stdout=log,stderr=subprocess.STDOUT).returncode
   if negative:
    if status==0:raise AssertionError(name+' survived causal control')
-  elif status:raise AssertionError(name+' failed, see '+str(out/(name+'.log')))
+  elif status:
+   diagnostic=(out/(name+'.log')).read_text()
+   if thread_sanitize and 'FATAL: ThreadSanitizer: unexpected memory mapping' in diagnostic:return {'exit_status':status,'unavailable':True,'reason':'ThreadSanitizer cannot initialize its shadow address space in this host; no race-free claim.'}
+   raise AssertionError(name+' failed, see '+str(out/(name+'.log')))
   if a.telemetry_only and not negative:
    lines=(out/(name+'.log')).read_text()
    if lines.count('native pipeline refused: image interface not verified')!=1 or 'native count1 image interface verified' not in lines or 'native exact-coverage pipeline prepared; original picture preserved' not in lines:raise AssertionError('startup refusal spam consumed later admission diagnostics')
@@ -40,6 +45,7 @@ def main():
   return {'exit_status':status,'expected_negative':negative}
  results={'normal':run('normal',renderer)}
  if a.sanitize:results['sanitize']=run('sanitize',renderer,True)
+ if a.thread_sanitize:results['thread-sanitize']=run('thread-sanitize',renderer,thread_sanitize=True)
  if a.mutants:
   text=renderer.read_text()
   mutations={
@@ -49,16 +55,31 @@ def main():
    'native-handle-replaced':('entry->layout=coverageLayout;create(p.coverageWords,entry->layout,entry->coverage);','entry->layout=coverageLayout;create(p.coverageWords,entry->layout,entry->coverage);original=entry->coverage;'),
    'unsupported-submit-poisons-future':('if(!supported){','if(!supported){p.pool.prepareSubmit(queue,nullptr,gpu::MaximumSlots+1);'),
    'pending-misreported-ready':('out.ready=gpu.ready;','out.ready=gpu.ready+gpu.pending;'),
+   'pre-reservation-poisons-pool':('if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}', 'if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){for(std::size_t i=0;ls&&i<n&&i<MaximumSlots;++i)if(ls[i])p.slots[ls[i].slot].quarantine.store(true);++p.refusals;return {};}'),
+   'post-submit-mutex-poisons-pool':('if(!p.prepared||q!=p.queue||!ls||!n||n>MaximumSlots){refuse();return;}', 'std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){refuse();return;}if(!p.prepared||q!=p.queue||!ls||!n||n>MaximumSlots){refuse();return;}'),
    'canonical-timeline-rejected':('if(timeline==stream_bridge_submit::TimelineStatus::Extension)why=SubmitRefusal::Extension;','if(info.pNext)why=SubmitRefusal::Extension;'),
    'none-misreported-mask':('++p.counts.maskNone;return;','++p.counts.maskDecoded;return;'),
   }
   if a.artifact_fallback_only:mutations={}
+  if a.reservation_recovery_only:mutations={name:value for name,value in mutations.items() if name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool')}
   if a.timeline_only:mutations={name:value for name,value in mutations.items() if name=='canonical-timeline-rejected'}
   if a.fallback_recovery_only:mutations={name:value for name,value in mutations.items() if name=='unsupported-submit-poisons-future'}
   if a.telemetry_only:mutations={name:value for name,value in mutations.items() if name in ('pending-misreported-ready','none-misreported-mask')}
   for name,(old,new) in mutations.items():
-   if old not in text:raise AssertionError('semantic control anchor missing: '+name)
-   path=source/(name+'.cpp');path.write_text(text.replace(old,new,1));results[name]=run(name,path,negative=True)
+   pool_mutant=name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool');original_text=pool.read_text() if pool_mutant else text
+   if old not in original_text:raise AssertionError('semantic control anchor missing: '+name)
+   path=source/(name+'.cpp');path.write_text(original_text.replace(old,new,1))
+   if pool_mutant:
+    original_pool=pool;pool=path
+    try:results[name]=run(name,renderer,negative=True)
+    finally:pool=original_pool
+   elif name=='unsupported-submit-poisons-future':
+    original_pool=pool;pool_text=pool.read_text();anchor=mutations['pre-reservation-poisons-pool'][0] if 'pre-reservation-poisons-pool' in mutations else 'if(!lock||!p.prepared||!p.ownerGeneration||q!=p.queue||!p.leases(ls,n,mask,gs)||p.ticketSerial==(std::numeric_limits<std::uint64_t>::max()>>3)){++p.refusals;return {};}'
+    if anchor not in pool_text:raise AssertionError('unsupported submit whole-pool causal anchor missing')
+    pool=source/(name+'-pool.cpp');pool.write_text(pool_text.replace(anchor,anchor.replace('++p.refusals;', 'if(!ls||n>MaximumSlots)for(auto& s:p.slots)s.quarantine.store(true);++p.refusals;'),1))
+    try:results[name]=run(name,path,negative=True)
+    finally:pool=original_pool
+   else:results[name]=run(name,path,negative=True)
  (out/'results.json').write_text(json.dumps({'results':results,'sources':pins,'fixture_sha256':hashlib.sha256((source/'fixture.cpp').read_bytes()).hexdigest(),'private_inputs':input_pins,'scope':'Actual production Renderer and Pool with forwarded public-call fake, explicit external auth/lease observations; not a native Steam/Frame or GPU-picture test.'},indent=2)+'\n')
  print(json.dumps(results))
 

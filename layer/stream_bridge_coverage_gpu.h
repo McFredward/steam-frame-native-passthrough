@@ -22,6 +22,17 @@ struct Status {
     std::uint32_t pending=0,copying=0,ready=0,recorded=0,submitted=0,quarantined=0;
     std::uint64_t uploaded=0,refused=0;
 };
+class Reservation {
+    friend class Pool;
+    std::uint32_t slot_=MaximumSubmissionFences;
+    std::uint64_t generation_=0;
+    const void* owner_=nullptr;std::uint64_t ownerGeneration_=0;
+    Reservation(std::uint32_t slot,std::uint64_t generation,const void* owner,std::uint64_t ownerGeneration) noexcept
+        :slot_(slot),generation_(generation),owner_(owner),ownerGeneration_(ownerGeneration){}
+public:
+    Reservation()=default;
+    explicit operator bool()const noexcept{return slot_<MaximumSubmissionFences&&generation_&&owner_&&ownerGeneration_;}
+};
 class Pool {
 public:
     Pool();~Pool();
@@ -49,11 +60,14 @@ public:
     // prepareSubmit must succeed before the caller enables mask coverage.
     Lease acquireScheduled(const FrameIdentity&) noexcept;
     void releaseRecorded(const Lease&) noexcept;
-    // Caller holds its admitted queue owner across original submission. Failure
-    // to reserve/submit a tail fence quarantines immutable data; never free or
-    // reuse resources sampled by an already recorded/submitted native command.
-    bool prepareSubmit(VkQueue,const Lease*,std::size_t) noexcept;
-    void submitted(VkQueue,const Lease*,std::size_t,VkResult originalResult) noexcept;
+    // Caller holds its admitted queue owner across original submission. A
+    // refused reservation must keep this batch opaque; recording references
+    // still retain storage. Call submitted ONLY after a successful reservation.
+    // Post-submit ambiguity/tail failure quarantines data that may be in flight.
+    // The generation-bound reservation must be completed exactly once by this
+    // same externally synchronized queue owner. Completion never takes a lock.
+    Reservation prepareSubmit(VkQueue,const Lease*,std::size_t) noexcept;
+    void submitted(const Reservation&,VkQueue,const Lease*,std::size_t,VkResult originalResult) noexcept;
     Status statusCold()const noexcept;
     // No wait inside this helper. Owner stops worker and proves actual device
     // idle BEFORE destroying. A destroyed device may instead be abandoned.
