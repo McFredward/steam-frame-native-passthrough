@@ -55,3 +55,23 @@ No fix may retain a previous/latest mask for a new picture, derive coverage from
 RGB, change resolution or accept an unproved source/frame/eye association.
 Software contention/recovery fixtures and actual headset confirmation remain
 distinct evidence.
+
+## Implemented correction and scoped verification
+
+The completion path now uses a fixed, generation-bound reservation with pool
+identity and a non-recycled owner epoch. One lock-free CAS claims Reserved as
+Completing. The original queue owner submits its preallocated tail fence without
+reacquiring the cold mutex, then release-publishes Submitted. The worker polls
+only acquire-observed Submitted tickets and returns them to Free only after
+actual completion and fence reset. Failed preparation publishes no one-guard;
+real post-submit/fence ambiguity remains quarantined.
+
+The production Renderer/Pool fixture reproduces both cold-lock windows for all
+three submit dispatches: 7,645 checks pass normally and with ASan/UBSan. Restoring
+either old poisoning path fails its corresponding recovery assertion. Pool
+lifetime/token checks pass 2,499 assertions per run, including foreign, stale,
+duplicate and previous-lifecycle tokens. The actual Vulkan R8 fixture passes
+320 assertions and 176 sampled pixels. TSan compiles but cannot initialize its
+shadow mapping on this host; it is unavailable, not a passing race check.
+These results establish the source-proven contention repair. The amount of
+remaining headset flicker is not established by software tests.
