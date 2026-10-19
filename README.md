@@ -18,9 +18,9 @@
 > [!IMPORTANT]
 > **Currently supports <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows PCs with an <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA GPU only.**
 >
-> **Steam Frame SteamVR 2.18.2 · build 1791331621**
+> **Tested with Steam Frame SteamVR 2.18.2 · build 1791331621**
 >
-> The installer checks compatibility.
+> Untested SteamVR versions require an extra confirmation. Passthrough stays inactive if the required native components cannot be verified.
 
 Play supported PC VR games in your real room over Steam Link.
 

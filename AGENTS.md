@@ -56,6 +56,11 @@
   release download channels are no longer present: deliver the validated archive
   from an immutable repository commit with exact size/SHA256 in the bootstrap,
   without recreating GitHub Releases.
+- The maintainer's 2026-10-19 installer request permits installation on untested
+  SteamVR versions after an explicit additional warning and confirmation. Do not
+  hide Install/Update/Repair solely because a runtime differs. Installation
+  consent is not native ABI, shader or frame authority: report inactive payloads
+  honestly, keep exact activation checks and preserve removal/recovery.
 - Clean completed temporary test artifacts after every run (maintainer request,
   2026-10-11). Retain small validation records and only the build outputs still
   needed for review/deployment. Protect active workers, hardware logs, source

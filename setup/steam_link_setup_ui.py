@@ -76,6 +76,11 @@ TEXT = {
         'bridge_removed': 'The current patch and recorded older patch were removed. Steam Link is back to its original unpatched state.',
         'bridge_install_plan': 'Setup prepares the patch files while your Frame interface stays running. SteamVR on this PC may close. When ready, setup briefly restarts Steam and SteamVR on the Frame and checks the interface. Your game settings are kept. If startup fails, setup tries to restore the previous setup and restart its interface.',
         'bridge_confirm': 'Apply the changes shown above now?',
+        'bridge_untested_confirm': 'Your SteamVR software has not been tested with this patch. Install anyway? Native passthrough may remain unavailable if the runtime checks cannot verify the required components. You can uninstall the patch or restore the previous setup afterwards.',
+        'bridge_untested_accept': 'Install anyway',
+        'bridge_untested_versions': 'Untested SteamVR software detected',
+        'bridge_untested_inactive': 'Installed, inactive on this unrecognized runtime',
+        'bridge_untested_installed': 'The patch files were installed. Native passthrough remains inactive where the runtime could not be verified; ordinary Steam Link is unchanged. Update to a compatible patch to enable passthrough.',
         'bridge_partial': 'This action could not finish. Setup will try to restore the previous setup. The setup log shows the cause; log and recovery paths are listed below.',
         'setup_log': 'Setup log: ',
         'setup_log_unavailable': 'Setup log could not be created: ',
@@ -208,6 +213,11 @@ TEXT = {
         'bridge_removed': 'Der aktuelle und ein gegebenenfalls erfasster älterer Patch wurden entfernt. Steam Link läuft wieder im ursprünglichen Zustand ohne Patch.',
         'bridge_install_plan': 'Die Patch-Dateien werden bei laufender Frame-Oberfläche vorbereitet. SteamVR auf diesem PC wird gegebenenfalls beendet. Sobald alles bereit ist, werden Steam und SteamVR auf der Frame kurz neu gestartet und die Oberfläche geprüft. Deine Spieleinstellungen bleiben erhalten. Bei einem fehlgeschlagenen Start versucht die Einrichtung, den vorherigen Zustand wiederherzustellen und dessen Oberfläche neu zu starten.',
         'bridge_confirm': 'Die oben angezeigten Änderungen jetzt anwenden?',
+        'bridge_untested_confirm': 'Deine SteamVR-Software wurde mit diesem Patch noch nicht getestet. Trotzdem installieren? Natives Passthrough kann nicht verfügbar bleiben, wenn die Laufzeitprüfung die benötigten Komponenten nicht verifizieren kann. Du kannst den Patch danach deinstallieren oder den vorherigen Zustand wiederherstellen.',
+        'bridge_untested_accept': 'Trotzdem installieren',
+        'bridge_untested_versions': 'Ungetestete SteamVR-Software erkannt',
+        'bridge_untested_inactive': 'Installiert, auf dieser unbekannten Laufzeit inaktiv',
+        'bridge_untested_installed': 'Die Patch-Dateien wurden installiert. Wo die Laufzeit nicht verifiziert werden konnte, bleibt natives Passthrough inaktiv; normales Steam Link bleibt unverändert. Ein kompatibles Patch-Update kann Passthrough aktivieren.',
         'bridge_partial': 'Diese Aktion konnte nicht abgeschlossen werden. Die Einrichtung versucht, den vorherigen Zustand wiederherzustellen. Den Grund findest du im Setup-Log; Log- und Wiederherstellungspfade stehen unten.',
         'setup_log': 'Setup-Log: ',
         'setup_log_unavailable': 'Setup-Log konnte nicht erstellt werden: ',
@@ -360,6 +370,15 @@ def version_plan(text,pc,frame):
     for role,record in (('pc',pc),('frame',frame)):
         current,target=version_labels(text,record)
         rows.append(text('version_'+role)+': '+current+' → '+target)
+    return '\n'.join(rows)
+
+
+def untested_runtime_plan(text,pc,frame):
+    """Show detected versions without promoting their labels to ABI permission."""
+    rows=[text('bridge_untested_versions')]
+    for role,versions in (('pc',pc),('frame',frame)):
+        rows.append(text('version_'+role))
+        rows.extend(runtime_labels(text,{'runtime_versions':versions}) or [text('runtime_unknown')])
     return '\n'.join(rows)
 
 
@@ -614,10 +633,16 @@ class Presenter:
                 if {'installed_version','target_version'}&set(value):
                     self._paragraph(self.text('version_installed').format(version=current),indent=4)
                     self._paragraph(self.text('version_target').format(version=target),indent=4)
+                if value.get('installed') is True and value.get('activation_mode')=='inactive':
+                    self._paragraph(self.text('bridge_untested_inactive'),indent=4)
 
     def version_plan(self,*,pc,frame):
         with self._lock:
             for line in version_plan(self.text,pc,frame).splitlines():self._paragraph(line)
+
+    def untested_runtime(self,*,pc,frame):
+        with self._lock:
+            for line in untested_runtime_plan(self.text,pc,frame).splitlines():self._paragraph(line)
 
     def _animate(self, stopped):
         phase = 0
@@ -831,7 +856,7 @@ class Presenter:
             self.say(key)
             if self._arrow_capable():
                 choices = [('no', self.text('confirm_no'), ''),
-                           ('yes', self.text('confirm_yes'), '')]
+                           ('yes', self.text('bridge_untested_accept' if key=='bridge_untested_confirm' else 'confirm_yes'), '')]
                 result = self._arrow_choose(choices, 'no', title='choice_confirm')
                 if result is not False:
                     return result == 'yes'

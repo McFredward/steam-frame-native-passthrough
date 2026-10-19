@@ -372,6 +372,43 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 await until(pilot,lambda:app.backend_finished)
             app.backend.join()
 
+    async def test_untested_warning_is_modal_explicit_and_shows_real_versions(self):
+        for lang in ('en','de'):
+            for accept in (False,True):
+                observed=[]
+                pc={'steamvr':{'version':'2.19.1','build':'1800000001'},'steam_link':{}}
+                frame={'steamvr':{'version':'2.19.2','build':'1800000002'},'steam_link':{}}
+                def backend():
+                    p=UI.active_presenter()
+                    p.inventory(pc={'compatible':False,'installed':True,'activation_mode':'inactive','runtime_versions':pc},
+                                frame={'runtime_compatible':False,'installed':True,'activation_mode':'inactive','runtime_versions':frame})
+                    p.untested_runtime(pc=pc,frame=frame)
+                    observed.append(p.confirm('bridge_untested_confirm'))
+                    if observed[-1]:p.say('bridge_untested_installed')
+                    return 0
+                app=UI.SetupApp(backend,lang)
+                async with app.run_test(size=(80,24)) as pilot:
+                    await until(pilot,lambda:isinstance(app.screen,UI.ConfirmScreen))
+                    await until(pilot,lambda:app.focused is not None)
+                    await pilot.pause()
+                    self.assertEqual(app.focused.id,'cancel')
+                    self.assertIn('2.19.1 (1800000001)',app.screen.plan)
+                    self.assertIn('2.19.2 (1800000002)',app.screen.plan)
+                    self.assertEqual(str(app.screen.query_one('#accept',Button).label),app.texts['bridge_untested_accept'])
+                    underlay=app.screen_stack[0]
+                    self.assertIn(app.texts['bridge_untested_inactive'],str(underlay.query_one('#frame-status',Static).render()))
+                    dialog=app.screen.query_one('#confirm-dialog').region
+                    for button in app.screen.query(Button):
+                        self.assertTrue(dialog.contains_region(button.region),button.id)
+                    if accept:await pilot.click('#accept')
+                    else:await pilot.press('enter')
+                    await until(pilot,lambda:app.backend_finished)
+                    self.assertEqual(observed,[accept])
+                    if accept:
+                        self.assertEqual(app.outcome,'bridge_untested_installed')
+                        self.assertIn(app.words['installed_inactive'],str(app.query_one('#complete-title',Static).render()))
+                app.backend.join()
+
     async def test_component_versions_are_independent_in_status_and_apply_plan(self):
         for lang in ("en","de"):
             observed=[]

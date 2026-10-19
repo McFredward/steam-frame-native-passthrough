@@ -44,6 +44,7 @@ WORDS = {
         "absent": "Not connected", "installed": "Installed", "not_installed": "Not installed",
         "connection_installed": "Patch installed", "connection_missing": "Patch not installed", "legacy_only": "Legacy patch only",
         "restored": "Previous setup restored", "removed": "Connection removed", "current": "Already up to date", "check_done": "Check complete · no changes",
+        "installed_inactive": "Installed · passthrough inactive",
         "working": "Preparing your setup", "review": "Choose what happens next",
         "details": "Details & activity", "files": "Logs & recovery files", "empty_files": "Paths appear here when setup reports them.",
         "paths_help": "Choose a file with ↑ ↓. Copy its full path, or copy the complete list to share with a bug report.",
@@ -79,6 +80,7 @@ WORDS = {
         "absent": "Nicht verbunden", "installed": "Installiert", "not_installed": "Nicht installiert",
         "connection_installed": "Patch installiert", "connection_missing": "Patch nicht installiert", "legacy_only": "Nur der bisherige Patch",
         "restored": "Vorheriger Zustand wiederhergestellt", "removed": "Verbindung entfernt", "current": "Bereits aktuell", "check_done": "Prüfung fertig · nichts geändert",
+        "installed_inactive": "Installiert · Passthrough inaktiv",
         "working": "Die Einrichtung wird vorbereitet", "review": "Wähle den nächsten Schritt",
         "details": "Details & Verlauf", "files": "Logs & Wiederherstellungsdateien", "empty_files": "Hier erscheinen die Pfade, sobald die Einrichtung sie meldet.",
         "paths_help": "Wähle mit ↑ ↓ eine Datei. Kopiere ihren vollständigen Pfad oder die gesamte Liste für einen Fehlerbericht.",
@@ -539,6 +541,9 @@ class TextualPresenter:
     def version_plan(self,*,pc,frame):
         self._call(self.app.add_version_plan,_existing_words().version_plan(self.text,pc,frame))
 
+    def untested_runtime(self,*,pc,frame):
+        self._call(self.app.set_untested_runtime,_existing_words().untested_runtime_plan(self.text,pc,frame))
+
     @contextmanager
     def progress(self, key):
         self._tasks.append(key)
@@ -631,12 +636,14 @@ class TextualPresenter:
         plan = self.app.plan
         if key == "bridge_started":
             plan = self.text("bridge_health_ok")
+        elif key == "bridge_untested_confirm":
+            plan = self.app.untested_runtime_plan
         elif key in ("bridge_recover_confirm", "bridge_continue"):
             plan = self.text("bridge_stop_first")
         return self._wait(lambda prompt: self.app.push_screen(ConfirmScreen(
             self.app.words["confirm"], self.text(key), plan,
-            self.app.words["cancel"], self.app.words["continue"],
-            versioned=key=="bridge_confirm" and bool(self.app.version_plan_prefix)),
+            self.app.words["cancel"], self.text("bridge_untested_accept") if key=="bridge_untested_confirm" else self.app.words["continue"],
+            versioned=key=="bridge_untested_confirm" or key=="bridge_confirm" and bool(self.app.version_plan_prefix)),
             lambda value: self.app.resolve_prompt(value, expected=prompt)), False)
 
     def confirm_uninstall(self):
@@ -756,6 +763,7 @@ class SetupApp(App[int]):
         self.prompt: Prompt | None = None
         self.plan = ""
         self.version_plan_prefix = ""
+        self.untested_runtime_plan = ""
         self.outcome = None
         self.stage_name = "pc_inventory"
         self.paths: dict[tuple[str, str], None] = {}
@@ -869,10 +877,10 @@ class SetupApp(App[int]):
     def show_notice(self, value, key="", state="info"):
         notice = self.query_one("#notice", Static)
         notice.update(_plain(value, 4096))
-        notice.set_class(state == "warning" or key in ("bridge_partial", "bridge_recovery_incomplete", "bridge_recovery_pending", "missing"), "warning")
+        notice.set_class(state == "warning" or key in ("bridge_partial", "bridge_recovery_incomplete", "bridge_recovery_pending", "missing", "bridge_untested_installed"), "warning")
         notice.set_class(state == "ok", "ok")
         self.add_detail(value)
-        if key in ("bridge_installed", "bridge_removed", "bridge_rolled_back", "bridge_current", "check_finish"):
+        if key in ("bridge_installed", "bridge_removed", "bridge_rolled_back", "bridge_current", "check_finish", "bridge_untested_installed"):
             self.outcome = key
         if key.endswith("_plan") or key in ("bridge_stop_first", "bridge_retry_ambiguous"):
             self.plan = value
@@ -894,6 +902,8 @@ class SetupApp(App[int]):
             if isinstance(files, dict) and files:
                 ready = all(isinstance(item, dict) and item.get("status") == "match" for item in files.values())
             state = self.words["ready"] if ready else self.words["attention"]
+            if value.get("installed") is True and value.get("activation_mode")=="inactive":
+                state += "\n" + self.texts["bridge_untested_inactive"]
             for row in _existing_words().runtime_labels(lambda k:self.texts[k],value):
                 state += "\n" + row
             installed = value.get("installed")
@@ -918,6 +928,10 @@ class SetupApp(App[int]):
             self.plan=self.plan[len(prefix)+2:]
         self.version_plan_prefix=value
         self.plan = value + "\n\n" + self.plan
+        self.add_detail(value)
+
+    def set_untested_runtime(self,value):
+        self.untested_runtime_plan=value
         self.add_detail(value)
 
     def add_detail(self, value):
@@ -1001,7 +1015,7 @@ class SetupApp(App[int]):
         self.query_one("#work").display = False
         self.query_one("#complete-area").display = True
         self.set_stage("complete")
-        outcome = {"bridge_installed": "connection_installed", "bridge_removed": "removed",
+        outcome = {"bridge_installed": "connection_installed", "bridge_untested_installed": "installed_inactive", "bridge_removed": "removed",
                    "bridge_rolled_back": "restored", "bridge_current": "current", "check_finish": "check_done"}.get(self.outcome)
         heading = "cancelled" if code == 130 else outcome or ("finished" if code == 0 else "failed")
         self.query_one("#complete-title", Static).update(self.words[heading])

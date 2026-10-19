@@ -154,6 +154,14 @@ fresh processes/logs and retain the user's visible-picture check. Undo is comple
 only after the previous owned state and running Frame UI are confirmed. Ctrl+C
 is an explicit abort without an automatic rollback/restart; retain recovery records.
 
+Untested-runtime consent grants installation, not native ABI or image permission.
+It must bind the package and observed runtime snapshot and be renewed after
+changed inputs or a retry. Preserve explicit inactive installation receipts and
+the ordinary remove/recovery path when private bindings are unrecognized. Do not
+reinterpret an installed version or the user's consent as a shader, hook, camera
+or selected-frame grant. The [compatibility reference](COMPATIBILITY.md#updates-and-recovery)
+describes the user-visible distinction.
+
 ## Evidence and development discipline
 
 Use separate worktrees and current dev ancestry. Run affected production-path

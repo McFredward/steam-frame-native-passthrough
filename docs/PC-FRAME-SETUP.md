@@ -9,8 +9,10 @@ retired; archived downloads are not an alternative installation route.
 
 ## Before you begin
 
-- Use the supported **Frame SteamVR 2.18.2, build 1791331621**. Exact runtime
-  checks must also pass.
+- The tested Frame runtime is **SteamVR 2.18.2, build 1791331621**. Other runtime
+  versions can be installed after a separate warning and confirmation. Native
+  activation still requires verified bindings; otherwise the installed patch
+  remains explicitly inactive.
 - The installable sender preview requires **Windows, NVIDIA and HEVC**. Other
   codecs are not admitted for paired passthrough. Linux can inspect the setup
   and maintain the Frame; installing a native Linux sender is not supported yet.
@@ -60,8 +62,10 @@ and **Copy** / **Copy all**, or **F4** to copy the log path directly.
    reused in memory for this setup session, never written to logs or saved for
    the next run. An incorrect password can be entered again.
 3. Choose the offered **Install**, **Update** or **Repair** action and review the
-   concrete changes before confirming **Apply**. An unsupported runtime, missing
-   payload or unknown changed file is not overwritten to force installation.
+   concrete changes before confirming **Apply**. An untested runtime requires
+   an additional **Install anyway** confirmation with the detected versions.
+   Unknown native bindings leave the installed patch inactive. A missing payload
+   or an unknown changed user file is still preserved rather than overwritten.
 4. The assistant prepares Frame files while its current interface remains
    running, then performs the required coordinated Steam/SteamVR restart. It
    checks fresh startup and asks whether the Frame picture is normal. Keep the

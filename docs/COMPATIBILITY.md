@@ -16,7 +16,7 @@ A matching development build is needed before an upcoming game release is availa
 Steam Frame standalone passthrough is separate and requires neither streamed companion.
 
 A version label alone is insufficient: exact checked binaries, interfaces and
-rendering contracts must match. The Frame version does not imply a PC SteamVR
+rendering contracts must match for native activation. The Frame version does not imply a PC SteamVR
 version. Native Linux PC sender installation is not yet supported; running the
 Windows game through Proton still uses Linux SteamVR as the driver host. Other
 headsets, Virtual Desktop, ALVR, HDR and unknown stereo/source formats are outside
@@ -74,6 +74,21 @@ are historical results of a different, retired method. They must not be presente
 as validation of this route or as an available runtime fallback.
 
 ## Updates and recovery
+
+An untested runtime no longer removes Install/Update/Repair from the assistant.
+After the ordinary Apply confirmation it shows the detected PC/Frame versions
+and requires a separate, default-No **Install anyway** confirmation. Inspection
+alone cannot approve a write. The approval belongs to this exact package and
+runtime snapshot; changed inputs or a retry need a new decision.
+
+Installation is separate from native activation. If the private native bindings
+or shader input cannot be verified, the assistant can install the owned payload,
+pairing and receipt in an explicitly inactive state. It does not guess hook
+offsets, generate a shader from an unrecognized native binary or leave a previous
+active layer behind. The status must say inactive rather than imply a working
+passthrough session. A later compatible patch can activate the prepared files;
+Uninstall and recovery remain available. This exception concerns runtime versions,
+not damaged packages, unknown user files or unsupported PC platforms.
 
 The installer checks exact runtime fingerprints before activation. A SteamVR or
 Steam Link update can invalidate those checks. A mismatch must refuse native

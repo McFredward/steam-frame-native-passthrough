@@ -739,6 +739,22 @@ class ActionChooser(unittest.TestCase):
             self.assertEqual(p.confirm_uninstall(), expected)
             self.assert_width(output.getvalue(), 32)
 
+    def test_untested_confirmation_shows_detected_versions_and_requires_explicit_yes(self):
+        runtime={'steamvr':{'version':'2.19.1','build':'1800000000'},'steam_link':{}}
+        for lang in ('en','de'):
+            for answer,accepted in (('',False),('n',False),('y',True)):
+                p,output,_=self.make([answer],lang=lang,width=80)
+                p.untested_runtime(pc=runtime,frame=runtime)
+                self.assertEqual(p.confirm('bridge_untested_confirm'),accepted)
+                text=output.getvalue()
+                self.assertIn('2.19.1 (1800000000)',text)
+                self.assertIn(p.text('version_pc'),text)
+                self.assertIn(p.text('version_frame'),text)
+                self.assertIn(p.text('bridge_untested_versions'),text)
+        p,output,_=self.make([],width=80)
+        p.untested_runtime(pc={'steamvr':{'version':'2.19.1\nFORGED'}},frame=None)
+        self.assertNotIn('FORGED',output.getvalue())
+
     def test_menu_and_confirmation_keep_parent_spinner_paused(self):
         p, output, _ = self.make(['1', 'REMOVE'])
         def read(prompt):
