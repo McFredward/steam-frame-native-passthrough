@@ -8,6 +8,29 @@
   source, comments and developer documentation are English.
 - The intended input is real per-eye scene coverage, independent of scene RGB.
   Never derive mask coverage from a key colour in the explicit-mask path.
+- The maintainer explicitly authorized a PC Steam Link sender companion on
+  2026-10-18, superseding the earlier application/Frame-only restriction for this
+  work. Require a mutually confirmed compatible sender/receiver session before
+  enabling the new coverage route. Missing, incompatible or disconnected peers
+  must preserve ordinary Steam Link and report a bounded useful status. A
+  handshake alone never proves exact video/coverage association. This does not
+  authorize an unattended Frame installation or restart; device changes still
+  require the maintainer's coordinated permission and readiness.
+- The maintainer's 2026-10-18 installer ruling authorizes the interactive setup,
+  after its concrete Apply confirmation, to close owned PC SteamVR processes,
+  atomically prepare Frame files while its UI stays running, perform the required
+  immediate coordinated service restart, monitor startup and restore the original
+  files/settings on failure. Do not leave Frame SteamVR stopped during file work
+  or while waiting for user input. Rollback is complete only after Steam and
+  SteamVR on the Frame are running and the original UI passes startup health.
+  Failed discovery/operations offer an explicit retry; uncertain writes are
+  reconciled through exact owned checkpoints, never blindly replayed. This
+  authorizes installer behavior, not uncoordinated developer device testing.
+- The maintainer's latest 2026-10-18 cancellation ruling makes Ctrl+C an
+  immediate setup abort without automatic rollback. Retain pending recovery
+  records; do not restore files, start another restart or retry after that
+  explicit abort. This exception does not remove ordinary failed-start recovery
+  or the requirement to restore a running original Frame when Undo is selected.
 - A mask belongs to one source session, video frame, eye and extent. A compositor
   submit counter, approximate timestamp or latest received mask is not proof of
   that association. Missing/invalid associations must retain opaque rendering.

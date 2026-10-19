@@ -1,0 +1,7 @@
+{
+  "schema": "sfnp-portable-python-pin-v1",
+  "source_url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip",
+  "bytes": 12601679,
+  "sha256": "a93abe456ab01bd96d7a085b3cdb6566b3063f4241360d114142fbdb07f0a310",
+  "release_notes": "https://www.python.org/downloads/release/python-3148/"
+}

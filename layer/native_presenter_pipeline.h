@@ -7,6 +7,7 @@
 // recipes, numeric handle equality or a former successful capture are not leases.
 #include "pixel_ssbo_clone_contract.h"
 
+
 namespace frame_native_presenter {
 namespace definitions = frame_pixel_ssbo_clone;
 constexpr std::size_t MaximumArtifactBytes=64u*1024u;
@@ -17,6 +18,7 @@ constexpr std::size_t GuardedFragmentBytes=18416;
 // Real image contribution is a distinct protocol: RGB already includes surface
 // opacity and additive emission. It must never enter the straight-RGB decoder.
 // This exact executable recognizes robust scene-atlas v3 and legacy v1.
+// Archived offline scene-atlas proof only; not an installed receiver artifact.
 constexpr const char* SceneFragmentSha256="44c4a6c6bf7543b53d14ab6d350d8498143d6c03f70bfb45b9c6812e6b900a49";
 constexpr std::size_t SceneFragmentBytes=31384;
 enum class Profile : std::uint8_t { Synthetic, SceneContribution };
@@ -79,11 +81,11 @@ struct Dispatch {
 // push constants and draw arguments are never rebound or copied into new objects.
 // The caller already has a successfully created original pipeline. Any rejected
 // admission or replacement failure keeps that pipeline and its result untouched.
-inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std::uint32_t negotiatedApiVersion,
-        VkResult originalResult,const VkGraphicsPipelineCreateInfo& original,const VkAllocationCallbacks* allocator,
-        VkPipeline& completed,const definitions::Recipe& currentDefinitions,
-        const Fragment& fragment,const Dispatch& dispatch) noexcept {
-    if(!fragment.ready())return {Reason::Artifact};
+// Shared read-only admission for the exact original native pipeline. This
+// grants no source frame, GPU lifetime, coverage or descriptor authority.
+inline Result inspectCompletedPipeline(VkDevice device,std::uint32_t negotiatedApiVersion,
+        VkResult originalResult,const VkGraphicsPipelineCreateInfo& original,
+        VkPipeline completed,const definitions::Recipe& currentDefinitions) noexcept {
     // The generated marker requires SPIR-V1.1; only the actual negotiated API
     // supplies this core guarantee, never a physical-device maximum or PFN.
     if(VK_API_VERSION_VARIANT(negotiatedApiVersion)||negotiatedApiVersion<VK_API_VERSION_1_1)return {Reason::ApiVersion};
@@ -160,6 +162,16 @@ inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std
     }
     if(!checked.hasMultisample||checked.multisample.alphaToOneEnable||checked.multisample.alphaToCoverageEnable||
        original.pMultisampleState->pNext)return graphicsRefusal(GraphicsGate::Multisample);
+    return {Reason::None};
+}
+
+inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std::uint32_t negotiatedApiVersion,
+        VkResult originalResult,const VkGraphicsPipelineCreateInfo& original,const VkAllocationCallbacks* allocator,
+        VkPipeline& completed,const definitions::Recipe& currentDefinitions,
+        const Fragment& fragment,const Dispatch& dispatch) noexcept {
+    if(!fragment.ready())return {Reason::Artifact};
+    const auto admission=inspectCompletedPipeline(device,negotiatedApiVersion,originalResult,original,completed,currentDefinitions);
+    if(admission.reason!=Reason::None)return admission;
     if(!dispatch.createShader||!dispatch.destroyShader||!dispatch.createPipeline||!dispatch.destroyPipeline)
         return {Reason::Dispatch};
     VkShaderModuleCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -173,7 +185,7 @@ inline Result replaceCompletedPipeline(VkDevice device,VkPipelineCache cache,std
     std::array<VkPipelineShaderStageCreateInfo,2> stages{{original.pStages[0],original.pStages[1]}};
     unsigned changed=0;
     for(auto& stage:stages)if(stage.stage==VK_SHADER_STAGE_FRAGMENT_BIT){stage.module=owned;++changed;}
-    if(changed!=1){dispatch.destroyShader(device,owned,allocator);return graphicsRefusal(GraphicsGate::Stages);}
+    if(changed!=1){dispatch.destroyShader(device,owned,allocator);return {Reason::Graphics,VK_SUCCESS,false,GraphicsGate::Stages};}
     replacement.pStages=stages.data();
     VkPipeline newPipeline=VK_NULL_HANDLE;
     result=dispatch.createPipeline(device,cache,1,&replacement,allocator,&newPipeline);

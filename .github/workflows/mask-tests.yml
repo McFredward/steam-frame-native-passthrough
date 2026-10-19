@@ -2,9 +2,98 @@ name: Native passthrough checks
 on:
   push:
     branches: [dev]
-    paths-ignore: ['**/*.md']
+    paths-ignore:
+      - '**/*.md'
+      - 'get.ps1'
+      - 'get.sh'
+      - 'get-preview.*'
+      - 'setup/**'
+      - 'tools/package_stream_link_setup.py'
+      - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_manager.py'
+      - 'tools/package_setup_dependencies.py'
+      - 'tools/package_setup_textual.py'
+      - 'tools/package_stream_bridge.py'
+      - 'packaging/setup-*.json'
+      - 'tests/test_embedded_setup_runtime.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
+      - 'tests/test_setup_session.py'
+      - 'tests/test_setup_log.py'
+      - 'tests/test_setup_tui.py'
+      - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_pc.py'
+      - 'tests/test_setup_workflow.py'
+      - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_package_stream_bridge.py'
+      - 'tests/test_textual_dependencies.py'
+      - 'tests/test_setup_textual.py'
+      - 'tests/test_setup_textual_integration.py'
+      - 'tests/test_stream_bridge_artifact_pins.py'
+      - '.github/workflows/setup-tests.yml'
+      - '.github/workflows/mask-tests.yml'
+      # Bounded lifecycle-only repairs have their own production-code gate.
+      - '.github/workflows/stream-lifecycle-tests.yml'
+      - '.github/workflows/sender-resource-tests.yml'
+      # These Windows-only fixtures have their own actual WARP gate.
+      - 'tests/test_stream_bridge_sender_context_layout.c'
+      - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
+      - 'bridge/stream_bridge_control.*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-sender-provider-runtime.*'
+      - 'receiver/stream_bridge_native_runtime.*'
+      - 'tests/test_stream_bridge_control.cpp'
+      - 'tests/test_stream_bridge_sender_provider*.cpp'
+      - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'cmake/StreamBridge.cmake'
   pull_request:
-    paths-ignore: ['**/*.md']
+    paths-ignore:
+      - '**/*.md'
+      - 'get.ps1'
+      - 'get.sh'
+      - 'get-preview.*'
+      - 'setup/**'
+      - 'tools/package_stream_link_setup.py'
+      - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_manager.py'
+      - 'tools/package_setup_dependencies.py'
+      - 'tools/package_setup_textual.py'
+      - 'tools/package_stream_bridge.py'
+      - 'packaging/setup-*.json'
+      - 'tests/test_embedded_setup_runtime.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
+      - 'tests/test_setup_session.py'
+      - 'tests/test_setup_log.py'
+      - 'tests/test_setup_tui.py'
+      - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_pc.py'
+      - 'tests/test_setup_workflow.py'
+      - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_package_stream_bridge.py'
+      - 'tests/test_textual_dependencies.py'
+      - 'tests/test_setup_textual.py'
+      - 'tests/test_setup_textual_integration.py'
+      - 'tests/test_stream_bridge_artifact_pins.py'
+      - '.github/workflows/setup-tests.yml'
+      - '.github/workflows/mask-tests.yml'
+      - '.github/workflows/stream-lifecycle-tests.yml'
+      - '.github/workflows/sender-resource-tests.yml'
+      # These Windows-only fixtures have their own actual WARP gate.
+      - 'tests/test_stream_bridge_sender_context_layout.c'
+      - 'tests/test_stream_bridge_sender_writable_context_shadow.cpp'
+      - 'bridge/stream_bridge_control.*'
+      - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-sender-provider-runtime.*'
+      - 'receiver/stream_bridge_native_runtime.*'
+      - 'tests/test_stream_bridge_control.cpp'
+      - 'tests/test_stream_bridge_sender_provider*.cpp'
+      - 'tests/stream_bridge_native_runtime_test.cpp'
+      - 'cmake/StreamBridge.cmake'
   workflow_dispatch:
 
 permissions:
@@ -20,11 +109,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Verify installer and native artifact pins agree
+        run: python3 -B tests/test_stream_bridge_artifact_pins.py
       - name: Install small native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends glslc spirv-tools libvulkan-dev mesa-vulkan-drivers g++-mingw-w64-x86-64-win32 binutils-aarch64-linux-gnu
+      - name: Prepare the pinned public NVENC header for actual sender lifecycle tests
+        run: |
+          mkdir -p build/nvenc-sdk
+          curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/FFmpeg/nv-codec-headers/43d91706e097565f57b311e567f0219838bcc2f6/include/ffnvcodec/nvEncodeAPI.h -o build/nvenc-sdk/nvEncodeAPI.h
+          echo 'be0c29a41ae3260fd016a9001fd959e747bac93ad21411759736abba4ffdea86  build/nvenc-sdk/nvEncodeAPI.h' | sha256sum --check --strict
+          curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/ValveSoftware/openvr/0924064316de3effbcd1acf1e309182a2deb1c05/headers/openvr_driver.h -o build/nvenc-sdk/openvr_driver.h
+          echo '1036efe998d63e82d1d3db2b32a2f58df4a8eeaf5280f50aaf28220ff60a40ab  build/nvenc-sdk/openvr_driver.h' | sha256sum --check --strict
       - name: Configure and build
         run: |
-          cmake -S . -B build/mask -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFRAME_MASK_BUILD_RECEIVER_OBSERVER=ON -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON
+          cmake -S . -B build/mask -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFRAME_MASK_BUILD_RECEIVER_OBSERVER=ON -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
           cmake --build build/mask --parallel 4
       - name: Focused checks in parallel
         run: ctest --test-dir build/mask --output-on-failure --parallel 4
@@ -40,11 +138,12 @@ jobs:
         run: |
           cmake -S . -B build/presenter -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON -DFRAME_PIXEL_SYNTHETIC_PRESENTER=ON
           cmake --build build/presenter --target VkLayer_frame_pixel_snapshot --parallel 2
-      - name: Compile installed scene receiver and check user setup
+      - name: Compile independent coverage receiver and check actual Vulkan forwarding
         run: |
-          cmake -S . -B build/release-receiver -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DFRAME_MASK_BUILD_PIXEL_SNAPSHOT=ON -DFRAME_PIXEL_SYNTHETIC_PRESENTER=ON -DFRAME_PIXEL_RELEASE_RECEIVER=ON
-          cmake --build build/release-receiver --target VkLayer_frame_pixel_snapshot --parallel 2
-          python3 -B tests/test_native_passthrough_setup.py
+          cmake -S . -B build/stream-bridge -DFRAME_STREAM_BRIDGE_ONLY=ON -DFRAME_STREAM_BRIDGE_RECEIVER=ON -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/stream-bridge --parallel 4
+          python3 -B tests/test_stream_bridge_vulkan.py
+          python3 -B tests/test_stream_bridge_launch.py
       - name: Windows sender cross-build
         run: x86_64-w64-mingw32-g++-win32 -std=c++17 -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ -I. tools/mask_endpoint.cpp mask/mask_protocol.cpp -lws2_32 -o build/mask_endpoint.exe
       - name: Protocol memory and undefined-behavior checks

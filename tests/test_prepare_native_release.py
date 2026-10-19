@@ -171,58 +171,17 @@ class PackageTests(unittest.TestCase):
             with self.assertRaises(p.SafetyError): p.read_regular(path, 4)
         self.assertLessEqual(sum(calls), 5)
 
-    def test_prepare_non_arm_and_missing_tools_preserve_existing_output(self):
+    def test_legacy_preparation_is_retired_without_running_build_tools(self):
         before = {path: path.read_bytes() for path in self.files.values()}
-        with mock.patch.object(p.platform, 'machine', return_value='x86_64'):
-            with self.assertRaisesRegex(p.SafetyError, 'AArch64'): p.prepare(self.package)
-        with mock.patch.object(p.platform, 'machine', return_value='aarch64'), mock.patch.object(p.shutil, 'which', return_value=None):
-            with self.assertRaisesRegex(p.SafetyError, 'tool missing'): p.prepare(self.package)
+        with mock.patch.object(p, 'run_command', side_effect=AssertionError('must not build')), \
+             mock.patch.object(p, 'verify_runtime', side_effect=AssertionError('must not inspect runtime')):
+            for architecture in ('x86_64', 'aarch64'):
+                with self.subTest(architecture=architecture), \
+                     mock.patch.object(p.platform, 'machine', return_value=architecture), \
+                     self.assertRaisesRegex(p.SafetyError, 'legacy picture/mask-atlas receiver is retired'):
+                    p.prepare(self.base / 'new-package')
+        self.assertFalse((self.base / 'new-package').exists())
         self.assertEqual(before, {path: path.read_bytes() for path in self.files.values()})
-
-    def preparation(self, *, wrong_candidate=False, changed_source=False):
-        profile_path = self.base / 'reviewed-fixture-profile.json'; profile_path.write_bytes(self.compat)
-        snapshot = p.source_snapshot()
-        def robust(original, enabled, descriptor_count):
-            self.assertEqual(original, self.files['fragment'].read_bytes())
-            self.assertIs(enabled, True); self.assertEqual(descriptor_count, 1)
-            return (b'wrong' if wrong_candidate else self.candidate), {'owned_fixture_only': True}
-        module = types.SimpleNamespace(transform_robust=robust)
-        calls = []
-        def command(argv, log, timeout=600):
-            calls.append(argv); Path(log).touch()
-            if argv[:2] == ['cmake', '--build']:
-                build = Path(argv[2]); build.mkdir(parents=True)
-                (build / p.LIBRARY).write_bytes(self.artifacts[p.LIBRARY])
-        snapshots = [snapshot, {}] if changed_source else None
-        with mock.patch.object(p.platform, 'machine', return_value='aarch64'), \
-             mock.patch.object(p.shutil, 'which', return_value='/owned/tool'), \
-             mock.patch.object(p, 'COMPATIBILITY', profile_path), \
-             mock.patch.object(p, 'runtime_files', return_value=self.files), \
-             mock.patch.object(p, 'source_snapshot', side_effect=snapshots, return_value=snapshot), \
-             mock.patch.object(p, 'run_command', side_effect=command), \
-             mock.patch.dict(sys.modules, {'native_fragment_scene_presenter': module}):
-            value = p.prepare(self.base / 'new-package')
-        return value, calls
-
-    def test_preparation_builds_then_validates_before_publication(self):
-        value, commands = self.preparation()
-        self.assertEqual(value['schema'], p.SCHEMA)
-        self.assertTrue((self.base / 'new-package/package.json').is_file())
-        self.assertEqual([x[0] for x in commands], ['cmake', 'cmake', 'spirv-val'])
-        runs = list(self.base.glob('new-package.preparation-*')); self.assertEqual(len(runs), 1)
-        self.assertFalse((runs[0] / 'cache').exists())
-        self.assertTrue(json.loads((runs[0] / 'result.json').read_text())['success'])
-        self.assertTrue((runs[0] / 'sources/tools/prepare_native_release.py').is_file())
-
-    def test_wrong_generation_or_changed_source_never_publishes(self):
-        for kwargs in ({'wrong_candidate': True}, {'changed_source': True}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(p.SafetyError): self.preparation(**kwargs)
-            self.assertFalse((self.base / 'new-package').exists())
-        runs = list(self.base.glob('new-package.preparation-*')); self.assertEqual(len(runs), 2)
-        for run in runs:
-            self.assertFalse((run / 'cache').exists())
-            self.assertFalse(json.loads((run / 'result.json').read_text())['success'])
-            self.assertTrue((run / 'source-manifest.json').is_file())
 
     def test_atomic_publication_never_overwrites_existing_directory(self):
         stage = self.base / 'stage'; stage.mkdir(); (stage / 'owned').write_text('original')

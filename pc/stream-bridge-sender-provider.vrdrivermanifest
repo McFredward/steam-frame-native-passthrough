@@ -1,0 +1,7 @@
+{
+  "alwaysActivate": true,
+  "name": "steam_link_native_passthrough",
+  "directory": "",
+  "resourceOnly": false,
+  "hmd_presence": []
+}

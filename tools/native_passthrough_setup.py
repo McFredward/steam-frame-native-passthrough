@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Durable user-only native passthrough setup; never restarts Steam or SteamVR.
+"""Receipt-owned maintenance for retired Frame atlas installations.
 
-Prepare is a fail-closed optional ExecCondition, not a readiness claim. Every
-compositor launch gets a fresh unchanged one-shot GHVR session. Emergency-off
-unpublishes our injection before attempting any independent camera restoration.
+Only inspection, revocation and restoration remain. No command builds, installs
+or activates the retired transport; use the paired Steam Link setup for that.
+Optional old service hooks must allow ordinary SteamVR to start.
 """
 from __future__ import annotations
 import argparse
@@ -364,140 +364,11 @@ class Setup:
         put(self.status_file, encoded(value), read(self.status_file) if exists(self.status_file) else None)
         return value
 
-    def _collision(self):
-        old = self.home / '.local/share/GloomhavenVR/SteamLinkMaskProbe/session.conf'
-        old_manifest = self.manifest.with_name('VkLayer_GHVR_pixel_snapshot.json')
-        legacy_manifest = self.manifest.with_name('mrchroma.json')
-        if exists(old) or exists(old_manifest) or exists(legacy_manifest):
-            raise SafetyError('Existing temporary GloomhavenVR experiment or legacy mrchroma layer preserved. Roll it back with its original operator/receipt (including camera baseline), then install again; no automatic migration.')
-        if not exists(self.receipt) and exists(self.manifest):
-            raise SafetyError('Unowned native passthrough manifest preserved')
-
-    def _unit(self):
-        script = str(self.tools / 'native_passthrough_setup.py')
-        def quote(value):
-            return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%').replace('$', '$$') + '"'
-        # Valve starts vrstartup from its own ExecStartPre. An additive condition
-        # runs before every vendor pre-command; '-' ignores optional helper errors.
-        return ('# Owned by SteamFrameNativePassthrough; existing directory lists are not reset.\n[Service]\nRuntimeDirectory=steam-frame-native-passthrough\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=no\n'
-                'ExecCondition=-/usr/bin/python3 ' + quote(script) + ' prepare-launch --home ' + quote(str(self.home)) + '\n'
-                'ExecStopPost=-/usr/bin/python3 ' + quote(script) + ' finish-launch --home ' + quote(str(self.home)) + '\n').encode()
-
     def install(self, package):
-        self._collision()
-        metadata, _ = self._verify(package)
-        source = Path(__file__).resolve()
-        files = {self.tools / source.name: source.read_bytes()}
-        # The verifier owns the finite complete package allowlist and every pin.
-        for name in metadata['files']:
-            if '..' in Path(name).parts or Path(name).is_absolute():
-                raise SafetyError('package relative path refused')
-            files[self.package / name] = read(package / name, 16 * 1024 * 1024)
-        files[self.package / 'package.json'] = read(package / 'package.json')
-        # The installed verifier imports no private original shader at startup.
-        files[self.dropin] = self._unit()
-        planned = {'schema': SCHEMA, 'home': str(self.home), 'data': str(self.data),
-                   'manifest_link': str(self.target), 'package_sha256': digest(files[self.package / 'package.json']),
-                   'files': {str(p): digest(b) for p, b in files.items()}}
-        previous = self._state() if exists(self.receipt) else None
-        upgrading = previous is not None and encoded(previous) != encoded(planned)
-        upgrade = {'schema': 'sfnp-upgrade-v1', 'previous': previous, 'next': planned}
-        if upgrading:
-            if self.system.running():
-                raise SafetyError('Stop SteamVR before updating installed code; no restart or mapped-library overwrite was attempted')
-            self._unpublish(unlink=True)
-            if not self._restore()['restored']:
-                raise SafetyError('Camera restoration is pending; current installation retained')
-            if exists(self.upgrade):
-                if encoded(load(self.upgrade)) != encoded(upgrade):
-                    raise SafetyError('foreign/different interrupted upgrade preserved')
-            else:
-                put(self.upgrade, encoded(upgrade))
-        elif previous is None:
-            # Durable write-ahead ownership; install can safely resume after interruption.
-            put(self.receipt, encoded(planned))
-        elif exists(self.upgrade):
-            pending = load(self.upgrade)
-            if pending.get('schema') != 'sfnp-upgrade-v1' or encoded(pending.get('next')) != encoded(planned):
-                raise SafetyError('foreign interrupted upgrade preserved')
-        for path, raw in files.items():
-            os.close(directory(path.parent, create=True))
-            if exists(path):
-                current = read(path, 16 * 1024 * 1024)
-                if current == raw:
-                    continue
-                old = previous['files'].get(str(path)) if upgrading else None
-                if old is None or digest(current) != old:
-                    raise SafetyError('changed installed file preserved: ' + str(path))
-                put(path, raw, current)
-            else:
-                put(path, raw)
-        if upgrading:
-            for name, sha in previous['files'].items():
-                if name not in planned['files']:
-                    remove(Path(name), sha)
-            put(self.receipt, encoded(planned), encoded(previous))
-        if exists(self.upgrade):
-            remove(self.upgrade, digest(read(self.upgrade)))
-        if not exists(self.control):
-            self._enabled(True)
-        else:
-            self._control()  # Reinstallation preserves explicit disabled state.
-        if self._control()['enabled']:
-            self._link()
-            if self._revoked():
-                self._unlink()
-        self.system.reload()
-        return self._status('installed', enabled=self._control()['enabled'], manual_action='Start SteamVR normally; setup did not restart it.')
+        raise SafetyError('The Frame-only atlas transport is retired. Use the paired Steam Link Native Passthrough setup.')
 
     def install_automatic(self):
-        self._collision()
-        engine = self._engine()
-        # Exact repeats reuse the immutable already checked package. They do not
-        # compile again or grow preparation records on every invocation.
-        if exists(self.receipt) and not exists(self.upgrade):
-            try:
-                engine.verify_package(self.package, engine.runtime_files(home=self.home))
-                return self.install(self.package)
-            except Exception:
-                pass  # Changed source/runtime must go through the full cold gate.
-        os.close(directory(self.data, create=True, private=True))
-        attempts = self.data / 'preparation'
-        os.close(directory(attempts, create=True, private=True))
-        staging = attempts / ('attempt-' + secrets.token_hex(16))
-        os.close(directory(staging, create=True, private=True))
-        package = staging / 'package'
-        # The helper retains bounded logs/source/result evidence next to output,
-        # even on failure. An outer temporary context must not erase that proof.
-        engine.prepare(package)
-        result = self.install(package)
-        metadata = load(package / 'package.json')
-        for name, record in metadata['files'].items():
-            remove(package / name, record['sha256'])
-        remove(package / 'package.json', digest(encoded(metadata)))
-        # Only empty directories after exact-file removal qualify for cleanup.
-        for path in sorted(package.rglob('*'), key=lambda p: len(p.parts), reverse=True):
-            if path.is_dir() and not path.is_symlink():
-                try:
-                    path.rmdir()
-                except OSError:
-                    pass
-        try:
-            package.rmdir()
-        except OSError:
-            pass
-        return result
-
-    def _link(self):
-        self._state()
-        if exists(self.target) and not exists(self.inflight):
-            raise SafetyError('unowned volatile manifest preserved')
-        os.close(directory(self.manifest.parent, create=True))
-        if exists(self.manifest):
-            if not self.manifest.is_symlink() or os.readlink(self.manifest) != str(self.target):
-                raise SafetyError('foreign Vulkan manifest/link preserved')
-        else:
-            os.symlink(str(self.target), self.manifest)
+        return self.install(None)
 
     def _unlink(self):
         if not exists(self.manifest):
@@ -577,13 +448,11 @@ class Setup:
         return path, raw, value, {'present': KEY in section, 'value': section.get(KEY)}
 
     def _camera(self, enable, verified=None):
-        path, raw, value, current = self._camera_state()
+        if enable:
+            raise SafetyError('Retired transport cannot enable camera blending')
         if not exists(self.camera_receipt):
-            if not enable:
-                return {'restored': True, 'changed': False}
-            before = {'schema': CAMERA, 'settings': str(path), 'previous': current,
-                      'write_intent': current != {'present': True, 'value': True}}
-            put(self.camera_receipt, encoded(before))  # BEFORE file or API modification.
+            return {'restored': True, 'changed': False}
+        path, raw, value, current = self._camera_state()
         previous = load(self.camera_receipt)
         if set(previous) != {'schema', 'settings', 'previous', 'write_intent'} or previous['schema'] != CAMERA or previous['settings'] != str(path):
             raise SafetyError('foreign camera receipt preserved')
@@ -593,7 +462,7 @@ class Setup:
         owned = {'present': True, 'value': True}
         if current != baseline and (not previous['write_intent'] or current != owned):
             raise SafetyError('unexpected foreign camera value preserved')
-        wanted = owned if enable else baseline
+        wanted = baseline
         if current == wanted:
             return {'restored': not enable, 'changed': False}
         if self.system.running():
@@ -623,111 +492,18 @@ class Setup:
         except Exception as error:
             return {'restored': False, 'reason': str(error)[:300]}
 
-    def _prune(self):
-        os.close(directory(self.runtime, private=True))
-        os.close(directory(self.runs, create=True, private=True))
-        runs = sorted(self.runs.iterdir(), key=lambda p: p.name)
-        if len(runs) > 8:
-            raise SafetyError('run inventory bound exceeded; foreign files preserved')
-        for run in runs[:-2]:
-            if not re.fullmatch(r'run-[0-9a-f]{32}', run.name):
-                raise SafetyError('foreign run preserved')
-            receipt = load(run / 'run-receipt.json')
-            if receipt.get('schema') != 'sfnp-run-files-v1' or receipt.get('directory') != str(run):
-                raise SafetyError('foreign run receipt preserved')
-            allowed = set(receipt['files']) | {'run-receipt.json', 'launch.claim', 'scene-presenter-status.json'}
-            if {p.name for p in run.iterdir()} - allowed:
-                raise SafetyError('unexpected run artifact preserved; no captures are collected')
-            for name, sha in receipt['files'].items():
-                remove(run / name, sha)
-            claim = run / 'launch.claim'
-            if exists(claim):
-                remove(claim, digest(b'GHVR_PIXEL_CLAIM/1\n'))
-            status = run / 'scene-presenter-status.json'
-            if exists(status):
-                item = load(status)
-                if item.get('capture_id') != receipt['capture_id'] or item.get('schema') != 'frame-scene-presenter-receiver-v1':
-                    raise SafetyError('foreign native status preserved')
-                remove(status, digest(read(status)))
-            remove(run / 'run-receipt.json', digest(encoded(receipt)))
-            run.rmdir()
-
     def enable(self):
-        self._state()
-        self._collision()
-        revoked_before = self._revoked()
-        self._verify()
-        if exists(self.upgrade):
-            raise SafetyError('Interrupted upgrade must be completed before enable')
-        if exists(self.inflight):
-            raise SafetyError('Previous launch still marked inflight; disable first, then enable explicitly')
-        if self._revoked():
-            if not revoked_before:
-                raise SafetyError('Emergency-off arrived during enable; enable again explicitly when ready')
-            remove(self.revocation, digest(REVOCATION))
-        self._enabled(True)
-        self._link()
-        if self._revoked():
-            self._unlink()
-            return self._status('emergency_off', enabled=False, camera=self._restore())
-        return self._status('enabled', enabled=True, manual_action='Start SteamVR normally; no restart was performed.')
+        raise SafetyError('The Frame-only atlas transport is retired and cannot be enabled. Use the paired setup.')
 
     def prepare(self):
-        try:
-            self._state()
-            self._collision()
-            if exists(self.upgrade):
-                self._unpublish(unlink=True)
-                return self._status('interrupted_upgrade', enabled=False, camera=self._restore())
-            if exists(self.inflight):
-                self._unpublish()
-                self._enabled(False)
-                return self._status('unclean_previous_launch', enabled=False, camera=self._restore())
-            if not self._control()['enabled']:
-                self._unpublish()
-                return self._status('disabled', enabled=False, camera=self._restore())
-            verified = self._verify()
-            self._prune()
-            run = self.runs / ('run-' + secrets.token_hex(16))
-            os.close(directory(run, create=True, private=True))
-            capture = secrets.token_hex(16)
-            config = b'GHVR_PIXEL_SNAPSHOT/1\n' + capture.encode() + b'\n' + str(run).encode() + b'\n'
-            manifest = encoded({'file_format_version': '1.2.0', 'layer': {
-                'name': 'VK_LAYER_GHVR_pixel_snapshot', 'type': 'GLOBAL', 'library_path': str(self.package / LIBRARY),
-                'api_version': '1.3.0', 'implementation_version': '1', 'description': 'Steam Frame Native Passthrough; locally verified per-launch opt-in',
-                'functions': {'vkGetInstanceProcAddr': 'frame_pixel_vkGetInstanceProcAddr', 'vkGetDeviceProcAddr': 'frame_pixel_vkGetDeviceProcAddr',
-                              'vkNegotiateLoaderLayerInterfaceVersion': 'frame_pixel_vkNegotiateLoaderLayerInterfaceVersion'},
-                'disable_environment': {'GHVR_PIXEL_SNAPSHOT_DISABLE': '1'}}})
-            launch = {'schema': 'sfnp-launch-v1', 'directory': str(run), 'capture_id': capture,
-                      'manifest_sha256': digest(manifest), 'config_sha256': digest(config)}
-            put(self.inflight, encoded(launch))  # Dirty before any opt-in/camera change.
-            artifact = read(self.package / 'scene-presenter.spv')
-            files = {'scene-presenter.spv': artifact, 'scene-presenter.enable': b'GHVR_SCENE_PRESENTER/1\n'}
-            put(run / 'run-receipt.json', encoded({'schema': 'sfnp-run-files-v1', 'directory': str(run), 'capture_id': capture,
-                                                 'files': {n: digest(b) for n, b in files.items()}}))
-            for name, raw in files.items():
-                put(run / name, raw)
-            put(self.session, config)
-            camera = self._camera(True, verified)
-            if camera.get('persistence_pending'):
-                raise SafetyError('camera API persistence is pending; ordinary SteamVR launch retained')
-            # The last publication is the only loader-visible opt-in. Emergency
-            # revocation can arrive without waiting for the cold setup lock.
-            if self._revoked():
-                raise SafetyError('Emergency-off revoked this preparation')
-            put(self.target, manifest)
-            self._link()
-            if self._revoked():
-                self._unpublish(unlink=True)
-                raise SafetyError('Emergency-off revoked final publication')
-            return self._status('prepared', enabled=True, capture_id=capture, camera=camera)
-        except Exception as error:
-            cleanup = None
-            try:
-                self._unpublish()
-            except Exception as cleanup_error:
-                cleanup = str(cleanup_error)[:300]
-            return self._status('stock_fallback', reason_detail=str(error)[:300], cleanup_error=cleanup, camera=self._restore())
+        # An old additive service hook may still invoke this helper. Revoke its
+        # exact owned opt-in, never publish a shader, manifest or camera override.
+        if not exists(self.receipt):
+            return {'reason': 'retired_transport', 'enabled': False, 'automatic_restart': False}
+        self._state()
+        self._enabled(False)
+        self._unpublish(unlink=True)
+        return self._status('retired_transport', enabled=False, camera=self._restore())
 
     def finish(self, service_result='success'):
         self._state()
@@ -811,7 +587,6 @@ def main(argv=None):
             return 0
         with setup.locked():
             if args.command == 'install':
-                setup._collision()
                 package = args.package
                 if package is None:
                     result = setup.install_automatic()

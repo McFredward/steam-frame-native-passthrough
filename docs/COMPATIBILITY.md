@@ -1,126 +1,76 @@
-# Compatibility and current limits
-
-Steam Link Native Passthrough currently targets one combination: a supported
-PC game integration, ordinary Steam Link PC VR streaming, and a Steam Frame
-runtime accepted by the local compatibility checks. It is not a universal
-transparency switch for any streamed game.
+# Compatibility and evidence
 
 ## Supported combination
 
-| Component | Current scope |
+| Component | Current paired route |
 |---|---|
-| Headset | Steam Frame; the native receiver runs on the headset. |
-| Transport | Steam Link PC VR through SteamVR, with the ordinary PC sender. No sender patch or second camera video stream. |
-| Game | Gloomhaven Digital with a GloomhavenVR build containing the native Steam Link integration. Unmodified clients do not supply the format. |
-| PC graphics path | The visible game test used Windows/D3D11, Unity's built-in renderer, MultiPass, Gamma colour space and an SDR alpha-capable source. |
-| Frame software | SteamVR **2.18.2 (build 1791331621, Linux ARM64)**, checked on 2026-10-17. Exact compositor shader, descriptor/state and driver-provider checks must also pass; a matching SteamVR/SteamOS version label alone is insufficient. |
-| Other games/transports | Not supported by the current game integration. ALVR, Virtual Desktop and other headsets are not established by these tests. |
+| Headset and transport | Steam Frame over Steam Link |
+| Frame SteamVR | **2.18.2 · build 1791331621**, exact checked runtime files |
+| PC sender | Windows x86_64, supported NVIDIA encoder, HEVC |
+| Game source | Explicit integration; Gamma SDR UNorm, MultiPass, real RGB contribution and alpha |
+| Installation | Matching PC and Frame companions, [guided setup](PC-FRAME-SETUP.md) |
+| Hardware status | Experimental; final full-resolution picture and simultaneous local menu/game remain unconfirmed |
 
-The receiver is distinct from GloomhavenVR's **Steam Frame standalone**
-passthrough. It processes a PC VR stream; it does not install or configure the
-standalone game.
+The supported game and minimum version have their own [table](../README.md#supported-games).
+A matching development build is needed before an upcoming game release is available.
+Steam Frame standalone passthrough is separate and requires neither streamed companion.
 
-The Frame-side version above does not establish a particular Windows SteamVR
-version. PC-side stream changes have their own compatibility limits below.
+A version label alone is insufficient: exact checked binaries, interfaces and
+rendering contracts must match. The Frame version does not imply a PC SteamVR
+version. Native Linux PC sender installation is not yet supported; running the
+Windows game through Proton still uses Linux SteamVR as the driver host. Other
+headsets, Virtual Desktop, ALVR, HDR and unknown stereo/source formats are outside
+this route's current validated combination.
 
-## What has actually been shown
+## Picture and transparency
 
-On 2026-10-17 the maintainer confirmed real GloomhavenVR gameplay composited over
-the Frame's native passthrough camera, using ModBuild686. Application logs record
-both 4040×4040 MultiPass/MSAA8 eyes. Earlier synthetic-source tests also showed
-fractional transparency.
+The game supplies ordinary full-frame RGB contribution E and coverage A. Matching
+companions associate coverage with the exact native encoded access unit and
+selected decoded image. The Frame blends E+(1−A)×camera locally; camera video is
+not sent to the PC. This is independent transparency, not colour replacement.
+The route does not pack colour into a smaller atlas or apply the retired route's
+resolution/foveation/sharpening lease.
 
-Those visible headset tests used an explicitly staged, temporary receiver for
-one compositor process. The public persistent package was subsequently installed
-on the Frame and loaded across two SteamVR service starts with fresh launch
-claims; the second also passed the native UI startup health gate. This does not
-establish a full OS reboot, a new streamed-game picture, every future SteamVR
-update, every material or a measured end-to-end latency. See the dated
-[real-game result](research/real-game-visible-run-20261017.md) and separate
-[persistent-setup validation](research/persistent-user-setup-20261017.md) for
-their respective evidence and limits.
+Both companions, supported game source and valid current-image proof are required.
+A successful install, compatible peer, generated mask or healthy startup is not
+proof that the headset is displaying the right image. Missing/invalid proof keeps
+ordinary opaque video. No previous or latest mask is substituted. Other codecs
+must continue ordinary Steam Link without gaining passthrough permission.
 
-## Picture and performance limits
+Partial opacity is represented. It does not let game shaders refract the real
+room: the game's shaders never receive its camera image. Arbitrary glass,
+background-sampling shaders and every material family are not certified.
 
-- The source must supply RGB contribution and independent opacity for the same
-  current eye. A texture with an alpha channel is not enough on its own.
-- Fractional opacity is supported. Arbitrary refractive glass, effects that sample
-  a different background and all transparent shader families are not certified.
-- The updated receiver recognizes **v3 and legacy v1**. V3 uses equal2048² colour
-  and opacity with a larger, codec-resistant format header. It removes the
-  dedicated half-resolution coverage filter, without erasing genuine partial
-  transparency. Its real streamed headset picture is not yet established.
-  Legacy v1 retains1024² opacity versus2048² colour and remains compatible.
-- Historical experimental v2 also uses equal2048² grids, but its first real
-  stereo test failed: apparent scale and passthrough differed between
-  eyes. Controlled lossy-codec inputs reproduce asymmetric guard rejection and
-  that exact output split in the actual native fragment. The failing hardware
-  guard samples were not logged, so the real triggering cell/codec settings are
-  unproven. V2 is quarantined; its desktop sharpness results are insufficient.
-  See the [regression review](research/eye-divergence-20261018.md). V3 changes
-  the header, leaving v2's scene/mask geometry unchanged. Both producer and
-  receiver must be updated together for v3. A new producer with an old receiver
-  can show a packed picture instead of the scene; disable native streaming in
-  the game until the receiver update is complete. Legacy v1 does not require v3.
-- Motion latency and the cost of extra image packing/sampling remain relevant.
-  Host GPU measurements are not a Frame performance guarantee. There is no extra
-  previous-eye/pair queue in the GloomhavenVR source helper, but the ordinary
-  rendering, video, reprojection and display pipeline still has latency.
-- HDR, Linear colour space and unsupported stereo/source shapes keep the
-  ordinary image instead of guessing coverage. The game reports why it refused
-  the scene source.
+## Current evidence
 
-The format guard recognizes the current packed picture. It is not authentication
-or a guarantee that a copied/frozen image is fresh. Turning off
-**Steam Link native passthrough** or **Mixed Reality** takes effect when a new
-ordinary image reaches the receiver; already transmitted or frozen images cannot
-be recalled.
-Opening VR Options keeps real-game passthrough active, and its settings apply
-while the menu remains open.
+Software checks exercise production native dispatch, source/texture ownership,
+authenticated control, accepted access units, receiver leases and guarded GPU
+coverage. Actual hardware now demonstrates all four native D3D hooks remaining
+installed and 22 sender-certified masks in the 2026-10-19 run. That run still did
+not establish the intended full-resolution output: a packed swap-descriptor word
+was being rejected as an invalid sample count. The bounded correction is checked
+against the pinned native ABI and focused software tests; a new visual pass is
+still required. Simultaneous local Steam menu/game mixed reality also remains
+an explicit hardware check.
 
-## Persistence, updates and recovery
+The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)
+are historical results of a different, retired method. They must not be presented
+as validation of this route or as an available runtime fallback.
 
-The installer owns files below `~/.local/share/SteamFrameNativePassthrough`,
-`~/.config/SteamFrameNativePassthrough`, its user-service activation and temporary
-per-user runtime state. It does not replace Valve binaries, flash the OS or write
-the system partition/bootloader. It does not automatically restart SteamVR.
+## Updates and recovery
 
-Before each activation it verifies the **Frame-side files** against the installed
-package. A changed/unknown fingerprint prevents loading the receiver and restores
-the owned camera setting. Temporary activation expires with the service process
-or a reboot; the installed package remains available for inspection. Keeping it
-installed does not mean that a new SteamVR build has been admitted. A failed or
-incomplete previous launch latches activation off until you inspect `status`,
-resolve the cause and explicitly use `enable`.
+The installer checks exact runtime fingerprints before activation. A SteamVR or
+Steam Link update can invalidate those checks. A mismatch must refuse native
+passthrough and preserve ordinary video; it does not make an unreviewed runtime
+compatible. Install a compatible companion release when available.
 
-A **PC-side** SteamVR/Steam Link update can change the video layout or codec while
-all Frame-side files remain identical. Pre-start file checks cannot detect every
-such change. Native pipeline and current-image format guards retain the original
-shader when their contracts do not match, but an actively packed game source can
-then look like an atlas rather than an ordinary game view. There is no receiver
-handshake that automatically turns off the PC source. Disable **Steam Link native
-passthrough** in the game, restart the game if the ordinary image does not return,
-and wait for the required compatibility update. Do the same while the receiver
-is otherwise disabled or unavailable. This is conservative fallback, not a
-guarantee of an invisible recovery from every update.
+Files live in user-owned directories; no system partition or SteamVR binary is
+replaced. Exact ownership receipts/checkpoints protect update, uninstall and Undo.
+Unknown or changed files are preserved. Old receipt-owned installations remain
+recognizable for safe removal/migration and recovery only. Do not reactivate an
+archived Frame-only release as a workaround.
 
-Stopping activation affects future processes. Running modified pipelines remain
-owned by that SteamVR process until it exits. Installing while it is running
-stages activation for the next normal launch. A loaded library cannot be replaced
-by an update; stop SteamVR manually before updating the checkout and running
-`install` again. An exact repeat preserves a manually disabled state instead of
-silently re-enabling it.
-
-Follow a disable/recovery operation with a **manual** SteamVR restart.
-`emergency-off` does not need a working SteamVR camera API to remove activation;
-camera-setting restoration can be separately pending and is reported by `status`.
-For full removal, stop SteamVR and run `uninstall` before starting it again. An
-uninstall issued while live can retain a disabled stop helper and camera receipt;
-repeat it after SteamVR has stopped to finalize removal. A removed filename is
-never treated as proof that an old library has unloaded.
-
-Earlier development attempts did cause recoverable black/blue screens and Steam
-startup failures. Checks and rollback are designed around that history. User-scope
-files and strict refusal reduce risk; they are not proof that every future runtime
-failure is impossible. Keep the project folder and a way to reach Desktop Mode
-or SSH until the installation works for your configuration.
+Fresh-start monitoring checks software startup, followed by the user's picture
+confirmation. It cannot guarantee every future SteamOS update. Keep the Frame
+awake until a coordinated install/Undo confirms the interface is running.
+[Setup and recovery details](PC-FRAME-SETUP.md#update-uninstall-and-undo).

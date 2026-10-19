@@ -1,0 +1,282 @@
+name: PC and Frame setup checks
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'get.ps1'
+      - 'get.sh'
+      - 'get-preview.*'
+      - 'setup/**'
+      - 'tools/package_stream_bridge.py'
+      - 'tools/package_stream_link_setup.py'
+      - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_manager.py'
+      - 'tools/native_passthrough_setup.py'
+      - 'tests/test_native_passthrough_setup.py'
+      - 'tools/package_setup_dependencies.py'
+      - 'tools/package_setup_textual.py'
+      - 'packaging/setup-*.json'
+      - 'tests/test_embedded_setup_runtime.py'
+      - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_setup_session.py'
+      - 'tests/test_setup_log.py'
+      - 'tests/test_setup_tui.py'
+      - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_pc.py'
+      - 'tests/test_setup_workflow.py'
+      - 'tests/test_package_stream_bridge.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
+      - 'tests/test_textual_dependencies.py'
+      - 'tests/test_setup_textual.py'
+      - 'tests/test_setup_textual_integration.py'
+      - 'tests/test_stream_bridge_artifact_pins.py'
+      - 'tools/build_setup_askpass.py'
+      - 'tests/test_setup_auth.py'
+      - 'tests/test_setup_askpass_client.py'
+      - '.github/workflows/setup-tests.yml'
+  pull_request:
+    paths:
+      - 'get.ps1'
+      - 'get.sh'
+      - 'get-preview.*'
+      - 'setup/**'
+      - 'tools/package_stream_bridge.py'
+      - 'tools/package_stream_link_setup.py'
+      - 'tools/package_setup_inspection.py'
+      - 'tools/package_setup_manager.py'
+      - 'tools/native_passthrough_setup.py'
+      - 'tests/test_native_passthrough_setup.py'
+      - 'tools/package_setup_dependencies.py'
+      - 'tools/package_setup_textual.py'
+      - 'packaging/setup-*.json'
+      - 'tests/test_embedded_setup_runtime.py'
+      - 'tests/test_stream_bridge_install.py'
+      - 'tests/test_setup_session.py'
+      - 'tests/test_setup_log.py'
+      - 'tests/test_setup_tui.py'
+      - 'tests/test_setup_frame.py'
+      - 'tests/test_setup_pc.py'
+      - 'tests/test_setup_workflow.py'
+      - 'tests/test_package_stream_bridge.py'
+      - 'tests/test_steam_link_setup.py'
+      - 'tests/test_setup_bootstrap.py'
+      - 'tests/test_setup_ui.py'
+      - 'tests/test_setup_dependencies.py'
+      - 'tests/test_textual_dependencies.py'
+      - 'tests/test_setup_textual.py'
+      - 'tests/test_setup_textual_integration.py'
+      - 'tests/test_stream_bridge_artifact_pins.py'
+      - 'tools/build_setup_askpass.py'
+      - 'tests/test_setup_auth.py'
+      - 'tests/test_setup_askpass_client.py'
+      - '.github/workflows/setup-tests.yml'
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Run only an affected platform after a bounded repair
+        type: choice
+        default: all
+        options: [all, linux, windows, windows-auth, python39]
+      auth_case:
+        description: Repeat only the affected synthetic sign-in case
+        type: choice
+        default: all
+        options: [all, automatic-discovery, manual-discovery, ui-session]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'linux'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download exact offline Textual wheels for package checks
+        run: python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
+      - name: Real private Textual imports and asynchronous keyboard/mouse/resizing tests
+        run: python -B tests/test_textual_dependencies.py --wheels "${{ runner.temp }}/textual-wheels" --pilot tests/test_setup_textual.py
+      - name: Real OpenSSH sign-in, Textual cancellation and private broker
+        run: |
+          python -m pip install paramiko==4.0.0 textual==8.2.8
+          python -B tests/test_setup_askpass_client.py
+          python -B tests/test_setup_auth.py --require-real-ssh
+      - name: Actual wizard, temporary remote agent, and bootstrap fixtures
+        run: |
+          bash -n get.sh get-preview.sh setup/patch-steam-link.sh
+          python -B tests/test_native_passthrough_setup.py
+          python -B tests/test_steam_link_setup.py
+          python -B tests/test_stream_bridge_install.py
+          python -B tests/test_setup_session.py
+          python -B tests/test_setup_log.py
+          python -B tests/test_setup_tui.py
+          python -B tests/test_setup_frame.py
+          python -B tests/test_setup_pc.py
+          python -B tests/test_setup_workflow.py
+          python -B tests/test_package_stream_bridge.py
+          python -B tests/test_setup_bootstrap.py
+          python -B tests/test_setup_ui.py
+          python -B tests/test_setup_dependencies.py
+          python -B tests/test_setup_textual_integration.py
+          python -B tests/test_stream_bridge_artifact_pins.py
+  linux-python-baseline:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'python39'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Verify real offline UI on the documented minimum Python
+        run: |
+          python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
+          python -B tests/test_textual_dependencies.py --wheels "${{ runner.temp }}/textual-wheels" --pilot tests/test_setup_textual.py
+  windows-bootstrap:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'windows' || inputs.scope == 'windows-auth'
+    runs-on: windows-2025
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Actual Windows PowerShell archive parser and bootstrap fixtures
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        shell: powershell
+        run: python -B tests/test_setup_bootstrap.py --pwsh "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+      - name: Session reuse and persistent failure logs on Windows
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        shell: powershell
+        run: |
+          python -B tests/test_setup_session.py
+          if ($LASTEXITCODE -ne 0) { throw 'SSH session checks failed.' }
+          python -B tests/test_setup_log.py
+          if ($LASTEXITCODE -ne 0) { throw 'Setup log checks failed.' }
+          python -B tests/test_setup_tui.py
+          if ($LASTEXITCODE -ne 0) { throw 'Terminal menu checks failed.' }
+          python -B tests/test_setup_pc.py
+          if ($LASTEXITCODE -ne 0) { throw 'PC runtime control checks failed.' }
+          python -B tests/test_setup_workflow.py Files.test_pc_install_rollback_removes_only_its_new_credentials Files.test_pc_repair_rollback_preserves_original_receipt_and_missing_file Files.test_pc_update_retains_initial_uninstall_baseline_and_pairing Files.test_pc_update_rollback_restores_previous_version_and_owned_preferences
+          if ($LASTEXITCODE -ne 0) { throw 'Windows file rollback checks failed.' }
+      - name: Download exact offline Textual wheels for package checks
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        run: python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
+      - name: Execute the actual packaged portable Python without Frame access
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pin = Get-Content packaging/setup-python.json -Raw | ConvertFrom-Json
+          $archive = Join-Path $env:RUNNER_TEMP 'python-embed.zip'
+          & curl.exe --fail --silent --show-error --proto '=https' --max-time 60 --max-filesize 16777216 --output $archive $pin.source_url
+          if ($LASTEXITCODE -ne 0 -or (Get-Item $archive).Length -ne $pin.bytes -or (Get-FileHash $archive).Hash.ToLowerInvariant() -cne $pin.sha256) { throw 'Official Python pin differs.' }
+          # Only the public Python archive: compare actual Win32 stat/fstat fields
+          # when diagnosing runtime-specific file identity representations.
+          @'
+          import json, os, sys
+          from pathlib import Path
+          path = Path(sys.argv[1]); before = path.stat()
+          with path.open('rb') as stream:
+              opened = os.fstat(stream.fileno())
+          fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+          print(json.dumps({'python':sys.version, 'public_archive_stat_differences':{name:[getattr(before,name),getattr(opened,name)] for name in fields if getattr(before,name)!=getattr(opened,name)}}))
+          '@ | python -B - $archive
+          $package = Join-Path $env:RUNNER_TEMP 'setup-inspection.zip'
+          $sshPin = Get-Content packaging/setup-openssh.json -Raw | ConvertFrom-Json
+          $sshArchive = Join-Path $env:RUNNER_TEMP 'openssh-portable.zip'
+          & curl.exe --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 16777216 --output $sshArchive $sshPin.source_url
+          if ($LASTEXITCODE -ne 0 -or (Get-Item $sshArchive).Length -ne $sshPin.bytes -or (Get-FileHash $sshArchive).Hash.ToLowerInvariant() -cne $sshPin.sha256) { throw 'Official OpenSSH pin differs.' }
+          python -B tools/package_setup_inspection.py --python-zip $archive --openssh-zip $sshArchive --textual-wheels (Join-Path $env:RUNNER_TEMP 'textual-wheels') --output $package
+          if ($LASTEXITCODE -ne 0) { throw 'Inspection packaging failed.' }
+          $tokens=$null; $parseErrors=$null
+          $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get.ps1'),[ref]$tokens,[ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { throw 'Bootstrap syntax error.' }
+          $previewAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get-preview.ps1'),[ref]$tokens,[ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { throw 'Preview launcher syntax error.' }
+          $functions=$ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)
+          foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
+          $target = Join-Path $env:RUNNER_TEMP 'actual-inspection-package'
+          [void][IO.Directory]::CreateDirectory($target)
+          $runtime = Expand-SfnpPackage $package $target $true
+          & (Join-Path $target $runtime) -I -B tests/test_embedded_setup_runtime.py --package $target
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup runtime failed.' }
+          & (Join-Path $target $runtime) -I -B tests/test_setup_ui.py
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup presentation failed.' }
+          & (Join-Path $target $runtime) -I -B tests/test_setup_textual.py
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual keyboard/mouse and screen checks failed.' }
+          & (Join-Path $target $runtime) -I -B tests/test_setup_textual_integration.py
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual entry-point and console ownership checks failed.' }
+
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Real Windows OpenSSH sign-in and UI cancellation
+        shell: powershell
+        env:
+          SFNP_AUTH_CASE: ${{ inputs.auth_case }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install paramiko==4.0.0 textual==8.2.8
+          if ($LASTEXITCODE -ne 0) { throw 'Local test-server dependencies failed.' }
+          $signIn = Join-Path $env:RUNNER_TEMP 'sign in helper'
+          New-Item -ItemType Directory -Path $signIn -Force | Out-Null
+          Copy-Item -Path 'setup/*.py','setup/steam-link-askpass.sh' -Destination $signIn
+          python -B tools/build_setup_askpass.py --compiler cl.exe --output (Join-Path $signIn 'steam-link-askpass.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Windows sign-in helper build failed.' }
+          $sshRoot = Join-Path $env:RUNNER_TEMP 'auth-only-client'
+          $ssh = Join-Path $env:RUNNER_TEMP 'actual-inspection-package/setup/runtime/openssh/ssh.exe'
+          if (-not (Test-Path $ssh)) {
+            @'
+          import importlib.util,json,sys,urllib.request
+          from pathlib import Path
+          repo=Path(sys.argv[1]);target=Path(sys.argv[2])
+          spec=importlib.util.spec_from_file_location('checked_ssh',repo/'tools/package_setup_dependencies.py')
+          deps=importlib.util.module_from_spec(spec);spec.loader.exec_module(deps)
+          pin=json.loads((repo/'packaging/setup-openssh.json').read_text())
+          with urllib.request.urlopen(pin['source_url'],timeout=60) as reply:raw=reply.read(16*1024*1024+1)
+          for name,data in deps.windows_openssh(raw,pin).items():
+              path=target/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+          '@ | python -B - $PWD $sshRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Checked OpenSSH client preparation failed.' }
+            $ssh = Join-Path $sshRoot 'setup/runtime/openssh/ssh.exe'
+          }
+          if ($env:SFNP_AUTH_CASE -eq 'automatic-discovery') {
+            python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn --diagnostic-timeout 35 -v ActualWizardEntry.test_automatic_discovery_uses_actual_loader_and_shows_password_outside_cwd
+          } elseif ($env:SFNP_AUTH_CASE -eq 'manual-discovery') {
+            python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn --diagnostic-timeout 35 -v ActualWizardEntry.test_manual_ip_uses_actual_loader_and_shows_password_with_log_already_created
+          } elseif ($env:SFNP_AUTH_CASE -eq 'ui-session') {
+            python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn --diagnostic-timeout 45 -v ActualTextualSSH ActualWizardEntry ActualSSH.test_cancel_during_real_password_wait_reaps_every_worker
+          } else {
+            python -B tests/test_setup_auth.py --require-real-ssh --ssh $ssh --setup-dir $signIn -v
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Actual Windows OpenSSH sign-in failed.' }
+
+      - name: Actual packaged management mode (no Frame contact or removal)
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'python-embed.zip'
+          $sshArchive = Join-Path $env:RUNNER_TEMP 'openssh-portable.zip'
+          $package = Join-Path $env:RUNNER_TEMP 'setup-manager.zip'
+          python -B tools/package_setup_manager.py --python-zip $archive --openssh-zip $sshArchive --textual-wheels (Join-Path $env:RUNNER_TEMP 'textual-wheels') --output $package
+          if ($LASTEXITCODE -ne 0) { throw 'Management packaging failed.' }
+          $target = Join-Path $env:RUNNER_TEMP 'actual-manager-package'
+          [void][IO.Directory]::CreateDirectory($target)
+          $tokens=$null; $parseErrors=$null
+          $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'get.ps1'),[ref]$tokens,[ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { throw 'Bootstrap syntax error.' }
+          foreach ($fn in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)) { Invoke-Expression $fn.Extent.Text }
+          $runtime = Expand-SfnpPackage $package $target $false $true
+          & (Join-Path $target $runtime) -I -B tests/test_embedded_setup_runtime.py --package $target --manager
+          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded management runtime failed.' }

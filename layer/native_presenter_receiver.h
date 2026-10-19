@@ -1,5 +1,8 @@
 #pragma once
 
+// Archived opt-in diagnostic source only. The installed product uses the
+// paired exact-coverage bridge; the old release build flag is retired.
+
 #include "native_presenter_pipeline.h"
 #include <atomic>
 

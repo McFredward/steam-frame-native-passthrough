@@ -1,0 +1,87 @@
+{
+  "schema": "sfnp-setup-inspection-v1",
+  "expected_pc": {
+    "windows-x86_64": {
+      "drivers/vrlink/bin/win64/driver_vrlink.dll": {
+        "bytes": 13908632,
+        "sha256": "1e846be041039798580a91452371f6288c614fb4c152126b137e2c693fb77eef"
+      },
+      "bin/win64/vrpathreg.exe": {
+        "bytes": 840856,
+        "sha256": "8a9c2fbc591b9ef65393d26c1b21f6ef1bfce055d7a5d9f94ee539b0cddbf4dc"
+      }
+    },
+    "linux-x86_64": {
+      "drivers/vrlink/bin/linux64/driver_vrlink.so": {
+        "bytes": 2199408,
+        "sha256": "d47f05b90dd29bcac1cfe41d75effbeb5e16a5f960ceb11979af365fedd8ac08"
+      },
+      "bin/linux64/vrpathreg": {
+        "bytes": 651032,
+        "sha256": "4aa26be9c9203c700b44b216e0c7bbed9dfe1e78fc80a318d09790d529b49720"
+      }
+    }
+  },
+  "runtime_files": {
+    "compositor": {
+      "base": "steamvr",
+      "path": "bin/linuxarm64/vrcompositor",
+      "bytes": 6026096,
+      "sha256": "0bb148eda6b5e54e2fbed09d475a43671f5ff6fcb6c2b4f48345b1a9fe8d6f96"
+    },
+    "openvr": {
+      "base": "steamvr",
+      "path": "bin/linuxarm64/libopenvr_api.so",
+      "bytes": 249168,
+      "sha256": "a07163c436b3d791a0aa2442029d2ef0ba40a772ebf1dc6006d610c3a7934ee2"
+    },
+    "fragment": {
+      "base": "steamvr",
+      "path": "resources/shaders/vulkan/distort_ps_achromatic_se2.spv",
+      "bytes": 6620,
+      "sha256": "f28dd5d22a570cbee64057da03d0418b80aee88a8eeed988b2f776e8d9a513f2"
+    },
+    "driver": {
+      "base": "system",
+      "path": "usr/lib/libvulkan_freedreno.so",
+      "bytes": 18850240,
+      "sha256": "dfed0652b592b263a400ba0a64fbdd421870a938abed4d447a9aafa6a4ad789a"
+    },
+    "vulkan_loader": {
+      "base": "home",
+      "path": ".local/share/Steam/steamrtarm64/libvulkan.so.1",
+      "bytes": 592464,
+      "sha256": "d114974137bb80154f08c12531a2adef6431dde112566a0d2625e307fbd7eedf"
+    },
+    "libstdcxx": {
+      "base": "system",
+      "path": "usr/lib/libstdc++.so.6.0.34",
+      "bytes": 22461112,
+      "sha256": "13b851ae84397771a54ff8b17bde8981056ac26e92ec7e1f83e76dd15496fdbf"
+    },
+    "libc": {
+      "base": "system",
+      "path": "usr/lib/libc.so.6",
+      "bytes": 1722992,
+      "sha256": "be7ee393429d493c4d3b996ed25cbb02fabb2896a77efe6d57e5993ead5bbb3b"
+    },
+    "libgcc": {
+      "base": "system",
+      "path": "usr/lib/libgcc_s.so.1",
+      "bytes": 723544,
+      "sha256": "791528a025faecaceed64a2c70ee4b8dc36daad1fb4edd18323f6ba6e8946fed"
+    },
+    "libm": {
+      "base": "system",
+      "path": "usr/lib/libm.so.6",
+      "bytes": 592192,
+      "sha256": "8c81e7271794ab5592a760651d82773b344670f3c6857109463c91a4f7a9128e"
+    },
+    "ld_linux": {
+      "base": "system",
+      "path": "usr/lib/ld-linux-aarch64.so.1",
+      "bytes": 204048,
+      "sha256": "2ddc56a02f476765a21e31d69144e68bee933950fe613747d54b87a2369a037e"
+    }
+  }
+}

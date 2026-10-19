@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Execute with the actual bundled Windows interpreter; never contact a Frame."""
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--package', type=Path, required=True)
+parser.add_argument('--manager', action='store_true')
+args = parser.parse_args()
+engine = args.package.resolve() / 'setup/steam_link_setup.py'
+result = subprocess.run([sys.executable, '-I', '-B', str(engine), '--manage' if args.manager else '--inspect', '--check',
+                         '--bundle', str(args.package.resolve())], stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=30, check=False)
+assert result.returncode == 0, result.stderr.decode(errors='replace')
+report = json.loads(result.stdout)
+# The CLI is an actual no-frame inspection, not an installed-bridge claim.
+assert 'pc' in report and report.get('frame') is None
+spec = importlib.util.spec_from_file_location('sfnp_actual_embedded_engine', engine)
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+if args.manager:
+    maintenance = module.Maintenance(args.package.resolve())
+    assert maintenance is not None
+# The bundled _pth must make the exact offline runtime available even with -I.
+# This imports real upstream dependencies, not local fixture stand-ins.
+import importlib.metadata
+import textual, rich, pygments, markdown_it, mdit_py_plugins, platformdirs, typing_extensions, linkify_it, mdurl, uc_micro
+from textual.app import App
+from textual.widgets import Header, Footer, OptionList, Input, Button, RichLog
+vendor=(args.package.resolve()/'setup/runtime/vendor').resolve()
+assert importlib.metadata.version('textual') == '8.2.8'
+assert all(vendor in Path(item.__file__).resolve().parents for item in
+           [textual,rich,pygments,markdown_it,mdit_py_plugins,platformdirs,typing_extensions,linkify_it,mdurl,uc_micro])
+ui = module.load_presentation()
+assert ui.language('de') == 'de' and ui.language('en') == 'en'
+with tempfile.TemporaryDirectory(prefix='sfnp-embedded-acl-') as temporary:
+    path = Path(temporary) / 'owned-dummy.json'
+    module.put(path, b'{"dummy":"not-a-credential"}\n')
+    assert module.read(path, private=True) == b'{"dummy":"not-a-credential"}\n'
+    # A later modification makes Windows creation/change timestamps differ.
+    # Exercise the actual read after replacement and actual DACL application.
+    module.put(path, b'{"dummy":"updated"}\n', b'{"dummy":"not-a-credential"}\n')
+    assert module.read(path, private=True) == b'{"dummy":"updated"}\n'
+    # Actual NTFS hardlinks are valid public references, never private admission.
+    public = Path(temporary) / 'public-vrpathreg.exe'
+    public.write_bytes(b'non-executable public reference fixture')
+    alias = Path(temporary) / 'public-link.exe'
+    import os
+    os.link(public, alias)
+    before = public.stat()
+    with public.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
+    fields = ('st_dev','st_ino','st_mode','st_nlink','st_uid','st_gid','st_size','st_mtime_ns','st_ctime_ns')
+    print(json.dumps({'public_hardlink_stat_differences':{key:[getattr(before,key),getattr(opened,key)]
+                     for key in fields if getattr(before,key)!=getattr(opened,key)}}))
+    snapshot, metadata = module.read_public_reference(public)
+    assert snapshot == b'non-executable public reference fixture'
+    assert metadata == {'bytes': len(snapshot), 'hardlinked': True}
+    try:
+        module.read(public, private=True)
+    except module.SetupError:
+        pass
+    else:
+        raise AssertionError('public hardlink must not relax private admission')
+    public.write_bytes(b'updated public reference fixture')
+    assert module.read_public_reference(alias)[0] == b'updated public reference fixture'
+    if sys.platform == 'win32':
+        # Force the fallback selection without changing Windows Optional Features.
+        # -V is local: no key generation, Frame, network or service is contacted.
+        ssh = module.ssh_program(system='Windows', system_directory=Path(temporary) / 'absent-system',
+                                 bundle_root=args.package.resolve())
+        version = subprocess.run([ssh, '-V'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 timeout=15, check=False)
+        assert version.returncode == 0 and b'OpenSSH_for_Windows_10.0' in version.stdout, version.stdout.decode(errors='replace')
+print(json.dumps({'actual_bundled_python': sys.version, 'inspection_cli': 'passed',
+                  'actual_windows_private_acl': sys.platform == 'win32', 'dummy_file_read': 'passed',
+                  'actual_windows_public_hardlink': sys.platform == 'win32', 'public_hardlink_snapshot': 'passed',
+                  'included_ui_import': 'passed', 'private_textual_version': importlib.metadata.version('textual'), 'portable_windows_ssh_execution': sys.platform == 'win32',
+                  'frame_contact': False, 'native_patch_install': False}))

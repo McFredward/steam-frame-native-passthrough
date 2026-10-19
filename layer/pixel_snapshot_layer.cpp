@@ -14,6 +14,9 @@
 #include "pixel_sampler_admission.h"
 #include "pixel_sampler_format.h"
 #include "pixel_sampler_routes.h"
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+#include "../probe/dashboard_transition_probe.h"
+#endif
 #ifdef FRAME_PIXEL_SYNTHETIC_PRESENTER
 #if !defined(FRAME_PIXEL_SSBO_DEFINITION_JOURNAL) || defined(FRAME_PIXEL_SSBO_TRANSACTION) || defined(FRAME_PIXEL_UNIFORM_COMPANION)
 #error "Synthetic presenter requires only the definition journal; SSBO/uniform modes are mutually exclusive"
@@ -49,6 +52,9 @@
 
 #define PIXEL_EXPORT extern "C" __attribute__((visibility("default")))
 namespace {
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+__attribute__((used)) const char DashboardDiagnosticBuildMarker[]="SFNP_DASHBOARD_TRANSITION_PROBE/1";
+#endif
 #ifdef FRAME_PIXEL_SYNTHETIC_PRESENTER
 __attribute__((used)) const char SyntheticPresenterBuildMarker[]="GHVR_SYNTHETIC_PRESENTER_COLD/1";
 __attribute__((used)) const char ScenePresenterBuildMarker[]="GHVR_SCENE_PRESENTER_COLD/1";
@@ -214,7 +220,7 @@ struct Device {
     FIELD(CreateGraphicsPipelines) FIELD(DestroyPipeline) FIELD(CreateCommandPool)
 #ifdef FRAME_PIXEL_SSBO_DEFINITION_JOURNAL
     FIELD(CreateRenderPass) FIELD(CreateRenderPass2) FIELD(CreateRenderPass2KHR) FIELD(DestroyRenderPass)
-#ifdef FRAME_PIXEL_SSBO_TRANSACTION
+#if defined(FRAME_PIXEL_SSBO_TRANSACTION) || defined(FRAME_DASHBOARD_TRANSITION_PROBE)
     FIELD(GetDeviceQueue) FIELD(GetDeviceQueue2) FIELD(CmdDrawIndirectCount) FIELD(CmdDrawIndexedIndirectCount) FIELD(CmdDrawIndirectCountKHR) FIELD(CmdDrawIndexedIndirectCountKHR)
 #endif
 #endif
@@ -277,6 +283,9 @@ struct Device {
     std::thread writer;
     std::atomic<bool> stop{false}, selected{false};
     bool ownsCapture = false;
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+    dashboard_transition_probe::Probe dashboardProbe;
+#endif
 };
 #ifdef FRAME_PIXEL_SSBO_DEFINITION_JOURNAL
 template<class F> void observeDefinitions(Device* d,F&& observe) noexcept {
@@ -1046,6 +1055,27 @@ VKAPI_ATTR VkResult VKAPI_CALL traceCreateDevice(VkPhysicalDevice physical,const
         LOAD_PRESENT(CreateDescriptorSetLayout) LOAD_PRESENT(DestroyDescriptorSetLayout)
         LOAD_PRESENT(CreatePipelineLayout) LOAD_PRESENT(DestroyPipelineLayout)
         LOAD_PRESENT(CreateRenderPass) LOAD_PRESENT(CreateRenderPass2) LOAD_PRESENT(CreateRenderPass2KHR) LOAD_PRESENT(DestroyRenderPass)
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+        LOAD_PRESENT(DeviceWaitIdle) LOAD_PRESENT(GetDeviceQueue) LOAD_PRESENT(GetDeviceQueue2)
+        LOAD_PRESENT(AllocateCommandBuffers) LOAD_PRESENT(FreeCommandBuffers) LOAD_PRESENT(BeginCommandBuffer) LOAD_PRESENT(EndCommandBuffer)
+        LOAD_PRESENT(ResetCommandBuffer) LOAD_PRESENT(ResetCommandPool) LOAD_PRESENT(DestroyCommandPool)
+        LOAD_PRESENT(CmdBindPipeline) LOAD_PRESENT(CmdDraw) LOAD_PRESENT(CmdDrawIndexed)
+        LOAD_PRESENT(CmdBeginQuery) LOAD_PRESENT(CmdBeginQueryIndexedEXT) LOAD_PRESENT(CmdExecuteCommands)
+        LOAD_PRESENT(CmdBindShadersEXT) LOAD_PRESENT(QueueSubmit) LOAD_PRESENT(QueueSubmit2) LOAD_PRESENT(QueueSubmit2KHR)
+        LOAD_PRESENT(CmdBindDescriptorSets) LOAD_PRESENT(CmdPushDescriptorSetKHR) LOAD_PRESENT(CmdPushDescriptorSetWithTemplateKHR)
+        LOAD_PRESENT(CmdBindDescriptorBuffersEXT) LOAD_PRESENT(CmdSetDescriptorBufferOffsetsEXT) LOAD_PRESENT(CmdBindDescriptorBufferEmbeddedSamplersEXT)
+        LOAD_PRESENT(CmdBindDescriptorSets2KHR) LOAD_PRESENT(CmdPushDescriptorSet2KHR) LOAD_PRESENT(CmdPushDescriptorSetWithTemplate2KHR)
+        LOAD_PRESENT(CmdSetDescriptorBufferOffsets2EXT) LOAD_PRESENT(CmdBindDescriptorBufferEmbeddedSamplers2EXT)
+        VkPhysicalDeviceMemoryProperties diagnosticMemory{};
+        auto memoryProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(i->gipa(i->native,"vkGetPhysicalDeviceMemoryProperties"));
+        if(session().allowed && memoryProperties){
+            memoryProperties(physical,&diagnosticMemory);
+            auto queueProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(i->gipa(i->native,"vkGetPhysicalDeviceQueueFamilyProperties"));
+            const auto family=info->queueCreateInfoCount&&info->pQueueCreateInfos?info->pQueueCreateInfos[0].queueFamilyIndex:UINT32_MAX;
+            const auto observedQueue=dashboard_transition_probe::observeQueueFamily(queueProperties,physical,family);
+            d->dashboardProbe.prepare(*out,*info,d->gdpa,diagnosticMemory,session().config.directoryFd,observedQueue.flags,&observedQueue);
+        }
+#endif
 #undef LOAD_PRESENT
         auto* published=d.get();const auto destroy=d->DestroyDevice;
         try{auto& c=contexts();std::lock_guard<std::mutex> lock(c.mutex);c.devices.emplace(dispatchKey(*out),std::move(d));}
@@ -1178,6 +1208,9 @@ VKAPI_ATTR void VKAPI_CALL traceDestroyDevice(VkDevice device,const VkAllocation
     auto* d=deviceFor(device);
 #ifdef FRAME_PIXEL_SYNTHETIC_PRESENTER
     {
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+        d->dashboardProbe.release(d->DeviceWaitIdle ? d->DeviceWaitIdle(device) : VK_NOT_READY);
+#endif
         if(d->presenterRegistered)presenterDeviceStopped();
         observeDefinitions(d,[&](auto& definitions){definitions.destroyDevice();});
         const auto key=dispatchKey(device);d->DestroyDevice(device,alloc);
@@ -1276,6 +1309,9 @@ void unknownCommand(Device* d,VkCommandBuffer command,RecordingOperation operati
 #undef observeBindings
 VKAPI_ATTR VkResult VKAPI_CALL traceCreateShaderModule(VkDevice device,const VkShaderModuleCreateInfo* info,const VkAllocationCallbacks* alloc,VkShaderModule* out) {
     auto* d=deviceFor(device);const auto result=d->CreateShaderModule(device,info,alloc,out);
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+    if(result==VK_SUCCESS)d->dashboardProbe.shaderObserved(*out,*info);
+#endif
 #ifdef FRAME_PIXEL_SYNTHETIC_PRESENTER
     if(result==VK_SUCCESS)observeDefinitions(d,[&](auto& definitions){
         if(!definitions.createShader(*out,*info,result)||!session().presenterSource.ready()||
@@ -1330,6 +1366,9 @@ VKAPI_ATTR VkResult VKAPI_CALL traceCreateGraphicsPipelines(VkDevice device,VkPi
     auto* d=deviceFor(device);const auto result=d->CreateGraphicsPipelines(device,cache,count,info,alloc,out);
 #ifdef FRAME_PIXEL_SYNTHETIC_PRESENTER
     if(result==VK_SUCCESS&&count<=256&&info&&out)for(std::uint32_t n=0;n<count;++n){
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+        unsigned dashboardNativeReason=UINT32_MAX;
+#endif
         observeDefinitions(d,[&](auto& definitions){
             frame_pixel_ssbo_journal::Event event;
             if(!definitions.createPipeline(out[n],info[n],result,&event)||!session().presenterSource.ready()||
@@ -1341,9 +1380,16 @@ VKAPI_ATTR VkResult VKAPI_CALL traceCreateGraphicsPipelines(VkDevice device,VkPi
             const auto completed=presenter::complete(device,cache,d->instanceApiVersion,result,info[n],alloc,out[n],
                 ready->recipe,session().presenterSource,dispatch,{d,retirePresenterOriginal});
             session().presenterCounters.attempted(completed);
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+            dashboardNativeReason=unsigned(completed.reason);
+            if(completed.replaced)d->dashboardProbe.pipeline(out[n],cache,info[n],ready->recipe);
+#endif
             // Success returns a normal app-owned candidate pipeline. It is
             // deliberately NOT registered as a stock-original-PS pipeline.
         });
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+        d->dashboardProbe.pipelineObserved(out[n],info[n],dashboardNativeReason);
+#endif
     }
     return result;
 #endif
@@ -1363,6 +1409,9 @@ VKAPI_ATTR VkResult VKAPI_CALL traceCreateGraphicsPipelines(VkDevice device,VkPi
 }
 VKAPI_ATTR void VKAPI_CALL traceDestroyPipeline(VkDevice device,VkPipeline pipeline,const VkAllocationCallbacks* alloc) {
     auto* d=deviceFor(device);
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+    d->dashboardProbe.pipelineRetiring(pipeline);
+#endif
 #ifdef FRAME_PIXEL_SSBO_DEFINITION_JOURNAL
 #ifdef FRAME_PIXEL_SSBO_TRANSACTION
     d->bridge.definitionRetiring(frame_pixel_ssbo_journal::ObjectKind::Pipeline,frame_pixel_ssbo_clone::handle(pipeline));
@@ -1794,9 +1843,15 @@ VKAPI_ATTR void VKAPI_CALL bridgeDestroyDescriptorPool(VkDevice device,VkDescrip
     auto* d=deviceFor(device);d->bridge.descriptorPoolRetiring(*session().tracker,d->id,pool);traceDestroyDescriptorPool(device,pool,alloc);
 }
 #endif
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+#include "../probe/dashboard_transition_probe_hooks.inc"
+#endif
 PFN_vkVoidFunction intercept(const char* name,PFN_vkVoidFunction native) {
     if(!native || !session().allowed)return native;
 #ifdef FRAME_PIXEL_SYNTHETIC_PRESENTER
+#ifdef FRAME_DASHBOARD_TRANSITION_PROBE
+    if(auto hooked=dashboardProbeIntercept(name))return hooked;
+#endif
     // Functional prototype: only cold definition/lifetime callbacks. Returning
     // the exact NEXT PFN for all recording/draw/submit/resource commands avoids
     // the diagnostic LiveTracker and its per-frame work entirely.

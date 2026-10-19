@@ -1,0 +1,28 @@
+{
+  "schema": "sfnp-linux-python-pins-v1",
+  "release": "20261013",
+  "python_version": "3.13.16",
+  "license_info": "https://github.com/astral-sh/python-build-standalone/blob/20261013/docs/running.rst#licensing",
+  "architectures": {
+    "x86_64": {
+      "target": "x86_64-unknown-linux-gnu",
+      "glibc_min": "2.17",
+      "source_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "bytes": 35099487,
+      "sha256": "d0080766b6b74aeb81e1949ef0d9a20e6c17f7b160fb295a69b936ccb17660be",
+      "archive_root": "python",
+      "executable": "python/bin/python3.13",
+      "license_path": "python/lib/python3.13/LICENSE.txt"
+    },
+    "aarch64": {
+      "target": "aarch64-unknown-linux-gnu",
+      "glibc_min": "2.17",
+      "source_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "bytes": 29331623,
+      "sha256": "69a30ed26198178732c37b8de0b6b5191479fbacfe526954da776befe38f18e7",
+      "archive_root": "python",
+      "executable": "python/bin/python3.13",
+      "license_path": "python/lib/python3.13/LICENSE.txt"
+    }
+  }
+}

@@ -1,18 +1,53 @@
 cmake_minimum_required(VERSION 3.16)
 project(frame_mask LANGUAGES CXX)
+option(FRAME_DASHBOARD_TRANSITION_PROBE "Prepare an uninstalled sparse dashboard transition diagnostic" OFF)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(FRAME_DASHBOARD_TRANSITION_PROBE)
+    find_path(DASHBOARD_VULKAN_HEADERS vulkan/vulkan.h REQUIRED)
+    find_package(Threads REQUIRED)
+    add_library(VkLayer_dashboard_transition_probe SHARED EXCLUDE_FROM_ALL
+        layer/pixel_snapshot_layer.cpp layer/pixel_readback.cpp layer/pixel_sampler_probe.cpp
+        layer/pixel_native_driver_lease.cpp layer/native_presenter_receiver.cpp
+        probe/dashboard_transition_probe.cpp)
+    target_include_directories(VkLayer_dashboard_transition_probe PRIVATE ${DASHBOARD_VULKAN_HEADERS})
+    target_compile_definitions(VkLayer_dashboard_transition_probe PRIVATE
+        FRAME_DASHBOARD_TRANSITION_PROBE=1 FRAME_PIXEL_SYNTHETIC_PRESENTER=1 FRAME_PIXEL_SSBO_DEFINITION_JOURNAL=1)
+    target_compile_options(VkLayer_dashboard_transition_probe PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -Wno-missing-field-initializers -fvisibility=hidden)
+    target_link_options(VkLayer_dashboard_transition_probe PRIVATE -Wl,-Bsymbolic-functions -Wl,--no-undefined
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/layer/pixel_snapshot_exports.map")
+    target_link_libraries(VkLayer_dashboard_transition_probe PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_executable(test_dashboard_transition_probe EXCLUDE_FROM_ALL
+        probe/dashboard_transition_probe_tests.cpp probe/dashboard_transition_probe.cpp)
+    target_compile_options(test_dashboard_transition_probe PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -Wno-missing-field-initializers)
+    target_include_directories(test_dashboard_transition_probe PRIVATE ${DASHBOARD_VULKAN_HEADERS})
+    target_link_libraries(test_dashboard_transition_probe PRIVATE Threads::Threads)
+endif()
 include(CTest)
+option(FRAME_STREAM_BRIDGE_ONLY
+    "Build only the uninstalled negotiated stream-bridge prototype and its focused tests" OFF)
+option(FRAME_STREAM_BRIDGE_RECEIVER "Build the negotiated full-resolution receiver (not automatically installed)" OFF)
+if(BUILD_TESTING OR FRAME_STREAM_BRIDGE_ONLY OR FRAME_STREAM_BRIDGE_RECEIVER)
+    include(cmake/StreamBridge.cmake)
+endif()
+if(FRAME_STREAM_BRIDGE_RECEIVER)
+    include(cmake/StreamBridgeReceiver.cmake)
+endif()
+if(FRAME_STREAM_BRIDGE_ONLY)
+    return()
+endif()
 option(FRAME_MASK_BUILD_TRACE "Build the opt-in passive compositor diagnostic layer" OFF)
 option(FRAME_MASK_BUILD_PIXEL_SNAPSHOT
     "Build an uninstalled one-shot explicit-pattern GPU pixel diagnostic" OFF)
 option(FRAME_PIXEL_SYNTHETIC_PRESENTER
-    "Build the uninstalled explicitly opted-in synthetic or real-scene native output replacement" OFF)
+    "Archived, uninstalled explicitly opted-in synthetic/scene diagnostic" OFF)
 option(FRAME_PIXEL_RELEASE_RECEIVER
-    "Build the explicitly installed Steam Frame Native Passthrough scene receiver" OFF)
-if(FRAME_PIXEL_RELEASE_RECEIVER AND NOT FRAME_PIXEL_SYNTHETIC_PRESENTER)
-    message(FATAL_ERROR "Release receiver requires the scene-capable presenter")
+    "Retired legacy picture/mask-atlas receiver (unsupported)" OFF)
+if(FRAME_PIXEL_RELEASE_RECEIVER)
+    message(FATAL_ERROR "The legacy picture/mask-atlas release receiver is retired; use FRAME_STREAM_BRIDGE_RECEIVER")
 endif()
 option(FRAME_PIXEL_UNIFORM_COMPANION
     "Require a bounded same-command native uniform companion in the uninstalled diagnostic" OFF)
