@@ -294,6 +294,10 @@ class LocalInstall:
     def state(self):
         if not self.receipt.exists():return None
         e=self.e;v=e.parse(e.read(self.receipt,2*1024*1024,private=True))
+        return self.validate_state(v)
+
+    def validate_state(self,v):
+        e=self.e
         e.require(set(v)-{'version'}=={'schema','bundle','files','settings','registered_before','pair','vrpathreg'} and
                   v['schema']==RECEIPT and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
                   set(v['files'])==PC_FILES,'Unknown PC connection receipt preserved.')
@@ -445,33 +449,73 @@ class LocalInstall:
             e.require(self.local.inventory()['registered'],'The updated provider registration could not be confirmed.')
         return {'reason':'updated','changed':True,'automatic_restart':False}
 
-    def uninstall(self,pc,*,backup=False):
-        e=self.e;state=self.state()
-        if state is None:return {'reason':'not_installed','automatic_restart':False}
+    def uninstall(self,pc,*,backup=False,target=None):
+        e=self.e;state=self.state();checkpoint=self.checkpoint();pending=checkpoint.value()
+        if state is None and pending:
+            for operation in pending['operations']:
+                if operation['path']!=str(self.receipt):continue
+                for item in reversed([operation['before'],*operation['after']]):
+                    if item and item['kind']=='file':
+                        state=self.validate_state(e.parse(base64.b64decode(item['bytes'],validate=True)));break
+                if state:break
+        if state is None:
+            e.require(not pc.get('registered') and not any(os.path.lexists(self.local.root/name) for name in PC_FILES),
+                      'The PC removal receipt is missing; existing provider files or registration were preserved.')
+            return {'reason':'not_installed','automatic_restart':False}
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before removing the connection.')
+        helper=load_helper(e,'steam_link_setup_checkpoint')
+        known={item['path']:item for item in pending['operations']} if pending else {}
+        active=self.local.root/'pairings/active.json'
+        active_before=e.read(active,4096,private=True) if active.exists() else None
+        if active_before is not None:
+            prior=known.get(str(active));observed=helper.read_value(e,active)
+            e.require(active_before==e.encoded({'schema':e.ACTIVE,'pair_id':state['pair']}) or
+                      prior and observed in [prior['before'],*prior['after']],
+                      'Changed active pairing preserved; removal stopped.')
+        receipt_before=e.read(self.receipt,2*1024*1024,private=True) if self.receipt.exists() else None
+        e.require(receipt_before is None or e.parse(receipt_before)==state,'Changed removal receipt preserved.')
         for name,pin in state['files'].items():
-            e.require(e.sha(e.read(self.local.root/e.relative(name)))==pin['sha256'],'Changed provider files preserved.')
+            path=self.local.root/e.relative(name)
+            if not os.path.lexists(path):continue
+            current=helper.read_value(e,path);item=known.get(str(path))
+            e.require(e.sha(e.read(path))==pin['sha256'] or item and current in [item['before'],*item['after']],
+                      'Changed provider files preserved.')
         tool=self.local.verify_tool(pc,state['vrpathreg'])
         # Validate conditional settings restoration before unregistering anything.
         raw=e.read(Path(state['settings']['path']),2*1024*1024);current=e.parse(raw)
         for section,spec in state['settings']['baseline'].items():
-            e.require(type(current.get(section))is dict and all(k in current[section] and
-                      current[section][k]==v['installed'] and type(current[section][k])is type(v['installed'])
-                      for k,v in spec['keys'].items()),'Changed SteamVR settings preserved; removal stopped.')
+            values=current.get(section,{})
+            e.require(type(values)is dict,'Changed SteamVR settings preserved; removal stopped.')
+            for key,entry in spec['keys'].items():
+                observed={'present':key in values,'value':values.get(key)}
+                choices=[{'present':True,'value':entry['installed']},{'present':entry['present'],'value':entry['value']}]
+                if pending:
+                    prior=next((item for item in pending['settings'] if item['path']==state['settings']['path'] and
+                                item['section']==section and item['key']==key),None)
+                    if prior:choices.extend([prior['before'],*prior['after']])
+                e.require(any(e.encoded(observed)==e.encoded(choice) for choice in choices),
+                          'Changed SteamVR settings preserved; removal stopped.')
+                if entry['present']:current.setdefault(section,{})[key]=entry['value']
+                elif section in current:current[section].pop(key,None)
+            if section in current and not current[section] and not spec['present']:current.pop(section)
         if backup:
             helper=load_helper(e,'steam_link_setup_checkpoint');checkpoint=self.checkpoint(state['pair'])
             paths=[self.local.root/name for name in state['files']]+[self.local.root/'pairings/active.json',self.receipt]
             operations=[checkpoint.operation(path,[None]) for path in paths]
             settings=[checkpoint.setting(self.settings_path(),section,key,[{'present':entry['present'],'value':entry['value']}])
                       for section,spec in state['settings']['baseline'].items() for key,entry in spec['keys'].items()]
-            checkpoint.begin('uninstall',operations,settings,bool(pc.get('registered')))
-        if not state['registered_before']:self.local.register(tool,'removedriver')
-        SettingsChange.restore(e,state['settings'])
-        for name in state['files']:e.remove_owned(self.local.root/e.relative(name),e.read(self.local.root/e.relative(name)))
+            checkpoint.begin('uninstall',operations,settings,bool(pc.get('registered')),target=target)
+        if pc.get('registered'):self.local.register(tool,'removedriver')
+        e.require(not self.local.inventory().get('registered'),'The owned PC driver registration could not be removed.')
+        path=Path(state['settings']['path']);mode=stat.S_IMODE(path.stat().st_mode)
+        if e.encoded(current)!=raw:e.put(path,e.encoded(current),raw)
+        if os.name!='nt':os.chmod(path,mode)
+        for name in state['files']:
+            path=self.local.root/e.relative(name)
+            if os.path.lexists(path):e.remove_owned(path,e.read(path))
         # Only this session's exact active pointer is removed; keep old user keys.
-        active=self.local.root/'pairings/active.json'
-        if active.exists():e.remove_owned(active,e.encoded({'schema':e.ACTIVE,'pair_id':state['pair']}))
-        e.remove_owned(self.receipt,e.read(self.receipt,2*1024*1024,private=True))
+        if active_before is not None:e.remove_owned(active,active_before)
+        if receipt_before is not None:e.remove_owned(self.receipt,receipt_before)
         return {'reason':'uninstalled','automatic_restart':False}
 
 
@@ -769,7 +813,15 @@ class FrameInstall:
         for op in operations:
             after=op['after']
             if after and after['kind']=='file':after={**after,'mode':op['mode']}
-            entries.append(checkpoint.operation(Path(op['path']),[after]))
+            choices=[after]
+            # A partial prior Uninstall may have removed the camera config.
+            # Native quiescence can briefly stage only its exact saved config;
+            # reserve that intermediate before the helper makes any write.
+            if op['path']==str(self.root/CAMERA_CONFIG):
+                for candidate in op.get('camera_intermediates',[]):
+                    if candidate and candidate['kind']=='file':candidate={**candidate,'mode':op['mode']}
+                    if candidate not in choices:choices.append(candidate)
+            entries.append(checkpoint.operation(Path(op['path']),choices))
         entries.append(checkpoint.operation(self.tx.path,transaction_values))
         entries_settings=[] if settings.get('policy')==SESSION_POLICY else [checkpoint.setting(Path(settings['path']),section,key,[{'present':entry['present'],'value':entry['value']}]
                        if action=='uninstall' else [{'present':True,'value':entry['installed']}])
@@ -1233,21 +1285,46 @@ class FrameInstall:
         return {'reason':'prepared-update','pair_id':current['pair'],'automatic_restart':False,
                 'manual_restart_required':True,'coverage_operational':False}
 
-    def undo(self,*,backup=False,live=False,purge_legacy=False):
-        state=self.tx.state();legacy=None;legacy_helper=None
+    def undo(self,*,backup=False,live=False,purge_legacy=False,target=None):
+        state=self.tx.state();legacy=None;legacy_helper=None;checkpoint=self.checkpoint();pending=checkpoint.value()
+        if state is None and purge_legacy and pending:
+            for operation in pending['operations']:
+                if operation['path']!=str(self.tx.path):continue
+                for item in reversed([operation['before'],*operation['after']]):
+                    if item and item['kind']=='file':
+                        state=self.tx.validate_state(self.e.parse(base64.b64decode(item['bytes'],validate=True)));break
+                if state:break
         if purge_legacy:
-            legacy_helper=load_helper(self.e,'steam_link_setup_legacy');legacy=legacy_helper.plan(self)
+            legacy_helper=load_helper(self.e,'steam_link_setup_legacy')
+            if state and self.tx.state() is None:
+                from types import SimpleNamespace
+                tx=SimpleNamespace(state=lambda:state,owned=self.tx.owned,current=self.tx.current,operation=self.tx.operation)
+                view=SimpleNamespace(e=self.e,home=self.home,tx=tx,settings_path=self.settings_path,camera_value=self.camera_value)
+            else:view=self
+            legacy=legacy_helper.plan(view,checkpoint=pending)
         if state is None and legacy is None:return {'reason':'not_installed','automatic_restart':False}
         if not live:self.cold(steam=True)
         legacy_paths={op['path'] for op in legacy['operations']} if legacy else set()
+        known={item['path']:item for item in pending['operations']} if pending else {}
+        operations={op['path']:{**op,'after':None if op['path'] in legacy_paths else op['before']}
+                    for op in state['operations']} if state else {}
+        if purge_legacy:
+            for operation in operations.values():
+                observed=self.tx.current(Path(operation['path']));prior=known.get(operation['path'])
+                candidates=[operation['before'],operation['after']]
+                if state:
+                    original=next(item for item in state['operations'] if item['path']==operation['path'])
+                    candidates.extend([original['before'],original['after']])
+                    if operation['path']==str(self.root/CAMERA_CONFIG):operation['camera_intermediates']=[original['after']]
+                if prior:candidates.extend(None if item is None else {k:v for k,v in item.items() if k!='mode'} for item in [prior['before'],*prior['after']])
+                self.e.require(observed in candidates,'Changed Frame uninstall files were preserved before removal.')
+                operation.update(before=observed,owned_intermediates=candidates)
+        if legacy:operations.update({op['path']:op for op in legacy['operations']})
         if backup:
-            operations={op['path']:{**op,'after':None if op['path'] in legacy_paths else op['before']}
-                        for op in state['operations']} if state else {}
-            if legacy:operations.update({op['path']:op for op in legacy['operations']})
             settings=state['settings'] if state else {'path':str(self.settings_path()),'policy':SESSION_POLICY}
-            self.backup('uninstall',list(operations.values()),settings,[None],camera_override=legacy['camera'] if legacy else None)
+            self.backup('uninstall',list(operations.values()),settings,[None],camera_override=legacy['camera'] if legacy else None,target=target)
         if state:
-            with self.camera_context(state=state) as camera:
+            with self.camera_context(state=state,checkpoint=self.checkpoint().value() if purge_legacy else None) as camera:
                 if camera:self.camera_call(camera,'restore_owned')
         if legacy:legacy_helper.apply_camera(self,legacy)
         # Revoke new activation first; never restore the old layer while the new
@@ -1268,9 +1345,19 @@ class FrameInstall:
                 self.e.require(all((key in values)==entry['present'] and
                     (not entry['present'] or values[key]==entry['value']) for key,entry in spec['keys'].items()),
                     'The camera preference changed; it was preserved and recovery remains available.')
-        if state:self.tx.rollback(skip_paths=legacy_paths & {op['path'] for op in state['operations']})
-        if legacy:
-            for operation in legacy['operations']:self.tx.replace(operation)
+        if purge_legacy:
+            # Revoke/delete paired artifacts in reverse publication order, but
+            # keep the retired remover's validated order: its receipt is last.
+            removal=[operation for operation in reversed(list(operations.values())) if operation['path'] not in legacy_paths]
+            if legacy:removal.extend(operations[operation['path']] for operation in legacy['operations'])
+            for operation in removal:
+                observed=self.tx.current(Path(operation['path']))
+                self.e.require(observed in [operation['before'],operation['after'],*operation.get('owned_intermediates',[])],
+                               'A Frame component changed during uninstall; it was preserved.')
+                self.tx.replace({**operation,'before':observed})
+            if self.tx.path.exists():self.e.remove_owned(self.tx.path,self.e.read(self.tx.path,64*1024*1024,private=True))
+        else:
+            if state:self.tx.rollback()
         self.system('daemon-reload')
         return {'reason':'uninstalled','automatic_restart':False,'manual_restart_required':True}
 
@@ -1355,16 +1442,25 @@ def remote_request(engine,request,*,unit=None):
         unit._camera_payload=(source,{'path':str(path),'bytes':provider['bytes'],'sha256':provider['sha256']})
     if command=='bridge-restore':
         continuation=request.get('continuation',False)
+        removing=request.get('removing',False)
         e.require(type(continuation)is bool and (not continuation or request.get('automated') is True),
                   'Setup continuation requires the confirmed Apply workflow.')
-        checkpoint=unit.checkpoint();result=checkpoint.restore()
-        if continuation:result['continuation']=checkpoint.reconcile(view.pin)
-        unit.system('daemon-reload')
+        e.require(type(removing)is bool and (not removing or continuation),
+                  'Removal continuation requires the confirmed Uninstall workflow.')
+        checkpoint=unit.checkpoint()
+        if removing:
+            # Transfer exact Undo authority without restoring or activating any
+            # predecessor. Explicit Uninstall must proceed directly to vanilla.
+            result={'continuation':checkpoint.retain_current(view.pin),'removing':True}
+        else:
+            result=checkpoint.restore()
+            if continuation:result['continuation']=checkpoint.reconcile(view.pin)
+            unit.system('daemon-reload')
         state=unit.tx.state()
         return {**result,'installed':state is not None,'installed_version':patch_version(state.get('version')) if state else None}
     if command=='bridge-checkpoint-finish':unit.checkpoint().finish(restored=request.get('restored') is True);return {'reason':'complete'}
     if command=='bridge-undo':return unit.undo(backup=request.get('automated') is True,live=request.get('automated') is True,
-                                               purge_legacy=request.get('automated') is True)
+                                               purge_legacy=request.get('automated') is True,target=view.pin)
     if command=='bridge-commit':unit.tx.commit();return {'reason':'committed','automatic_restart':False}
     files=request.get('files',{});e.require(type(files)is dict and 1<=len(files)<=64,'Bounded package inventory required.')
     # RPC payload staging has no service or library side effects. Its complete
@@ -1517,7 +1613,7 @@ class Automation:
     def prepare(self,action):
         if action=='uninstall':
             self.phase('undo');self.call('bridge-undo',automated=True)
-            self.installed.uninstall(self.local.inventory(),backup=True)
+            self.installed.uninstall(self.local.inventory(),backup=True,target=self.bundle.pin)
             return
         state=self.installed.state()
         pair=self.local.pairing(state['pair']) if state else {'schema':self.e.PAIR,'pair_id':secrets.token_hex(16),
@@ -1569,10 +1665,17 @@ class Automation:
         inherit their Undo predecessors. Original runtime baselines survive;
         only the eventual new package receives a restart and picture question.
         """
-        self.restore_files(continuation=True)
-        self.e.require(self.pc_recovery_error is None,
-                       'The saved PC state could not be prepared for this update; recovery records were kept.')
-        checkpoint=self.installed.checkpoint();checkpoint.reconcile(self.bundle.pin)
+        if self.context.get('operation_action')=='uninstall':
+            self.phase('preflight')
+            self.runtime.snapshot();self.runtime.stop()
+            self.restored_frame=self.call('bridge-restore',continuation=True,removing=True,automated=True)
+            self.installed.checkpoint().retain_current(self.bundle.pin)
+            self.pc_recovery_error=None
+        else:
+            self.restore_files(continuation=True)
+            self.e.require(self.pc_recovery_error is None,
+                           'The saved PC state could not be prepared for this update; recovery records were kept.')
+            checkpoint=self.installed.checkpoint();checkpoint.reconcile(self.bundle.pin)
         self.phase('preflight')
         self.call('bridge-runtime-snapshot',continuation=self.restored_frame['continuation'],automated=True)
 
@@ -1826,7 +1929,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     actions=['retry','check','exit']
     pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
     if pending and frame is not None:actions.insert(0,'rollback')
-    if frame is not None and (state or frame.get('installed') or frame.get('legacy_installed')):actions.insert(0,'uninstall')
+    if frame is not None and (pending or state or frame.get('installed') or frame.get('legacy_installed')):actions.insert(0,'uninstall')
     if available and not downgrade and frame is not None and report['pc']['compatible'] and frame.get('runtime_compatible'):
         if state is None:actions.insert(0,'install')
         elif state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
@@ -1870,7 +1973,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     context['operation_action']=action
     ports=Automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
     flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
-    if pending and action in ('install','update','repair'):
+    if pending and action in ('install','update','repair','uninstall'):
         result=flow.run(action,reconcile=True)
         if result==0:refresh_inventory()
         return result

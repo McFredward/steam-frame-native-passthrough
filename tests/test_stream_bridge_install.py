@@ -807,6 +807,76 @@ class Tests(unittest.TestCase):
         self.assertTrue(os.path.islink(link))
         for path,raw in original.items():self.assertEqual(s.read(path),raw)
 
+    def test_partial_uninstall_with_missing_camera_tools_finishes_without_reactivating_patch(self):
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();initial=s.read(self.unit.tx.path);replace=self.unit.tx.replace
+        def interrupt(operation,reverse=False):
+            if operation['path']==str(self.froot/b.LIBRARY):raise OSError('uncertain interrupted removal')
+            return replace(operation,reverse=reverse)
+        with mock.patch.object(self.unit.tx,'replace',side_effect=interrupt),self.assertRaisesRegex(OSError,'interrupted'):
+            b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertFalse((self.froot/b.CAMERA_CONFIG).exists());self.assertFalse((self.froot/b.CAMERA_TOOL).exists())
+        self.assertTrue((self.froot/b.LIBRARY).exists());self.assertEqual(s.read(self.unit.tx.path),initial)
+        checkpoint=self.unit.checkpoint();checkpoint.retain_current(self.bundle.pin)
+        def never_activate(operation,reverse=False):
+            if operation['path']!=str(self.froot/b.CAMERA_CONFIG):self.assertIsNone(operation['after'])
+            return replace(operation,reverse=reverse)
+        with mock.patch.object(self.unit.tx,'replace',side_effect=never_activate):
+            result=b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertEqual(result['reason'],'uninstalled');self.assertFalse(self.unit.tx.path.exists())
+        self.assertFalse((self.froot/b.LIBRARY).exists());self.assertFalse((self.froot/b.CAMERA_CONFIG).exists())
+        checkpoint.restore();checkpoint.verify_restored()
+        self.assertEqual(s.read(self.unit.tx.path),initial)
+
+    def test_explicit_pc_uninstall_unregisters_owned_path_even_when_preexisting(self):
+        self.local.register(self.runtime/'bin/win64/vrpathreg.exe','adddriver')
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        self.assertTrue(installer.state()['registered_before'])
+        result=installer.uninstall(self.local.inventory(),backup=True)
+        self.assertEqual(result['reason'],'uninstalled');self.assertFalse(self.local.inventory()['registered'])
+        self.assertTrue(installer.checkpoint().value()['registered'],'Explicit Undo retains the original registration authority')
+
+    def test_interrupted_retired_uninstall_keeps_receipt_last_and_continues_from_exact_checkpoint(self):
+        _,config,dropin,link,payload=self.old_frame_only();replace=self.unit.tx.replace
+        def interrupt(operation,reverse=False):
+            if operation['path']==str(config/'control.json'):raise OSError('interrupted retired removal')
+            if operation['path']==str(config/'install.json'):
+                self.assertFalse(payload.exists());self.assertFalse(dropin.exists());self.assertFalse(os.path.lexists(link))
+                self.assertFalse((config/'camera-before.json').exists());self.assertFalse((config/'control.json').exists())
+            return replace(operation,reverse=reverse)
+        with mock.patch.object(self.unit.tx,'replace',side_effect=interrupt),self.assertRaisesRegex(OSError,'interrupted retired'):
+            b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertTrue((config/'install.json').exists());self.assertFalse(payload.exists());self.assertFalse(dropin.exists())
+        # Older releases could remove the receipts too early. Their exact
+        # checkpoint is sufficient in memory; neither file is reinstalled.
+        (config/'install.json').unlink();(config/'camera-before.json').unlink()
+        self.unit.checkpoint().retain_current(self.bundle.pin)
+        def complete(operation,reverse=False):
+            self.assertFalse(reverse);self.assertIsNone(operation['after'])
+            if operation['path']==str(config/'install.json'):
+                self.assertFalse((config/'control.json').exists())
+            return replace(operation,reverse=reverse)
+        with mock.patch.object(self.unit.tx,'replace',side_effect=complete):
+            result=b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+        self.assertEqual(result['reason'],'uninstalled')
+        for path in (payload,dropin,link,config/'control.json',config/'install.json',config/'camera-before.json'):
+            self.assertFalse(os.path.lexists(path))
+        self.assertNotIn('forceSceneAlphaBlending',s.parse(s.read(self.fsettings)).get('camera',{}))
+
+    def test_pc_uninstall_tolerates_missing_owned_payload_but_preserves_changed_remaining_file(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        image=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'
+        image.unlink()
+        other=next(self.local.root/name for name in sorted(b.PC_FILES) if self.local.root/name!=image)
+        before=s.read(other);s.put(other,b'foreign replacement',before)
+        with self.assertRaisesRegex(s.SetupError,'Changed provider'):installer.uninstall(self.local.inventory(),backup=True)
+        self.assertTrue(installer.receipt.exists());self.assertTrue(self.local.inventory()['registered'])
+        self.assertEqual(s.read(other),b'foreign replacement');self.assertFalse(installer.checkpoint().path.exists())
+        s.put(other,before,s.read(other));installer.uninstall(self.local.inventory(),backup=True)
+        self.assertFalse(installer.receipt.exists());self.assertFalse(self.local.inventory()['registered'])
+
 
 
     def test_generation_is_coverage_only_and_ignores_cached_tools(self):

@@ -188,6 +188,96 @@ class Files(fixtures.Tests):
         installer.uninstall(self.local.inventory())
         self.assertEqual(s.parse(s.read(self.settings)),initial);self.assertFalse(self.local.inventory()['registered'])
 
+    def pending_uninstall(self,*,removed=False):
+        """Actual wizard ports may transfer records, never restore old activation."""
+        installer=b.LocalInstall(s,self.local);initial=s.parse(s.read(self.settings));commands=[];questions=[];offered=[]
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        if removed:
+            installer.checkpoint().finish();self.unit.checkpoint().finish()
+            installer.uninstall(self.local.inventory(),backup=True)
+            b.remote_request(s,b.request(self.bundle,'bridge-undo',automated=True),unit=self.unit)
+            self.assertFalse(installer.receipt.exists());self.assertFalse(self.unit.tx.path.exists())
+        class Screen:
+            def banner(inner,**kw):pass
+            def status(inner,*a):pass
+            def path(inner,*a,**kw):pass
+            def say(inner,*a):pass
+            def suspend(inner):return contextlib.nullcontext()
+            def choose_action(inner,actions,**kw):offered.append(actions);return 'uninstall'
+            def confirm_uninstall(inner):return True
+            def confirm(inner,key):questions.append(key);return True
+        class Runtime:
+            def __init__(inner,*a):pass
+            def snapshot(inner):pass
+            def stop(inner):self.system.live=False
+            def restore(inner):self.fail('Uninstall must never restore the previous PC runtime')
+            def finish(inner):pass
+        class Peer:
+            def call(inner,request):
+                command=request['command'];commands.append(command)
+                if command=='bridge-health-baseline':return {}
+                if command=='bridge-health':return {'software_ready':True}
+                if command=='bridge-runtime-restart':
+                    self.assertNotIn('restoring',request)
+                    self.assertFalse(self.unit.tx.path.exists());self.assertFalse(installer.receipt.exists())
+                    return {'running':True}
+                if command in ('bridge-runtime-snapshot','bridge-runtime-restored'):return {'running':True}
+                if command=='bridge-restore':
+                    self.assertTrue(request.get('removing'));self.assertTrue(request.get('continuation'))
+                    # Only private checkpoint metadata may change during this
+                    # handoff. It may not restore old payloads or camera state.
+                    put=s.put
+                    def metadata_only(path,*a,**kw):
+                        self.assertEqual(path,self.unit.checkpoint().path)
+                        return put(path,*a,**kw)
+                    with mock.patch.object(s,'put',side_effect=metadata_only):return b.remote_request(s,request,unit=self.unit)
+                return b.remote_request(s,request,unit=self.unit)
+            def close(inner):pass
+        actual=b.load_helper
+        def helper(engine,name):
+            return types.SimpleNamespace(Lifecycle=Runtime) if name=='steam_link_setup_pc' else actual(engine,name)
+        args=types.SimpleNamespace(bundle=self.bundle_root,check=False,dry_run=False,lang='en',frame='192.168.1.25',user='steamos',action=None)
+        with mock.patch.object(s.sys.stdin,'isatty',return_value=True),mock.patch.object(s,'load_presentation',return_value=types.SimpleNamespace(Presenter=lambda **kw:Screen())),mock.patch.object(b,'load_helper',side_effect=helper):
+            self.assertEqual(b.run(args,s,self.local,remote_factory=lambda *a,**kw:Peer()),0)
+        self.assertEqual(len(offered),1);self.assertIn('uninstall',offered[0]);self.assertEqual(questions,['bridge_picture'])
+        self.assertEqual(commands.count('bridge-runtime-restart'),1)
+        self.assertFalse(installer.receipt.exists());self.assertFalse(self.unit.tx.path.exists())
+        self.assertFalse(installer.checkpoint().path.exists());self.assertFalse(self.unit.checkpoint().path.exists())
+        self.assertFalse(self.local.inventory()['registered']);self.assertEqual(s.parse(s.read(self.settings)),initial)
+        self.assertFalse((self.froot/b.LIBRARY).exists())
+
+    def test_pending_install_then_uninstall_never_restores_predecessor_and_restarts_once(self):
+        self.pending_uninstall()
+
+    def test_pending_already_removed_uninstall_uses_saved_ownership_without_reactivation(self):
+        self.pending_uninstall(removed=True)
+
+    def test_retained_checkpoint_rejects_unknown_changes_without_restoring_anything(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        checkpoint=installer.checkpoint();before=s.read(checkpoint.path)
+        image=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'
+        s.put(image,b'foreign later change',s.read(image))
+        with self.assertRaisesRegex(s.SetupError,'retained setup file'):checkpoint.retain_current(self.bundle.pin)
+        self.assertEqual(s.read(checkpoint.path),before);self.assertEqual(s.read(image),b'foreign later change')
+
+    def test_uninstall_handoff_keeps_true_original_undo_after_partial_payload_removal(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        stable=s.read(installer.receipt);prefs=s.read(self.settings)
+        installer.install(self.newer_bundle(),self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        checkpoint=installer.checkpoint();old=checkpoint.value();checkpoint.retain_current(self.bundle.pin)
+        installer.uninstall(self.local.inventory(),backup=True,target=self.bundle.pin)
+        self.assertFalse(installer.receipt.exists());self.assertFalse(self.local.inventory()['registered'])
+        active=checkpoint.value()
+        self.assertEqual(active['registered'],old['registered'])
+        for item in old['operations']:
+            self.assertEqual(next(entry for entry in active['operations'] if entry['path']==item['path'])['before'],item['before'])
+        checkpoint.restore();checkpoint.verify_restored()
+        self.assertEqual(s.read(installer.receipt),stable);self.assertEqual(s.read(self.settings),prefs)
+
     def test_continuation_checkpoint_keeps_exact_original_predecessors_across_new_update(self):
         installer=b.LocalInstall(s,self.local)
         installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)

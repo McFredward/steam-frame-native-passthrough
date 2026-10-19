@@ -42,7 +42,8 @@ class Checkpoint:
                   (value['registered'] is None or type(value['registered'])is bool),'Unknown setup recovery checkpoint preserved.')
         if 'continuation' in value:
             transfer=value['continuation']
-            e.require(type(transfer)is dict and set(transfer)=={'target','id','phase','previous'} and
+            e.require(type(transfer)is dict and set(transfer) in (
+                      {'target','id','phase','previous'},{'target','id','phase','previous','retained'}) and
                       all(type(transfer[k])is str and re.fullmatch('[0-9a-f]{64}',transfer[k]) for k in ('target','previous')) and
                       type(transfer['id'])is str and re.fullmatch('[0-9a-f]{32}',transfer['id']) and
                       transfer['phase'] in ('ready','active'),'Unknown setup continuation authority preserved.')
@@ -80,9 +81,62 @@ class Checkpoint:
             for entry in [item['before'],*item['after']]:
                 e.require(type(entry)is dict and set(entry)=={'present','value'} and type(entry['present'])is bool,
                           'Invalid setup recovery setting.')
+        self._retained(value)
         return value
 
-    def reconcile(self,target):
+    def _retained(self,value):
+        e=self.e;retained=value.get('continuation',{}).get('retained',{'files':[],'settings':[]})
+        e.require(type(retained)is dict and set(retained)=={'files','settings'} and
+                  type(retained['files'])is list and len(retained['files'])<=128 and
+                  type(retained['settings'])is list and len(retained['settings'])<=4,
+                  'Unknown retained setup scope preserved.')
+        operations={item['path']:item for item in value['operations']}
+        preferences={(item['path'],item['section'],item['key']):item for item in value['settings']}
+        files={};settings={}
+        for item in retained['files']:
+            e.require(type(item)is dict and set(item)=={'path','value'} and type(item['path'])is str and
+                      item['path'] in operations and item['path'] not in files,
+                      'Unknown retained setup file preserved.')
+            old=operations[item['path']]
+            e.require(item['value'] in [old['before'],*old['after']], 'Changed retained setup file preserved.')
+            files[item['path']]=item['value']
+        for item in retained['settings']:
+            e.require(type(item)is dict and set(item)=={'path','section','key','value'} and
+                      all(type(item[key])is str for key in ('path','section','key')),
+                      'Unknown retained setup preference preserved.')
+            key=(item['path'],item['section'],item['key']);old=preferences.get(key)
+            e.require(old is not None and key not in settings and any(e.encoded(item['value'])==e.encoded(entry)
+                      for entry in [old['before'],*old['after']]), 'Changed retained setup preference preserved.')
+            settings[key]=item['value']
+        return files,settings
+
+    def _verify_prepared(self,value):
+        files,settings=self._retained(value)
+        for item in value['operations']:
+            self.e.require(self.current(Path(item['path']))==files.get(item['path'],item['before']),
+                           'Original setup files changed before recovery could finish.')
+        for item in value['settings']:
+            path=Path(item['path']);current=self.e.parse(self.e.read(path,2*1024*1024)) if path.exists() else {}
+            section=current.get(item['section'],{});key=(item['path'],item['section'],item['key'])
+            self.e.require(type(section)is dict and self.e.encoded({'present':item['key'] in section,'value':section.get(item['key'])})==
+                           self.e.encoded(settings.get(key,item['before'])),
+                           'Original setup preferences changed before recovery could finish.')
+
+    def retain_current(self,target):
+        """Transfer a pending Uninstall without reactivating any predecessor."""
+        value=self.value()
+        if value is None:return self.reconcile(target)
+        files=[{'path':item['path'],'value':self.current(Path(item['path']))} for item in value['operations']]
+        settings=[]
+        for item in value['settings']:
+            path=Path(item['path']);data=self.e.parse(self.e.read(path,2*1024*1024)) if path.exists() else {}
+            section=data.get(item['section'],{})
+            self.e.require(type(section)is dict,'Changed retained camera preference preserved.')
+            settings.append({**{key:item[key] for key in ('path','section','key')},
+                             'value':{'present':item['key'] in section,'value':section.get(item['key'])}})
+        return self.reconcile(target,retained_files=files,retained_settings=settings)
+
+    def reconcile(self,target,*,retained_files=(),retained_settings=()):
         """Keep original Undo authority while handing restored files to Apply.
 
         This is not completed recovery: no runtime or picture is claimed. A
@@ -95,12 +149,16 @@ class Checkpoint:
         if old is None:
             self.begin('repair',[],[])
             old=self.value()
-        self.verify_restored()
+        retained={'files':list(retained_files),'settings':list(retained_settings)}
+        marker={'target':target,'id':secrets.token_hex(16),'phase':'ready','previous':'0'*64}
+        if retained['files'] or retained['settings']:marker['retained']=retained
+        self._verify_prepared({**old,'continuation':marker})
         prior=old.get('continuation')
-        if prior and prior['phase']=='ready' and prior['target']==target:return prior['id']
+        if prior and prior['phase']=='ready' and prior['target']==target and prior.get('retained',{'files':[],'settings':[]})==retained:
+            return prior['id']
         raw=e.read(self.path,LIMIT,private=True)
         e.require(e.parse(raw)==old,'The setup checkpoint changed before continuation could be recorded.')
-        updated={**old,'continuation':{'target':target,'id':secrets.token_hex(16),'phase':'ready','previous':e.sha(raw)}}
+        updated={**old,'continuation':{**marker,'previous':e.sha(raw)}}
         e.put(self.path,e.encoded(updated),raw)
         self._sync_directory()
         self.value()
@@ -114,7 +172,8 @@ class Checkpoint:
             handoff=old.get('continuation')
             e.require(handoff and handoff['phase']=='ready' and target==handoff['target'],
                       'An unfinished setup recovery must be completed before another installation.')
-            self.verify_restored()
+            self._verify_prepared(old)
+            retained_files,retained_settings=self._retained(old)
             previous=e.read(self.path,LIMIT,private=True)
             e.require(e.parse(previous)==old,'The setup checkpoint changed before continuation could start.')
             by_path={item['path']:item for item in operations}
@@ -122,23 +181,31 @@ class Checkpoint:
             for item in old['operations']:
                 replacement=by_path.get(item['path'])
                 if replacement is not None:
-                    e.require(replacement['before']==item['before'],'Changed continuation predecessor preserved.')
+                    observed=retained_files.get(item['path'],item['before'])
+                    e.require(replacement['before']==observed,'Changed continuation predecessor preserved.')
+                    after=list(replacement['after'])
+                    if observed!=item['before'] and observed not in after:after.append(observed)
+                    by_path[item['path']]={**replacement,'before':item['before'],'after':after}
                 else:
-                    by_path[item['path']]={**item,'after':[item['before']]}
+                    by_path[item['path']]={**item,'after':[retained_files.get(item['path'],item['before'])]}
             by_key={(item['path'],item['section'],item['key']):item for item in settings}
             e.require(len(by_key)==len(settings),'Duplicate continuation setting refused.')
             for item in old['settings']:
                 key=(item['path'],item['section'],item['key']);replacement=by_key.get(key)
                 if replacement is not None:
-                    e.require(replacement['before']==item['before'], 'Changed continuation preference preserved.')
+                    observed=retained_settings.get(key,item['before'])
+                    e.require(e.encoded(replacement['before'])==e.encoded(observed), 'Changed continuation preference preserved.')
+                    after=list(replacement['after'])
+                    if e.encoded(observed)!=e.encoded(item['before']) and all(e.encoded(observed)!=e.encoded(entry) for entry in after):after.append(observed)
                     # The initial file/section ownership survives the handoff.
-                    by_key[key]={**replacement,**{k:item[k] for k in ('file_present','section_present','mode')}}
-                else:by_key[key]={**item,'after':[item['before']]}
+                    by_key[key]={**replacement,'before':item['before'],'after':after,**{k:item[k] for k in ('file_present','section_present','mode')}}
+                else:by_key[key]={**item,'after':[retained_settings.get(key,item['before'])]}
             if old['registered'] is not None:
-                e.require(registered is None or registered==old['registered'],'Changed continuation registration preserved.')
+                e.require(registered is None or registered==old['registered'] or action=='uninstall' and 'retained' in handoff,
+                          'Changed continuation registration preserved.')
                 value['registered']=old['registered']
             value.update(operations=list(by_path.values()),settings=list(by_key.values()),
-                         continuation={**handoff,'phase':'active','previous':e.sha(previous)})
+                         continuation={k:v for k,v in {**handoff,'phase':'active','previous':e.sha(previous)}.items() if k!='retained'})
         raw=e.encoded(value);e.require(len(raw)<=LIMIT,'Setup recovery checkpoint exceeds its bound.')
         e.put(self.path,raw,previous)
         self._sync_directory()
