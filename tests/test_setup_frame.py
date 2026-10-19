@@ -23,7 +23,7 @@ def load(path, name):
 
 
 engine = load(ROOT / 'setup/steam_link_setup.py', 'sfnp_frame_test_engine')
-frame = load(ROOT / 'setup/steam_link_setup_frame.py', 'sfnp_setup_frame')
+frame = load(Path(os.environ.get('SFNP_LIFECYCLE_TEST_SOURCE', ROOT / 'setup/steam_link_setup_frame.py')), 'sfnp_setup_frame')
 
 
 class System:
@@ -31,6 +31,11 @@ class System:
         self.calls, self.actions = [], []
         self.generation, self.now = 2, 0
         self.auto_vr = False
+        self.keep_steam_running = False
+        self.require_fresh_vr = False
+        self.unready_client_starts = 0
+        self.live_client_vr_restarts = 0
+        self.lost_reply_after = None
         self.fail_vr = self.fail_steam = False
         self.command_error = False
         self.corrupt_status = None
@@ -63,7 +68,7 @@ class System:
             if raw is None:
                 raw = ''.join(key + '=' + self.units[unit][key] + '\n' for key in frame.PROPERTIES).encode()
             return subprocess.CompletedProcess(argv, 0, stdout=raw)
-        assert action in ('restart', 'start', 'reset-failed')
+        assert action in ('restart', 'start', 'stop', 'reset-failed')
         assert argv[3:-1] == ([] if action == 'reset-failed' else ['--no-block'])
         self.actions.append((action, unit))
         if self.before_action:
@@ -71,13 +76,26 @@ class System:
         if action == 'reset-failed':
             self.units[unit]['ActiveState'], self.units[unit]['SubState'] = 'inactive', 'dead'
             self.units[unit]['MainPID'], self.units[unit]['Result'] = '0', 'success'
+        elif action == 'stop':
+            if not self.keep_steam_running:
+                self.units[unit].update(ActiveState='inactive', SubState='dead', MainPID='0')
+            if unit == 'steam.service' and self.auto_vr:
+                self.fresh('steamvr.service')
+        elif unit == 'steam.service' and self.require_fresh_vr and self.units['steamvr.service']['InvocationID'] == format(2, '032x'):
+            self.unready_client_starts += 1
+            self.units[unit].update(ActiveState='failed', SubState='failed', MainPID='0', Result='exit-code')
         elif self.fail_vr and unit == 'steamvr.service' or self.fail_steam and unit == 'steam.service':
             self.units[unit]['ActiveState'], self.units[unit]['SubState'] = 'failed', 'failed'
             self.units[unit]['MainPID'], self.units[unit]['Result'] = '0', 'start-limit-hit'
         else:
-            self.fresh(unit)
-            if unit == 'steam.service' and self.auto_vr:
-                self.fresh('steamvr.service')
+            if unit == 'steamvr.service' and self.units['steam.service']['ActiveState'] == 'active':
+                self.live_client_vr_restarts += 1
+            # A real systemd start does not restart an active running service.
+            if action == 'restart' or self.units[unit]['ActiveState'] != 'active':
+                self.fresh(unit)
+        if self.lost_reply_after == (action, unit):
+            self.lost_reply_after = None
+            raise subprocess.TimeoutExpired(argv, 5)
         return subprocess.CompletedProcess(argv, 0, stdout=None)
 
     def sleep(self, duration):
@@ -115,11 +133,14 @@ class LifecycleTests(unittest.TestCase):
 
     def test_one_coordinated_restart_preserves_original_baseline_and_starts_both(self):
         baseline = json.loads(json.dumps(self.system.units))
+        self.system.require_fresh_vr = True
         seen = []
         self.system.before_action = lambda action, unit:seen.append(self.record()['phase'])
         result = self.lifecycle.restart()
-        self.assertEqual(self.system.actions, [('restart', 'steam.service'), ('restart', 'steamvr.service')])
-        self.assertEqual(seen, ['restarting-steam', 'restarting-vr'])
+        self.assertEqual(self.system.actions, [('stop', 'steam.service'), ('restart', 'steamvr.service'), ('start', 'steam.service')])
+        self.assertEqual(seen, ['stopping-steam', 'restarting-vr', 'starting-steam'])
+        self.assertEqual(self.system.unready_client_starts, 0)
+        self.assertEqual(self.system.live_client_vr_restarts, 0)
         self.assertTrue(result['running'])
         self.assertTrue(result['pending'])
         self.assertFalse(result['complete'])
@@ -131,7 +152,7 @@ class LifecycleTests(unittest.TestCase):
     def test_steam_managed_vr_restart_is_not_repeated(self):
         self.system.auto_vr = True
         result = self.lifecycle.restart()
-        self.assertEqual(self.system.actions, [('restart', 'steam.service')])
+        self.assertEqual(self.system.actions, [('stop', 'steam.service'), ('start', 'steam.service')])
         self.assertTrue(result['running'])
         self.assertEqual(result['phase'], 'awaiting-health')
 
@@ -140,8 +161,8 @@ class LifecycleTests(unittest.TestCase):
         self.system.fresh = lambda unit:None if unit == 'steam.service' else original(unit)
         with self.assertRaisesRegex(engine.SetupError, 'Steam did not restart'):
             self.lifecycle.restart()
-        self.assertEqual(self.system.actions, [('restart', 'steam.service')])
-        self.assertEqual(self.record()['phase'], 'restarting-steam')
+        self.assertEqual(self.system.actions, [('stop', 'steam.service'), ('restart', 'steamvr.service'), ('start', 'steam.service')])
+        self.assertEqual(self.record()['phase'], 'starting-steam')
 
     def test_failed_vr_start_keeps_recovery_and_retry_restores_runtime(self):
         self.system.fail_vr = True
@@ -155,8 +176,8 @@ class LifecycleTests(unittest.TestCase):
         recovered = self.instance().restore()
         self.assertTrue(recovered['running'])
         self.assertFalse(recovered['complete'])
-        self.assertEqual(self.system.actions[-3:], [('restart', 'steam.service'),
-            ('reset-failed', 'steamvr.service'), ('start', 'steamvr.service')])
+        self.assertEqual(self.system.actions[-3:], [('reset-failed', 'steamvr.service'),
+            ('start', 'steamvr.service'), ('start', 'steam.service')])
         self.assertEqual(self.record()['baseline'], baseline, 'Retry cannot replace original recovery baseline.')
         confirmed = self.instance().restored(health_ok=True)
         self.assertTrue(confirmed['healthy'] and confirmed['complete'])
@@ -190,7 +211,7 @@ class LifecycleTests(unittest.TestCase):
             value.update(ActiveState='inactive', SubState='dead', MainPID='0')
         result = self.lifecycle.restore()
         self.assertTrue(result['running'])
-        self.assertEqual(self.system.actions, [('restart', 'steam.service'), ('start', 'steamvr.service')])
+        self.assertEqual(self.system.actions, [('start', 'steamvr.service'), ('start', 'steam.service')])
         self.assertEqual(self.record()['baseline']['steam.service']['ActiveState'], 'inactive')
 
     def test_unknown_or_missing_units_are_preserved_before_journal_or_action(self):
@@ -203,6 +224,134 @@ class LifecycleTests(unittest.TestCase):
             self.system.units['steamvr.service'][key] = original
             self.assertEqual(self.system.actions, [])
             self.assertFalse(self.journal.exists())
+
+    def test_steam_stop_timeout_never_refreshes_vr_or_starts_client(self):
+        self.system.keep_steam_running = True
+        with self.assertRaisesRegex(engine.SetupError, 'Steam did not stop'):
+            self.lifecycle.restart()
+        self.assertEqual(self.system.actions, [('stop', 'steam.service')])
+        self.assertEqual(self.record()['phase'], 'stopping-steam')
+        self.assertEqual(self.system.units['steamvr.service']['InvocationID'], format(2, '032x'))
+
+    def test_completed_activation_is_reconciled_without_another_restart(self):
+        self.lifecycle.restart()
+        actions = list(self.system.actions)
+        before = json.loads(json.dumps(self.system.units))
+        result = self.instance().restart()
+        self.assertTrue(result['running'] and result['pending'])
+        self.assertEqual(self.system.actions, actions)
+        self.assertEqual(self.system.units, before)
+
+    def test_lost_vr_restart_reply_reconciles_fresh_generation_without_replay(self):
+        self.system.lost_reply_after = ('restart', 'steamvr.service')
+        with self.assertRaises(engine.SetupError): self.lifecycle.restart()
+        self.assertEqual(self.record()['phase'], 'restarting-vr')
+        before = self.system.units['steamvr.service']['InvocationID']
+        result = self.instance().restart()
+        self.assertTrue(result['running'])
+        self.assertEqual(self.system.actions, [('stop', 'steam.service'),
+            ('restart', 'steamvr.service'), ('start', 'steam.service')])
+        self.assertEqual(self.system.units['steamvr.service']['InvocationID'], before)
+        self.assertEqual(self.system.live_client_vr_restarts, 0)
+
+    def test_unknown_vr_command_reply_cannot_repeat_old_or_inactive_generation(self):
+        for active, sub in [('active', 'running'), ('inactive', 'dead')]:
+            with self.subTest(active=active):
+                baseline = json.loads(json.dumps(self.system.units))
+                value = {'schema':frame.SCHEMA, 'baseline':baseline, 'restart_steam':True,
+                    'phase':'restarting-vr', 'activation':{'kind':'prepared', 'baseline':baseline}}
+                engine.put(self.journal, engine.encoded(value))
+                self.system.units['steam.service'].update(ActiveState='inactive', SubState='dead', MainPID='0')
+                self.system.units['steamvr.service'].update(ActiveState=active, SubState=sub,
+                    MainPID='102' if active == 'active' else '0')
+                with self.assertRaisesRegex(engine.SetupError, 'SteamVR did not restart'):
+                    self.instance().restart()
+                self.assertEqual(self.system.actions, [], 'An unknown accepted request is observed, not replayed.')
+                self.assertEqual(self.record()['phase'], 'restarting-vr')
+                self.journal.unlink()
+                self.system = System()
+
+    def test_lost_client_start_reply_does_not_repeat_vr_or_client_generation(self):
+        self.system.lost_reply_after = ('start', 'steam.service')
+        with self.assertRaises(engine.SetupError): self.lifecycle.restart()
+        self.assertEqual(self.record()['phase'], 'starting-steam')
+        before = json.loads(json.dumps(self.system.units))
+        result = self.instance().restart()
+        self.assertTrue(result['running'])
+        self.assertEqual(self.system.units, before)
+        self.assertEqual(self.system.actions, [('stop', 'steam.service'),
+            ('restart', 'steamvr.service'), ('start', 'steam.service')])
+
+    def test_restore_is_new_activation_but_repeated_restore_only_reconciles(self):
+        self.lifecycle.restart()
+        baseline = self.record()['baseline']
+        prepared = json.loads(json.dumps(self.system.units))
+        result = self.instance().restore()
+        self.assertTrue(result['running'])
+        self.assertEqual(self.record()['baseline'], baseline)
+        self.assertEqual(self.record()['activation'], {'kind':'original', 'baseline':prepared})
+        self.assertNotEqual(self.system.units['steamvr.service']['InvocationID'], prepared['steamvr.service']['InvocationID'])
+        actions = list(self.system.actions)
+        self.instance().restore()
+        self.assertEqual(self.system.actions, actions)
+        self.assertEqual(self.system.live_client_vr_restarts, 0)
+
+    def test_original_to_prepared_activation_uses_new_staged_baseline(self):
+        self.lifecycle.restore()
+        original = json.loads(json.dumps(self.system.units))
+        baseline = self.record()['baseline']
+        result = self.instance().restart()
+        self.assertTrue(result['running'])
+        self.assertEqual(self.record()['baseline'], baseline)
+        self.assertEqual(self.record()['activation'], {'kind':'prepared', 'baseline':original})
+        self.assertNotEqual(self.system.units['steamvr.service']['InvocationID'], original['steamvr.service']['InvocationID'])
+        self.assertEqual(self.system.live_client_vr_restarts, 0)
+
+    def test_reconciled_pending_vr_stops_unexpected_live_client_without_repeating_vr(self):
+        self.system.lost_reply_after = ('restart', 'steamvr.service')
+        with self.assertRaises(engine.SetupError): self.lifecycle.restart()
+        self.system.fresh('steam.service')
+        vr = self.system.units['steamvr.service']['InvocationID']
+        result = self.instance().restart()
+        self.assertTrue(result['running'])
+        self.assertEqual(self.system.units['steamvr.service']['InvocationID'], vr)
+        self.assertEqual(self.system.actions.count(('restart', 'steamvr.service')), 1)
+        self.assertEqual(self.system.actions[-2:], [('stop', 'steam.service'), ('start', 'steam.service')])
+        self.assertEqual(self.system.live_client_vr_restarts, 0)
+
+    def test_legacy_phases_keep_original_baseline_and_reuse_already_fresh_vr(self):
+        for phase in ('prepared', 'restarting-steam', 'restarting-vr'):
+            with self.subTest(phase=phase):
+                baseline = json.loads(json.dumps(self.system.units))
+                engine.put(self.journal, engine.encoded({'schema':frame.SCHEMA, 'baseline':baseline,
+                    'restart_steam':True, 'phase':phase}))
+                self.system.fresh('steamvr.service')
+                vr = self.system.units['steamvr.service']['InvocationID']
+                result = self.instance().restart()
+                self.assertTrue(result['running'])
+                self.assertEqual(self.record()['baseline'], baseline)
+                self.assertEqual(self.system.units['steamvr.service']['InvocationID'], vr)
+                self.assertEqual(self.system.actions, [('stop', 'steam.service'), ('start', 'steam.service')])
+                self.journal.unlink()
+                self.system = System()
+
+    def test_legacy_completed_activation_waits_for_health_without_restarting(self):
+        baseline = json.loads(json.dumps(self.system.units))
+        engine.put(self.journal, engine.encoded({'schema':frame.SCHEMA, 'baseline':baseline,
+            'restart_steam':True, 'phase':'awaiting-health'}))
+        self.assertTrue(self.instance().restart()['running'])
+        self.assertEqual(self.system.actions, [])
+        self.assertTrue(self.instance().restored(health_ok=True)['complete'])
+
+    def test_client_is_not_started_if_vr_disappears_after_its_fresh_generation(self):
+        baseline = json.loads(json.dumps(self.system.units))
+        engine.put(self.journal, engine.encoded({'schema':frame.SCHEMA, 'baseline':baseline,
+            'restart_steam':True, 'phase':'starting-steam',
+            'activation':{'kind':'prepared', 'baseline':baseline}}))
+        self.system.units['steam.service'].update(ActiveState='inactive', SubState='dead', MainPID='0')
+        self.system.units['steamvr.service'].update(ActiveState='inactive', SubState='dead', MainPID='0')
+        with self.assertRaisesRegex(engine.SetupError, 'not ready for its client'): self.instance().restart()
+        self.assertEqual(self.system.actions, [])
 
     def test_fixed_error_messages_never_surface_process_output(self):
         self.system.command_error = True
@@ -251,7 +400,7 @@ class LifecycleTests(unittest.TestCase):
         self.system.before_action = replace
         with self.assertRaises(engine.SetupError): self.lifecycle.restart()
         self.assertEqual(engine.read(self.journal), b'foreign replacement')
-        self.assertEqual(self.system.actions, [('restart', 'steam.service')])
+        self.assertEqual(self.system.actions, [('stop', 'steam.service')])
         self.system.before_action = original
 
 

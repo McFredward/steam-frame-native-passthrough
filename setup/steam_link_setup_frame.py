@@ -18,7 +18,8 @@ SNAPSHOT = 'sfnp-frame-runtime-v1'
 UNITS = ('steam.service', 'steamvr.service')
 PROPERTIES = ('Id', 'LoadState', 'ActiveState', 'SubState', 'InvocationID',
               'ActiveEnterTimestampMonotonic', 'MainPID', 'Result')
-PHASES = frozenset(('prepared', 'restarting-steam', 'restarting-vr', 'awaiting-health'))
+PHASES = frozenset(('prepared', 'stopping-steam', 'refreshing-vr', 'starting-steam',
+                    'restarting-steam', 'restarting-vr', 'awaiting-health'))
 ACTIVE = frozenset(('active', 'inactive', 'failed', 'activating', 'deactivating',
                     'reloading', 'maintenance'))
 SUBSTATES = frozenset(('dead', 'condition', 'start-pre', 'start', 'start-post',
@@ -44,7 +45,7 @@ class FrameLifecycle:
     """
     def __init__(self, engine, root, *, runner=subprocess.run,
                  sleeper=time.sleep, monotonic=time.monotonic,
-                 poll_attempts=60, poll_interval=.25, phase_timeout=30):
+                 poll_attempts=120, poll_interval=.25, phase_timeout=30):
         self.e = engine
         self.root = engine.no_links(Path(root))
         engine.require(self.root.is_absolute(), 'A private Frame recovery directory is required.')
@@ -123,13 +124,22 @@ class FrameLifecycle:
             return None
         raw = self.e.read(self.path, 16384, private=True)
         value = self.e.parse(raw)
-        self.e.require(set(value) == {'schema', 'baseline', 'restart_steam', 'phase'} and
+        self.e.require(set(value) in ({'schema', 'baseline', 'restart_steam', 'phase'},
+                                   {'schema', 'baseline', 'restart_steam', 'phase', 'activation'}) and
                        value['schema'] == SCHEMA and value['restart_steam'] is True and
                        type(value['phase']) is str and value['phase'] in PHASES and type(value['baseline']) is dict and
                        set(value['baseline']) == set(UNITS),
                        'Unknown Frame lifecycle recovery record preserved.')
         for unit in UNITS:
             self._validate_unit(value['baseline'][unit], unit)
+        if 'activation' in value:
+            activation = value['activation']
+            self.e.require(type(activation) is dict and set(activation) == {'kind', 'baseline'} and
+                           activation['kind'] in ('prepared', 'original') and
+                           type(activation['baseline']) is dict and set(activation['baseline']) == set(UNITS),
+                           'Unknown Frame activation recovery record preserved.')
+            for unit in UNITS:
+                self._validate_unit(activation['baseline'][unit], unit)
         self._raw, self._value = raw, value
         return value
 
@@ -163,7 +173,7 @@ class FrameLifecycle:
         value['phase'] = phase
         self._save(value)
 
-    def _wait(self, unit, predicate, deadline):
+    def _wait(self, unit, predicate, deadline, *, stopping=False):
         for attempt in range(self.attempts):
             value = self._show(unit)
             if predicate(value):
@@ -172,6 +182,8 @@ class FrameLifecycle:
                 break
             self.sleeper(min(self.interval, max(0, deadline - self.clock())))
         if unit == 'steam.service':
+            if stopping:
+                raise self.e.SetupError('Frame Steam did not stop. Recovery details were kept.')
             raise self.e.SetupError('Frame Steam did not restart. Recovery details were kept.')
         raise self.e.SetupError('Frame SteamVR did not restart. Recovery details were kept.')
 
@@ -188,41 +200,117 @@ class FrameLifecycle:
     def _fresh_running(cls, value, previous):
         return cls._running(value) and bool(value['InvocationID']) and value['InvocationID'] != previous['InvocationID']
 
-    def restart(self):
-        """Activate already staged files in one immediate coordinated restart.
+    def _stop_client(self):
+        steam = self._show('steam.service')
+        if steam['ActiveState'] == 'failed':
+            self._run(['reset-failed', 'steam.service'])
+            steam = self._show('steam.service')
+        if not self._stopped(steam):
+            # Repeating an uncertain stop is idempotent; unlike restart it
+            # cannot manufacture another loaded VR/client generation.
+            self._run(['stop', '--no-block', 'steam.service'])
+            self._wait('steam.service', self._stopped, self.clock() + self.timeout, stopping=True)
 
-        No stopped/intervention phase exists. Steam is restarted once; SteamVR
-        is not restarted again if that operation already gave it a fresh running
-        generation. The caller stages or rolls back files atomically FIRST.
+    def restart(self, *, restoring=False):
+        """Activate staged files without restarting VR under a running client.
+
+        Steam explicitly depends on SteamVR. Stop the client, make the already
+        staged VR generation ready, then start the client. The durable activation
+        identity distinguishes an interrupted RPC from activating restored files;
+        neither a fresh VR invocation nor a completed activation is replayed.
         """
+        self.e.require(type(restoring) is bool, 'An exact Frame activation intent is required.')
         self._load()
         before = self._units()
-        if self._value is None:
-            self._save({'schema':SCHEMA, 'baseline':before, 'restart_steam':True, 'phase':'prepared'})
-        deadline = self.clock() + self.timeout
-        self._phase('restarting-steam')
-        if before['steam.service']['ActiveState'] == 'failed':
-            self._run(['reset-failed', 'steam.service'])
-        self._run(['restart', '--no-block', 'steam.service'])
-        self._wait('steam.service', lambda value:self._fresh_running(value, before['steam.service']), deadline)
-        value = self._show('steamvr.service')
-        if value['ActiveState'] in ('activating', 'deactivating', 'reloading'):
-            value = self._wait('steamvr.service',
-                lambda item:self._running(item) or item['ActiveState'] in ('inactive', 'failed'), deadline)
-        if not self._fresh_running(value, before['steamvr.service']):
-            self._phase('restarting-vr')
-            if value['ActiveState'] == 'failed':
-                self._run(['reset-failed', 'steamvr.service'])
-            action = 'restart' if value['ActiveState'] in ('active', 'reloading') else 'start'
-            self._run([action, '--no-block', 'steamvr.service'])
-            self._wait('steamvr.service', lambda item:self._fresh_running(item, before['steamvr.service']), deadline)
+        kind = 'original' if restoring else 'prepared'
+        prior = self._value
+        if prior is None:
+            self._save({'schema':SCHEMA, 'baseline':before, 'restart_steam':True, 'phase':'prepared',
+                        'activation':{'kind':kind, 'baseline':before}})
+        elif 'activation' not in prior:
+            # Old journal phases remain recoverable. A finished old activation
+            # only awaits its independent health check; never replay it merely
+            # because its RPC response was lost. An explicit Undo is a new
+            # activation after original files have already been restored.
+            if prior['phase'] == 'awaiting-health' and not restoring:
+                self.e.require(all(self._running(v) for v in before.values()),
+                               'Frame Steam and SteamVR are not both running. Recovery details were kept.')
+                return self._result(before)
+            baseline = dict(before)
+            if not restoring:
+                baseline['steamvr.service'] = prior['baseline']['steamvr.service']
+            value = dict(prior)
+            value.update(phase='prepared', activation={'kind':kind, 'baseline':baseline})
+            self._save(value)
+        elif prior['activation']['kind'] != kind:
+            value = dict(prior)
+            value.update(phase='prepared', activation={'kind':kind, 'baseline':before})
+            self._save(value)
+
+        phase = self._value['phase']
+        baseline = self._value['activation']['baseline']
+        if phase == 'awaiting-health':
+            self.e.require(all(self._running(v) for v in before.values()),
+                           'Frame Steam and SteamVR are not both running. Recovery details were kept.')
+            return self._result(before)
+
+        if phase in ('prepared', 'stopping-steam', 'restarting-steam'):
+            self._phase('stopping-steam')
+            self._stop_client()
+            self._phase('refreshing-vr')
+            phase = 'refreshing-vr'
+
+        if phase in ('refreshing-vr', 'restarting-vr'):
+            # A caller/user may have restarted Steam while SSH was away. Keep
+            # any already-issued VR request phase, but never refresh under it.
+            self._stop_client()
+            vr_deadline = self.clock() + self.timeout
+            vr = self._show('steamvr.service')
+            if vr['ActiveState'] in ('activating', 'deactivating', 'reloading'):
+                vr = self._wait('steamvr.service',
+                    lambda item:self._running(item) or item['ActiveState'] in ('inactive', 'failed'),
+                    vr_deadline)
+            if not self._fresh_running(vr, baseline['steamvr.service']):
+                # restarting-vr means the command may already have reached
+                # systemd before SSH lost its reply. Observe that request; an
+                # unchanged old active invocation is not permission to replay it.
+                if phase == 'restarting-vr' and vr['ActiveState'] != 'failed':
+                    vr = self._wait('steamvr.service',
+                        lambda item:self._fresh_running(item, baseline['steamvr.service']),
+                        vr_deadline)
+                else:
+                    self._phase('restarting-vr')
+                    if vr['ActiveState'] == 'failed':
+                        self._run(['reset-failed', 'steamvr.service'])
+                    action = 'restart' if vr['ActiveState'] in ('active', 'reloading') else 'start'
+                    self._run([action, '--no-block', 'steamvr.service'])
+                    vr = self._wait('steamvr.service',
+                        lambda item:self._fresh_running(item, baseline['steamvr.service']),
+                        vr_deadline)
+            self._phase('starting-steam')
+
+        self.e.require(self._fresh_running(self._show('steamvr.service'), baseline['steamvr.service']),
+                       'Frame SteamVR is not ready for its client. Recovery details were kept.')
+        steam = self._show('steam.service')
+        if not self._fresh_running(steam, baseline['steam.service']):
+            if steam['ActiveState'] == 'failed':
+                self._run(['reset-failed', 'steam.service'])
+            # start is deliberately idempotent on an already queued/running
+            # client; never issue a second restart after an uncertain reply.
+            self._run(['start', '--no-block', 'steam.service'])
+            self._wait('steam.service',
+                lambda item:self._fresh_running(item, baseline['steam.service']),
+                self.clock() + self.timeout)
         self._phase('awaiting-health')
-        return self._result(self._units())
+        units = self._units()
+        self.e.require(all(self._running(v) for v in units.values()),
+                       'Frame Steam and SteamVR are not both running. Recovery details were kept.')
+        return self._result(units)
 
     def restore(self):
-        # Undo restores a usable Frame, even if a service happened to be stopped
-        # at inventory. The caller first restores exact original files/settings.
-        return self.restart()
+        # The caller has restored the exact original files/settings FIRST.
+        # A distinct activation intent must not reuse the prepared generation.
+        return self.restart(restoring=True)
 
     def restored(self, *, health_ok=False):
         self.e.require(type(health_ok) is bool, 'A fresh Frame startup health result is required.')
