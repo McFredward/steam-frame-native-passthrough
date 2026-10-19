@@ -955,7 +955,20 @@ class FrameInstall:
         callback=getattr(module,method,None)
         self.e.require(callable(callback),'The reviewed camera helper API is unavailable; existing files were preserved.')
         active=self.settings_path()
-        configured=Path(module.load_config(root)[0]['settings'])
+        config=module.load_config(root)[0];configured=Path(config['settings'])
+        if method=='apply_owned_override' and Path(args[0]['settings'])!=configured:
+            # After config publication, Undo can still own a delta on the old
+            # unused file. Its checkpoint is authority for THAT file only;
+            # never pass its baseline to the active native API or replace a
+            # live helper's config merely to make the paths agree.
+            old=self.home/'.local/share/Steam/config/steamvr.vrsettings'
+            self.e.require(configured==active and Path(args[0]['settings'])==old and old!=active,
+                'The camera checkpoint refers to an unknown configuration; existing files were preserved.')
+            with tempfile.TemporaryDirectory(prefix='camera-checkpoint-',dir=self.root.parent) as temporary:
+                temporary=Path(temporary);os.chmod(temporary,0o700)
+                self.e.put(temporary/CAMERA_CONFIG,self.e.encoded({
+                    'schema':'sfnp-camera-session-config-v1','settings':str(old),'library':config['library']}))
+                return self.camera_call((module,temporary),method,*args)
         if configured!=active:
             self.e.require(configured==self.home/'.local/share/Steam/config/steamvr.vrsettings',
                 'The camera configuration changed to an unknown directory; existing files were preserved.')

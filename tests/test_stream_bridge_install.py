@@ -198,6 +198,23 @@ class Tests(unittest.TestCase):
         self.assertEqual(s.read(self.fsettings),active);self.assertEqual(self.camera_native_calls,[])
         self.assertNotIn('legacy_migration',s.parse(s.read(self.froot/b.CAMERA_CONFIG)))
 
+    def test_legacy_global_target_update_undo_after_config_publication_is_inactive_only(self):
+        original=self.legacy_frame(original=None)
+        old=self.separate_native_settings();active=s.read(self.fsettings)
+        self.version_bundle(pc='0.2.5',frame='0.2.6')
+        unit=b.FrameInstall(s,home=self.fhome,steamvr=self.fsvr,root=self.froot,config=self.fhome/'.config',
+            run=self.unit.run,machine=lambda:'aarch64')
+        with self.fake_generation():
+            b.remote_request(s,b.request(self.bundle,'bridge-prepare',pairing={**self.pair,'role':'receiver'},
+                address='192.168.1.4',port=47631,automated=True),unit=unit)
+        self.assertEqual(s.parse(s.read(self.froot/b.CAMERA_CONFIG))['settings'],str(self.fsettings))
+        b.remote_request(s,b.request(self.bundle,'bridge-restore'),unit=unit)
+        unit.checkpoint().verify_restored()
+        self.assertEqual(unit.tx.state(),original)
+        self.assertIs(s.parse(s.read(old))['camera']['forceSceneAlphaBlending'],True)
+        self.assertEqual(s.read(self.fsettings),active);self.assertEqual(self.camera_native_calls,[])
+        self.assertFalse((self.froot/'camera-session.pause').exists())
+
     def make_bundle(self,readiness='release'):
         pins=lambda raw:{'bytes':len(raw),'sha256':s.sha(raw)}
         elf=bytearray(80);elf[:7]=b'\x7fELF\x02\x01\x01';elf[18:20]=b'\xb7\x00'
