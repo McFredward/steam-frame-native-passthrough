@@ -29,7 +29,7 @@
 namespace sr=stream_bridge_renderer;namespace sb=stream_bridge;namespace local=stream_bridge_local;
 namespace {
 std::vector<std::uint32_t> words(const char* path){std::ifstream f(path,std::ios::binary|std::ios::ate);check(bool(f),"private source opens");const auto n=f.tellg();check(n>0&&n<65536&&n%4==0,"bounded private words");std::vector<std::uint32_t> out(std::size_t(n)/4);f.seekg(0);f.read(reinterpret_cast<char*>(out.data()),n);check(bool(f),"private source fully read");return out;}
-sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords;std::atomic<bool> leaseCurrent{true};std::atomic<std::uint64_t> leaseSequence{71};bool coverageReadable=true;std::atomic<bool> cameraReady{true};
+sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords;std::atomic<bool> leaseCurrent{true};std::atomic<std::uint64_t> leaseSequence{71};bool coverageReadable=true;std::atomic<bool> cameraReady{true};std::atomic<std::uint64_t> cameraGrant{1};
 struct Driver:Fake {
  struct Update{std::uint64_t buffer;VkDeviceSize offset;float value;bool fill=false;};
  std::map<std::uint64_t,std::vector<Update>> commands;
@@ -97,7 +97,8 @@ struct Driver:Fake {
 };Driver* Driver::self=nullptr;
 }
 namespace stream_bridge_renderer {
-bool cameraAlphaReady()noexcept{return cameraReady.load(std::memory_order_acquire);}
+std::uint64_t cameraAlphaEpoch()noexcept{return cameraReady.load(std::memory_order_acquire)?cameraGrant.load(std::memory_order_acquire):0;}
+bool cameraAlphaReady()noexcept{return cameraAlphaEpoch()!=0;}
 bool prepareProcessCold()noexcept{return true;}bool enabled()noexcept{return true;}ProcessKind processKind()noexcept{return ProcessKind::Compositor;}
 stream_bridge_native::NativeImages* sourceImages()noexcept{return nullptr;}void sourceExportedFd(int)noexcept{}
 bool registerConsumerCold(ProcessConsumer c)noexcept{consumer=c;return true;}void unregisterConsumerCold(void*)noexcept{consumer={};}
@@ -119,7 +120,7 @@ struct Integration {
  VkDevice device=handle<VkDevice>(1);VkCommandBuffer cb=handle<VkCommandBuffer>(0x71000);VkImage image=handle<VkImage>(0x72000);VkImageView view=handle<VkImageView>(0x73000);VkDescriptorSet set=handle<VkDescriptorSet>(0x74000);VkDeviceMemory imported=handle<VkDeviceMemory>(0x75000);VkDescriptorPool descriptorPool=handle<VkDescriptorPool>(0x76000);
  std::shared_ptr<std::atomic<bool>> connection=std::make_shared<std::atomic<bool>>(true);int file=-1;sr::LocalPicture picture;VkBuffer guard=VK_NULL_HANDLE;
  Integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned imageCount=3,bool useColdProof=true,bool expectReady=true,bool failCoverage=false,bool customAllocator=false,bool prime=true,unsigned pendingPipelines=0){
-  cameraReady=true;leaseCurrent=true;leaseSequence=71;vk.fences[number(vk.appFence)]=false;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
+  cameraGrant=1;cameraReady=true;leaseCurrent=true;leaseSequence=71;vk.fences[number(vk.appFence)]=false;float priority=1;VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queueInfo.queueFamilyIndex=0;queueInfo.queueCount=1;queueInfo.pQueuePriorities=&priority;native.device.queueCreateInfoCount=1;native.device.pQueueCreateInfos=&queueInfo;
   VkPhysicalDeviceMemoryProperties m{};m.memoryTypeCount=1;m.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   check(renderer.prepareCold(device,m,Driver::get,native.device,VK_API_VERSION_1_1,0)==coverageReadable,"actual renderer cold prepare requires only exact coverage artifact");check(!consumer.owner,"pool preparation alone cannot advertise actual selected-image renderer");
   if(imageCount==1){
@@ -173,6 +174,24 @@ struct Integration {
  }
  VkResult submit(bool semaphores=true){VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&cb;if(semaphores){info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&vk.signalSemaphore;}return renderer.submit(vk.queue,1,&info,vk.appFence);}
 };
+void cameraEpoch(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ {Integration f(vs,ps,1);cameraReady=false;
+  VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};f.renderer.commandBegin(f.cb,&begin);
+  f.renderer.pipelineBound(f.cb,VK_PIPELINE_BIND_POINT_GRAPHICS,f.publicPipeline);f.renderer.setsBound(f.cb,VK_PIPELINE_BIND_POINT_GRAPHICS,0,1,&f.set,0);
+  const auto left=f.renderer.beforeDraw(f.cb);check(!left.ready,"unready stereo recording keeps original first-eye draw");
+  cameraReady=true;
+  const auto right=f.renderer.beforeDraw(f.cb);check(!right.ready,"late camera acknowledgment cannot activate only the second eye of an existing command buffer");
+  check(f.submit(false)==VK_SUCCESS&&!f.renderer.statsCold().collected,"unready-begin stereo command submits without any coverage authorization");
+ }
+ for(unsigned mode=0;mode<2;++mode){Integration f(vs,ps,1);
+  check(f.record().ready,"stereo epoch control begins with acknowledged first-eye coverage");
+  if(mode){const auto right=f.renderer.beforeDraw(f.cb);check(right.ready,"same acknowledged grant can record both stereo eyes");}
+  cameraReady=false;cameraGrant=2;cameraReady=true;
+  if(!mode)check(!f.renderer.beforeDraw(f.cb).ready,"new camera grant cannot revive the second eye of an older stereo recording");
+  check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"revoke and reacknowledge cannot revive any already-recorded stereo coverage at submit");
+  check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"fresh command begin admits current nonzero camera grant after safe revocation");
+ }
+}
 void resourcePressure(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps,unsigned mode){
  Integration f(vs,ps,1);
  VkExternalMemoryImageCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};external.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
@@ -528,7 +547,8 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
 }
 }
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
- if(argc==5&&std::strcmp(argv[4],"resource-pressure")==0){for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);}
+ if(argc==5&&std::strcmp(argv[4],"camera-epoch")==0)cameraEpoch(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"resource-pressure")==0){for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);}
  else if(argc==5&&std::strncmp(argv[4],"pressure-",9)==0){const auto mode=unsigned(argv[4][9]-'0');check(mode<7&&argv[4][10]=='\0',"bounded pressure case");if(mode<6)resourcePressure(vs,ps,mode);else resourceTelemetry(vs,ps);}
  else if(argc==5&&std::strcmp(argv[4],"descriptor-isolation")==0){descriptorIsolation(vs,ps);descriptorStream(vs,ps);}
  else if(argc==5&&std::strcmp(argv[4],"idle-startup")==0)idleStartup(vs,ps);
@@ -538,5 +558,5 @@ int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inpu
  else if(argc==5&&std::strcmp(argv[4],"reservation-recovery")==0)reservationRecovery(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"continuous")==0)continuous(vs,ps);
  else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else {for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);idleStartup(vs,ps);integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);continuous(vs,ps);}
+ else {cameraEpoch(vs,ps);for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);idleStartup(vs,ps);integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);continuous(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

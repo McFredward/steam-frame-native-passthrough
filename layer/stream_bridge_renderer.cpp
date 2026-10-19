@@ -21,6 +21,7 @@ namespace journal=frame_pixel_ssbo_journal;
 namespace stream_bridge_renderer {
 // Implemented by the isolated camera-client owner; this query is atomic only.
 bool cameraAlphaReady() noexcept;
+std::uint64_t cameraAlphaEpoch() noexcept;
 namespace {
 template<class T>std::uint64_t handle(T value){std::uint64_t n=0;static_assert(sizeof value<=sizeof n,"bounded native handle");std::memcpy(&n,&value,sizeof value);return n;}
 template<class T>T from(std::uint64_t value){T result{};std::memcpy(&result,&value,sizeof result);return result;}
@@ -54,7 +55,7 @@ struct Renderer::Impl {
     struct PreparedPicture:LocalPicture {std::shared_ptr<Retention> retained;};
     struct Control{VkBuffer buffer{};VkDeviceSize offset=0;VkDescriptorSet set{};VkCommandBuffer one{};bool assigned=false;};
     struct Command{
-        std::uint64_t id=0,pipeline=0,set0=0,epoch=0;bool primary=false,eligible=false;
+        std::uint64_t id=0,pipeline=0,set0=0,epoch=0,cameraEpoch=0;bool primary=false,eligible=false;
         Control* control=nullptr;
         std::array<Use,gpu::MaximumSlots> uses{};std::size_t used=0;
     };
@@ -289,7 +290,7 @@ struct Renderer::Impl {
         const auto refuse=[&](CollectRefusal reason){++counts.collectRefusals[static_cast<std::size_t>(reason)];return false;};
         auto* command=find(commands,handle(cb));if(!command)return refuse(CollectRefusal::Command);
         if(!command->used)return refuse(CollectRefusal::Empty);
-        if(!cameraAlphaReady())return refuse(CollectRefusal::Camera);
+        if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch())return refuse(CollectRefusal::Camera);
         CollectRefusal why=CollectRefusal::Count;
         const auto require=[&](bool condition,CollectRefusal reason){if(!condition&&why==CollectRefusal::Count)why=reason;};
         require(command->eligible,CollectRefusal::Ineligible);
@@ -501,7 +502,9 @@ void Renderer::commandRetired(VkCommandBuffer value) noexcept{auto&p=*impl_;std:
 void Renderer::commandBegin(VkCommandBuffer value,const VkCommandBufferBeginInfo* info) noexcept{
     auto&p=*impl_;++p.counts.begins;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}
     if(auto* command=find(p.commands,handle(value))){p.release(*command);command->eligible=command->primary&&info&&info->sType==VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO&&!info->pNext&&
-        !(info->flags&VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);command->epoch=p.observationEpoch.load(std::memory_order_acquire);}
+        !(info->flags&VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);command->epoch=p.observationEpoch.load(std::memory_order_acquire);
+        // An A arriving between stereo draws must never authorize half a CB.
+        command->cameraEpoch=cameraAlphaEpoch();}
 }
 void Renderer::pipelineBound(VkCommandBuffer value,VkPipelineBindPoint point,VkPipeline pipeline) noexcept{auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){command->pipeline=point==VK_PIPELINE_BIND_POINT_GRAPHICS?handle(pipeline):0;}}
 void Renderer::setsBound(VkCommandBuffer value,VkPipelineBindPoint point,std::uint32_t first,std::uint32_t count,const VkDescriptorSet* sets,std::uint32_t dynamic) noexcept{auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){if(point!=VK_PIPELINE_BIND_POINT_GRAPHICS||dynamic){command->set0=0;return;}if(!first&&count&&sets)command->set0=handle(sets[0]);}}
@@ -510,8 +513,8 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     auto&p=*impl_;++p.counts.draws;Draw out;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
     if(!lock){p.refused(DrawRefusal::Busy);return out;}
     if(!p.prepared||p.lost.load(std::memory_order_acquire)){p.refused(DrawRefusal::Unavailable);return out;}
-    if(!cameraAlphaReady()){p.refused(DrawRefusal::Camera);return out;}
     auto* command=find(p.commands,handle(value));if(!command){p.refused(DrawRefusal::Command);return out;}
+    if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch()){p.refused(DrawRefusal::Camera);return out;}
     if(command->epoch!=p.observationEpoch.load(std::memory_order_acquire)){p.refused(DrawRefusal::Epoch);return out;}
     auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline){p.refused(DrawRefusal::Pipeline);return out;}
     out.original=from<VkPipeline>(pipeline->id);

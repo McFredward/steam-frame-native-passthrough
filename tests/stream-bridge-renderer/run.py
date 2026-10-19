@@ -8,8 +8,8 @@ The existing standalone native-fragment and R8 GPU proofs remain separate.
 import argparse, hashlib, json, pathlib, shutil, subprocess
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--thread-sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');p.add_argument('--reservation-recovery-only',action='store_true');p.add_argument('--continuous-only',action='store_true');p.add_argument('--idle-startup-only',action='store_true');p.add_argument('--descriptor-isolation-only',action='store_true');p.add_argument('--resource-pressure-only',action='store_true');p.add_argument('--pressure-case',type=int,choices=range(7));a=p.parse_args()
- if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only,a.reservation_recovery_only,a.continuous_only,a.idle_startup_only,a.descriptor_isolation_only,a.resource_pressure_only))>1:p.error('choose one focused subset')
+ p=argparse.ArgumentParser();p.add_argument('--native-root',required=True,type=pathlib.Path);p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--vs',required=True,type=pathlib.Path);p.add_argument('--ps',required=True,type=pathlib.Path);p.add_argument('--coverage',required=True,type=pathlib.Path);p.add_argument('--sanitize',action='store_true');p.add_argument('--thread-sanitize',action='store_true');p.add_argument('--mutants',action='store_true');p.add_argument('--artifact-fallback-only',action='store_true');p.add_argument('--fallback-recovery-only',action='store_true');p.add_argument('--telemetry-only',action='store_true');p.add_argument('--timeline-only',action='store_true');p.add_argument('--reservation-recovery-only',action='store_true');p.add_argument('--continuous-only',action='store_true');p.add_argument('--idle-startup-only',action='store_true');p.add_argument('--descriptor-isolation-only',action='store_true');p.add_argument('--resource-pressure-only',action='store_true');p.add_argument('--camera-epoch-only',action='store_true');p.add_argument('--pressure-case',type=int,choices=range(7));a=p.parse_args()
+ if sum((a.artifact_fallback_only,a.fallback_recovery_only,a.telemetry_only,a.timeline_only,a.reservation_recovery_only,a.continuous_only,a.idle_startup_only,a.descriptor_isolation_only,a.resource_pressure_only,a.camera_epoch_only))>1:p.error('choose one focused subset')
  if a.pressure_case is not None and not a.resource_pressure_only:p.error('--pressure-case requires --resource-pressure-only')
  here=pathlib.Path(__file__).resolve().parent;root=a.native_root.resolve();out=a.output.resolve();cache=out/'cache';cache.mkdir(parents=True,exist_ok=True);source=out/'source';source.mkdir(exist_ok=True)
  fixtures=here/'fixture.cpp';shutil.copy2(fixtures,source/'fixture.cpp')
@@ -28,6 +28,7 @@ def main():
  if a.continuous_only:args+=['continuous']
  if a.idle_startup_only:args+=['idle-startup']
  if a.descriptor_isolation_only:args+=['descriptor-isolation']
+ if a.camera_epoch_only:args+=['camera-epoch']
  if a.resource_pressure_only:args+=['resource-pressure' if a.pressure_case is None else 'pressure-'+str(a.pressure_case)]
  input_pins={str(path.resolve()):hashlib.sha256(path.read_bytes()).hexdigest() for path in [a.vs,a.ps,a.coverage]}
  def run(name,production,sanitize=False,negative=False,thread_sanitize=False):
@@ -40,7 +41,7 @@ def main():
   if negative:
    if status==0:raise AssertionError(name+' survived causal control')
    expected={'startup-always-adds-zero':'idle startup forwards original submit pointer/count/queue/fence and dispatch unchanged','loss-skips-retained-zero':'tracking loss retains mandatory zeroing for previously guarded Submit2 recordings','unrelated-pool-erases-video':'unrelated native UI pool reset cannot erase video descriptor or lose an active mask','copy-erases-video-globally':'copying video image into a UI descriptor never invalidates source video descriptor','allocation-aba-admitted':"reallocated identical numeric set/view cannot revive command's old allocation generation"}
-   expected.update({'camera-draw-bypassed':'missing camera acknowledgment refuses new masked draws','camera-collect-bypassed':'camera readiness revocation zeroes already-recorded masked command','image-budget-too-small':'native video image recovers after eighty unrelated imported image generations','memory-budget-too-small':'native video memory recovers after eighty unrelated imported allocations','view-budget-too-small':'native video view recovers after three hundred unrelated native views','untracked-write-reserves-entry':'untracked native UI writes do not consume video descriptor capacity','untracked-copy-reserves-entry':'untracked native UI copies do not consume video descriptor capacity'})
+   expected.update({'camera-epoch-draw-bypassed':'late camera acknowledgment cannot activate only the second eye of an existing command buffer','camera-epoch-collect-bypassed':'revoke and reacknowledge cannot revive any already-recorded stereo coverage at submit','camera-draw-bypassed':'missing camera acknowledgment refuses new masked draws','camera-collect-bypassed':'camera readiness revocation zeroes already-recorded masked command','image-budget-too-small':'native video image recovers after eighty unrelated imported image generations','memory-budget-too-small':'native video memory recovers after eighty unrelated imported allocations','view-budget-too-small':'native video view recovers after three hundred unrelated native views','untracked-write-reserves-entry':'untracked native UI writes do not consume video descriptor capacity','untracked-copy-reserves-entry':'untracked native UI copies do not consume video descriptor capacity'})
    if name in expected and expected[name] not in (out/(name+'.log')).read_text():raise AssertionError(name+' failed outside its intended lifecycle assertion')
   elif status:
    diagnostic=(out/(name+'.log')).read_text()
@@ -63,8 +64,10 @@ def main():
  if a.mutants:
   text=renderer.read_text()
   mutations={
-   'camera-draw-bypassed':('if(!cameraAlphaReady()){p.refused(DrawRefusal::Camera);return out;}','if(false){p.refused(DrawRefusal::Camera);return out;}'),
-   'camera-collect-bypassed':('if(!cameraAlphaReady())return refuse(CollectRefusal::Camera);','if(false)return refuse(CollectRefusal::Camera);'),
+   'camera-epoch-draw-bypassed':('if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch()){p.refused(DrawRefusal::Camera);return out;}','if(!cameraAlphaReady()){p.refused(DrawRefusal::Camera);return out;}'),
+   'camera-epoch-collect-bypassed':('if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch())return refuse(CollectRefusal::Camera);','if(!cameraAlphaReady())return refuse(CollectRefusal::Camera);'),
+   'camera-draw-bypassed':('if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch()){p.refused(DrawRefusal::Camera);return out;}','if(false){p.refused(DrawRefusal::Camera);return out;}'),
+   'camera-collect-bypassed':('if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch())return refuse(CollectRefusal::Camera);','if(false)return refuse(CollectRefusal::Camera);'),
    'image-budget-too-small':('std::array<Image,512> images{};','std::array<Image,64> images{};'),
    'memory-budget-too-small':('std::array<Memory,512> memories{};','std::array<Memory,64> memories{};'),
    'view-budget-too-small':('std::array<View,1024> views{};','std::array<View,256> views{};'),
@@ -90,6 +93,7 @@ def main():
    'allocation-aba-admitted':('&&allocation->generation==use.descriptorGeneration', ''),
   }
   if a.artifact_fallback_only:mutations={}
+  if a.camera_epoch_only:mutations={name:value for name,value in mutations.items() if name in ('camera-epoch-draw-bypassed','camera-epoch-collect-bypassed')}
   if a.resource_pressure_only:mutations={name:value for name,value in mutations.items() if name in ('camera-draw-bypassed','camera-collect-bypassed','image-budget-too-small','memory-budget-too-small','view-budget-too-small','untracked-write-reserves-entry','untracked-copy-reserves-entry')}
   if a.reservation_recovery_only:mutations={name:value for name,value in mutations.items() if name in ('pre-reservation-poisons-pool','post-submit-mutex-poisons-pool')}
   if a.continuous_only:mutations={name:value for name,value in mutations.items() if name in ('acquire-takes-cold-mutex','copy-takes-cold-mutex','reserve-takes-cold-mutex')}
