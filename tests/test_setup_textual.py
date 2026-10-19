@@ -22,7 +22,7 @@ import unittest
 from unittest import mock
 
 from textual.drivers.headless_driver import HeadlessDriver
-from textual.widgets import Button, Collapsible, Input, OptionList, Static
+from textual.widgets import Button, Collapsible, Input, OptionList, Static, TextArea
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("_sfnp_setup_textual", ROOT / "setup/steam_link_setup_textual.py")
@@ -69,6 +69,207 @@ class PicturePorts:
 
 
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_file_paths_offer_native_copy_and_readonly_fallback_at_small_sizes(self):
+        log = "C:/Users/Player/AppData/Local/Steam Link Native Passthrough/logs/setup-736.jsonl"
+        recovery = "C:/Users/Player/AppData/Local/Steam Link Native Passthrough/recovery/checkpoint.json"
+        for lang in ("en", "de"):
+            def backend():
+                p = UI.active_presenter()
+                p.path(log, "setup_log")
+                p.path(recovery, "recovery_pc")
+                p.choose_action(["exit"])
+                return 0
+            app = UI.SetupApp(backend, lang)
+            with mock.patch.object(UI, "_copy_public_paths") as copy:
+                async with app.run_test(size=(80, 24)) as pilot:
+                    await until(pilot, lambda: app.prompt is not None)
+                    await pilot.press("f3")
+                    await until(pilot, lambda: isinstance(app.screen, UI.PathsScreen))
+                    for width, height in ((80, 24), (42, 16), (80, 24)):
+                        await pilot.resize_terminal(width, height)
+                        await pilot.pause()
+                        dialog = app.screen.query_one("#paths-dialog").region
+                        for button in app.screen.query(Button):
+                            self.assertTrue(dialog.contains_region(button.region), (lang, width, button.id, dialog, button.region))
+                        area = app.screen.query_one("#selected-path", TextArea)
+                        self.assertTrue(dialog.contains_region(area.region))
+                        self.assertTrue(area.read_only)
+                        self.assertEqual(area.text, log)
+                    await pilot.press("down")
+                    await pilot.pause()
+                    self.assertEqual(area.text, recovery)
+                    area.focus()
+                    await pilot.press("x", "backspace")
+                    self.assertEqual(area.text, recovery)
+                    await pilot.click("#copy-path")
+                    await until(pilot, lambda: copy.call_count == 1 and not app.copy_pending)
+                    self.assertEqual(copy.call_args.args, (recovery,))
+                    self.assertEqual(str(app.screen.query_one("#copy-status", Static).render()), app.words["copied_path"])
+                    await pilot.click("#copy-paths")
+                    await until(pilot, lambda: copy.call_count == 2 and not app.copy_pending)
+                    all_paths = copy.call_args.args[0]
+                    self.assertIn(log, all_paths)
+                    self.assertIn(recovery, all_paths)
+                    self.assertIn(app.texts["recovery_pc"].strip(), all_paths)
+                    await pilot.press("escape", "enter")
+                    await until(pilot, lambda: app.backend_finished)
+            app.backend.join()
+
+    async def test_failed_clipboard_shows_selectable_path_without_claiming_success(self):
+        log = "C:/Setup with spaces/logs/setup-736.jsonl"
+        def backend():
+            p = UI.active_presenter()
+            p.path(log, "setup_log")
+            p.choose_action(["exit"])
+            return 0
+        for lang in ("en", "de"):
+            app = UI.SetupApp(backend, lang)
+            with mock.patch.object(UI, "_copy_public_paths", side_effect=UI.ClipboardUnavailable("fixture failure")) as copy:
+                async with app.run_test(size=(42, 16)) as pilot:
+                    await until(pilot, lambda: app.prompt is not None)
+                    await pilot.press("f4")
+                    await until(pilot, lambda: isinstance(app.screen, UI.PathsScreen) and not app.copy_pending)
+                    self.assertEqual(copy.call_args.args, (log,))
+                    status = str(app.screen.query_one("#copy-status", Static).render())
+                    self.assertEqual(status, app.words["copy_failed"])
+                    self.assertNotIn(app.words["copied_path"], status)
+                    area = app.screen.query_one("#selected-path", TextArea)
+                    self.assertEqual(area.text, log)
+                    self.assertTrue(area.read_only)
+                    self.assertIs(app.focused, area)
+                    for button in app.screen.query(Button):
+                        self.assertTrue(app.screen.query_one("#paths-dialog").region.contains_region(button.region))
+                    visible = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", app.export_screenshot())).split())
+                    self.assertIn("Copy command." if lang == "en" else "Terminal kopieren.", visible)
+                    await pilot.press("escape", "enter")
+                    await until(pilot, lambda: app.backend_finished)
+            app.backend.join()
+
+    async def test_copy_shortcuts_never_read_password_and_ctrl_c_still_aborts(self):
+        log = "C:/Setup/logs/setup-736.jsonl"
+        observed = []
+        def backend():
+            p = UI.active_presenter()
+            p.path(log, "setup_log")
+            observed.append(p.ssh_prompt("Password:", secret=True))
+            return 0
+        app = UI.SetupApp(backend, "en")
+        with mock.patch.object(UI, "_copy_public_paths") as copy, mock.patch.object(app, "copy_to_clipboard") as osc52:
+            async with app.run_test(size=(80, 24)) as pilot:
+                await until(pilot, lambda: isinstance(app.screen, UI.SSHInputScreen))
+                field = app.screen.query_one(Input)
+                field.value = "fixture-password-must-never-be-copied"
+                field.action_select_all()
+                await pilot.press("ctrl+shift+c")
+                await until(pilot, lambda: copy.call_count == 1 and not app.copy_pending)
+                self.assertEqual(copy.call_args.args, (log,))
+                await pilot.press("f3")
+                self.assertIsInstance(app.screen, UI.SSHInputScreen)
+                self.assertEqual(field.value, "fixture-password-must-never-be-copied")
+                await pilot.press("ctrl+c")
+                await until(pilot, lambda: app.backend_finished)
+                self.assertEqual(observed, [None])
+                self.assertTrue(app.stop_requested)
+                self.assertEqual(app.backend_result, 130)
+                self.assertEqual(copy.call_count, 1)
+                osc52.assert_not_called()
+                self.assertNotIn("fixture-password", "\n".join(app.detail_history))
+        app.backend.join()
+
+    async def test_copy_log_without_file_is_explicit_and_does_not_copy_other_ui(self):
+        def backend():
+            UI.active_presenter().choose_action(["exit"])
+            return 0
+        app = UI.SetupApp(backend, "en")
+        with mock.patch.object(UI, "_copy_public_paths") as copy, mock.patch.object(app, "notify") as notify:
+            async with app.run_test(size=(80, 24)) as pilot:
+                await until(pilot, lambda: app.prompt is not None)
+                await pilot.press("f4")
+                copy.assert_not_called()
+                self.assertEqual(notify.call_args.args, (app.words["copy_missing"],))
+                await pilot.press("f3")
+                await until(pilot, lambda: isinstance(app.screen, UI.PathsScreen))
+                self.assertTrue(app.screen.query_one("#copy-path", Button).disabled)
+                self.assertTrue(app.screen.query_one("#copy-paths", Button).disabled)
+                await pilot.press("escape", "enter")
+                await until(pilot, lambda: app.backend_finished)
+        app.backend.join()
+
+    def test_clipboard_windows_uses_unicode_native_api_and_transfers_memory_only_on_success(self):
+        import ctypes
+        from types import SimpleNamespace
+        value = "C:/Spieler/Änne/Setup/日誌.jsonl"
+        for accepted in (True, False):
+            buffer = ctypes.create_string_buffer(1024)
+            user = SimpleNamespace(**{name: mock.Mock(return_value=result) for name, result in (
+                ("GetForegroundWindow", 42), ("OpenClipboard", 1), ("EmptyClipboard", 1),
+                ("SetClipboardData", 73 if accepted else 0), ("CloseClipboard", 1))})
+            kernel = SimpleNamespace(**{name: mock.Mock(return_value=result) for name, result in (
+                ("GlobalAlloc", 73), ("GlobalLock", ctypes.addressof(buffer)), ("GlobalUnlock", 1),
+                ("GlobalFree", 0), ("GetConsoleWindow", 41))})
+            with mock.patch.object(ctypes, "WinDLL", create=True, side_effect=lambda name, **kw: user if name == "user32" else kernel), \
+                    mock.patch.object(UI.sys, "platform", "win32"):
+                if accepted:
+                    UI._copy_public_paths(value)
+                else:
+                    with self.assertRaises(UI.ClipboardUnavailable):
+                        UI._copy_public_paths(value)
+            payload = value.encode("utf-16-le") + b"\0\0"
+            self.assertEqual(buffer.raw[:len(payload)], payload)
+            user.OpenClipboard.assert_called_once_with(41)
+            user.SetClipboardData.assert_called_once_with(13, 73)
+            user.CloseClipboard.assert_called_once()
+            self.assertEqual(kernel.GlobalFree.call_count, int(not accepted))
+
+    def test_clipboard_linux_uses_local_tool_with_utf8_stdin_without_shell_or_osc52(self):
+        value = "/home/Änne/Setup $(not-a-command)/setup-736.jsonl"
+        for tool, environment in (("wl-copy", {"WAYLAND_DISPLAY": "wayland-1"}), ("xclip", {"DISPLAY": ":1"})):
+            with mock.patch.object(UI.sys, "platform", "linux"), mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(UI.shutil, "which", side_effect=lambda name: "/usr/bin/" + name if name == tool else None), \
+                    mock.patch.object(UI.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+                UI._copy_public_paths(value)
+            self.assertEqual(run.call_args.args[0][0], "/usr/bin/" + tool)
+            self.assertEqual(run.call_args.kwargs["input"], value.encode("utf-8"))
+            self.assertNotIn("shell", run.call_args.kwargs)
+            self.assertEqual(run.call_args.kwargs["timeout"], 3)
+            self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+
+    def test_clipboard_failure_and_invalid_values_do_not_claim_terminal_acceptance(self):
+        with mock.patch.object(UI.sys, "platform", "linux"), mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(UI.shutil, "which") as which, mock.patch.object(UI.subprocess, "run") as run:
+            for value in ("", "x\0y", "x" * 136193, "a valid path"):
+                with self.assertRaises(UI.ClipboardUnavailable):
+                    UI._copy_public_paths(value)
+            which.assert_not_called()
+            run.assert_not_called()
+
+    def test_clipboard_tool_failure_timeout_and_missing_command_use_manual_fallback(self):
+        with mock.patch.object(UI.sys, "platform", "linux"), \
+                mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-1", "DISPLAY": ":1"}, clear=True), \
+                mock.patch.object(UI.shutil, "which", side_effect=lambda name: "/usr/bin/" + name), \
+                mock.patch.object(UI.subprocess, "run", side_effect=[
+                    subprocess.TimeoutExpired("wl-copy", 3), mock.Mock(returncode=1), FileNotFoundError()]) as run:
+            with self.assertRaises(UI.ClipboardUnavailable):
+                UI._copy_public_paths("/home/player/setup-736.jsonl")
+            self.assertEqual(run.call_count, 3)
+
+    async def test_ctrl_c_from_file_paths_cancels_setup_without_copying_or_undo(self):
+        selected = []
+        def backend():
+            selected.append(UI.active_presenter().choose_action(["exit"]))
+            return 0
+        app = UI.SetupApp(backend, "en")
+        with mock.patch.object(UI, "_copy_public_paths") as copy:
+            async with app.run_test(size=(42, 16)) as pilot:
+                await until(pilot, lambda: app.prompt is not None)
+                await pilot.press("f3", "ctrl+c")
+                await until(pilot, lambda: app.backend_finished)
+                self.assertFalse(isinstance(app.screen, UI.PathsScreen))
+                self.assertEqual(app.backend_result, 130)
+                self.assertEqual(selected, [None])
+                copy.assert_not_called()
+        app.backend.join()
+
     async def test_detected_runtime_versions_and_patch_actions_remain_visible_at_80x24(self):
         for lang in ('en','de'):
             runtime={'steamvr':{'version':'2.18.2','build':'1791331621'},'steam_link':{'version':None,'build':None}}
@@ -87,7 +288,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn('SteamVR: 2.18.2 (1791331621)',text)
                     self.assertIn('Steam Link: '+app.texts['runtime_unknown' if key=='pc' else 'runtime_bundled'],text)
                     self.assertIn('0.2.0',text);self.assertIn('0.2.1',text)
-                    self.assertTrue(body.content_region.contains_region(app.query_one('#'+key+'-status').region),key)
+                    self.assertTrue(body.content_region.contains_region(app.query_one('#'+key+'-status').region), (key, body.content_region, app.query_one('#'+key+'-status').region, body.scroll_y))
                 self.assertIn(app.words['attention'],str(app.query_one('#pc-status',Static).render()))
                 self.assertGreater(app.query_one(OptionList).region.height,0)
                 self.assertTrue(body.content_region.contains_region(app.query_one(OptionList).region))

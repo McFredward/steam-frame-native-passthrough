@@ -7,11 +7,15 @@ broker owns OpenSSH; authentication input stays inside a private masked modal.
 from __future__ import annotations
 
 import concurrent.futures
+import asyncio
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 import importlib.util
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import threading
 from typing import Any, Callable, Optional
@@ -22,7 +26,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Collapsible, Footer, Input, Label, LoadingIndicator, OptionList, RichLog, Static
+from textual.widgets import Button, Collapsible, Footer, Input, Label, LoadingIndicator, OptionList, RichLog, Static, TextArea
 from textual.widgets.option_list import Option
 
 
@@ -42,13 +46,19 @@ WORDS = {
         "restored": "Previous setup restored", "removed": "Connection removed", "current": "Already up to date", "check_done": "Check complete · no changes",
         "working": "Preparing your setup", "review": "Choose what happens next",
         "details": "Details & activity", "files": "Logs & recovery files", "empty_files": "Paths will appear here when they are created.",
+        "paths_help": "Choose a file with ↑ ↓. Copy its full path, or copy the complete list to share with a bug report.",
+        "path_copy": "Copy", "paths_copy_all": "Copy all", "copy_log": "Copy log path", "paths_open": "Open paths", "path_close": "Close",
+        "copied_path": "Path copied to the clipboard.", "copied_paths": "File paths copied to the clipboard.",
+        "copy_failed": "Clipboard unavailable. Select the path with Shift+drag, then use your terminal's Copy command.",
+        "copy_missing": "No log path has been created yet. Press F3 to see the available files.",
+        "paths_empty": "No file paths have been created yet.", "paths_secret": "Finish or cancel the password prompt before opening file paths. F4 copies the log path without copying your password.",
         "choose": "Use ↑ ↓ to explore, then Enter to select. Nothing changes before confirmation.",
         "cancel": "Cancel", "continue": "Continue", "close": "Close setup", "confirm": "Before we continue",
         "finished": "Setup finished", "failed": "Setup needs your attention", "finish_help": "You can now close this window. Your log and recovery paths remain available below.",
         "cancelled": "Setup cancelled", "cancelled_help": "Setup was cancelled. Changes were not automatically undone. Any recovery records are kept for a later restore.",
         "stop_pending": "Stopping setup. No automatic undo will run; any recovery records are kept. Waiting for the current operation to stop safely.",
         "stop_help": "Setup is stopping without automatically undoing changes. Any recovery records are kept; this window stays open until the current operation ends.",
-        "select": "Select", "stop": "Abort setup", "detail_key": "Details", "paths_key": "Log paths",
+        "select": "Select", "stop": "Abort setup", "detail_key": "Details", "paths_key": "File paths",
         "ssh": "Connect to your Steam Frame", "ssh_help": "Sign in below to connect securely. Your password is hidden and is never written to the setup log.",
         "ssh_secret_help": "Your input stays hidden and is never written to the setup log.",
         "ssh_confirm_help": "Check this device identity before continuing. Cancel leaves this connection unapproved.",
@@ -71,13 +81,19 @@ WORDS = {
         "restored": "Vorheriger Zustand wiederhergestellt", "removed": "Verbindung entfernt", "current": "Bereits aktuell", "check_done": "Prüfung fertig · nichts geändert",
         "working": "Die Einrichtung wird vorbereitet", "review": "Wähle den nächsten Schritt",
         "details": "Details & Verlauf", "files": "Logs & Wiederherstellungsdateien", "empty_files": "Hier erscheinen die Pfade, sobald sie angelegt wurden.",
+        "paths_help": "Wähle mit ↑ ↓ eine Datei. Kopiere ihren vollständigen Pfad oder die gesamte Liste für einen Fehlerbericht.",
+        "path_copy": "Kopieren", "paths_copy_all": "Alle", "copy_log": "Log-Pfad kopieren", "paths_open": "Pfade öffnen", "path_close": "Schließen",
+        "copied_path": "Pfad in die Zwischenablage kopiert.", "copied_paths": "Dateipfade in die Zwischenablage kopiert.",
+        "copy_failed": "Zwischenablage nicht verfügbar. Pfad mit Umschalt+Ziehen markieren und im Terminal kopieren.",
+        "copy_missing": "Es wurde noch kein Log-Pfad angelegt. F3 zeigt die verfügbaren Dateien.",
+        "paths_empty": "Es wurden noch keine Dateipfade angelegt.", "paths_secret": "Beende zuerst die Passwortabfrage, um Dateipfade zu öffnen. F4 kopiert nur den Log-Pfad, niemals dein Passwort.",
         "choose": "Mit ↑ ↓ auswählen und mit Enter öffnen. Änderungen werden erst nach deiner Bestätigung vorgenommen.",
         "cancel": "Abbrechen", "continue": "Weiter", "close": "Einrichtung schließen", "confirm": "Bevor es weitergeht",
         "finished": "Einrichtung abgeschlossen", "failed": "Die Einrichtung benötigt deine Hilfe", "finish_help": "Du kannst dieses Fenster jetzt schließen. Log und Wiederherstellungspfade bleiben unten verfügbar.",
         "cancelled": "Einrichtung abgebrochen", "cancelled_help": "Die Einrichtung wurde abgebrochen. Änderungen wurden nicht automatisch zurückgenommen. Vorhandene Wiederherstellungsdateien bleiben für später erhalten.",
         "stop_pending": "Die Einrichtung wird abgebrochen. Änderungen werden nicht automatisch zurückgenommen; vorhandene Wiederherstellungsdateien bleiben erhalten. Die laufende Aktion wird sicher beendet.",
         "stop_help": "Die Einrichtung endet ohne automatisches Zurücknehmen der Änderungen. Vorhandene Wiederherstellungsdateien bleiben erhalten; das Fenster bleibt bis zum Ende der laufenden Aktion offen.",
-        "select": "Auswählen", "stop": "Einrichtung abbrechen", "detail_key": "Details", "paths_key": "Log-Pfade",
+        "select": "Auswählen", "stop": "Einrichtung abbrechen", "detail_key": "Details", "paths_key": "Dateipfade",
         "ssh": "Mit deiner Steam Frame verbinden", "ssh_help": "Melde dich unten sicher an. Dein Passwort bleibt verborgen und wird niemals in das Setup-Log geschrieben.",
         "ssh_secret_help": "Deine Eingabe bleibt verborgen und wird niemals in das Setup-Log geschrieben.",
         "ssh_confirm_help": "Prüfe diese Gerätekennung, bevor du fortfährst. Abbrechen lässt diese Verbindung unbestätigt.",
@@ -98,6 +114,158 @@ def _plain(value: Any, limit: int = MAX_DETAIL_LINE) -> str:
     value = _ANSI.sub("", str(value))
     value = "".join(c for c in value if c.isprintable() or c in "\n\t")
     return _SECRET.sub(r"\1=[redacted]", value)[:limit]
+
+
+class ClipboardUnavailable(OSError):
+    """A local clipboard operation could not be confirmed."""
+
+
+def _windows_clipboard(value: str):
+    """Use the Unicode Windows clipboard, including legacy console hosts.
+
+    OSC 52 output alone cannot tell whether a terminal accepted a copy. The
+    native API provides an actual success result and needs no extra package.
+    """
+    import ctypes
+    from ctypes import wintypes
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    for function, result, arguments in (
+        (kernel.GlobalAlloc, ctypes.c_void_p, [wintypes.UINT, ctypes.c_size_t]),
+        (kernel.GlobalLock, ctypes.c_void_p, [ctypes.c_void_p]),
+        (kernel.GlobalUnlock, wintypes.BOOL, [ctypes.c_void_p]),
+        (kernel.GlobalFree, ctypes.c_void_p, [ctypes.c_void_p]),
+        (kernel.GetConsoleWindow, wintypes.HWND, []),
+        (user.GetForegroundWindow, wintypes.HWND, []),
+        (user.OpenClipboard, wintypes.BOOL, [wintypes.HWND]),
+        (user.EmptyClipboard, wintypes.BOOL, []),
+        (user.SetClipboardData, ctypes.c_void_p, [wintypes.UINT, ctypes.c_void_p]),
+        (user.CloseClipboard, wintypes.BOOL, []),
+    ):
+        function.restype, function.argtypes = result, arguments
+    payload = value.encode("utf-16-le") + b"\0\0"
+    allocation = kernel.GlobalAlloc(2, len(payload))  # GMEM_MOVEABLE
+    if not allocation:
+        raise ClipboardUnavailable("clipboard allocation failed")
+    opened = transferred = False
+    try:
+        address = kernel.GlobalLock(allocation)
+        if not address:
+            raise ClipboardUnavailable("clipboard allocation could not be locked")
+        try:
+            ctypes.memmove(address, payload, len(payload))
+        finally:
+            kernel.GlobalUnlock(allocation)
+        # A non-null owner is required by EmptyClipboard/SetClipboardData.
+        owner = kernel.GetConsoleWindow() or user.GetForegroundWindow()
+        if not owner or not user.OpenClipboard(owner):
+            raise ClipboardUnavailable("clipboard is unavailable")
+        opened = True
+        if not user.EmptyClipboard() or not user.SetClipboardData(13, allocation):  # CF_UNICODETEXT
+            raise ClipboardUnavailable("clipboard rejected the path")
+        transferred = True  # Windows now owns the allocation.
+    finally:
+        if opened:
+            user.CloseClipboard()
+        if not transferred:
+            kernel.GlobalFree(allocation)
+
+
+def _copy_public_paths(value: str):
+    """Copy only caller-selected public paths through a confirmed OS backend."""
+    if type(value) is not str or not value or len(value) > 136192 or "\0" in value:
+        raise ClipboardUnavailable("invalid clipboard content")
+    if sys.platform == "win32":
+        _windows_clipboard(value)
+        return
+    candidates = []
+    if sys.platform == "darwin":
+        candidates.append(("pbcopy", []))
+    else:
+        if os.environ.get("WAYLAND_DISPLAY"):
+            candidates.append(("wl-copy", ["--type", "text/plain;charset=utf-8"]))
+        if os.environ.get("DISPLAY"):
+            candidates.extend((("xclip", ["-selection", "clipboard"]), ("xsel", ["--clipboard", "--input"])))
+    for name, arguments in candidates:
+        executable = shutil.which(name)
+        if executable is None:
+            continue
+        try:
+            result = subprocess.run([executable, *arguments], input=value.encode("utf-8"),
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
+            if result.returncode == 0:
+                return
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    raise ClipboardUnavailable("no local clipboard accepted the path")
+
+
+class _PublicPathArea(TextArea):
+    """A read-only manual fallback; never reads a focused authentication field."""
+    def action_copy(self):
+        self.app.copy_paths(self.selected_text or self.text)
+
+
+class PathsScreen(ModalScreen[None]):
+    BINDINGS = [Binding("escape,f3", "close", show=False),
+                Binding("ctrl+shift+c", "copy_selected", show=False)]
+
+    def __init__(self, paths, words, *, selected_path=None):
+        super().__init__()
+        self.paths, self.words = list(paths), words
+        self.selected_index = next((index for index, (_, path) in enumerate(self.paths) if path == selected_path), 0)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="paths-dialog"):
+            yield Static(self.words["files"], id="paths-title", markup=False)
+            yield Static(self.words["paths_help"], id="paths-help", classes="muted", markup=False)
+            yield OptionList(*(Option(Text(label + "\n" + path), id=str(index))
+                               for index, (label, path) in enumerate(self.paths)), id="path-choices")
+            yield _PublicPathArea(self.paths[self.selected_index][1] if self.paths else "", read_only=True,
+                                  show_line_numbers=False, soft_wrap=True, id="selected-path")
+            yield Static("" if self.paths else self.words["paths_empty"], id="copy-status", markup=False)
+            with Horizontal(id="paths-buttons"):
+                yield Button(self.words["path_copy"], id="copy-path", disabled=not self.paths, variant="primary")
+                yield Button(self.words["paths_copy_all"], id="copy-paths", disabled=not self.paths)
+                yield Button(self.words["path_close"], id="paths-close")
+
+    def on_mount(self):
+        choices = self.query_one("#path-choices", OptionList)
+        if self.paths:
+            choices.highlighted = self.selected_index
+        choices.focus()
+
+    def on_resize(self, event: events.Resize):
+        self.set_class(event.size.height < 22, "short")
+
+    @on(OptionList.OptionHighlighted, "#path-choices")
+    def highlighted(self, event):
+        self.selected_index = int(event.option.id)
+        self.query_one("#selected-path", TextArea).load_text(self.paths[self.selected_index][1])
+
+    @on(OptionList.OptionSelected, "#path-choices")
+    def selected(self):
+        self.action_copy_selected()
+
+    def action_copy_selected(self):
+        if self.paths:
+            self.app.copy_paths(self.paths[self.selected_index][1], target=self)
+
+    @on(Button.Pressed)
+    def pressed(self, event):
+        event.stop()
+        if event.button.id == "copy-path":
+            self.action_copy_selected()
+        elif event.button.id == "copy-paths":
+            self.app.copy_paths("\n\n".join(label + "\n" + path for label, path in self.paths), target=self, all_paths=True)
+        elif event.button.id == "paths-close":
+            self.action_close()
+
+    def action_close(self):
+        self.dismiss(None)
+
+    def action_cancel(self):
+        self.action_close()
 
 
 def _existing_words():
@@ -488,7 +656,8 @@ class SetupApp(App[int]):
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [Binding("ctrl+c,ctrl+q", "abort_setup", "Abort setup", priority=True),
                 Binding("q,escape", "request_stop", show=False),
-                Binding("f2", "details", "Details"), Binding("f3", "paths", "Log paths")]
+                Binding("f2", "details", "Details"), Binding("f3", "paths", "File paths"),
+                Binding("f4,ctrl+shift+c", "copy_log", "Copy log path", priority=True)]
     CSS = """
     Screen { background: #0b111b; color: #dbe7f3; }
     #masthead { height: 5; padding: 1 3 0 3; background: #101e2e; border-bottom: solid #20465c; }
@@ -519,6 +688,8 @@ class SetupApp(App[int]):
     Collapsible > Contents { padding: 0 1; }
     #details-log { height: 10; min-height: 4; background: #0b111b; border: round #203e52; }
     #path-list { height: auto; color: #a8bfce; }
+    #file-buttons { height: auto; }
+    #file-buttons Button { width: 1fr; min-width: 0; padding: 0 1; margin-left: 0; }
     #small { height: auto; color: #dbb67d; margin-bottom: 1; }
     .muted { color: #8ea9bc; height: auto; }
     Footer { background: #101e2e; color: #a5bdce; }
@@ -537,7 +708,7 @@ class SetupApp(App[int]):
     SetupApp.compact.versioned.reviewing #actions { max-height: 7; }
     SetupApp.narrow #devices { layout: vertical; }
     SetupApp.narrow .device { width: 1fr; margin: 0; }
-    ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen { align: center middle; background: #030811cc; }
+    ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen, PathsScreen { align: center middle; background: #030811cc; }
     #confirm-dialog, #input-dialog, #ssh-dialog { width: 70; max-width: 94%; height: auto; max-height: 90%; padding: 1 2; border: round #61bfd4; background: #122336; }
     #confirm-title, #input-title, #ssh-title { color: #8de2ec; text-style: bold; height: auto; margin-bottom: 1; }
     #ssh-question { height: auto; margin-bottom: 1; }
@@ -553,6 +724,16 @@ class SetupApp(App[int]):
     Button { margin-left: 1; }
     Button:focus { text-style: bold; }
     #setup-input, #ssh-response { margin-bottom: 1; }
+    #paths-dialog { width: 80; max-width: 94%; height: 90%; max-height: 30; padding: 0 1; border: round #61bfd4; background: #122336; }
+    #paths-title { color: #8de2ec; text-style: bold; height: 1; }
+    #paths-help { height: auto; max-height: 3; }
+    #path-choices { height: 1fr; min-height: 2; border: none; }
+    #selected-path { height: 3; min-height: 3; padding: 0; border: solid #315a72; }
+    #copy-status { height: auto; max-height: 4; color: #dbb67d; }
+    #paths-buttons { height: 3; }
+    #paths-buttons Button { width: 1fr; min-width: 0; height: 3; min-height: 3; max-height: 3; padding: 0 1; margin-left: 0; }
+    PathsScreen.short #paths-help { display: none; }
+    PathsScreen.short #copy-status { max-height: 3; }
     """
 
     def __init__(self, callback: Callable[[], int], lang=None):
@@ -576,6 +757,7 @@ class SetupApp(App[int]):
         self.paths: dict[tuple[str, str], None] = {}
         self.detail_history: list[str] = []
         self.action_names: list[str] = []
+        self.copy_pending = False
         self.set_bindings()
 
     def set_bindings(self):
@@ -585,6 +767,7 @@ class SetupApp(App[int]):
         self.bind("q,escape", "request_stop", show=False)
         self.bind("f2", "details", description=self.words["detail_key"], show=True)
         self.bind("f3", "paths", description=self.words["paths_key"], show=True)
+        self._bindings.bind("f4,ctrl+shift+c", "copy_log", description=self.words["copy_log"], show=True, priority=True)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="masthead"):
@@ -614,6 +797,9 @@ class SetupApp(App[int]):
                 yield Button(self.words["close"], id="close", variant="primary")
             with Collapsible(title=self.words["files"], collapsed=True, id="files"):
                 yield Static(self.words["empty_files"], id="path-list", markup=False)
+                with Horizontal(id="file-buttons"):
+                    yield Button(self.words["copy_log"], id="copy-log")
+                    yield Button(self.words["paths_open"], id="show-paths")
             with Collapsible(title=self.words["details"], collapsed=True, id="details"):
                 yield RichLog(id="details-log", max_lines=MAX_DETAILS, wrap=True, markup=False, highlight=False)
         yield Footer()
@@ -679,7 +865,7 @@ class SetupApp(App[int]):
     def show_notice(self, value, key="", state="info"):
         notice = self.query_one("#notice", Static)
         notice.update(_plain(value, 4096))
-        notice.set_class(state == "warning" or key in ("bridge_partial", "bridge_recovery_incomplete", "missing"), "warning")
+        notice.set_class(state == "warning" or key in ("bridge_partial", "bridge_recovery_incomplete", "bridge_recovery_pending", "missing"), "warning")
         notice.set_class(state == "ok", "ok")
         self.add_detail(value)
         if key in ("bridge_installed", "bridge_removed", "bridge_rolled_back", "bridge_current", "check_finish"):
@@ -832,7 +1018,7 @@ class SetupApp(App[int]):
         if self.backend_finished:
             self.exit(self.backend_result)
             return
-        if isinstance(self.screen, (ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen)):
+        if isinstance(self.screen, (ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen, PathsScreen)):
             self.screen.action_cancel()
             return
         if self.prompt is not None:
@@ -853,7 +1039,7 @@ class SetupApp(App[int]):
             return
         self.stop_requested = True
         prompt = self.prompt
-        if isinstance(self.screen, (ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen)):
+        if isinstance(self.screen, (ConfirmScreen, PictureScreen, InputScreen, SSHInputScreen, PathsScreen)):
             self.screen.action_cancel()
         if prompt is not None:
             self.resolve_prompt(prompt.cancel, expected=prompt)
@@ -868,9 +1054,61 @@ class SetupApp(App[int]):
         details.scroll_visible()
 
     def action_paths(self):
-        files = self.query_one("#files", Collapsible)
-        files.collapsed = not files.collapsed
-        files.scroll_visible()
+        if isinstance(self.screen, PathsScreen):
+            self.screen.action_close()
+        elif isinstance(self.screen, SSHInputScreen):
+            self.notify(self.words["paths_secret"], severity="warning")
+        else:
+            self.push_screen(PathsScreen(self.paths, self.words))
+
+    @on(Button.Pressed, "#show-paths")
+    def paths_pressed(self):
+        self.action_paths()
+
+    @on(Button.Pressed, "#copy-log")
+    def copy_log_pressed(self):
+        self.action_copy_log()
+
+    def action_copy_log(self):
+        if isinstance(self.screen, PathsScreen):
+            self.screen.action_copy_selected()
+            return
+        logs = [path for label, path in self.paths if "log" in label.casefold()]
+        if logs:
+            self.copy_paths(logs[-1])
+        else:
+            self.notify(self.words["copy_missing"], severity="warning")
+
+    def copy_paths(self, value, *, target=None, all_paths=False):
+        """Copy registered public paths, never a focused widget's contents."""
+        if self.copy_pending:
+            return
+        self.copy_pending = True
+        self.run_worker(self._copy_paths(value, target=target, all_paths=all_paths), group="public-path-clipboard")
+
+    async def _copy_paths(self, value, *, target, all_paths):
+        okay = False
+        try:
+            await asyncio.to_thread(_copy_public_paths, value)
+            okay = True
+        except (OSError, ValueError, UnicodeError):
+            pass  # Public instructions are useful; platform diagnostics may not be.
+        finally:
+            self.copy_pending = False
+        message = self.words["copied_paths" if all_paths else "copied_path"] if okay else self.words["copy_failed"]
+        if target is None and isinstance(self.screen, PathsScreen):
+            target = self.screen
+        if not okay and target is None and not isinstance(self.screen, SSHInputScreen):
+            target = PathsScreen(self.paths, self.words, selected_path=value)
+            await self.push_screen(target)
+        if target is not None and target.is_mounted:
+            target.query_one("#copy-status", Static).update(message)
+            if not okay:
+                area = target.query_one("#selected-path", TextArea)
+                area.focus()
+                area.select_all()
+        else:
+            self.notify(message, severity="information" if okay else "warning")
 
     def on_unmount(self):
         global _ACTIVE
