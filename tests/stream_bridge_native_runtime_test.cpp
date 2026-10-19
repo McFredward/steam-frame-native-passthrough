@@ -234,6 +234,25 @@ void routeQuarantineAndBackoff(){
     for(std::size_t i=0;i<nd::ReceiverWorker::RetiredPoolCapacity+1;++i){bounded.capture.push_back({nd::CaptureKind::SourceReset,static_cast<int>(24+i),-1,0,0,100+i,200+i,0});bounded.pump();}
     check(bounded.worker.status().state==nd::RuntimeState::SourceLost&&bounded.worker.status().reason==nd::RuntimeReason::QuarantineCapacity,
         "per-fd source-retirement tombstones refuse on bounded capacity without unsafe eviction");
+    const auto boundedCalls=bounded.randomCalls;bounded.enqueue(ordinary,150,1000);bounded.input.back().fact.fd=26;bounded.pump();
+    bounded.enqueue(ordinary,151,1001);bounded.pump();
+    check(bounded.randomCalls==boundedCalls,"retirement capacity exhaustion remains globally refused across other fd and new-pool inputs");
+}
+
+void liveDecoderSwitch(){
+    Fixture f;f.negotiate();const auto port=f.producer.localPort();
+    f.enqueue(f.certifiedFrame(),40);f.pump();const auto before=f.certified;
+    f.relisten(port);f.enqueue(ordinary,50,20);f.input.back().fact.fd=24;f.pump();
+    for(unsigned token=51;token<54;++token){f.enqueue(f.certifiedDiscovery(),token,20);f.input.back().fact.fd=24;f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,24,74,0,token,20,21,token});f.pump();}
+    check(f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.worker.status().source.decoderFd==24,"second still-live decoder gets its own actual full admission");
+    f.relisten(port);f.enqueue(ordinary,60);f.pump();
+    for(unsigned token=61;token<64;++token){f.enqueue(f.certifiedDiscovery(),token);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,token,7,21,token});f.pump();}
+    const auto fresh=f.certified;f.enqueue(f.certifiedFrame(),40);f.pump();
+    f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+    check(f.certified==fresh&&fresh==before+6&&f.decoded==9,
+        "switching live decoder A B A quarantines old A pending token before dropping its prior session");
 }
 
 void ambiguityAndBound(){
@@ -330,4 +349,4 @@ void transportRecoveryRejectsOldProof(){
         "transport retry never retries authenticated-control rejection or grants pixels");
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

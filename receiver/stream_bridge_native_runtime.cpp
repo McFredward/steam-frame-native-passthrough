@@ -96,7 +96,7 @@ struct ReceiverWorker::Impl {
         notice(state,observed,reason);if(!keepSource)source={};
     }
     bool retryTransport(RuntimeReason reason=RuntimeReason::TransportLost,RuntimeState state=RuntimeState::SenderUnavailable){
-        if(!retirePending()){clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return false;}
+        if(!retirePending()){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return false;}
         clear(state,true,reason);
         const auto clock=now();retryAt=clock>std::numeric_limits<std::uint64_t>::max()-retryDelay
             ?std::numeric_limits<std::uint64_t>::max():clock+retryDelay;
@@ -105,6 +105,9 @@ struct ReceiverWorker::Impl {
     bool begin(const Observation& fact){
         if(!fact.poolGeneration||fact.fd<0||!fact.bufferCapacity||fact.usedBytes>fact.bufferCapacity)return false;
         if(!matches(fact.fd,fact.poolGeneration))retryDelay=250;
+        // A different live decoder does not retire the previous pool. Preserve
+        // all old exact native tokens before dropping that session's receipts.
+        if(!retirePending()){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return false;}
         clear(RuntimeState::SourceLost,false,RuntimeReason::NativeSourceChanged);
         if(admissionGeneration==~std::uint64_t(0)){blocked=true;notice(RuntimeState::SourceRefused,RuntimeReason::GenerationExhausted);return false;}
         admissionGeneration=std::max(admissionGeneration+1,fact.poolGeneration);
@@ -139,7 +142,7 @@ struct ReceiverWorker::Impl {
             }
             if(retired(event.fd,event.sourcePoolGeneration))return;
             if(!retire(event.fd,event.sourcePoolGeneration,event.nativeTimestampToken)){
-                clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
+                unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
             if(matches(event.fd,event.sourcePoolGeneration)&&!blocked)
                 retryTransport(event.inputLoss==InputLoss::SnapshotFull?RuntimeReason::SnapshotGap:RuntimeReason::CopyGap,RuntimeState::SourceLost);
             return;
@@ -174,7 +177,7 @@ struct ReceiverWorker::Impl {
         }
         if(event.kind!=CaptureKind::Decoded||blocked)return;
         const auto* q=quarantine(event.fd,event.sourcePoolGeneration);
-        if(!q){clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
+        if(!q){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
         if(event.nativeTimestampToken>0xffff||q->tokens.test(event.nativeTimestampToken))return;
         Pending* found=nullptr;unsigned matches=0;
         for(auto& p:pending)if(p.used&&p.submitted.nativeTimestampToken==event.nativeTimestampToken){found=&p;++matches;}
@@ -190,7 +193,7 @@ struct ReceiverWorker::Impl {
             clear(RuntimeState::SourceLost,true,RuntimeReason::InvalidInput);return;}
         if(retired(fact.fd,fact.poolGeneration))return;
         auto* q=quarantine(fact.fd,fact.poolGeneration);
-        if(!q){clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
+        if(!q){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return;}
         if(q->hard){q->tokens.set(fact.nativeTimestampToken);return;}
         if(!matches(fact.fd,fact.poolGeneration)){if(!begin(fact)){q->tokens.set(fact.nativeTimestampToken);return;}}
         else if(blocked){
@@ -279,7 +282,10 @@ void ReceiverWorker::tick() noexcept{
     try{
         const bool ready=impl_->request.imageRoutePrepared&&impl_->request.imageRoutePrepared(impl_->request.imageRouteContext);
         if(!ready){
-            if(impl_->routeWasReady){impl_->retirePending();impl_->clear(RuntimeState::SourceLost,false,RuntimeReason::ImageRouteLost);}
+            if(impl_->routeWasReady){
+                if(!impl_->retirePending()){impl_->unknownLoss();impl_->clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);}
+                else impl_->clear(RuntimeState::SourceLost,false,RuntimeReason::ImageRouteLost);
+            }
             impl_->routeSeen=true;impl_->routeWasReady=false;
             impl_->collect();impl_->discardInputs();impl_->collect();
             impl_->notice(RuntimeState::WaitingImageRoute);return;
