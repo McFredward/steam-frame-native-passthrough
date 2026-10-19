@@ -17,6 +17,7 @@ namespace local=stream_bridge_local;
 namespace native=stream_bridge_native;
 namespace stream_bridge_renderer {
 namespace {
+enum class Flow:unsigned {CertifiedCallback,CertifiedQueued,CertifiedQueueRefused,DecodedCallback,ImageMiss,LeaseMiss,NativeStale,BindingMiss,DecodedQueued,DecodedQueueRefused,CertifiedReceived,Authenticated,AuthenticationRefused,DecodedReceived,CertificateMiss,ReceivedLeaseMiss,KernelMiss,PicturesRetained,Count};
 struct Process {
     std::mutex gate;std::atomic<ProcessKind> kind{ProcessKind::Off};int directory=-1;
     std::filesystem::path root;std::array<ProcessConsumer,4> consumers{};
@@ -28,7 +29,22 @@ struct Process {
     std::thread worker;std::uint32_t notes=0;bool prepared=false;
     std::array<std::array<std::uint32_t,24>,9> sourceNotices{};unsigned sourceNoticeLines=0; // Written only by the receiver worker.
     std::uint32_t channelNotices=0; // Written only by the local channel worker.
+    std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(Flow::Count)> flow{};
+    std::uint64_t flowMilestones=0;unsigned flowLevel=0,flowLines=0; // Local worker only.
 };
+void count(Process& p,Flow flow){p.flow[static_cast<unsigned>(flow)].fetch_add(1,std::memory_order_relaxed);}
+void reportFlowCold(Process& p){
+    if(p.flowLines>=48)return;
+    std::array<std::uint64_t,static_cast<unsigned>(Flow::Count)> values{};std::uint64_t milestones=0,progress=0;
+    for(unsigned n=0;n<values.size();++n){values[n]=p.flow[n].load(std::memory_order_relaxed);if(values[n])milestones|=std::uint64_t(1)<<n;progress=std::max(progress,values[n]);}
+    if(!milestones)return;
+    unsigned level=0;for(auto value=progress;value>1;value>>=1)++level;
+    if(!(milestones&~p.flowMilestones)&&level<=p.flowLevel)return;
+    p.flowMilestones|=milestones;p.flowLevel=std::max(level,p.flowLevel);++p.flowLines;
+    const auto get=[&](Flow f){return static_cast<unsigned long long>(values[static_cast<unsigned>(f)]);};
+    std::fprintf(stderr,"[Steam Link Native Passthrough] local flow %s: certificate callbacks/queued/queue-refused=%llu/%llu/%llu; decoded callbacks/queued/queue-refused=%llu/%llu/%llu; source miss image/lease/current/binding=%llu/%llu/%llu/%llu; received certificate/authenticated/auth-refused=%llu/%llu/%llu; received decoded/retained=%llu/%llu; receive miss certificate/lease/kernel=%llu/%llu/%llu\n",
+        p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::CertifiedCallback),get(Flow::CertifiedQueued),get(Flow::CertifiedQueueRefused),get(Flow::DecodedCallback),get(Flow::DecodedQueued),get(Flow::DecodedQueueRefused),get(Flow::ImageMiss),get(Flow::LeaseMiss),get(Flow::NativeStale),get(Flow::BindingMiss),get(Flow::CertifiedReceived),get(Flow::Authenticated),get(Flow::AuthenticationRefused),get(Flow::DecodedReceived),get(Flow::PicturesRetained),get(Flow::CertificateMiss),get(Flow::ReceivedLeaseMiss),get(Flow::KernelMiss));
+}
 Process* process() noexcept{
     // The optional pre-main companion must not terminate Steam on allocation
     // failure, and failure is sticky without retrying from a noexcept callback.
@@ -53,24 +69,26 @@ bool ownedRead(int directory,const char* name,void* output,std::size_t size){
 }
 void note(Process&p,const char* event){if(p.notes++<32)std::fprintf(stderr,"[Steam Link Native Passthrough] %s\n",event);}
 void certified(const native::CertifiedFrame& frame,void* context) noexcept{
-    auto&p=*static_cast<Process*>(context);if(!frame.certificate||!frame.peerConfirmed||!frame.certificate->originalAccessUnitVerified)return;
+    auto&p=*static_cast<Process*>(context);count(p,Flow::CertifiedCallback);if(!frame.certificate||!frame.peerConfirmed||!frame.certificate->originalAccessUnitVerified)return;
     try{local::Message message;message.kind=local::Kind::Certified;message.source=frame.source;message.descriptor=frame.certificate->descriptor;message.binding=frame.certificate->binding;message.nativeTimestampToken=frame.submitted.nativeTimestampToken;message.submittedContent=frame.submitted.contentGeneration;message.peerConfirmed=true;
         if(!sb::serializeCoverageMetadata(*frame.certificate,message.certifiedMetadata))return;
-        std::lock_guard<std::mutex> lock(p.gate);if(p.channel.enqueue(message))p.masks[message.descriptor.sourceFrame%p.masks.size()]=message;
+        std::lock_guard<std::mutex> lock(p.gate);if(p.channel.enqueue(message)){p.masks[message.descriptor.sourceFrame%p.masks.size()]=message;count(p,Flow::CertifiedQueued);}else count(p,Flow::CertifiedQueueRefused);
     }catch(...){/* Missing local copy is opaque, never a guessed picture. */}
 }
 void decoded(const native::DecodedFrame& frame,void* context) noexcept{
-    auto&p=*static_cast<Process*>(context);if(!frame.peerConfirmed)return;
+    auto&p=*static_cast<Process*>(context);count(p,Flow::DecodedCallback);if(!frame.peerConfirmed)return;
     native::ImageLease image;local::LeaseReference lease;
-    if(!p.images.join(frame.capture,image)||!p.writer.reference(frame.capture,lease)||!native::pinnedCaptureLeaseCurrent(frame.capture))return;
+    if(!p.images.join(frame.capture,image)){count(p,Flow::ImageMiss);return;}
+    if(!p.writer.reference(frame.capture,lease)){count(p,Flow::LeaseMiss);return;}
+    if(!native::pinnedCaptureLeaseCurrent(frame.capture)){count(p,Flow::NativeStale);return;}
     try{std::lock_guard<std::mutex> lock(p.gate);
         // The exact certificate was queued first; recover its binding only by
         // matching this same source+submission+descriptor, never newest frame.
         local::Message message;bool found=false;
         for(const auto& old:p.masks)if(old.peerConfirmed&&sameSource(old.source.stream,frame.source.stream)&&sameDescriptor(old.descriptor,frame.descriptor)&&old.nativeTimestampToken==frame.submitted.nativeTimestampToken&&old.submittedContent==frame.submitted.contentGeneration){message.binding=old.binding;found=true;break;}
-        if(!found)return;
+        if(!found){count(p,Flow::BindingMiss);return;}
         message.kind=local::Kind::Decoded;message.source=frame.source;message.descriptor=frame.descriptor;message.nativeTimestampToken=frame.submitted.nativeTimestampToken;message.submittedContent=frame.submitted.contentGeneration;message.peerConfirmed=true;message.lease=lease;message.dmabuf=frame.capture.dmabufFd;message.readOnlyLeases=p.writer.duplicateReadOnly();
-        if(message.readOnlyLeases>=0){p.channel.enqueue(message);close(message.readOnlyLeases);}
+        if(message.readOnlyLeases>=0){if(p.channel.enqueue(message))count(p,Flow::DecodedQueued);else count(p,Flow::DecodedQueueRefused);close(message.readOnlyLeases);}else count(p,Flow::LeaseMiss);
     }catch(...){/* Missing selected lease is ordinary native output. */}
 }
 void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
@@ -93,22 +111,25 @@ void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
 void consume(Process&p,local::Message& message){
     if(!message.peerConfirmed)return;
     if(message.kind==local::Kind::Certified){
+        count(p,Flow::CertifiedReceived);
         if(!sameSource(p.verifiedSource,message.source.stream)){
             sb::Pairing pair;const auto status=sb::loadPrivatePairing(p.root/"pairings",sb::Role::Receiver,pair);
-            if(status!=sb::CredentialStatus::Ok)return;
-            const auto ready=p.verifier.prepareReceiver(pair,message.source.stream);sb::secureZero(pair.key.data(),pair.key.size());if(ready!=sb::AuthStatus::Ok)return;
+            if(status!=sb::CredentialStatus::Ok){count(p,Flow::AuthenticationRefused);return;}
+            const auto ready=p.verifier.prepareReceiver(pair,message.source.stream);sb::secureZero(pair.key.data(),pair.key.size());if(ready!=sb::AuthStatus::Ok){count(p,Flow::AuthenticationRefused);return;}
             p.verifiedSource=message.source.stream;for(auto& old:p.masks)old={};for(auto& old:p.pictures)old={};p.currentLeases.reset();
         }
-        sb::CertifiedAccessUnit certificate;if(sb::inspectCoverageMetadata({message.certifiedMetadata.data(),message.certifiedMetadata.size()},p.verifier,certificate)!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor))return;
+        sb::CertifiedAccessUnit certificate;if(sb::inspectCoverageMetadata({message.certifiedMetadata.data(),message.certifiedMetadata.size()},p.verifier,certificate)!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor)){count(p,Flow::AuthenticationRefused);return;}
+        count(p,Flow::Authenticated);
         auto* target=&p.masks[message.descriptor.sourceFrame%p.masks.size()];*target=message;
         for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))&&consumer.coverage)consumer.coverage(consumer.owner,certificate);
     }else if(message.kind==local::Kind::Decoded){
+        count(p,Flow::DecodedReceived);
         bool certified=false;for(const auto& mask:p.masks)if(mask.peerConfirmed&&mask.binding==message.binding&&sameSource(mask.source.stream,message.source.stream)&&sameDescriptor(mask.descriptor,message.descriptor)&&mask.nativeTimestampToken==message.nativeTimestampToken&&mask.submittedContent==message.submittedContent){certified=true;break;}
-        if(!certified||message.dmabuf<0||message.readOnlyLeases<0)return;
-        auto reader=std::make_shared<local::LeaseReader>();if(!reader->mapReadOnly(message.readOnlyLeases)||!reader->current(message.lease))return;
-        struct stat file{};if(fstat(message.dmabuf,&file)||local::KernelIdentity{{std::uint64_t(file.st_dev),std::uint64_t(file.st_ino)}}!=message.lease.kernel)return;
+        if(!certified||message.dmabuf<0||message.readOnlyLeases<0){count(p,Flow::CertificateMiss);return;}
+        auto reader=std::make_shared<local::LeaseReader>();if(!reader->mapReadOnly(message.readOnlyLeases)||!reader->current(message.lease)){count(p,Flow::ReceivedLeaseMiss);return;}
+        struct stat file{};if(fstat(message.dmabuf,&file)||local::KernelIdentity{{std::uint64_t(file.st_dev),std::uint64_t(file.st_ino)}}!=message.lease.kernel){count(p,Flow::KernelMiss);return;}
         LocalPicture picture;picture.metadata=message;picture.metadata.dmabuf=picture.metadata.readOnlyLeases=-1;picture.leases=reader;picture.connection=p.connection;
-        auto& old=p.pictures[message.descriptor.sourceFrame%p.pictures.size()];old=std::move(picture);
+        auto& old=p.pictures[message.descriptor.sourceFrame%p.pictures.size()];old=std::move(picture);count(p,Flow::PicturesRetained);
         for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))&&consumer.picture)consumer.picture(consumer.owner,old);
     }
 }
@@ -165,6 +186,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
                 if(consumer.tick)consumer.tick(consumer.owner);
             }
         }
+        reportFlowCold(p);
     }catch(...){/* Optional worker loss cannot stop native rendering. */}
 }
 void work(Process* pointer) noexcept{

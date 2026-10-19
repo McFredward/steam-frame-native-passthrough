@@ -28,3 +28,13 @@ and removes its temporary compiler tree, preserving results and source/input
 hashes. No native shaders, generated native code or headset image is published.
 Passing file admission is distinct from a valid native pipeline, video frame or
 correct hardware picture.
+
+## Bounded transport diagnostics
+
+The lifecycle fixture also exercises the actual Process counters: unconfirmed
+callbacks are not queued successes, refused detached authentication is separate
+from accepted metadata, and a decoded packet without its exact certificate does
+not count as a retained picture. Unchanged snapshots emit no repeated line;
+even changing counts have an absolute 48-line bound per process. The log labels
+queued packets separately from received/authenticated metadata and retained
+local pictures. A picture mapping is never reported as an R8 mask upload.

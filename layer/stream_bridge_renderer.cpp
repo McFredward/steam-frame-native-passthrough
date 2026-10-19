@@ -25,9 +25,13 @@ template<class T,std::size_t N>T* add(std::array<T,N>& list,std::uint64_t value)
 bool current(const LocalPicture& picture){return picture.leases&&picture.connection&&picture.connection->load(std::memory_order_acquire)&&picture.leases->current(picture.metadata.lease);}
 bool same(const sb::FrameDescriptor&a,const sb::FrameDescriptor&b){return a.sourceFrame==b.sourceFrame&&a.encoderGeneration==b.encoderGeneration&&a.codedWidth==b.codedWidth&&a.codedHeight==b.codedHeight;}
 void coldNote(const char* message) noexcept{
-    static std::atomic<unsigned> budget{0};
-    if(budget.fetch_add(1,std::memory_order_relaxed)<24)
-        std::fprintf(stderr,"[Steam Link Native Passthrough] %s\n",message);
+    // Cold creation callbacks only. Repeated unrelated startup pipelines must
+    // not consume the later shader/companion admission messages' entire budget.
+    try{static std::mutex gate;static std::array<const char*,32> seen{};
+        std::lock_guard<std::mutex> lock(gate);
+        for(const auto* old:seen)if(old&&!std::strcmp(old,message))return;
+        for(auto& old:seen)if(!old){old=message;std::fprintf(stderr,"[Steam Link Native Passthrough] %s\n",message);return;}
+    }catch(...){/* Optional cold diagnostics cannot affect native creation. */}
 }
 }
 struct Renderer::Impl {
@@ -61,6 +65,42 @@ struct Renderer::Impl {
 #undef FIELD
     PFN_vkQueueSubmit2 QueueSubmit2=nullptr,QueueSubmit2KHR=nullptr;
     std::array<gpu::Lease,gpu::MaximumSlots> submittedLeases{};std::size_t submittedCount=0;
+    struct Counters {
+        std::atomic<std::uint64_t> metadata{0},maskNone{0},maskDecoded{0},maskRejected{0},uploadAccepted{0},uploadRefused{0},pictures{0};
+        std::atomic<std::uint64_t> begins{0},draws{0},selected{0},guardAttempts{0},guardAccepted{0},guardRefused{0},opaqueSubmits{0};
+        std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(DrawRefusal::Count)> refusals{};
+    } counts;
+    std::uint64_t reportedMilestones=0;unsigned reportedLevel=0,statusLines=0;
+    void refused(DrawRefusal reason) noexcept {counts.refusals[static_cast<std::size_t>(reason)].fetch_add(1,std::memory_order_relaxed);}
+    RendererStats stats()const noexcept{
+        RendererStats out;
+#define COUNT(n) out.n=counts.n.load(std::memory_order_relaxed);
+        COUNT(metadata) COUNT(maskNone) COUNT(maskDecoded) COUNT(maskRejected) COUNT(uploadAccepted) COUNT(uploadRefused) COUNT(pictures)
+        COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
+#undef COUNT
+        for(std::size_t n=0;n<out.drawRefusals.size();++n)out.drawRefusals[n]=counts.refusals[n].load(std::memory_order_relaxed);
+        const auto gpu=pool.statusCold();out.pending=gpu.pending;out.copying=gpu.copying;out.ready=gpu.ready;out.quarantined=gpu.quarantined;
+        out.poolUploaded=gpu.uploaded;out.poolRefused=gpu.refused;out.pipelines=admittedPipelines.load(std::memory_order_acquire);
+        out.prepared=out.pipelines!=0;out.lost=lost.load(std::memory_order_acquire);return out;
+    }
+    void reportCold() noexcept{
+        if(statusLines>=48)return;
+        const auto s=stats();if(!s.metadata&&!s.pictures)return;
+        std::uint64_t milestones=0;
+        const std::array<std::uint64_t,11> events{{s.metadata,s.maskDecoded,s.maskRejected,s.uploadAccepted,s.uploadRefused,s.pictures,s.selected,s.guardAccepted,s.guardRefused,s.ready,s.quarantined}};
+        for(unsigned n=0;n<events.size();++n)if(events[n])milestones|=std::uint64_t(1)<<n;
+        for(unsigned n=0;n<s.drawRefusals.size();++n)if(s.drawRefusals[n])milestones|=std::uint64_t(1)<<(16+n);
+        const auto progress=std::max({s.metadata,s.draws,s.guardAttempts,s.opaqueSubmits});unsigned level=0;for(auto value=progress;value>1;value>>=1)++level;
+        if(!(milestones&~reportedMilestones)&&level<=reportedLevel)return;
+        reportedMilestones|=milestones;reportedLevel=std::max(level,reportedLevel);++statusLines;
+        const auto miss=[&](DrawRefusal r){return static_cast<unsigned long long>(s.drawRefusals[static_cast<std::size_t>(r)]);};
+        std::fprintf(stderr,"[Steam Link Native Passthrough] renderer flow: metadata=%llu; mask decoded/none/rejected=%llu/%llu/%llu; upload accepted/refused=%llu/%llu, actual=%llu; pool pending/copying/ready/quarantined=%u/%u/%u/%u; pictures=%llu; record selected/attempts=%llu/%llu, begins=%llu; miss unavailable/busy/cb/epoch/pipeline/ineligible/descriptor/image/exact/mask/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu; submit guarded-accepted/attempts/refused=%llu/%llu/%llu, opaque=%llu; pipelines=%u, lost=%u\n",
+            static_cast<unsigned long long>(s.metadata),static_cast<unsigned long long>(s.maskDecoded),static_cast<unsigned long long>(s.maskNone),static_cast<unsigned long long>(s.maskRejected),
+            static_cast<unsigned long long>(s.uploadAccepted),static_cast<unsigned long long>(s.uploadRefused),static_cast<unsigned long long>(s.poolUploaded),s.pending,s.copying,s.ready,s.quarantined,
+            static_cast<unsigned long long>(s.pictures),static_cast<unsigned long long>(s.selected),static_cast<unsigned long long>(s.draws),static_cast<unsigned long long>(s.begins),
+            miss(DrawRefusal::Unavailable),miss(DrawRefusal::Busy),miss(DrawRefusal::Command),miss(DrawRefusal::Epoch),miss(DrawRefusal::Pipeline),miss(DrawRefusal::Ineligible),miss(DrawRefusal::Descriptor),miss(DrawRefusal::Image),miss(DrawRefusal::ExactPicture),miss(DrawRefusal::ReadyMask),miss(DrawRefusal::Capacity),
+            static_cast<unsigned long long>(s.guardAccepted),static_cast<unsigned long long>(s.guardAttempts),static_cast<unsigned long long>(s.guardRefused),static_cast<unsigned long long>(s.opaqueSubmits),s.pipelines,unsigned(s.lost));
+    }
     bool load(){
 #define LOAD(n) n=reinterpret_cast<PFN_vk##n>(gdpa(device,"vk" #n));if(!n)return false;
         FUNCS(LOAD)
@@ -133,12 +173,24 @@ struct Renderer::Impl {
         auto&p=*static_cast<Impl*>(owner);return !p.lost.load(std::memory_order_acquire)&&p.admittedPipelines.load(std::memory_order_acquire)>0;
     }
     static void coverage(void* owner,const sb::CertifiedAccessUnit& certificate) noexcept{
-        auto&p=*static_cast<Impl*>(owner);try{std::vector<std::uint8_t> bytes;if(sb::decodeCertifiedCoverage(certificate,bytes))p.pool.upload({certificate.binding,certificate.descriptor},certificate.descriptor.codedWidth,certificate.descriptor.codedHeight,{bytes.data(),bytes.size()});}catch(...){}
+        auto&p=*static_cast<Impl*>(owner);++p.counts.metadata;
+        if(certificate.coverageEncoding==sb::CoverageEncoding::None){++p.counts.maskNone;return;}
+        try{std::vector<std::uint8_t> bytes;
+            if(!sb::decodeCertifiedCoverage(certificate,bytes)){++p.counts.maskRejected;return;}
+            ++p.counts.maskDecoded;
+            if(p.pool.upload({certificate.binding,certificate.descriptor},certificate.descriptor.codedWidth,certificate.descriptor.codedHeight,{bytes.data(),bytes.size()}))++p.counts.uploadAccepted;
+            else ++p.counts.uploadRefused;
+        }catch(...){++p.counts.maskRejected;}
     }
     static void picture(void* owner,const LocalPicture& value) noexcept{
-        auto&p=*static_cast<Impl*>(owner);try{auto snapshot=std::make_shared<const LocalPicture>(value);std::atomic_store_explicit(&p.pictures[value.metadata.descriptor.sourceFrame%p.pictures.size()],std::move(snapshot),std::memory_order_release);}catch(...){}
+        auto&p=*static_cast<Impl*>(owner);try{
+            auto& slot=p.pictures[value.metadata.descriptor.sourceFrame%p.pictures.size()];const auto old=std::atomic_load_explicit(&slot,std::memory_order_acquire);
+            const bool fresh=!old||old->metadata.binding!=value.metadata.binding||!same(old->metadata.descriptor,value.metadata.descriptor)||old->metadata.lease.epoch!=value.metadata.lease.epoch||old->metadata.lease.sequence!=value.metadata.lease.sequence||old->metadata.lease.slot!=value.metadata.lease.slot;
+            auto snapshot=std::make_shared<const LocalPicture>(value);std::atomic_store_explicit(&slot,std::move(snapshot),std::memory_order_release);
+            if(fresh)++p.counts.pictures;
+        }catch(...){}
     }
-    static void tick(void* owner) noexcept{static_cast<Impl*>(owner)->pool.reapCold();}
+    static void tick(void* owner) noexcept{auto& p=*static_cast<Impl*>(owner);p.pool.reapCold();p.reportCold();}
     bool matchingImage(std::uint64_t image,std::shared_ptr<const LocalPicture>& output){
         const auto* i=find(images,image);if(!i)return false;const auto* m=find(memories,i->memory);if(!m||m->generation!=i->memoryGeneration||m->duplicate<0)return false;
         output.reset();
@@ -169,6 +221,7 @@ struct Renderer::Impl {
 Renderer::Renderer():impl_(new Impl){}
 Renderer::~Renderer()=default;
 frame_pixel_ssbo_journal::Journal& Renderer::definitions() noexcept{return impl_->definitions;}
+RendererStats Renderer::statsCold()const noexcept{return impl_->stats();}
 void Renderer::shaderCreated(VkShaderModule value,const VkShaderModuleCreateInfo& info) noexcept{
     auto&p=*impl_;try{
         if(!p.definitions.createShader(value,info,VK_SUCCESS)||!p.prepared||info.codeSize!=6620)return;
@@ -304,7 +357,7 @@ void Renderer::commandAllocated(VkCommandBuffer value,VkCommandBufferLevel level
 }
 void Renderer::commandRetired(VkCommandBuffer value) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);if(auto* command=find(p.commands,handle(value))){p.release(*command);if(command->control)command->control->assigned=false;*command={};}}
 void Renderer::commandBegin(VkCommandBuffer value,const VkCommandBufferBeginInfo* info) noexcept{
-    auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}
+    auto&p=*impl_;++p.counts.begins;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}
     if(auto* command=find(p.commands,handle(value))){p.release(*command);command->eligible=command->primary&&info&&info->sType==VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO&&!info->pNext&&
         !(info->flags&VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);command->epoch=p.observationEpoch.load(std::memory_order_acquire);}
 }
@@ -312,17 +365,22 @@ void Renderer::pipelineBound(VkCommandBuffer value,VkPipelineBindPoint point,VkP
 void Renderer::setsBound(VkCommandBuffer value,VkPipelineBindPoint point,std::uint32_t first,std::uint32_t count,const VkDescriptorSet* sets,std::uint32_t dynamic) noexcept{auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){if(point!=VK_PIPELINE_BIND_POINT_GRAPHICS||dynamic){command->set0=0;return;}if(!first&&count&&sets)command->set0=handle(sets[0]);}}
 void Renderer::commandUnknown(VkCommandBuffer value) noexcept{auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){command->eligible=false;command->pipeline=command->set0=0;}}
 Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
-    auto&p=*impl_;Draw out;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock||!p.prepared||p.lost.load(std::memory_order_acquire))return out;
-    auto* command=find(p.commands,handle(value));if(!command||command->epoch!=p.observationEpoch.load(std::memory_order_acquire))return out;auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline)return out;
+    auto&p=*impl_;++p.counts.draws;Draw out;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
+    if(!lock){p.refused(DrawRefusal::Busy);return out;}
+    if(!p.prepared||p.lost.load(std::memory_order_acquire)){p.refused(DrawRefusal::Unavailable);return out;}
+    auto* command=find(p.commands,handle(value));if(!command){p.refused(DrawRefusal::Command);return out;}
+    if(command->epoch!=p.observationEpoch.load(std::memory_order_acquire)){p.refused(DrawRefusal::Epoch);return out;}
+    auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline){p.refused(DrawRefusal::Pipeline);return out;}
     out.original=from<VkPipeline>(pipeline->id);
-    if(!command->eligible||!command->control||!pipeline->coverage)return out;
-    const auto* descriptor=find(p.descriptors,command->set0);if(!descriptor||!descriptor->valid)return out;
-    const auto* view=find(p.views,descriptor->view);if(!view||view->serial!=descriptor->viewSerial)return out;const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation)return out;
-    std::shared_ptr<const LocalPicture> picture;if(!p.matchingImage(image->id,picture))return out;
+    if(!command->eligible||!command->control||!pipeline->coverage){p.refused(DrawRefusal::Ineligible);return out;}
+    const auto* descriptor=find(p.descriptors,command->set0);if(!descriptor||!descriptor->valid){p.refused(DrawRefusal::Descriptor);return out;}
+    const auto* view=find(p.views,descriptor->view);if(!view||view->serial!=descriptor->viewSerial){p.refused(DrawRefusal::Image);return out;}
+    const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation){p.refused(DrawRefusal::Image);return out;}
+    std::shared_ptr<const LocalPicture> picture;if(!p.matchingImage(image->id,picture)){p.refused(DrawRefusal::ExactPicture);return out;}
     Impl::Use* use=nullptr;
     for(unsigned n=0;n<command->used;++n)if(command->uses[n].descriptor==command->set0&&command->uses[n].viewSerial==view->serial&&command->uses[n].picture.metadata.binding==picture->metadata.binding&&same(command->uses[n].picture.metadata.descriptor,picture->metadata.descriptor)){use=&command->uses[n];break;}
-    if(!use){if(command->used==command->uses.size())return out;auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease)return out;use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
-    out.replacement=pipeline->coverage;out.layout=pipeline->layout;out.coverage=use->lease.set;out.control=command->control->set;out.ready=true;return out;
+    if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return out;}auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return out;}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
+    out.replacement=pipeline->coverage;out.layout=pipeline->layout;out.coverage=use->lease.set;out.control=command->control->set;out.ready=true;++p.counts.selected;return out;
 }
 void Renderer::commandReset(VkCommandBuffer value) noexcept{
     auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
@@ -340,16 +398,17 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
     std::array<VkSubmitInfo,65> submits{};std::array<VkCommandBuffer,1024> commands{};
     submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submits[0].commandBufferCount=1;submits[0].pCommandBuffers=&p.zero;
     std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
-    bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0;p.submittedCount=0;
+    bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0,guards=0;p.submittedCount=0;
     if(supported)for(unsigned n=0;n<count;++n){
         if(infos[n].pNext||infos[n].commandBufferCount>512||(!infos[n].pCommandBuffers&&infos[n].commandBufferCount)||used+infos[n].commandBufferCount*2>commands.size()){supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBuffers=commands.data()+used;submits[n+1].commandBufferCount=0;
         for(unsigned k=0;k<infos[n].commandBufferCount;++k){const auto cb=infos[n].pCommandBuffers[k];
-            if(p.collect(cb)){auto* command=find(p.commands,handle(cb));if(command&&command->control){commands[used++]=command->control->one;++submits[n+1].commandBufferCount;}}
+            if(p.collect(cb)){auto* command=find(p.commands,handle(cb));if(command&&command->control){commands[used++]=command->control->one;++submits[n+1].commandBufferCount;++guards;}}
             commands[used++]=cb;++submits[n+1].commandBufferCount;
         }
     }
     if(!supported){
+        ++p.counts.opaqueSubmits;
         // Unknown extension/cardinality never reuses an old successful guard.
         // The owned zero CB is immutable SIMULTANEOUS_USE and kept until idle.
         // Discard scratch one-guards; the original native CBs run after zero.
@@ -373,12 +432,17 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
         }
         return VK_SUCCESS;
     }
-    if(!p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount)){
+    p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
+    const bool reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
+    if(!reserved){
         // Fenced retirement is part of admission, not just resource accounting.
         // Clear all one guards on refusal while retaining ordinary native RGB.
         for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one)commands[n]=p.zero;
     }
     const auto result=p.QueueSubmit(queue,count+1,submits.data(),fence);
+    if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);
+    else p.counts.guardRefused.fetch_add(guards,std::memory_order_relaxed);
+    if(!guards||!reserved)++p.counts.opaqueSubmits;
     p.pool.submitted(queue,p.submittedLeases.data(),p.submittedCount,result);p.submittedCount=0;return result;
 }
 VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2* infos,VkFence fence,bool khr) noexcept{
@@ -388,16 +452,17 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
     std::array<VkSubmitInfo2,65> submits{};std::array<VkCommandBufferSubmitInfo,1024> commands{};
     const VkCommandBufferSubmitInfo zero{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,p.zero,1};
     submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submits[0].commandBufferInfoCount=1;submits[0].pCommandBufferInfos=&zero;
-    std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0;p.submittedCount=0;
+    std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0,guards=0;p.submittedCount=0;
     if(supported)for(unsigned n=0;n<count;++n){
         if(infos[n].pNext||infos[n].flags||infos[n].commandBufferInfoCount>512||(!infos[n].pCommandBufferInfos&&infos[n].commandBufferInfoCount)||used+infos[n].commandBufferInfoCount*2>commands.size()){supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBufferInfos=commands.data()+used;submits[n+1].commandBufferInfoCount=0;
         for(unsigned k=0;k<infos[n].commandBufferInfoCount;++k){const auto& cb=infos[n].pCommandBufferInfos[k];
-            if(p.collect(cb.commandBuffer)){auto* command=find(p.commands,handle(cb.commandBuffer));if(command&&command->control){commands[used++]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,command->control->one,1};++submits[n+1].commandBufferInfoCount;}}
+            if(p.collect(cb.commandBuffer)){auto* command=find(p.commands,handle(cb.commandBuffer));if(command&&command->control){commands[used++]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,command->control->one,1};++submits[n+1].commandBufferInfoCount;++guards;}}
             commands[used++]=cb;++submits[n+1].commandBufferInfoCount;
         }
     }
     if(!supported){
+        ++p.counts.opaqueSubmits;
         // Only original CBs follow zero. Their recording references retain
         // immutable storage; do not invent a failed in-flight lease reservation
         // that would permanently quarantine every future coverage slot.
@@ -411,10 +476,15 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
         }
         return VK_SUCCESS;
     }
-    if(!p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount)){
+    p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
+    const bool reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
+    if(!reserved){
         for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one)commands[n].commandBuffer=p.zero;
     }
     const auto result=forward(queue,count+1,submits.data(),fence);
+    if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);
+    else p.counts.guardRefused.fetch_add(guards,std::memory_order_relaxed);
+    if(!guards||!reserved)++p.counts.opaqueSubmits;
     p.pool.submitted(queue,p.submittedLeases.data(),p.submittedCount,result);p.submittedCount=0;return result;
 }
 void Renderer::stopCold() noexcept{
