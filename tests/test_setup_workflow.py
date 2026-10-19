@@ -661,7 +661,7 @@ class Files(fixtures.Tests):
             return cache(*args)
         with mock.patch.object(s,'remember_frame',side_effect=lost_final_reply):
             self.assertTrue(flow.Workflow(ports,ui).finish_confirmed(restored=False))
-        self.assertEqual(commands,['bridge-runtime-restored','bridge-checkpoint-finish']*2)
+        self.assertEqual(commands,['bridge-finalize-inactive','bridge-runtime-restored','bridge-checkpoint-finish']*2)
         self.assertEqual(len(remembered),2)
         self.assertEqual(system.actions,original_actions)
         self.assertEqual(adapter.launches,0);self.assertEqual(adapter.graceful_calls,[])
