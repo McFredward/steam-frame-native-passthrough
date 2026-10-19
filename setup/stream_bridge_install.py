@@ -387,6 +387,16 @@ class LocalInstall:
         return runtime_snapshot(self.e,bundle.pc['runtime_files'],{'steamvr':Path(pc['steamvr']) if pc.get('steamvr') else Path('/sfnp-missing')},
             side='pc',versions=pc.get('runtime_versions') or self.e.runtime_versions(pc.get('steamvr')))
 
+    def payload_status(self,bundle,state):
+        matches=state is not None and state['files']=={name:bundle.value['files'][name] for name in PC_FILES}
+        intact=state is not None
+        if intact:
+            try:
+                intact=all(len(raw:=self.e.read(self.local.root/name,pin['bytes']))==pin['bytes'] and
+                    self.e.sha(raw)==pin['sha256'] for name,pin in state['files'].items())
+            except (OSError,ValueError):intact=False
+        return {'patch_payload_current':matches,'owned_files_current':intact}
+
     def registration(self,pc,registered,pin):
         """Public registration CLI only; observed identity grants no private ABI."""
         tool=self.registration_tool(pc,pin)
@@ -963,14 +973,28 @@ class FrameInstall:
     def inventory(self,bundle):
         state=self.tx.state();snapshot=self.snapshot(bundle);compatible=all(item['matches'] for item in snapshot.values())
         admitted=native_admitted('frame',snapshot)
-        current=state is not None and state['bundle']==bundle.pin and state['phase']=='installed'
-        if current:
-            try:current=all(self.tx.current(Path(o['path']))==o['after'] for o in state['operations'])
-            except (OSError,ValueError):current=False
+        intact=state is not None and state['phase']=='installed'
+        if intact:
+            try:intact=all(self.tx.current(Path(o['path']))==o['after'] for o in state['operations'])
+            except (OSError,ValueError):intact=False
+        current=intact and state['bundle']==bundle.pin
+        # Helpers can change with the installer without changing either native
+        # library or the locally derived shader. Keep the full receipt checks
+        # above separate from this target-payload identity comparison.
+        patch_current=state is not None
+        if state:
+            operations={op['path']:op['after'] for op in state['operations']}
+            pins={name:bundle.value['files']['frame/'+name] for name in (LIBRARY,'libsfnp_stream_launch.so')}
+            if state.get('activation_mode','active')=='active':pins.update(bundle.frame['generated'])
+            for name,pin in pins.items():
+                value=operations.get(str(self.root/name))
+                raw=base64.b64decode(value['bytes'],validate=True) if value and value['kind']=='file' else b''
+                patch_current=patch_current and len(raw)==pin['bytes'] and self.e.sha(raw)==pin['sha256']
         return {**version_status(state,bundle.frame),**activation_status(admitted,state),'runtime_snapshot':snapshot,
                 'architecture':self.machine(),'runtime_compatible':compatible,
                 'runtime_versions':self.e.runtime_versions(self.steamvr),
                 'installed':state is not None,'files_current':current,
+                'patch_payload_current':patch_current,'owned_files_current':intact,
                 'recovery_pending':(self.root/'setup-restore.json').exists() or (self.root/'lifecycle.json').exists(),
                 'legacy_installed':(self.home/'.config/SteamFrameNativePassthrough/install.json').exists(),
                 'recovery_path':str(self.root/'setup-restore.json'),
@@ -2236,9 +2260,11 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if log:log.event('preflight','result',status='ok',versions=versions)
     pc_snapshot=installed.snapshot(bundle,pc);pc_admitted=pc_snapshot['vrlink']['matches']
     report={'schema':SCHEMA,'bridge_available':available,'automatic_restart':False,'version_update_blocked':downgrade,
-            'version':bundle.value.get('version'),'target_versions':{k:v['target_version'] for k,v in versions.items()},
+            'version':bundle.value.get('version'),'installer_version':bundle.value.get('version'),
+            'target_versions':{k:v['target_version'] for k,v in versions.items()},
             'pc':{'compatible':installed.check(bundle,pc),'runtime_versions':pc.get('runtime_versions'),
-                  'runtime_snapshot':pc_snapshot,**activation_status(pc_admitted,state),**pc_versions},'frame':frame}
+                  'runtime_snapshot':pc_snapshot,**activation_status(pc_admitted,state),
+                  **installed.payload_status(bundle,state),**pc_versions},'frame':frame}
     if args.check or args.dry_run:
         print(json.dumps(report,sort_keys=True));return 0
     def display_inventory(current_pc,current_frame):
@@ -2252,7 +2278,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
                          ('installed','installed_version','legacy_installed','runtime_compatible','runtime_versions','enabled','recovery_pending',
                           'runtime_admitted','activation_mode','admission_reason')}|{
                          'host':str(address),'target_version':bundle.frame.get('version')},
-                     report={'bridge_available':available,'automatic_restart':False})
+                     report={'bridge_available':available,'automatic_restart':False,'installer_version':bundle.value.get('version')})
     def refresh_inventory():
         # Presentation after a committed operation cannot turn a successful
         # installation into rollback. A lost read-only refresh leaves an honest
@@ -2274,11 +2300,16 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     if frame is not None and (pending or state or frame.get('installed') or frame.get('legacy_installed')):actions.insert(0,'uninstall')
     frame_snapshot=frame.get('runtime_snapshot',{}) if frame is not None else {}
     frame_present=frame_snapshot and all(frame_snapshot.get(role,{}).get('format_valid') for role in ('vrlink','compositor','fragment'))
+    components_current=all(v['installed'] and v['target_version'] is not None and
+        v['installed_version']==v['target_version'] for v in versions.values()) and report['pc']['patch_payload_current'] and frame is not None and frame.get('patch_payload_current') is True
     if available and not downgrade and frame is not None and pc_snapshot['vrlink']['format_valid'] and (frame_present or frame.get('runtime_compatible')):
         if state is None:actions.insert(0,'install')
-        elif state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
+        elif components_current or state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
         else:actions.insert(0,'update')
     recommended='install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'rollback' if pending else 'check'
+    if components_current and not pending and report['pc']['owned_files_current'] and frame.get('owned_files_current') is True and bool(pc.get('registered'))==(report['pc']['activation_mode']=='active') and all(
+            item['runtime_admitted']==(item['activation_mode']=='active') for item in (report['pc'],frame)):
+        recommended='check'
     resumed=context.pop('confirmed_apply',None)
     if resumed is not None:
         e.require(type(resumed)is dict and set(resumed)=={'bundle','intent'} and resumed['bundle']==bundle.pin and

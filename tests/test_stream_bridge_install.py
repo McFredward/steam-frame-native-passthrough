@@ -272,16 +272,16 @@ class Tests(unittest.TestCase):
         import types,contextlib
         owner=self
         class UI:
-            messages=[];questions=[];warnings=[]
+            messages=[];questions=[];warnings=[];choices=[];inventories=[]
             def banner(inner,**kw):pass
             def status(inner,*a):pass
             def path(inner,*a,**kw):pass
             def say(inner,key):inner.messages.append(key)
-            def inventory(inner,**kw):pass
+            def inventory(inner,**kw):inner.inventories.append(kw)
             def version_plan(inner,**kw):pass
             def suspend(inner):return contextlib.nullcontext()
             def untested_runtime(inner,**kw):inner.warnings.append(kw)
-            def choose_action(inner,*a,**kw):return 'exit'
+            def choose_action(inner,*a,**kw):inner.choices.append((a[0],kw));return 'exit'
             def confirm(inner,key):
                 inner.questions.append(key)
                 if key=='bridge_untested_confirm':
@@ -591,6 +591,64 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.unit.inventory(self.bundle)['target_version'],'0.2.1')
         self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
 
+    def install_component_fixture(self,pc='0.2.11',frame='0.2.11'):
+        # Match the fake shader boundary's public output pin, without claiming
+        # to exercise the separate native shader derivation suite.
+        patch=mock.patch.dict(b.GENERATED,{'coverage.spv':{'bytes':len(b'fixture coverage'),'sha256':s.sha(b'fixture coverage')}})
+        patch.start();self.addCleanup(patch.stop)
+        self.version_bundle(pc,frame)
+        installer=b.LocalInstall(s,self.local);installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631)
+        self.unit.tx.commit();return installer
+
+    def test_installer_only_and_helper_changes_recommend_check_with_optional_repair(self):
+        self.install_component_fixture();old=self.bundle.pin
+        self.manifest['version']='0.2.12'
+        s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'));self.bundle=b.Bundle(self.bundle_root,s)
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'check')
+        self.assertEqual(ui.inventories[0]['report']['installer_version'],'0.2.12')
+        name='frame/tools/compositor_startup_health.py';raw=s.read(self.bundle_root/name)+b'# installer-only helper revision\n'
+        s.put(self.bundle_root/name,raw,s.read(self.bundle_root/name));self.manifest['files'][name]={'bytes':len(raw),'sha256':s.sha(raw)}
+        s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'));self.bundle=b.Bundle(self.bundle_root,s)
+        self.assertNotEqual(self.bundle.pin,old);self.assertFalse(self.unit.inventory(self.bundle)['files_current'])
+        result,ui=self.wizard(action=None);self.assertEqual(result,0)
+        actions,options=ui.choices[0];self.assertEqual(options['recommended'],'check');self.assertIn('repair',actions);self.assertNotIn('update',actions)
+        self.assertEqual(ui.questions,[])
+
+    def test_same_component_version_changed_frame_native_or_shader_payload_is_update(self):
+        self.install_component_fixture();name='frame/'+b.LIBRARY;original=s.read(self.bundle_root/name)
+        changed=original+b'new native payload';s.put(self.bundle_root/name,changed,original)
+        self.manifest['files'][name]={'bytes':len(changed),'sha256':s.sha(changed)};self.version_bundle('0.2.11','0.2.11')
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'update')
+        s.put(self.bundle_root/name,original,changed);self.manifest['files'][name]={'bytes':len(original),'sha256':s.sha(original)}
+        b.GENERATED['coverage.spv']={'bytes':len(b'new shader output'),'sha256':s.sha(b'new shader output')};self.version_bundle('0.2.11','0.2.11')
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'update')
+
+    def test_current_components_recommend_check_and_missing_registration_recommends_repair(self):
+        self.install_component_fixture();result,ui=self.wizard(action=None)
+        self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'check')
+        paths=s.parse(s.read(self.local.registry));paths['external_drivers']=[];s.put(self.local.registry,s.encoded(paths),s.read(self.local.registry))
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'repair')
+
+    def test_one_older_component_still_recommends_update(self):
+        self.install_component_fixture(pc='0.2.10');self.version_bundle('0.2.11','0.2.11')
+        result,ui=self.wizard(action=None);self.assertEqual(result,0)
+        self.assertEqual(ui.choices[0][1]['recommended'],'update');self.assertIn('update',ui.choices[0][0])
+
+    def test_missing_and_changed_owned_native_payload_remain_repair_with_exact_guards(self):
+        installer=self.install_component_fixture();path=self.local.root/'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll';original=path.read_bytes();path.unlink()
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'repair')
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        self.assertEqual(path.read_bytes(),original);path.write_bytes(b'foreign native change')
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'repair')
+        with self.assertRaisesRegex(s.SetupError,'Changed provider'):installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        path.write_bytes(original);frame=self.froot/b.LIBRARY;raw=frame.read_bytes();frame.unlink()
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'repair')
+        self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True);self.assertEqual(frame.read_bytes(),raw)
+        frame.write_bytes(b'foreign frame change')
+        result,ui=self.wizard(action=None);self.assertEqual(result,0);self.assertEqual(ui.choices[0][1]['recommended'],'repair')
+        with self.assertRaisesRegex(s.SetupError,'Changed Frame'):self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+
     def test_version_update_migrates_legacy_receipts_and_exact_undo_retains_missing_version(self):
         installed=b.LocalInstall(s,self.local)
         installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
@@ -712,6 +770,7 @@ class Tests(unittest.TestCase):
         self.assertFalse(report['frame']['installed']);self.assertIsNone(report['frame']['installed_version'])
         self.assertEqual(report['pc']['target_version'],'0.2.0');self.assertEqual(report['frame']['target_version'],'0.2.1')
         self.assertEqual(report['target_versions'],{'pc':'0.2.0','frame':'0.2.1'})
+        self.assertEqual(report['installer_version'],'0.2.0')
         self.assertEqual(before,{str(p):p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
 
     def test_version_newer_frame_does_not_offer_an_update_or_repair(self):
