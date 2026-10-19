@@ -1,4 +1,5 @@
 #include "pc/stream-bridge-sender-provider-runtime.h"
+#include "pc/stream-bridge-sender-provider-core.h"
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>

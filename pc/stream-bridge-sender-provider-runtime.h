@@ -1,5 +1,5 @@
 #pragma once
-#include "stream-bridge-sender-provider-core.h"
+#include "stream-bridge-sender-backend.h"
 #include "bridge/stream_bridge_control.h"
 namespace stream_bridge::sender {
 enum class RuntimeState {Off,WaitingEncoder,AmbiguousEncoder,Preparing,WaitingPeer,Negotiating,Confirmed,ProbeObserved,Failed};
@@ -19,8 +19,10 @@ struct RuntimeFailureSnapshot {
 class SenderRuntime {
 public:
     using Clock=std::uint64_t(*)(void*);
-    explicit SenderRuntime(NvencBoundary& boundary,Clock clock=nullptr,void* context=nullptr)
+    explicit SenderRuntime(SenderBackend boundary,Clock clock=nullptr,void* context=nullptr)
         :boundary_(boundary),clock_(clock),clockContext_(context){}
+    template<class Boundary> explicit SenderRuntime(Boundary& boundary,Clock clock=nullptr,void* context=nullptr)
+        :SenderRuntime(SenderBackend::bind(boundary),clock,context){}
     void configure(const ControlRequest&); // Cold owner, before starting worker.
     void tick(); // Existing provider worker; nonblocking, no render callbacks.
     void stop();
@@ -31,7 +33,7 @@ public:
     RuntimeFailureSnapshot lastFailure()const{return failure_;}
     ControlRuntime& control(){return control_;}
 private:
-    NvencBoundary& boundary_;ControlRuntime control_{};ControlRequest request_{};
+    SenderBackend boundary_;ControlRuntime control_{};ControlRequest request_{};
     EncoderState encoder_{};RuntimeState state_=RuntimeState::Off;
     RuntimeFailureSnapshot failure_{};
     void fail(RuntimeFailure,Status=Status::Ok,bool hasProtocolStatus=false);
