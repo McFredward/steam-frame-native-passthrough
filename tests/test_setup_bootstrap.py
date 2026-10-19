@@ -26,9 +26,16 @@ POWERSHELL = None
 OUT = None
 
 
-def contents():
+def legacy_contents():
     return {'steam-link-bundle.json': json.dumps({'schema': 'sfnp-steam-link-setup-v1', 'readiness': 'release'}).encode(),
             'setup/steam_link_setup.py': b'# Non-executable fixture content.\n',
+            'setup/runtime/python/python.exe': b'FIXTURE ONLY: NOT A REAL EXECUTABLE\n'}
+
+
+def contents():
+    return {'stream-bridge-bundle.json': json.dumps({'schema':'sfnp-stream-bridge-bundle-v1', 'readiness':'release'}).encode(),
+            'setup/stream_bridge_install.py': b'# Non-executable paired installer fixture.\n',
+            'setup/steam_link_setup.py': b'# Non-executable paired setup fixture.\n',
             'setup/runtime/python/python.exe': b'FIXTURE ONLY: NOT A REAL EXECUTABLE\n'}
 
 
@@ -46,9 +53,9 @@ def manager_contents():
     return files
 
 
-def archive(files=None, *, mutate=None, extra=None, inspection=False, maintenance=False):
-    files = (manager_contents() if maintenance else inspection_contents() if inspection else contents()) if files is None else files
-    manifest = {'schema': 'sfnp-bootstrap-manager-v1' if maintenance else 'sfnp-bootstrap-inspection-v1' if inspection else 'sfnp-bootstrap-package-v1',
+def archive(files=None, *, mutate=None, extra=None, inspection=False, maintenance=False, legacy=False):
+    files = (manager_contents() if maintenance else inspection_contents() if inspection else legacy_contents() if legacy else contents()) if files is None else files
+    manifest = {'schema': 'sfnp-bootstrap-manager-v1' if maintenance else 'sfnp-bootstrap-inspection-v1' if inspection else 'sfnp-bootstrap-package-v1' if legacy else 'sfnp-bootstrap-stream-bridge-v1',
                 'readiness': 'maintenance' if maintenance else 'inspection-only' if inspection else 'release',
                 'windows_python': 'setup/runtime/python/python.exe',
                 'files': {name: {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()} for name, raw in files.items()}}
@@ -103,8 +110,9 @@ class BootstrapTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def release(self, inspection=False, maintenance=False, bridge_preview=False):
+        bridge_preview = not inspection and not maintenance
         tag = bootstrap.BRIDGE_TAG if bridge_preview else bootstrap.MANAGER_TAG if maintenance else bootstrap.INSPECTION_TAG if inspection else 'v1.0.0'
-        asset_name = bootstrap.BRIDGE_ASSET if bridge_preview else bootstrap.MANAGER_ASSET if maintenance else bootstrap.INSPECTION_ASSET if inspection else bootstrap.ASSET
+        asset_name = bootstrap.BRIDGE_ASSET if bridge_preview else bootstrap.MANAGER_ASSET if maintenance else bootstrap.INSPECTION_ASSET if inspection else bootstrap.BRIDGE_ASSET
         return {'draft': False, 'prerelease': inspection or maintenance or bridge_preview, 'tag_name': tag,
                 'assets': [{'name': asset_name, 'state': 'uploaded', 'size': 512,
                             'digest': 'sha256:' + 'a' * 64,
@@ -118,6 +126,18 @@ class BootstrapTests(unittest.TestCase):
 
     def test_exact_public_asset(self):
         self.assertEqual(bootstrap.select_asset(self.release())['size'], 512)
+
+    def test_default_rejects_retired_frame_only_asset_and_archive(self):
+        retired = self.release()
+        retired.update(prerelease=False, tag_name='v1.0.0')
+        retired['assets'][0]['name'] = 'steam-link-native-passthrough-setup.zip'
+        with self.assertRaises(ValueError): bootstrap.select_asset(retired)
+        for explicit in (False,True):
+            with tempfile.TemporaryDirectory(dir=self.path) as temporary:
+                target=Path(temporary)/'target';target.mkdir()
+                zipped=Path(temporary)/'old.zip';zipped.write_bytes(archive(legacy=True))
+                with self.assertRaises(ValueError): bootstrap.extract(zipped,target,bridge_preview=explicit)
+                self.assertEqual(list(target.iterdir()),[])
 
     def test_preview_wrappers_pin_reviewed_core_and_select_manager(self):
         for name, source, flag in [('get-preview.ps1', 'get.ps1', '-BridgePreview'),
@@ -137,7 +157,7 @@ class BootstrapTests(unittest.TestCase):
         for field, value in [('draft', True), ('prerelease', False), ('tag_name', 'another-inspection')]:
             candidate = self.release(True); candidate[field] = value
             with self.subTest(field=field), self.assertRaises(ValueError): bootstrap.select_asset(candidate, True)
-        candidate = self.release(True); candidate['assets'][0]['name'] = bootstrap.ASSET
+        candidate = self.release(True); candidate['assets'][0]['name'] = bootstrap.BRIDGE_ASSET
         with self.assertRaises(ValueError): bootstrap.select_asset(candidate, True)
 
     def test_inspection_archive_has_no_installation_payload(self):
@@ -190,7 +210,7 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.extract(archive(files, inspection=True), True)
 
     def test_only_explicit_inspection_argument(self):
-        self.assertFalse(bootstrap.arguments([])); self.assertIs(bootstrap.arguments(['--inspect']), True)
+        self.assertEqual(bootstrap.arguments([]), 'bridge-preview'); self.assertIs(bootstrap.arguments(['--inspect']), True)
         self.assertEqual(bootstrap.arguments(['--manage']), 'manage')
         self.assertEqual(bootstrap.arguments(['--bridge-preview']), 'bridge-preview')
         for args in (['--apply'], ['--inspect', '--apply'], ['--inspect', '--inspect'], ['--inspection'], ['--inspect','--manage'], ['--manage','--action','uninstall'],
@@ -199,7 +219,7 @@ class BootstrapTests(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ValueError): bootstrap.arguments(args)
 
     def test_incomplete_or_unexpected_release_refused(self):
-        for field, value in [('draft', True), ('prerelease', True), ('tag_name', '../main'), ('assets', [])]:
+        for field, value in [('draft', True), ('prerelease', False), ('tag_name', '../main'), ('assets', [])]:
             with self.subTest(field=field):
                 release = self.release(); release[field] = value
                 with self.assertRaises(ValueError): bootstrap.select_asset(release)
@@ -219,7 +239,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(list((self.path / 'package').rglob('*')), [])
 
     def test_inner_prototype_bundle_never_runs(self):
-        files = contents(); files['steam-link-bundle.json'] = b'{"schema":"sfnp-steam-link-setup-v1","readiness":"prototype"}'
+        files = contents(); files['stream-bridge-bundle.json'] = b'{"schema":"sfnp-stream-bridge-bundle-v1","readiness":"prototype"}'
         with self.assertRaises(ValueError): self.extract(archive(files))
 
     def test_hash_mismatch_refused(self):
@@ -256,10 +276,10 @@ class BootstrapTests(unittest.TestCase):
     def test_duplicate_manifest_keys_rejected(self):
         with self.assertRaises(ValueError): bootstrap.parse(b'{"readiness":"prototype","readiness":"release"}')
 
-    def test_actual_release_assembler_matches_bootstrap(self):
-        files = contents(); files.update({'patch-steam-link.cmd': b'fixture cmd', 'patch-steam-link.sh': b'fixture bash'})
-        target = self.extract(packaging.assemble(files))
-        for name, raw in files.items(): self.assertEqual((target / name).read_bytes(), raw)
+    def test_retired_release_assembler_is_never_installable(self):
+        files = legacy_contents(); files.update({'patch-steam-link.cmd': b'fixture cmd', 'patch-steam-link.sh': b'fixture bash'})
+        with self.assertRaises(ValueError): self.extract(packaging.assemble(files))
+        self.assertEqual(list((self.path/'package').iterdir()), [])
 
     def test_portable_python_pin_license_and_no_automatic_download(self):
         def runtime(files):
@@ -288,11 +308,11 @@ class BootstrapTests(unittest.TestCase):
             'import sys,json,pathlib\n'
             f'pathlib.Path({str(report)!r}).write_text(json.dumps({{"tty":sys.stdin.isatty(),"args":sys.argv[1:]}}))\n'
             'assert sys.stdin.isatty()\n').encode()
-        raw = (repack(bridge_archive(), {'setup/steam_link_setup.py': files['setup/steam_link_setup.py']}) if bridge_preview else
+        raw = (repack(bridge_archive(), {'setup/steam_link_setup.py': files['setup/steam_link_setup.py']}) if not inspection and not maintenance else
                archive(files, inspection=inspection, maintenance=maintenance))
         release = self.release(inspection, maintenance, bridge_preview)
         release['assets'][0].update(size=len(raw), digest='sha256:' + hashlib.sha256(raw).hexdigest())
-        endpoint = '/releases/tags/' + bootstrap.BRIDGE_TAG if bridge_preview else '/releases/tags/' + bootstrap.MANAGER_TAG if maintenance else '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/latest'
+        endpoint = '/releases/tags/' + bootstrap.BRIDGE_TAG if bridge_preview else '/releases/tags/' + bootstrap.MANAGER_TAG if maintenance else '/releases/tags/' + bootstrap.INSPECTION_TAG if inspection else '/releases/tags/' + bootstrap.BRIDGE_TAG
         api_url = 'https://api.github.com/repos/' + bootstrap.REPO + endpoint
         asset_url = release['assets'][0]['browser_download_url']
         # Only network I/O is replaced. Execute the actual Bash argv/heredoc,
@@ -369,10 +389,10 @@ class BootstrapTests(unittest.TestCase):
             candidate = self.release(bridge_preview=True); candidate[field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
                 bootstrap.select_asset(candidate, bridge_preview=True)
-        for flags in ((False, False, False), (True, False, False), (False, True, False),
+        for flags in ((True, False, False), (False, True, False),
                       (True, False, True), (False, True, True)):
             with self.subTest(flags=flags), self.assertRaises(ValueError): bootstrap.select_asset(release, *flags)
-        for candidate in (self.release(), self.release(True), self.release(maintenance=True)):
+        for candidate in (self.release(True), self.release(maintenance=True)):
             with self.subTest(candidate=candidate['tag_name']), self.assertRaises(ValueError):
                 bootstrap.select_asset(candidate, bridge_preview=True)
 
@@ -393,9 +413,9 @@ class BootstrapTests(unittest.TestCase):
 
     def test_bridge_modes_cannot_be_interchanged(self):
         raw = bridge_archive()
-        cases = [(raw, flags) for flags in ((False,False,False),(True,False,False),(False,True,False),
+        cases = [(raw, flags) for flags in ((True,False,False),(False,True,False),
                                            (True,False,True),(False,True,True))]
-        cases += [(archive(inspection=i, maintenance=m), (False,False,True))
+        cases += [(archive(inspection=i, maintenance=m, legacy=not i and not m), (False,False,True))
                   for i,m in ((False,False),(True,False),(False,True))]
         for index, (value, flags) in enumerate(cases):
             with self.subTest(index=index), tempfile.TemporaryDirectory(dir=self.path) as temporary:
@@ -422,10 +442,10 @@ class BootstrapTests(unittest.TestCase):
 
     def test_bridge_preview_keeps_hash_and_mixed_package_refusals(self):
         raw = bridge_archive()
-        legacy = contents()['steam-link-bundle.json']
+        legacy = legacy_contents()['steam-link-bundle.json']
         cases = [(repack(raw, {'steam-link-bundle.json':legacy}), (False,False,True))]
-        files = contents(); files['stream-bridge-bundle.json'] = b'{"schema":"sfnp-stream-bridge-bundle-v1","readiness":"release"}'
-        cases.append((archive(files), (False,False,False)))
+        files = legacy_contents(); files['stream-bridge-bundle.json'] = b'{"schema":"sfnp-stream-bridge-bundle-v1","readiness":"release"}'
+        cases.append((archive(files,legacy=True), (False,False,False)))
         # Same length but wrong bytes, with the original reviewed file pin.
         with zipfile.ZipFile(io.BytesIO(raw)) as package:
             values = {name:package.read(name) for name in package.namelist()}
@@ -446,6 +466,7 @@ class BootstrapTests(unittest.TestCase):
     def test_actual_powershell_archive_functions(self):
         if not POWERSHELL: self.skipTest('Pass --pwsh to run actual PowerShell parser/extraction functions')
         valid = self.path / 'valid.zip'; valid.write_bytes(archive())
+        legacy = self.path / 'legacy.zip'; legacy.write_bytes(archive(legacy=True))
         bad = self.path / 'bad.zip'; bad.write_bytes(archive(mutate=lambda v: v.update(readiness='prototype')))
         inspection = self.path / 'inspection.zip'
         inspection_files=inspection_contents()
@@ -466,7 +487,7 @@ class BootstrapTests(unittest.TestCase):
         bridge_inner.write_bytes(repack(bridge.read_bytes(), {'stream-bridge-bundle.json':json.dumps(inner).encode()}))
         report = self.path / 'ps-result.json'
         script = self.path / 'check.ps1'
-        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload, $Manager, $ManagerPayload, $Bridge, $BridgePrototype, $BridgeInner)
+        script.write_text(r'''param($Source, $Valid, $Bad, $Output, $Report, $Inspection, $Payload, $Manager, $ManagerPayload, $Bridge, $BridgePrototype, $BridgeInner, $Legacy)
 $ErrorActionPreference='Stop'
 $tokens=$null; $parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$parseErrors)
@@ -499,9 +520,9 @@ foreach ($case in @(@($Manager,$false,$false),@($Manager,$true,$false),@($Valid,
 $bridgeTarget=Join-Path $Output 'ps-bridge';[void][IO.Directory]::CreateDirectory($bridgeTarget)
 $bridgeRuntime=Expand-SfnpPackage $Bridge $bridgeTarget $false $false $true
 if ($bridgeRuntime -ne 'setup/runtime/python/python.exe' -or -not (Test-Path (Join-Path $bridgeTarget 'setup/stream_bridge_install.py'))) { throw 'Bridge did not verify.' }
-foreach ($case in @(@($Bridge,$false,$false,$false),@($Bridge,$true,$false,$false),@($Bridge,$false,$true,$false),
+foreach ($case in @(@($Legacy,$false,$false,$false),@($Bridge,$true,$false,$false),@($Bridge,$false,$true,$false),
                     @($Bridge,$true,$false,$true),@($Bridge,$false,$true,$true),
-                    @($Valid,$false,$false,$true),@($Inspection,$false,$false,$true),@($Manager,$false,$false,$true),
+                    @($Legacy,$false,$false,$true),@($Inspection,$false,$false,$true),@($Manager,$false,$false,$true),
                     @($BridgePrototype,$false,$false,$true),@($BridgeInner,$false,$false,$true))) {
  $caseTarget=Join-Path $Output ([Guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($caseTarget)
  $blocked=$false;try { Expand-SfnpPackage $case[0] $caseTarget $case[1] $case[2] $case[3] | Out-Null } catch { $blocked=$true }
@@ -515,7 +536,7 @@ foreach ($name in $unsafe) {
 @{parsed=$true;exact_runtime=$runtime;prototype_refused=$true;unsafe_paths=$unsafe.Count;inspection_verified=$true;inspection_native_payload_refused=$true;bridge_verified=$true;bridge_prototypes_refused=$true;bridge_scope_separated=$true;scope='ActualPowerShellFunctions_NoNetwork_NoWindowsACL_NoDevice'} | ConvertTo-Json | Set-Content $Report
 ''')
         result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script),
-                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload), str(manager), str(manager_payload), str(bridge), str(bridge_prototype), str(bridge_inner)],
+                                 str(ROOT / 'get.ps1'), str(valid), str(bad), str(self.path), str(report), str(inspection), str(payload), str(manager), str(manager_payload), str(bridge), str(bridge_prototype), str(bridge_inner), str(legacy)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
         self.assertEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
         data = json.loads(report.read_text(encoding='utf-8-sig'))

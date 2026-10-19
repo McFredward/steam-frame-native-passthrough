@@ -7,8 +7,8 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
     $sfnpStage = $null
     $sfnpTls = [Net.ServicePointManager]::SecurityProtocol
     $sfnpRepo = 'McFredward/steam-link-native-passthrough'
-    $sfnpAsset = 'steam-link-native-passthrough-setup.zip'
-    $sfnpEndpoint = '/releases/latest'
+    $sfnpAsset = 'steam-link-native-passthrough-bridge-preview.zip'
+    $sfnpEndpoint = '/releases/tags/stream-bridge-preview-v1'
     if ($sfnpInspection) {
         $sfnpAsset = 'steam-link-native-passthrough-inspection.zip'
         $sfnpEndpoint = '/releases/tags/setup-inspection-v2'
@@ -113,6 +113,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
     }
     function Expand-SfnpPackage([string] $Archive, [string] $Target, [bool] $InspectionOnly = $false, [bool] $Maintenance = $false, [bool] $BridgePreview = $false) {
         Require-Sfnp (([int] $InspectionOnly + [int] $Maintenance + [int] $BridgePreview) -le 1) 'Choose one setup mode.'
+        $BridgePreview = -not ($InspectionOnly -or $Maintenance)
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $package = [IO.Compression.ZipFile]::OpenRead($Archive)
         try {
@@ -138,7 +139,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
             $rawManifest = Read-SfnpEntry $files['bootstrap-package.json'] 1048576
             $manifest = [Text.Encoding]::UTF8.GetString($rawManifest) | ConvertFrom-Json
             $keys = @($manifest.PSObject.Properties.Name | Sort-Object)
-            $schema = 'sfnp-bootstrap-package-v1'; $readiness = 'release'; $profileName = 'steam-link-bundle.json'
+            $schema = 'sfnp-bootstrap-stream-bridge-v1'; $readiness = 'release'; $profileName = 'stream-bridge-bundle.json'
             if ($InspectionOnly) { $schema = 'sfnp-bootstrap-inspection-v1'; $readiness = 'inspection-only'; $profileName = 'setup-inspection.json' }
             if ($Maintenance) { $schema = 'sfnp-bootstrap-manager-v1'; $readiness = 'maintenance'; $profileName = 'setup-maintenance.json' }
             if ($BridgePreview) { $schema = 'sfnp-bootstrap-stream-bridge-v1'; $profileName = 'stream-bridge-bundle.json' }
@@ -158,8 +159,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
                     Require-Sfnp (Test-SfnpManagerFile $property.Name) 'Manager package contains an installation payload.'
                 }
             }
-            Require-Sfnp ($BridgePreview -or -not $files.ContainsKey('stream-bridge-bundle.json')) 'Stream bridge packages require -BridgePreview.'
-            Require-Sfnp (-not $BridgePreview -or -not $files.ContainsKey('steam-link-bundle.json')) 'Bridge preview cannot contain a legacy setup bundle.'
+            Require-Sfnp (-not $BridgePreview -or -not $files.ContainsKey('steam-link-bundle.json')) 'Retired Frame-only setup bundles cannot be installed.'
             Require-Sfnp (-not $BridgePreview -or $files.ContainsKey('setup/stream_bridge_install.py')) 'Stream bridge installer missing.'
             if ($BridgePreview) {
                 $rawBundle = Read-SfnpEntry $files['stream-bridge-bundle.json'] 33554432
@@ -187,8 +187,7 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
                     ((@($profile.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'expected_pc,runtime_files,schema')) 'Invalid inspection profile.'
             } else {
                 $bundle = [IO.File]::ReadAllText((Join-Path $Target $profileName)) | ConvertFrom-Json
-                $bundleSchema = 'sfnp-steam-link-setup-v1'
-                if ($BridgePreview) { $bundleSchema = 'sfnp-stream-bridge-bundle-v1' }
+                $bundleSchema = 'sfnp-stream-bridge-bundle-v1'
                 Require-Sfnp ($bundle.schema -eq $bundleSchema -and $bundle.readiness -eq 'release') 'Only complete release bundles may start setup.'
             }
             Require-Sfnp ($manifest.windows_python -is [string] -and
@@ -200,6 +199,8 @@ param([switch] $InspectionOnly, [switch] $Manage, [switch] $BridgePreview)
 
     try {
         Require-Sfnp (([int] $sfnpInspection + [int] $sfnpManage + [int] $sfnpBridgePreview) -le 1) 'Choose only -InspectionOnly, -Manage or -BridgePreview.'
+        # Default and explicit preview select only the paired sender/receiver.
+        $sfnpBridgePreview = -not ($sfnpInspection -or $sfnpManage)
         Require-Sfnp ($env:OS -eq 'Windows_NT') 'Use the Bash setup command on Linux.'
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         if ($sfnpBridgePreview) { Write-Host 'Steam Link Native Passthrough - downloading the paired bridge preview setup...' }

@@ -51,7 +51,6 @@ import urllib.request
 import zipfile
 
 REPO = 'McFredward/steam-link-native-passthrough'
-ASSET = 'steam-link-native-passthrough-setup.zip'
 INSPECTION_TAG = 'setup-inspection-v2'
 INSPECTION_ASSET = 'steam-link-native-passthrough-inspection.zip'
 MANAGER_TAG = 'setup-manager-v1'
@@ -110,13 +109,15 @@ def download(url, limit):
 
 def select_asset(release, inspection=False, maintenance=False, bridge_preview=False):
     require(sum(map(bool, (inspection, maintenance, bridge_preview))) <= 1, 'Choose one setup mode.')
-    preview = inspection or maintenance or bridge_preview
+    # Ordinary and explicit preview invocations install the same paired route.
+    bridge_preview = not inspection and not maintenance
+    preview = True
     require(type(release) is dict and release.get('draft') is False and
             release.get('prerelease') is preview,
             'No matching bridge preview release is available.' if bridge_preview else
             'No matching public inspection release is available.' if inspection else
-            'No public stable setup release is available.')
-    asset_name = BRIDGE_ASSET if bridge_preview else MANAGER_ASSET if maintenance else INSPECTION_ASSET if inspection else ASSET
+            'No matching check/removal release is available.')
+    asset_name = BRIDGE_ASSET if bridge_preview else MANAGER_ASSET if maintenance else INSPECTION_ASSET
     tag = release.get('tag_name')
     require(type(tag) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,63}', tag), 'Unknown release tag.')
     require(not inspection or tag == INSPECTION_TAG, 'Unexpected inspection release tag.')
@@ -145,7 +146,7 @@ def inspection_file(name):
 def arguments(args):
     require(args in ([], ['--inspect'], ['--manage'], ['--bridge-preview']),
             'Choose only --inspect, --manage or --bridge-preview.')
-    return 'bridge-preview' if args == ['--bridge-preview'] else 'manage' if args == ['--manage'] else args == ['--inspect']
+    return True if args == ['--inspect'] else 'manage' if args == ['--manage'] else 'bridge-preview'
 
 
 def manager_file(name):
@@ -154,6 +155,7 @@ def manager_file(name):
 
 def extract(archive, target, inspection=False, maintenance=False, bridge_preview=False):
     require(sum(map(bool, (inspection, maintenance, bridge_preview))) <= 1, 'Choose one setup mode.')
+    bridge_preview = not inspection and not maintenance
     with zipfile.ZipFile(archive) as package:
         items = package.infolist()
         require(0 < len(items) <= 4096, 'Archive entry bound exceeded.')
@@ -174,22 +176,19 @@ def extract(archive, target, inspection=False, maintenance=False, bridge_preview
                 'Bootstrap manifest missing.')
         manifest = parse(package.read(files['bootstrap-package.json']))
         require(type(manifest) is dict and set(manifest) == {'schema', 'readiness', 'windows_python', 'files'} and
-                manifest['schema'] == ('sfnp-bootstrap-stream-bridge-v1' if bridge_preview else 'sfnp-bootstrap-manager-v1' if maintenance else 'sfnp-bootstrap-inspection-v1' if inspection else 'sfnp-bootstrap-package-v1') and
+                manifest['schema'] == ('sfnp-bootstrap-stream-bridge-v1' if bridge_preview else 'sfnp-bootstrap-manager-v1' if maintenance else 'sfnp-bootstrap-inspection-v1') and
                 manifest['readiness'] == ('maintenance' if maintenance else 'inspection-only' if inspection else 'release') and
                 type(manifest['files']) is dict and set(manifest['files']) == set(files) - {'bootstrap-package.json'} and
                 ({'stream-bridge-bundle.json', 'setup/stream_bridge_install.py', 'setup/steam_link_setup.py'} if bridge_preview else
                  {'setup-inspection.json', 'setup-maintenance.json', 'setup/steam_link_setup.py', 'setup/frame_native_uninstall.py'} if maintenance else
-                 {'setup-inspection.json', 'setup/steam_link_setup.py'} if inspection else
-                 {'steam-link-bundle.json', 'setup/steam_link_setup.py'}) <= set(manifest['files']),
+                 {'setup-inspection.json', 'setup/steam_link_setup.py'}) <= set(manifest['files']),
                 'Incomplete or mismatched setup package; nothing was installed.')
         require(not inspection or all(inspection_file(name) for name in manifest['files']),
                 'Inspection package contains an installation payload.')
         require(not maintenance or all(manager_file(name) for name in manifest['files']),
                 'Manager package contains an installation payload.')
-        require(bridge_preview or 'stream-bridge-bundle.json' not in files,
-                'Stream bridge packages require --bridge-preview.')
         require(not bridge_preview or 'steam-link-bundle.json' not in files,
-                'Bridge preview cannot contain a legacy setup bundle.')
+                'Retired Frame-only setup bundles cannot be installed.')
         if bridge_preview:
             bundle = parse(package.read(files['stream-bridge-bundle.json']))
             require(type(bundle) is dict and bundle.get('schema') == 'sfnp-stream-bridge-bundle-v1' and
@@ -211,9 +210,9 @@ def extract(archive, target, inspection=False, maintenance=False, bridge_preview
         require(type(profile) is dict and set(profile) == {'schema', 'expected_pc', 'runtime_files'} and
                 profile['schema'] == 'sfnp-setup-inspection-v1', 'Invalid inspection profile.')
     else:
-        bundle = parse((target / ('stream-bridge-bundle.json' if bridge_preview else 'steam-link-bundle.json')).read_bytes())
+        bundle = parse((target / 'stream-bridge-bundle.json').read_bytes())
         require(type(bundle) is dict and
-                bundle.get('schema') == ('sfnp-stream-bridge-bundle-v1' if bridge_preview else 'sfnp-steam-link-setup-v1') and bundle.get('readiness') == 'release',
+                bundle.get('schema') == 'sfnp-stream-bridge-bundle-v1' and bundle.get('readiness') == 'release',
                 'Only complete release bundles may start interactive setup.')
 
 
@@ -231,7 +230,7 @@ def main():
     try:
         print('Steam Link Native Passthrough — downloading ' +
               ('the paired bridge preview setup...' if bridge_preview else 'the check/removal assistant...' if maintenance else 'read-only inspection (no installation or restart)...' if inspection else 'the guided setup...'), flush=True)
-        endpoint = '/releases/tags/' + BRIDGE_TAG if bridge_preview else '/releases/tags/' + MANAGER_TAG if maintenance else '/releases/tags/' + INSPECTION_TAG if inspection else '/releases/latest'
+        endpoint = '/releases/tags/' + BRIDGE_TAG if bridge_preview else '/releases/tags/' + MANAGER_TAG if maintenance else '/releases/tags/' + INSPECTION_TAG if inspection else '/releases/tags/' + BRIDGE_TAG
         release = parse(download('https://api.github.com/repos/' + REPO + endpoint, 1024 * 1024))
         asset = select_asset(release, inspection, maintenance, bridge_preview)
         stage = Path(tempfile.mkdtemp(prefix='sfnp-setup-'))
