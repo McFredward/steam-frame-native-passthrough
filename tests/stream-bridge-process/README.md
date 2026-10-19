@@ -16,6 +16,16 @@ explicitly counted emergency timeout. The final GPU consumer publication is a
 test port; the actual same-queue copy/barrier/native draw is exercised separately
 by the Renderer/Pool fixture.
 
+Requeue/reset wakeups use the actual production capture-change callback. The
+fixture establishes the wait's enqueue boundary and no longer supplies its own
+notification to conceal a missing production wake. Exact permanently rejected
+OUTPUT tokens use a separate negative completion, bound to a still-current
+full capture/kernel lease; it never creates Ready or coverage. A missing or
+delayed certificate remains pending. The `retired-lease` and `unavailable-lease`
+handoff controls independently remove these repairs and must fail at their
+intended assertions. Runtime fixtures separately test the genuine OUTPUT/AU
+classification before a negative disposition can exist.
+
 Camera demand follows authenticated, kernel-validated decoded pictures, rather
 than certificates that can run ahead of the displayed video. A future signed
 `None` certificate cannot withdraw the camera from a current active picture.

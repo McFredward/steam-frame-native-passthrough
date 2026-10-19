@@ -322,3 +322,40 @@ observation, not a demonstrated 0.2.10 gameplay crash and not proof either of
 patch causation or exoneration. No speculative teardown patch is justified by
 that stack alone. Simultaneous local menu/game composition, final sharpness
 and future runtime updates still need their own hardware evidence.
+
+## Exact negative handoff completion and requeue wake (0.2.11)
+
+The prerelease review uncovered two avoidable waits in production source. First,
+the native sink invalidated a requeued capture synchronously, but the Process
+did not register the worker's capture-change callback. A waiter could remain
+asleep until the unchanged 100-ms deadline even though its lease was already
+invalid. The old fixture masked this by issuing its own notification after the
+writer event. The production worker now notifies under the same check/enqueue
+mutex. No Process lock or logging is added to the synchronous native sink.
+
+Second, a confirmed peer alone made the decoder wait for every current capture,
+including an exact OUTPUT token already permanently quarantined after ordinary
+or rejected input. Such a capture cannot produce the authenticated decoded/Ready
+receipt. Runtime now reports a separate terminal-negative disposition, only for
+that permanently quarantined token in its actual source pool and after current
+capture revalidation. Process binds it to the complete current slot, sequence,
+epoch, kernel and capture lease. It ends optional waiting without manufacturing
+Ready, a mask, camera demand or permission to draw transparently.
+
+A missing or merely delayed certificate is explicitly **not** terminal. It
+continues waiting for its real exact proof; unrelated tokens, old leases and
+unknown loss cannot use this negative path. Positive publication, camera
+acknowledgment, descriptor/eye mapping, authenticated wire and original native
+output remain unchanged. `exact-unavailable` is a separate bounded cold counter,
+not a successful masked-frame count. No shorter timeout, timer-based install,
+resolution change or stale-mask fallback is introduced.
+
+Focused fixtures exercise the actual Process/Runtime, V4L2 observations, signed
+AU proof and current lease checks, including delayed valid certificates, known
+ordinary input before/after capture, corrupt AU proof, scoped gaps, stale leases,
+source/reset loss and unknown loss. Compiling causal controls restore each
+defect independently. The notification test now establishes that a real waiter
+has entered its condition-variable wait rather than manually repairing it.
+Software and sanitizer results accompany the package; a new headset run is
+still required. These fixes prove avoidable source waits, not a retrospective
+identification of the two emergency timeouts in the previous aggregate logs.

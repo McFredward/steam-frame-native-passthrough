@@ -58,6 +58,12 @@ is no native backtrack reset after active masks begin. The logs still identify
 a game-owned main-menu head replacement that withdraws its source, and two
 decoder emergency handoff timeouts (one before active masks). These are bounded
 observations, not proof that every visible frame was correct or uninterrupted.
+Candidate 0.2.11 repairs two source-proven avoidable waits: lost notification
+after exact capture retirement, and waiting for an exact token already known
+to be permanently rejected. Its focused software controls pass; the candidate
+has not yet been observed on the headset and does not claim to explain both
+previous aggregate timeout events. Game Build 714 separately preserves its
+owned menu head across native menu-anchor replacement.
 The latest automated and log results do not certify arbitrary game materials,
 new runtimes or a final like-for-like sharpness/latency comparison. See the
 [continuity evidence and limits](development/FRAME-CONTINUITY.md).
