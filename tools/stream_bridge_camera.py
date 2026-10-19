@@ -533,13 +533,12 @@ def inactive_lease(root, sha):
 
 def completed_inactive(root, config=None):
     require(not os.path.lexists(root / LEASE), 'camera target transfer requires no session lease')
-    if config is None:
-        marker, _ = migration_record(root)
-    else:
-        old = config.get('legacy_migration')
-        require(old is not None, 'completed inactive migration authority required')
-        marker, _ = migration_state(root, old)
-    require(marker is not None and marker['phase'] == 'consumed',
+    marker, _ = migration_record(root)
+    old = config.get('legacy_migration') if config is not None else None
+    # With no grant and no lease, no settings restore was ever authorized.
+    # Only the still-present pause is transferred; this grants no write rights.
+    require((marker is None and old is None) or marker is not None and
+        marker['phase'] == 'consumed' and (old is None or marker['id'] == old['id']),
         'completed inactive migration authority required')
 
 

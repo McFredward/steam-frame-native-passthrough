@@ -453,16 +453,37 @@ class InactiveSettingsControls(unittest.TestCase):
             tool.prepare_target(self.root,self.active,home=self.home)
         self.assertEqual((self.root/tool.PAUSE).read_bytes(),original)
         self.assertEqual(self.active.read_bytes(),self.active_before)
-    def test_configless_transfer_requires_valid_consumed_marker(self):
+    def test_configless_transfer_rejects_unconsumed_or_invalid_marker(self):
         self.restore();(self.root/tool.CONFIG).unlink()
         path=self.root/tool.MIGRATION;valid=json.loads(path.read_text())
         for value in ({**valid,'phase':'pending'}, {**valid,'unknown':True}):
             path.write_bytes(tool.encoded(value))
             with self.assertRaises(tool.SafetyError):
                 tool.prepare_target(self.root,self.active,home=self.home)
-        path.unlink()
-        with self.assertRaisesRegex(tool.SafetyError,'completed'):
-            tool.prepare_target(self.root,self.active,home=self.home)
+        self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.obsolete))
+        self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_no_grant_pause_transfer_needs_no_new_settings_authority(self):
+        self.config.pop('legacy_migration');self.write_config()
+        before=self.obsolete.read_bytes()
+        self.assertEqual(self.restore(),{'status':'unchanged','persisted':True})
+        self.assertFalse((self.root/tool.MIGRATION).exists())
+        tool.prepare_target(self.root,self.active,home=self.home)
+        self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.active))
+        self.restore()
+        self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.obsolete))
+        self.assertEqual(self.obsolete.read_bytes(),before);self.assertEqual(self.active.read_bytes(),self.active_before)
+        (self.root/tool.CONFIG).unlink()
+        tool.prepare_target(self.root,self.active,home=self.home)
+        self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.active))
+        self.assertEqual(self.obsolete.read_bytes(),before);self.assertEqual(self.active.read_bytes(),self.active_before)
+    def test_no_config_grant_does_not_discard_pending_foreign_marker(self):
+        tool.migration_begin(self.root,self.config)
+        self.config.pop('legacy_migration');self.write_config()
+        _,sha=tool.load_config(self.root);tool.pause(self.root,sha)
+        for present in (True,False):
+            if not present:(self.root/tool.CONFIG).unlink()
+            with self.assertRaisesRegex(tool.SafetyError,'completed'):
+                tool.prepare_target(self.root,self.active,home=self.home)
         self.assertEqual(json.loads((self.root/tool.PAUSE).read_text())['settings'],str(self.obsolete))
         self.assertEqual(self.active.read_bytes(),self.active_before)
 
