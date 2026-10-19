@@ -153,6 +153,192 @@ class Controls(unittest.TestCase):
         with self.assertRaisesRegex(tool.SafetyError,'persistence'):tool.restore_owned(self.root,api_factory=self.factory,persist_timeout=0)
         self.assertIs(self.camera.value,False);self.assertTrue((self.root / tool.LEASE).exists())
         self.assertIs(tool.settings(self.settings)[1],True)
+    def test_restore_without_pending_ownership_never_opens_native_api(self):
+        factory=mock.Mock(side_effect=AssertionError('unowned native initialization forbidden'))
+        config_before=(self.root/tool.CONFIG).read_bytes()
+        for value in (False,True,None):
+            with self.subTest(value=value):
+                self.write_settings({'camera':{'keep':31,**({tool.KEY:value} if value is not None else {})},'unrelated':42})
+                before=self.settings.read_bytes()
+                self.assertEqual(tool.restore_owned(self.root,api_factory=factory,persist_timeout=0),
+                    {'status':'unchanged','persisted':True})
+                self.assertEqual(self.settings.read_bytes(),before)
+                self.assertEqual((self.root/tool.CONFIG).read_bytes(),config_before)
+                self.assertFalse((self.root/tool.LEASE).exists())
+                self.assertEqual(json.loads((self.root/tool.PAUSE).read_text()),
+                    {'schema':tool.PAUSE_SCHEMA,'settings':str(self.settings)})
+        factory.assert_not_called()
+    def test_consumed_legacy_restore_preserves_later_user_choice_without_native_api(self):
+        self.legacy(None);self.write_settings({'camera':{tool.KEY:True,'keep':31}})
+        tool.startup(self.root,running=lambda:False)
+        marker=(self.root/tool.MIGRATION).read_bytes()
+        self.write_settings({'camera':{tool.KEY:True,'keep':42}});before=self.settings.read_bytes()
+        factory=mock.Mock(side_effect=AssertionError('consumed grant native initialization forbidden'))
+        self.assertEqual(tool.restore_owned(self.root,api_factory=factory,persist_timeout=0),
+            {'status':'unchanged','persisted':True})
+        factory.assert_not_called();self.assertEqual(self.settings.read_bytes(),before)
+        self.assertEqual((self.root/tool.MIGRATION).read_bytes(),marker)
+    def test_cleanup_pending_tracks_real_migration_lifecycle_and_new_grants(self):
+        def pending():
+            config,sha=tool.load_config(self.root)
+            with tool.locked(self.root):return tool.cleanup_pending(self.root,config,sha)
+        self.assertFalse(pending())
+        self.legacy(None);self.write_settings({'camera':{tool.KEY:True,'keep':31}})
+        self.assertTrue(pending());self.assertFalse((self.root/tool.MIGRATION).exists())
+        tool.migration_begin(self.root,self.config)
+        marker=(self.root/tool.MIGRATION).read_bytes();self.assertTrue(pending())
+        self.assertEqual((self.root/tool.MIGRATION).read_bytes(),marker)
+        tool.startup(self.root,running=lambda:False)
+        self.assertFalse(pending());self.assertEqual(json.loads((self.root/tool.MIGRATION).read_text())['phase'],'consumed')
+        consumed=(self.root/tool.MIGRATION).read_bytes()
+        self.legacy(None,'22'*32);self.assertTrue(pending())
+        self.assertEqual((self.root/tool.MIGRATION).read_bytes(),consumed)
+    def test_cleanup_pending_validates_lease_even_after_consumed_migration(self):
+        self.legacy(None);self.write_settings({'camera':{tool.KEY:True,'keep':31}})
+        tool.startup(self.root,running=lambda:False)
+        self.session().enable();config,sha=tool.load_config(self.root)
+        path=self.root/tool.LEASE;valid=path.read_bytes();before=self.settings.read_bytes()
+        with tool.locked(self.root):self.assertTrue(tool.cleanup_pending(self.root,config,sha))
+        self.assertEqual(path.read_bytes(),valid)
+        invalid=json.loads(valid);invalid['config_sha256']='00'*32;path.write_bytes(tool.encoded(invalid))
+        factory=mock.Mock(side_effect=AssertionError('unverified lease native initialization forbidden'))
+        with self.assertRaisesRegex(tool.SafetyError,'lease'):
+            tool.restore_owned(self.root,api_factory=factory,persist_timeout=0)
+        factory.assert_not_called();self.assertEqual(self.settings.read_bytes(),before)
+        self.assertEqual(json.loads(path.read_text()),invalid)
+    def test_restore_owned_pending_lease_still_requires_verified_native_restore(self):
+        self.session().enable();lease=(self.root/tool.LEASE).read_bytes();before=self.settings.read_bytes()
+        unavailable=mock.Mock(side_effect=tool.SafetyError('unverified native ABI'))
+        with self.assertRaisesRegex(tool.SafetyError,'unverified native ABI'):
+            tool.restore_owned(self.root,api_factory=unavailable,persist_timeout=0)
+        unavailable.assert_called_once_with(self.config['library'])
+        self.assertEqual((self.root/tool.LEASE).read_bytes(),lease)
+        self.assertEqual(self.settings.read_bytes(),before);self.assertTrue((self.root/tool.PAUSE).exists())
+        available=mock.Mock(return_value=self.camera)
+        self.assertEqual(tool.restore_owned(self.root,api_factory=available,persist_timeout=0),
+            {'status':'restored','persisted':True})
+        available.assert_called_once_with(self.config['library'])
+        self.assertFalse((self.root/tool.LEASE).exists());self.assertIs(tool.settings(self.settings)[1],False)
+        self.assertEqual(self.camera.calls,[('write',True),('write',False)])
+    def test_prepare_offline_restore_durably_pauses_without_touching_owned_state(self):
+        session=self.dead_lease();lease=(self.root/tool.LEASE).read_bytes();before=self.settings.read_bytes()
+        calls=list(self.camera.calls)
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('offline native API forbidden')) as native:
+            self.assertEqual(tool.prepare_offline_restore(self.root),{'status':'deferred','persisted':False})
+            pause=(self.root/tool.PAUSE).read_bytes()
+            self.assertEqual(tool.prepare_offline_restore(self.root),{'status':'deferred','persisted':False})
+            self.assertFalse(tool.offline_cleanup_ready(self.root));native.assert_not_called()
+        self.assertEqual((self.root/tool.PAUSE).read_bytes(),pause)
+        self.assertEqual(json.loads(pause),{'schema':tool.PAUSE_SCHEMA,'settings':str(self.settings)})
+        self.assertEqual((self.root/tool.PAUSE).stat().st_mode&0o777,0o600)
+        self.assertEqual((self.root/tool.LEASE).read_bytes(),lease);self.assertEqual(self.settings.read_bytes(),before)
+        with self.assertRaisesRegex(tool.SafetyError,'paused'):session.enable()
+        self.assertEqual(self.camera.calls,calls)
+    def test_offline_cleanup_ready_waits_for_actual_startup_restore_and_runtime_stop(self):
+        original=json.loads(self.settings.read_text());self.dead_lease()
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('startup native API forbidden')) as native:
+            self.assertFalse(tool.offline_cleanup_ready(self.root))
+            tool.prepare_offline_restore(self.root);self.assertFalse(tool.offline_cleanup_ready(self.root))
+            lease=(self.root/tool.LEASE).read_bytes();pause=(self.root/tool.PAUSE).read_bytes()
+            self.assertEqual(tool.startup(self.root,running=lambda:True),0)
+            self.assertFalse(tool.offline_cleanup_ready(self.root));self.assertIs(tool.settings(self.settings)[1],True)
+            self.assertEqual((self.root/tool.LEASE).read_bytes(),lease);self.assertEqual((self.root/tool.PAUSE).read_bytes(),pause)
+            self.assertEqual(tool.startup(self.root,running=lambda:False),0)
+            self.assertTrue(tool.offline_cleanup_ready(self.root));native.assert_not_called()
+        self.assertEqual(json.loads(self.settings.read_text()),original)
+        self.assertEqual(self.settings.stat().st_mode&0o777,0o640)
+        self.assertFalse((self.root/tool.LEASE).exists());self.assertFalse((self.root/tool.PAUSE).exists())
+    def test_offline_startup_preserves_live_or_uncertain_lease_owner(self):
+        self.dead_lease();tool.prepare_offline_restore(self.root)
+        before=self.settings.read_bytes();lease=(self.root/tool.LEASE).read_bytes();pause=(self.root/tool.PAUSE).read_bytes()
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('uncertain owner native API forbidden')) as native:
+            for alive in (True,None):
+                with self.subTest(alive=alive):
+                    self.assertEqual(tool.startup(self.root,running=lambda:False,alive=lambda _:alive),0)
+                    self.assertFalse(tool.offline_cleanup_ready(self.root))
+                    self.assertEqual(self.settings.read_bytes(),before)
+                    self.assertEqual((self.root/tool.LEASE).read_bytes(),lease);self.assertEqual((self.root/tool.PAUSE).read_bytes(),pause)
+            native.assert_not_called()
+    def test_offline_startup_restores_pending_migration_before_readiness(self):
+        self.legacy(None);self.write_settings({'camera':{tool.KEY:True,'keep':31},'unrelated':42})
+        tool.migration_begin(self.root,self.config);pending=(self.root/tool.MIGRATION).read_bytes()
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('migration native API forbidden')) as native:
+            self.assertEqual(tool.prepare_offline_restore(self.root),{'status':'deferred','persisted':False})
+            self.assertFalse(tool.offline_cleanup_ready(self.root));self.assertIs(tool.settings(self.settings)[1],True)
+            self.assertEqual((self.root/tool.MIGRATION).read_bytes(),pending)
+            self.assertEqual(tool.startup(self.root,running=lambda:False),0)
+            self.assertTrue(tool.offline_cleanup_ready(self.root));native.assert_not_called()
+        self.assertEqual(json.loads(self.settings.read_text()),{'camera':{'keep':31},'unrelated':42})
+        self.assertEqual(json.loads((self.root/tool.MIGRATION).read_text())['phase'],'consumed')
+    def test_offline_prepare_without_cleanup_waits_for_startup_to_clear_pause(self):
+        before=self.settings.read_bytes();self.assertTrue(tool.offline_cleanup_ready(self.root))
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('unowned native API forbidden')) as native:
+            self.assertEqual(tool.prepare_offline_restore(self.root),{'status':'deferred','persisted':False})
+            self.assertFalse(tool.offline_cleanup_ready(self.root))
+            self.assertEqual(tool.startup(self.root,running=lambda:True),0);self.assertFalse(tool.offline_cleanup_ready(self.root))
+            self.assertEqual(tool.startup(self.root,running=lambda:False),0);self.assertTrue(tool.offline_cleanup_ready(self.root))
+            native.assert_not_called()
+        self.assertEqual(self.settings.read_bytes(),before);self.assertFalse((self.root/tool.MIGRATION).exists())
+    def test_offline_restore_preserves_changed_pending_migration_for_retry(self):
+        self.legacy(None);self.write_settings({'camera':{tool.KEY:True}});tool.migration_begin(self.root,self.config)
+        self.write_settings({'camera':{tool.KEY:True},'user-change':42})
+        before=self.settings.read_bytes();marker=(self.root/tool.MIGRATION).read_bytes()
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('changed migration native API forbidden')) as native:
+            tool.prepare_offline_restore(self.root);pause=(self.root/tool.PAUSE).read_bytes()
+            self.assertEqual(tool.startup(self.root,running=lambda:False),0)
+            self.assertFalse(tool.offline_cleanup_ready(self.root));native.assert_not_called()
+        self.assertEqual(self.settings.read_bytes(),before);self.assertEqual((self.root/tool.MIGRATION).read_bytes(),marker)
+        self.assertEqual((self.root/tool.PAUSE).read_bytes(),pause)
+    def test_offline_restore_spends_foreign_legacy_value_without_rewriting_it(self):
+        self.legacy(None);before=self.settings.read_bytes()
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('foreign value native API forbidden')) as native:
+            tool.prepare_offline_restore(self.root);self.assertFalse(tool.offline_cleanup_ready(self.root))
+            self.assertEqual(tool.startup(self.root,running=lambda:False),0)
+            self.assertTrue(tool.offline_cleanup_ready(self.root));native.assert_not_called()
+        self.assertEqual(self.settings.read_bytes(),before)
+        self.assertEqual(json.loads((self.root/tool.MIGRATION).read_text())['phase'],'consumed')
+    def test_offline_helpers_refuse_invalid_config_before_pause_or_native_api(self):
+        original=(self.root/tool.CONFIG).read_bytes();before=self.settings.read_bytes()
+        factory=mock.Mock(side_effect=AssertionError('invalid config native initialization forbidden'))
+        guard=mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('invalid config native API forbidden'))
+        native=guard.start();self.addCleanup(guard.stop)
+        for invalid in ('schema','private-mode','relative-settings','root-mode'):
+            with self.subTest(invalid=invalid):
+                value=json.loads(original)
+                if invalid=='schema':value['schema']='unknown'
+                if invalid=='relative-settings':value['settings']='relative'
+                (self.root/tool.CONFIG).write_bytes(tool.encoded(value));(self.root/tool.CONFIG).chmod(0o644 if invalid=='private-mode' else 0o600)
+                self.root.chmod(0o755 if invalid=='root-mode' else 0o700)
+                try:
+                    with self.assertRaises(tool.SafetyError):tool.prepare_offline_restore(self.root)
+                    with self.assertRaises(tool.SafetyError):tool.offline_cleanup_ready(self.root)
+                    with self.assertRaises(tool.SafetyError):tool.restore_owned(self.root,api_factory=factory,persist_timeout=0)
+                    self.assertFalse((self.root/tool.PAUSE).exists());self.assertEqual(self.settings.read_bytes(),before)
+                finally:self.root.chmod(0o700)
+        factory.assert_not_called();native.assert_not_called()
+    def test_offline_helpers_preserve_invalid_lease_and_migration_records(self):
+        self.legacy(None);before=self.settings.read_bytes()
+        guard=mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('invalid record native API forbidden'))
+        native=guard.start();self.addCleanup(guard.stop)
+        for name in (tool.LEASE,tool.MIGRATION):
+            for mode in (0o600,0o644):
+                with self.subTest(name=name,mode=mode):
+                    path=self.root/name;path.write_bytes(tool.encoded({'schema':'unknown'}));path.chmod(mode)
+                    raw=path.read_bytes()
+                    with self.assertRaises(tool.SafetyError):tool.prepare_offline_restore(self.root)
+                    with self.assertRaises(tool.SafetyError):tool.offline_cleanup_ready(self.root)
+                    self.assertEqual(path.read_bytes(),raw);self.assertEqual(self.settings.read_bytes(),before)
+                    self.assertFalse((self.root/tool.PAUSE).exists());path.unlink()
+        native.assert_not_called()
+    def test_offline_startup_preserves_foreign_camera_value_and_lease(self):
+        self.dead_lease();self.write_settings({'camera':{tool.KEY:'foreign'},'user-change':42})
+        before=self.settings.read_bytes();lease=(self.root/tool.LEASE).read_bytes()
+        with mock.patch.object(tool.NativeCamera,'__enter__',side_effect=AssertionError('foreign override native API forbidden')) as native:
+            tool.prepare_offline_restore(self.root);pause=(self.root/tool.PAUSE).read_bytes()
+            self.assertEqual(tool.startup(self.root,running=lambda:False),0)
+            self.assertFalse(tool.offline_cleanup_ready(self.root));native.assert_not_called()
+        self.assertEqual(self.settings.read_bytes(),before);self.assertEqual((self.root/tool.LEASE).read_bytes(),lease)
+        self.assertEqual((self.root/tool.PAUSE).read_bytes(),pause)
     def test_exact_checkpoint_native_restore_and_foreign_value_refusal(self):
         authority = {'schema':'sfnp-camera-override-authority-v1','settings':str(self.settings),
             'before':False,'desired':True,'section_present':True}
