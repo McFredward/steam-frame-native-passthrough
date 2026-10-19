@@ -352,7 +352,10 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
     if(!supported){
         // Unknown extension/cardinality never reuses an old successful guard.
         // The owned zero CB is immutable SIMULTANEOUS_USE and kept until idle.
-        p.pool.prepareSubmit(queue,nullptr,gpu::MaximumSlots+1);
+        // Discard scratch one-guards; the original native CBs run after zero.
+        // Their recording references still retain every sampled descriptor
+        // until a native-completed reset/retirement. No coverage sampling
+        // reservation was made, so unrelated future slots remain usable.
         if(count<=64&&(infos||!count)){
             for(unsigned n=0;n<count;++n)submits[n+1]=infos[n];
             return p.QueueSubmit(queue,count+1,submits.data(),fence);
@@ -395,7 +398,9 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
         }
     }
     if(!supported){
-        p.pool.prepareSubmit(queue,nullptr,gpu::MaximumSlots+1);
+        // Only original CBs follow zero. Their recording references retain
+        // immutable storage; do not invent a failed in-flight lease reservation
+        // that would permanently quarantine every future coverage slot.
         if(count<=64&&(infos||!count)){for(unsigned n=0;n<count;++n)submits[n+1]=infos[n];return forward(queue,count+1,submits.data(),fence);}
         if(!infos)return forward(queue,count,infos,fence);
         for(std::uint32_t at=0;at<count;){const auto chunk=std::min<std::uint32_t>(64,count-at);
