@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -53,6 +54,61 @@ def warn(message):
     if _warnings < 8:
         _warnings += 1
         print('Steam Link camera: ' + message, file=sys.stderr, flush=True)
+
+
+# Exact authored reasons only. Never print arbitrary exception/config/path text.
+_FAILURE_REASONS = frozenset({
+    'runtime state unavailable', 'process identity unavailable', 'native runtime unavailable',
+    'native runtime generation changed', 'native camera readiness lost',
+    'active native camera readiness lost', 'native camera read refused',
+    'native camera write refused', 'native camera removal refused',
+    'camera enable not acknowledged', 'camera restore not acknowledged',
+    'camera session paused for installer', 'camera owner busy',
+    'camera lease replaced by another owner', 'live or uncertain camera owner preserved',
+    'file/runtime camera baseline disagrees', 'changed camera override preserved',
+    'changed runtime camera preserved', 'changed runtime camera baseline preserved',
+    'unknown camera lease preserved', 'unknown camera configuration preserved',
+    'unknown native provider pin', 'native provider ownership differs',
+    'native provider identity differs', 'native Frame AArch64 provider required',
+    'background native initialization refused', 'native settings interface unavailable',
+    'native settings interface incomplete', 'private owned camera directory required',
+    'ordinary bounded owned data required', 'private camera record required',
+    'private camera lock required', 'changed data preserved', 'changed camera data preserved',
+    'changed camera ownership record preserved', 'invalid camera settings preserved',
+    'nonboolean camera setting preserved', 'unknown camera pause preserved',
+    'invalid camera command', 'stale camera command', 'incomplete camera command',
+    'camera command buffer exceeded', 'camera command exceeded',
+    'running native runtime preserved during startup recovery',
+    'native camera persistence not confirmed', 'offline camera restoration not confirmed',
+})
+_FAILURE_PHASES = frozenset({'setup', 'native-open', 'lease-adopt', 'health', 'enable',
+    'disable-restore', 'restore', 'startup', 'serve', 'ipc-read', 'ipc-write', 'ipc-command'})
+
+
+@contextmanager
+def failure_phase(phase):
+    try:yield
+    except (OSError, ValueError, KeyError, TypeError, SafetyError, AttributeError) as error:
+        if not hasattr(error, '_camera_phase'):error._camera_phase = phase
+        raise
+
+
+def warn_failure(phase, error):
+    if getattr(error, '_camera_reported', False):return
+    error._camera_reported = True
+    phase = getattr(error, '_camera_phase', phase)
+    if phase not in _FAILURE_PHASES:phase = 'serve'
+    reason = str(error) if isinstance(error, SafetyError) and str(error) in _FAILURE_REASONS else (
+        'os-error' if isinstance(error, OSError) else 'safety-check-refused' if isinstance(error, SafetyError) else 'invalid-data')
+    os_error = error if isinstance(error, OSError) else error.__cause__
+    number = os_error.errno if isinstance(os_error, OSError) and type(os_error.errno) is int else None
+    category = {errno.ENOENT:'missing', errno.ESRCH:'process-gone', errno.EACCES:'permission-denied',
+        errno.EPERM:'permission-denied', errno.EIO:'io-error', errno.EPIPE:'pipe-closed',
+        errno.EBADF:'bad-descriptor', errno.EINTR:'interrupted', errno.ETIMEDOUT:'timeout',
+        errno.EAGAIN:'busy', errno.EBUSY:'busy'}.get(number, 'other-os-error' if number is not None else 'none')
+    warn('phase=' + phase + '; reason=' + reason + '; errno=' + category
+        + ('(' + str(number) + ')' if number is not None and 0 < number < 4096 else '')
+        + '; existing settings and camera recovery records preserved')
 
 
 def encoded(value):
@@ -218,7 +274,10 @@ def own_start(pid):
         require(len(raw) <= 4096, 'process identity unavailable')
         tail = raw[raw.rfind(')') + 2:].split()
         return int(tail[19])
-    except FileNotFoundError:return None
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ESRCH):return None
+        raise
+    except (ValueError, IndexError):raise SafetyError('process identity unavailable') from None
 
 
 def owner_alive(lease):
@@ -238,9 +297,11 @@ def runtime_generation():
             if path.stat().st_uid != os.getuid():continue
             name = (path / 'comm').read_text()[:64].strip()
             if name in ('vrserver', 'vrcompositor'):
-                result.append((int(path.name), own_start(int(path.name)), name))
-        except FileNotFoundError:continue
-        except OSError:raise SafetyError('runtime state unavailable') from None
+                start = own_start(int(path.name))
+                if start is not None:result.append((int(path.name), start, name))
+        except OSError as error:
+            if error.errno in (errno.ENOENT, errno.ESRCH):continue
+            raise SafetyError('runtime state unavailable') from error
     return tuple(sorted(result))
 
 
@@ -391,7 +452,8 @@ class Session:
         self.lease, self.raw = lease, raw
         self.restore()
         if self.lease:
-            value = dict(self.lease);value.update(helper_pid=os.getpid(), helper_start_ticks=own_start(os.getpid()))
+            start = own_start(os.getpid());require(start is not None, 'process identity unavailable')
+            value = dict(self.lease);value.update(helper_pid=os.getpid(), helper_start_ticks=start)
             self.save(value)
 
     def refresh(self):
@@ -405,8 +467,9 @@ class Session:
         if self.enabled:require(effective is True, 'active native camera readiness lost')
         if self.lease is None:
             require(before is None or before is effective, 'file/runtime camera baseline disagrees')
+            start = own_start(os.getpid());require(start is not None, 'process identity unavailable')
             self.save({'schema':LEASE_SCHEMA, 'config_sha256':self.sha, 'helper_pid':os.getpid(),
-                'helper_start_ticks':own_start(os.getpid()), 'override':before, 'effective':effective,
+                'helper_start_ticks':start, 'override':before, 'effective':effective,
                 'section_present':SECTION in value, 'write_intent':effective is not True,
                 'settings_signature':signature(info), 'restore_signature':None})
         else:
@@ -647,8 +710,8 @@ def startup(root, *, running=runtime_running, alive=owner_alive):
                 pause(root, sha)
                 raw, _ = read_file(root / PAUSE, MAX_JSON, private=True)
                 remove_owned(root / PAUSE, raw)
-    except (OSError, ValueError, KeyError, TypeError, SafetyError):
-        warn('startup recovery incomplete; existing settings and recovery records retained')
+    except (OSError, ValueError, KeyError, TypeError, SafetyError) as error:
+        warn_failure('startup', error)
     return 0
 
 
@@ -760,19 +823,21 @@ def offline_cleanup_ready(root):
 
 
 def serve(root, *, input_stream=None, output_stream=None, api_factory=NativeCamera):
-    root = private_root(root);config, sha = load_config(root)
+    with failure_phase('setup'):
+        root = private_root(root);config, sha = load_config(root)
     # A retained installer pause must not repeatedly initialize OpenVR merely
     # to refuse the session afterwards. Recheck after API setup for races.
-    with locked(root):
+    with failure_phase('setup'), locked(root):
         unpaused(root);settings(absolute(config['settings']))
     input_stream = sys.stdin.buffer if input_stream is None else input_stream
     output_stream = sys.stdout if output_stream is None else output_stream
-    def reply(value):output_stream.write(value + '\n');output_stream.flush()
-    with api_factory(config['library']) as camera:
+    def reply(value):
+        with failure_phase('ipc-write'):output_stream.write(value + '\n');output_stream.flush()
+    with failure_phase('native-open'), api_factory(config['library']) as camera:
         session = Session(root, config, sha, camera)
         wanted, previous = False, 0
         try:
-            with locked(root):
+            with failure_phase('lease-adopt'), locked(root):
                 unpaused(root);settings(session.path);session.adopt();reply('R 0')
             try:fd = input_stream.fileno()
             except (OSError, ValueError, AttributeError):fd = None
@@ -783,38 +848,42 @@ def serve(root, *, input_stream=None, output_stream=None, api_factory=NativeCame
                 # queued D command from select or starve session revalidation.
                 if fd is not None:
                     if b'\n' not in pending:
-                        ready = select.select([fd], [], [], 0.5 if wanted else None)[0]
+                        with failure_phase('ipc-read'):ready = select.select([fd], [], [], 0.5 if wanted else None)[0]
                         if not ready:
                             try:
-                                with locked(root):
+                                with failure_phase('health'), locked(root):
                                     unpaused(root);session.refresh()
                                     require(camera.read() is True, 'native camera readiness lost')
-                            except (OSError, ValueError, KeyError, TypeError, SafetyError):
+                            except (OSError, ValueError, KeyError, TypeError, SafetyError) as error:
+                                warn_failure('health', error)
                                 reply('N ' + str(previous));raise
                             continue
-                        chunk = os.read(fd, 128)
+                        with failure_phase('ipc-read'):chunk = os.read(fd, 128)
                         if not chunk:
-                            require(not pending, 'incomplete camera command');break
+                            with failure_phase('ipc-command'):require(not pending, 'incomplete camera command')
+                            break
                         pending.extend(chunk)
-                    require(len(pending) <= 256, 'camera command buffer exceeded')
+                    with failure_phase('ipc-command'):require(len(pending) <= 256, 'camera command buffer exceeded')
                     if b'\n' not in pending:
-                        require(len(pending) <= 64, 'camera command exceeded');continue
+                        with failure_phase('ipc-command'):require(len(pending) <= 64, 'camera command exceeded')
+                        continue
                     end = pending.index(10) + 1
                     raw = bytes(pending[:end]);del pending[:end]
                 else:
-                    raw = input_stream.readline(65)
+                    with failure_phase('ipc-read'):raw = input_stream.readline(65)
                     if not raw:break
-                match = re.fullmatch(rb'([ED]) ([1-9][0-9]{0,19})\n', raw)
-                require(match is not None, 'invalid camera command')
-                sequence = int(match[2]);require(previous < sequence < 2**64, 'stale camera command')
+                with failure_phase('ipc-command'):
+                    match = re.fullmatch(rb'([ED]) ([1-9][0-9]{0,19})\n', raw)
+                    require(match is not None, 'invalid camera command')
+                    sequence = int(match[2]);require(previous < sequence < 2**64, 'stale camera command')
                 previous = sequence
-                with locked(root):
+                with failure_phase('enable' if match[1] == b'E' else 'disable-restore'), locked(root):
                     if match[1] == b'E':session.enable();wanted = True;reply('A ' + str(sequence))
                     else:session.restore();wanted = False;reply('D ' + str(sequence))
         finally:
             try:
                 with locked(root):session.restore()
-            except (OSError, ValueError, KeyError, TypeError, SafetyError):warn('runtime restore incomplete; camera lease retained')
+            except (OSError, ValueError, KeyError, TypeError, SafetyError) as error:warn_failure('restore', error)
     return 0
 
 
@@ -830,8 +899,8 @@ def main(argv=None):
         if args.mode == 'restore':restore_owned(args.root);return 0
         return serve(args.root)
     except (StopRequested, KeyboardInterrupt):return 0
-    except (OSError, ValueError, KeyError, TypeError, SafetyError, AttributeError):
-        warn('camera session refused; ordinary native output retained');return 2
+    except (OSError, ValueError, KeyError, TypeError, SafetyError, AttributeError) as error:
+        warn_failure(args.mode, error);return 2
 
 
 if __name__ == '__main__':raise SystemExit(main())

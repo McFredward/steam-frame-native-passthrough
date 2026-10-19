@@ -1,5 +1,7 @@
 """Owned-file, native-ABI and real-pipe controls; never load Frame libraries."""
 import ctypes
+from contextlib import contextmanager
+import errno
 import importlib.util
 import io
 import json
@@ -72,6 +74,137 @@ class Controls(unittest.TestCase):
         session = self.session();session.enable()
         value = dict(session.lease);value.update(helper_pid=2147483646,helper_start_ticks=1);session.save(value)
         return session
+
+    @contextmanager
+    def proc_view(self, *, failed_pid=103, point='comm', number=errno.ESRCH, active=True):
+        proc=self.root/'proc';proc.mkdir(exist_ok=True)
+        for pid,name,start in ((101,'vrserver',11),(102,'vrcompositor',22),(103,'vrserver' if point=='start' else 'unrelated',33),(os.getpid(),'helper',44)):
+            path=proc/str(pid);path.mkdir(exist_ok=True)
+            (path/'comm').write_text(name+'\n');(path/'stat').write_text(str(pid)+' ('+name+') S '+'0 '*18+str(start)+' 0\n')
+        state={'active':active};real_path=Path;real_stat=Path.stat;real_read=Path.read_text
+        target=proc/str(failed_pid)
+        if point!='stat':target/='stat' if point=='start' else 'comm'
+        def mapped(value):
+            value=str(value)
+            return proc/ value.removeprefix('/proc/') if value.startswith('/proc/') else proc if value=='/proc' else real_path(value)
+        def fail(path):
+            if state['active'] and path==target:raise OSError(number,'private fixture path and key must never be logged',str(target))
+        def checked_stat(path,*args,**kw):fail(path);return real_stat(path,*args,**kw)
+        def checked_read(path,*args,**kw):fail(path);return real_read(path,*args,**kw)
+        with mock.patch.object(tool,'Path',side_effect=mapped),mock.patch.object(Path,'stat',autospec=True,side_effect=checked_stat),mock.patch.object(Path,'read_text',autospec=True,side_effect=checked_read):
+            yield state
+
+    def test_proc_disappearance_errno_does_not_invalidate_other_runtime_members(self):
+        for number in (errno.ENOENT,errno.ESRCH):
+            for point in ('stat','comm','start'):
+                with self.subTest(number=number,point=point),self.proc_view(point=point,number=number):
+                    self.assertEqual(tool.runtime_generation(),((101,11,'vrserver'),(102,22,'vrcompositor')))
+
+    def test_proc_churn_during_real_pipe_health_poll_keeps_valid_session(self):
+        with self.proc_view(active=False) as state:
+            native=tool.NativeCamera({});native.generation=tool.runtime_generation();original=self.camera.read
+            def read():
+                native.health();result=original()
+                if self.camera.value is True:state['active']=True
+                return result
+            self.camera.read=read
+            source,write=os.pipe();os.write(write,b'E 1\n');out=io.StringIO();polls=[]
+            def select(reads,*args):
+                polls.append(1)
+                if len(polls)==2:return [],[],[]
+                if len(polls)==3:os.write(write,b'D 2\n');os.close(write)
+                return reads,[],[]
+            try:
+                with os.fdopen(source,'rb') as stream,mock.patch.object(tool.select,'select',side_effect=select):
+                    tool.serve(self.root,input_stream=stream,output_stream=out,api_factory=self.factory)
+                self.assertEqual(out.getvalue(),'R 0\nA 1\nD 2\n');self.assertGreaterEqual(len(polls),3)
+                self.assertFalse((self.root/tool.LEASE).exists());self.assertIs(self.camera.value,False)
+            finally:
+                try:os.close(write)
+                except OSError:pass
+
+    def test_proc_permission_and_unknown_errors_remain_generation_fatal(self):
+        for number in (errno.EACCES,errno.EPERM,errno.EIO):
+            for point in ('stat','comm','start'):
+                with self.subTest(number=number,point=point),self.proc_view(point=point,number=number):
+                    with self.assertRaisesRegex(tool.SafetyError,'runtime state unavailable') as caught:tool.runtime_generation()
+                    self.assertEqual(caught.exception.__cause__.errno,number)
+
+    def test_real_pipe_health_revokes_for_runtime_disappearance_or_unknown_permission(self):
+        for pid,number,reason in ((101,errno.ESRCH,'native runtime generation changed'),(103,errno.EACCES,'runtime state unavailable')):
+            with self.subTest(pid=pid),self.proc_view(failed_pid=pid,number=number,active=False) as state:
+                self.camera=FakeCamera(self);native=tool.NativeCamera({});native.generation=tool.runtime_generation();original=self.camera.read
+                def read():
+                    native.health();result=original()
+                    if self.camera.value is True:state['active']=True
+                    return result
+                self.camera.read=read;source,write=os.pipe();os.write(write,b'E 1\n');out=io.StringIO();polls=[]
+                def select(reads,*args):
+                    polls.append(1);return (reads,[],[]) if len(polls)==1 else ([],[],[])
+                try:
+                    with os.fdopen(source,'rb') as stream,mock.patch.object(tool.select,'select',side_effect=select),mock.patch.object(tool,'_warnings',0),mock.patch.object(tool.sys,'stderr',new_callable=io.StringIO) as log:
+                        with self.assertRaisesRegex(tool.SafetyError,reason):tool.serve(self.root,input_stream=stream,output_stream=out,api_factory=self.factory)
+                    self.assertEqual(out.getvalue(),'R 0\nA 1\nN 1\n');self.assertTrue((self.root/tool.LEASE).exists())
+                    self.assertIn('phase=health; reason='+reason,log.getvalue())
+                    if number==errno.EACCES:self.assertIn('errno=permission-denied(13)',log.getvalue())
+                    self.assertNotIn(str(self.root),log.getvalue());self.assertNotIn('private fixture',log.getvalue())
+                finally:os.close(write)
+            (self.root/tool.LEASE).unlink();self.write_settings({'camera':{tool.KEY:False}})
+
+    def test_real_runtime_disappearance_or_restart_still_revokes_before_getter(self):
+        for pid in (101,102):
+            for point in ('stat','comm','start'):
+                with self.subTest(pid=pid,point=point),self.proc_view(failed_pid=pid,point=point,active=False) as state:
+                    camera=tool.NativeCamera({});camera.generation=tool.runtime_generation();camera.fn=mock.Mock()
+                    state['active']=True
+                    with self.assertRaisesRegex(tool.SafetyError,'generation changed'):camera.read()
+                    camera.fn.GetBool.assert_not_called()
+        with self.proc_view(active=False):
+            camera=tool.NativeCamera({});camera.generation=tool.runtime_generation();camera.fn=mock.Mock()
+            path=self.root/'proc/101/stat';path.write_text('101 (vrserver) S '+'0 '*18+'99 0\n')
+            with self.assertRaisesRegex(tool.SafetyError,'generation changed'):camera.read()
+            camera.fn.GetBool.assert_not_called()
+
+    def test_malformed_process_identity_remains_refused(self):
+        with self.proc_view(active=False):
+            path=self.root/'proc/101/stat';path.write_text('invalid private process data')
+            with self.assertRaisesRegex(tool.SafetyError,'process identity unavailable'):tool.runtime_generation()
+
+    def test_missing_helper_identity_cannot_create_a_lease_or_grant(self):
+        for number in (errno.ENOENT,errno.ESRCH):
+            with self.subTest(number=number),self.proc_view(failed_pid=os.getpid(),point='start',number=number):
+                with self.assertRaisesRegex(tool.SafetyError,'process identity unavailable'):self.session().enable()
+                self.assertFalse((self.root/tool.LEASE).exists());self.assertEqual(self.camera.calls,[])
+
+    def test_failure_diagnostics_allowlist_errno_privacy_and_existing_budget(self):
+        with mock.patch.object(tool,'_warnings',0),mock.patch.object(tool.sys,'stderr',new_callable=io.StringIO) as log:
+            known=tool.SafetyError('runtime state unavailable');known.__cause__=PermissionError(errno.EACCES,'secret errno text',str(self.root))
+            tool.warn_failure('health',known);tool.warn_failure('health',known)
+            tool.warn_failure('enable',tool.SafetyError('camera enable not acknowledged'))
+            tool.warn_failure('restore',OSError(errno.ESRCH,'secret text',str(self.root)))
+            tool.warn_failure('ipc-read',BrokenPipeError(errno.EPIPE,'secret text'))
+            tool.warn_failure('ipc-command',tool.SafetyError('private secret key '+str(self.root)))
+            for _ in range(12):tool.warn_failure('untrusted private phase',ValueError('secret config payload'))
+            rows=log.getvalue().splitlines();self.assertEqual(len(rows),8)
+            self.assertIn('phase=health; reason=runtime state unavailable; errno=permission-denied(13)',rows[0])
+            self.assertIn('phase=enable; reason=camera enable not acknowledged',rows[1])
+            self.assertIn('phase=restore; reason=os-error; errno=process-gone(3)',rows[2])
+            self.assertIn('phase=ipc-read; reason=os-error; errno=pipe-closed',rows[3])
+            self.assertIn('reason=safety-check-refused',rows[4]);self.assertIn('phase=serve; reason=invalid-data',rows[5])
+            self.assertNotIn('secret',log.getvalue());self.assertNotIn(str(self.root),log.getvalue())
+            self.assertTrue(all(len(row)<300 for row in rows))
+
+    def test_actual_main_reports_enable_and_ipc_failure_phases_without_payloads(self):
+        real=tool.serve
+        for commands,expected in ((b'E 1\n','enable'),(b'private-secret-command\n','ipc-command')):
+            with self.subTest(phase=expected):
+                self.camera=FakeCamera(self);self.camera.refuse=True;output=io.StringIO()
+                def serve(root):return real(root,input_stream=io.BytesIO(commands),output_stream=output,api_factory=self.factory)
+                with mock.patch.object(tool,'serve',side_effect=serve),mock.patch.object(tool.signal,'signal'),mock.patch.object(tool,'_warnings',0),mock.patch.object(tool.sys,'stderr',new_callable=io.StringIO) as log:
+                    self.assertEqual(tool.main(['serve','--root',str(self.root)]),2)
+                self.assertIn('phase='+expected+';',log.getvalue());self.assertNotIn('private-secret',log.getvalue())
+                self.assertNotIn(str(self.root),log.getvalue());self.assertNotIn('Traceback',log.getvalue())
+                if (self.root/tool.LEASE).exists():(self.root/tool.LEASE).unlink()
     def test_enable_ack_disable_repeat_eof_and_unrelated_preservation(self):
         before = json.loads(self.settings.read_text())
         self.assertEqual(self.run_serve(b'E 1\nD 2\nE 3\n'), 'R 0\nA 1\nD 2\nA 3\n')
