@@ -3,6 +3,9 @@
 #include "pc/stream-bridge-sender.h"
 #include <algorithm>
 #include <cstring>
+#include <cstdarg>
+#include <linux/videodev2.h>
+#include <sys/mman.h>
 #include <deque>
 #include <iostream>
 #include <stdexcept>
@@ -30,6 +33,7 @@ struct Files {
 struct Event {nd::Observation fact{};std::vector<std::uint8_t> coded;};
 struct Fixture {
     Files files;std::deque<Event> input;std::deque<nd::CaptureObservation> capture;
+    nd::DecodeProvider* ownedNative=nullptr;std::vector<nd::DecodedFrame> decodedFrames;
     nd::SnapshotStats counts{};unsigned polls=0,capturePolls=0,randomCalls=0,certified=0,decoded=0;
     bool randomFails=false,routeReady=true,publishGapAfterEmptyPoll=false,leaseCurrent=true;unsigned leaseChecks=0;std::uint64_t clock=100;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
     nd::DecodedFrame lastDecoded{};nd::CertifiedFrame lastCertified{};sb::CertifiedAccessUnit retained{};
@@ -47,17 +51,17 @@ struct Fixture {
     nd::SourceProvider provider(){return {poll,pollCapture,stats,random,this,monotonic,currentCapture};}
     static std::uint64_t monotonic(void* v) noexcept{return static_cast<Fixture*>(v)->clock;}
     static bool poll(nd::Observation& out,std::uint8_t* destination,std::size_t capacity,void* v) noexcept {
-        auto& f=*static_cast<Fixture*>(v);++f.polls;if(f.input.empty())return false;const auto& front=f.input.front();if(front.coded.size()>capacity)return false;
+        auto& f=*static_cast<Fixture*>(v);++f.polls;if(f.ownedNative)return f.ownedNative->poll(out,destination,capacity);if(f.input.empty())return false;const auto& front=f.input.front();if(front.coded.size()>capacity)return false;
         out=front.fact;std::copy(front.coded.begin(),front.coded.end(),destination);f.input.pop_front();return true;}
-    static bool pollCapture(nd::CaptureObservation& out,void* v) noexcept {auto& f=*static_cast<Fixture*>(v);++f.capturePolls;if(f.capture.empty()){
+    static bool pollCapture(nd::CaptureObservation& out,void* v) noexcept {auto& f=*static_cast<Fixture*>(v);++f.capturePolls;if(f.ownedNative)return f.ownedNative->pollCapture(out);if(f.capture.empty()){
         if(f.publishGapAfterEmptyPoll){f.publishGapAfterEmptyPoll=false;++f.counts.dropped;
             f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,300,7,0,0,nd::InputLoss::SnapshotFull,f.counts.dropped});}
         return false;}out=f.capture.front();f.capture.pop_front();return true;}
-    static bool currentCapture(const nd::CaptureObservation& fact,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.leaseChecks;return f.leaseCurrent&&fact.kind==nd::CaptureKind::Decoded&&fact.fd>=0&&fact.dmabufFd>=0;}
-    static nd::SnapshotStats stats(void* v) noexcept{return static_cast<Fixture*>(v)->counts;}
+    static bool currentCapture(const nd::CaptureObservation& fact,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.leaseChecks;if(f.ownedNative)return f.ownedNative->captureLeaseCurrentOnWorker(fact);return f.leaseCurrent&&fact.kind==nd::CaptureKind::Decoded&&fact.fd>=0&&fact.dmabufFd>=0;}
+    static nd::SnapshotStats stats(void* v) noexcept{auto& f=*static_cast<Fixture*>(v);return f.ownedNative?f.ownedNative->stats():f.counts;}
     static bool random(void* out,std::size_t n,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.randomCalls;if(f.randomFails)return false;std::memset(out,static_cast<int>(f.randomCalls),n);return true;}
     static void onCertified(const nd::CertifiedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.certified;f.lastCertified=frame;f.retained=*frame.certificate;f.lastCertified.certificate=&f.retained;}
-    static void onDecoded(const nd::DecodedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.decoded;f.lastDecoded=frame;}
+    static void onDecoded(const nd::DecodedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.decoded;f.lastDecoded=frame;f.decodedFrames.push_back(frame);}
     static void onCapture(const nd::SourceIdentity&,const nd::CaptureObservation& c,void* v) noexcept{static_cast<Fixture*>(v)->invalidations.push_back(c);}
     static void onNotice(const nd::RuntimeNotice& n,void* v) noexcept{static_cast<Fixture*>(v)->notices.push_back(n);}
     void enqueue(std::vector<std::uint8_t> coded,std::uint32_t token,std::uint64_t pool=7){nd::Observation o{23,2,static_cast<std::uint32_t>(coded.size()),pool,++content,token,false,4096};input.push_back({o,std::move(coded)});}
@@ -86,6 +90,87 @@ struct Fixture {
         check(producer.prepare(r)==sb::ControlStatus::Listening&&producer.localConfig(local,authority),"actual fresh producer control admission on same configured endpoint");
         sender.reset();check(sender.begin(local,authority.channel)==sb::Status::Ok,"new real paired binding after route reconnect");}
 };
+// Real production public-V4L2 observer feeding the real authenticated worker.
+// OS returns and original native bytes are owned fixtures; no headset is used.
+struct NativeBurst {
+    static NativeBurst* active;
+    static constexpr std::uintptr_t base=0x100000;
+    std::array<std::array<std::uint8_t,4096>,nd::MaxBuffers> storage{};
+    std::array<bool,nd::MaxBuffers> queued{};
+    nd::DecodeProvider provider;
+    unsigned originals=0;
+    static bool read(void* out,std::uintptr_t source,std::size_t n,void*) noexcept{
+        if(!source||n>4096)return false;
+        std::memcpy(out,reinterpret_cast<void*>(source),n);return true;
+    }
+    static int ioctl(int,unsigned long request,...) {
+        ++active->originals;va_list args;va_start(args,request);auto* argument=va_arg(args,void*);va_end(args);
+        if(request==VIDIOC_S_FMT)static_cast<v4l2_format*>(argument)->fmt.pix_mp.num_planes=1;
+        if(request==VIDIOC_QUERYBUF){auto& b=*static_cast<v4l2_buffer*>(argument);b.m.planes[0].length=4096;
+            if(b.type==V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)b.m.planes[0].m.mem_offset=b.index*4096;}
+        return 0;
+    }
+    static void* mmap(void*,std::size_t,int,int,int,off_t offset){return active->storage[static_cast<unsigned>(offset)/4096].data();}
+    static int munmap(void*,std::size_t){return 0;}static int close(int){return 0;}
+    struct Buffer {
+        v4l2_buffer b{};v4l2_plane plane{};
+        Buffer(unsigned index,bool capture=false){b.index=index;b.type=capture?V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            b.memory=capture?V4L2_MEMORY_DMABUF:V4L2_MEMORY_MMAP;b.length=1;b.m.planes=&plane;
+            b.flags=V4L2_BUF_FLAG_TIMESTAMP_COPY;plane.length=4096;plane.bytesused=64;}
+    };
+    NativeBurst(){
+        active=this;check(provider.prepare({base,nd::ExpectedVrlinkHash,nd::ExpectedExecutableSegmentHash},{ioctl,mmap,munmap,close},{read,nullptr}),"actual DecodeProvider admits only pinned fixture source/public API originals");
+        v4l2_format format{};format.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;format.fmt.pix_mp.pixelformat=V4L2_PIX_FMT_HEVC;
+        check(provider.invokeIoctl(base+0x32edc,23,VIDIOC_S_FMT,&format)==0,"native public HEVC OUTPUT format");
+        v4l2_requestbuffers buffers{};buffers.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;buffers.memory=V4L2_MEMORY_MMAP;buffers.count=nd::MaxBuffers;
+        check(provider.invokeIoctl(base+0x32f18,23,VIDIOC_REQBUFS,&buffers)==0,"native public maximum OUTPUT pool");
+        for(unsigned i=0;i<nd::MaxBuffers;++i){Buffer b(i);
+            check(provider.invokeIoctl(base+0x32fec,23,VIDIOC_QUERYBUF,&b.b)==0,"native OUTPUT query");
+            check(provider.invokeMmap(base+0x33008,nullptr,4096,PROT_READ|PROT_WRITE,MAP_SHARED,23,i*4096)==storage[i].data(),"native OUTPUT owned mmap");}
+        format.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        check(provider.invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&format)==0,"native public CAPTURE format");
+        buffers.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;buffers.memory=V4L2_MEMORY_DMABUF;
+        check(provider.invokeIoctl(base+0x324a8,23,VIDIOC_REQBUFS,&buffers)==0,"native public CAPTURE pool");
+        for(unsigned i=0;i<nd::MaxBuffers;++i){Buffer b(i,true);check(provider.invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b)==0,"native CAPTURE query");}
+    }
+    void input(sb::Bytes coded,unsigned token,unsigned index){
+        check(coded.size<=storage[index].size(),"actual encoded certificate fits queried native buffer");
+        Buffer b(index);if(queued[index])check(provider.invokeIoctl(base+0x32bc0,23,VIDIOC_DQBUF,&b.b)==0,"native successful OUTPUT reuse");
+        std::copy_n(coded.data,coded.size,storage[index].data());b.plane.bytesused=static_cast<unsigned>(coded.size);b.b.timestamp.tv_sec=token;
+        const auto before=originals;check(provider.invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&b.b)==0&&originals==before+1,"source bytes cross exactly one successful original QBUF");
+        queued[index]=true;storage[index].fill(0xee); // Native may immediately reuse memory after handoff.
+    }
+    void capture(unsigned token,unsigned index){
+        Buffer b(index,true);b.b.timestamp.tv_sec=token;b.plane.m.fd=73+static_cast<int>(index);
+        check(provider.invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==0,"native CAPTURE lease requeue");
+        check(provider.invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0,"native successful current CAPTURE DQBUF");
+    }
+};
+NativeBurst* NativeBurst::active=nullptr;
+void actualNativeBurst(){
+    Fixture f;auto native=std::make_unique<NativeBurst>();f.ownedNative=&native->provider;
+    check(f.worker.prepare(f.request(),f.provider()),"actual provider-to-authenticated-worker pipeline prepares");
+    native->input(bytes(ordinary),9,0);f.pump();
+    for(unsigned token=10;token<13;++token){const auto coded=f.certifiedDiscovery();native->input(bytes(coded),token,0);native->capture(token,0);f.pump();}
+    check(f.sender.confirmed()&&f.worker.status().state==nd::RuntimeState::PeerConfirmed&&f.decoded==3,"actual native ownership and early decoder results finish real mutual handshake");
+    const auto original=f.worker.status().source;const auto random=f.randomCalls;
+    for(unsigned burst=0;burst<4;++burst){
+        const auto before=f.decoded;const auto sourceFrame=f.sourceFrame;
+        for(unsigned i=0;i<nd::MaxBuffers;++i){const auto coded=f.certifiedFrame();const auto token=100+burst*nd::MaxBuffers+i;
+            native->input(bytes(coded),token,i);native->capture(token,i);}
+        check(native->provider.stats().dropped==0&&native->provider.stats().rejected==0,"complete native burst never loses owned bytes while worker was unscheduled");
+        f.worker.tick();
+        check(f.decoded==before+nd::MaxBuffers&&f.worker.immediateWorkPending(),"one bounded production tick joins every early decoded picture and requests immediate backlog check");
+        for(unsigned i=0;i<nd::MaxBuffers;++i){const auto& frame=f.decodedFrames[before+i];
+            check(frame.descriptor.sourceFrame==sourceFrame+i+1&&frame.submitted.nativeTimestampToken==100+burst*nd::MaxBuffers+i,
+                  "every decoded picture has its own exact certificate rather than previous/newest frame");
+            check(native->provider.captureLeaseCurrentOnWorker(frame.capture),"every published native CAPTURE lease is still exact/current");}
+        f.worker.tick();check(!f.worker.immediateWorkPending(),"drained worker returns to sleeping instead of idle busy loop");
+        check(f.worker.status().source.stream.connection==original.stream.connection&&f.randomCalls==random,"sustained complete bursts preserve original confirmed connection");
+    }
+    f.worker.stop();f.ownedNative=nullptr;
+}
+
 void offAndPreparation(){
     nd::ReceiverWorker worker;nd::RuntimeRequest r;r.pairingsDirectory="/does/not/exist";
     check(worker.prepare(r,{})&&worker.status().state==nd::RuntimeState::Disabled,"off path ignores missing credentials/provider");worker.tick();
@@ -134,6 +219,58 @@ void earlyDecodedOrdering(){
     f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});
     f.pump();
     check(f.decoded==before+1,"owned input and native decoded result queued before one worker tick must join exact picture once");
+}
+void earlyDecodedValidity(){
+    // A decoded result may precede worker admission of its owned coded bytes.
+    // Holding that scalar fact never extends the actual native image lease.
+    {
+        Fixture f;f.negotiate();const auto before=f.decoded;
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+        check(f.decoded==before,"early native result alone cannot invent a certificate");
+        f.leaseCurrent=false;f.enqueue(f.certifiedFrame(),40);f.pump();
+        check(f.decoded==before&&f.leaseChecks>=2,"native lease is revalidated at publication, not merely on early retention");
+        f.leaseCurrent=true;f.enqueue(f.certifiedFrame(),40);f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,41});f.pump();
+        check(f.decoded==before,"a stale early lease permanently quarantines its ambiguous exact token");
+        f.enqueue(f.certifiedFrame(),41);f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,41,7,21,42});f.pump();
+        check(f.decoded==before+1,"stale early lease does not revoke a different exact valid picture");
+    }
+    {
+        Fixture f;f.negotiate();const auto before=f.decoded;
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+        f.capture.push_back({nd::CaptureKind::Requeue,23,73,0,0,7,21,41});f.pump();
+        f.enqueue(f.certifiedFrame(),40);f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,42});f.pump();
+        check(f.decoded==before,"native requeue retires an early fact before a late certificate can use it");
+        f.enqueue(f.certifiedFrame(),41);f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,41,7,21,43});f.pump();
+        check(f.decoded==before+1,"requeue preserves the unrelated next native cycle");
+    }
+    {
+        Fixture f;f.negotiate();const auto before=f.decoded;const auto source=f.worker.status().source;
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,65535,7,21,40});f.pump();
+        ++f.counts.dropped;f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,65535,7,0,0,nd::InputLoss::SnapshotFull,1});f.pump();
+        f.enqueue(f.certifiedFrame(),65535);f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,65535,7,21,41});f.pump();
+        check(f.decoded==before,"known loss retires an early result even at the 16-bit token boundary");
+        f.enqueue(f.certifiedFrame(),0);f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,0,7,21,42});f.pump();
+        check(f.decoded==before+1&&f.worker.status().source.stream.connection==source.stream.connection,
+              "token wrap to a different exact token preserves current transport and publishes correctly");
+    }
+    {
+        Fixture f;f.negotiate();const auto before=f.decoded;
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+        const auto oldCertificate=f.certifiedFrame();
+        f.capture.push_back({nd::CaptureKind::SourceReset,23,-1,0,0,7,22,0});f.pump();
+        f.enqueue(ordinary,41,8);f.pump();
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.enqueue(oldCertificate,40,8);f.pump();
+        check(f.decoded==before&&f.randomCalls==2&&f.worker.status().source.stream.generation==8,
+              "retired source pool facts cannot join a later source with the same fd and timestamp token");
+    }
+    {
+        Fixture f;f.negotiate();const auto before=f.decoded;
+        f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,40,7,21,40});f.pump();
+        const auto oldCertificate=f.certifiedFrame();
+        ++f.counts.captureDropped;f.pump();f.enqueue(oldCertificate,40);f.pump();
+        check(f.decoded==before&&f.worker.status().state==nd::RuntimeState::SourceLost,
+              "unknown CAPTURE event loss remains a hard global stop even with a retained early fact");
+    }
 }
 
 void lifecycleAndLoss(){
@@ -377,4 +514,4 @@ void transportRecoveryRejectsOldProof(){
         "transport retry never retries authenticated-control rejection or grants pixels");
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--early-decoded")==0){earlyDecodedOrdering();std::cout<<checks<<" early decoded checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--native-burst")==0){actualNativeBurst();std::cout<<checks<<" actual native burst checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-validity")==0){earlyDecodedValidity();std::cout<<checks<<" early decoded validity checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-decoded")==0){earlyDecodedOrdering();std::cout<<checks<<" early decoded checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();actualNativeBurst();earlyDecodedOrdering();earlyDecodedValidity();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
