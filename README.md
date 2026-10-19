@@ -34,7 +34,7 @@ partial transparency; the camera image stays on the headset.
 
 | Game | Required mod | Minimum version |
 |---|---|---|
-| Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (upcoming) |
+| Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** |
 
 Other games need an integration; installing the patch alone is not enough.
 

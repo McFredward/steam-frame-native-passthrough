@@ -34,7 +34,7 @@ auch bei Teiltransparenz; das Kamerabild bleibt auf der Brille.
 
 | Spiel | Benötigte Mod | Mindestversion |
 |---|---|---|
-| Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** (angekündigt) |
+| Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** |
 
 Andere Spiele benötigen eine Integration; der Patch allein reicht nicht aus.
 
