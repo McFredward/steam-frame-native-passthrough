@@ -21,7 +21,7 @@ namespace local=stream_bridge_local;
 namespace native=stream_bridge_native;
 namespace stream_bridge_renderer {
 namespace {
-enum class Flow:unsigned {CertifiedCallback,CertifiedQueued,CertifiedQueueRefused,DecodedCallback,ImageMiss,LeaseMiss,NativeStale,BindingMiss,DecodedQueued,DecodedQueueRefused,CertifiedReceived,Authenticated,AuthenticationRefused,DecodedReceived,CertificateMiss,ReceivedLeaseMiss,KernelMiss,PicturesRetained,ReadyQueued,ReadyReceived,HandoffWait,HandoffReady,HandoffTimeout,CameraActive,CameraNone,CameraSource,CameraChannel,CameraLease,CameraDeferred,HandoffOverFrame,HandoffOverTwoFrames,HandoffOver50ms,Count};
+enum class Flow:unsigned {CertifiedCallback,CertifiedQueued,CertifiedQueueRefused,DecodedCallback,ImageMiss,LeaseMiss,NativeStale,BindingMiss,DecodedQueued,DecodedQueueRefused,CertifiedReceived,Authenticated,AuthenticationRefused,DecodedReceived,CertificateMiss,ReceivedLeaseMiss,KernelMiss,PicturesRetained,ReadyQueued,ReadyReceived,HandoffWait,HandoffReady,HandoffTimeout,CameraActive,CameraNone,CameraSource,CameraChannel,CameraLease,CameraDeferred,HandoffOverFrame,HandoffOverTwoFrames,HandoffOver50ms,HandoffUnavailable,Count};
 struct Process {
     std::mutex gate;std::condition_variable released;std::atomic<bool> peerConfirmed{false};int wake=-1;std::atomic<ProcessKind> kind{ProcessKind::Off};int directory=-1;
     std::filesystem::path root;std::array<ProcessConsumer,4> consumers{};
@@ -30,6 +30,7 @@ struct Process {
     std::array<local::Message,native::ReceiverWorker::PendingCapacity> masks{};
     std::array<LocalPicture,native::MaxDevices*native::MaxBuffers> pictures{};
     std::array<local::Message,native::MaxDevices*native::MaxBuffers> awaiting{},acknowledged{};
+    std::array<local::LeaseReference,native::MaxDevices*native::MaxBuffers> unavailable{};
     std::array<bool,native::ReceiverWorker::PendingCapacity> coverageNeeded{};
     std::array<bool,native::MaxDevices*native::MaxBuffers> readyQueued{},pictureCoverage{};
     std::shared_ptr<local::LeaseReader> currentLeases;
@@ -65,8 +66,8 @@ void reportFlowCold(Process& p){
     const auto get=[&](Flow f){return static_cast<unsigned long long>(values[static_cast<unsigned>(f)]);};
     std::fprintf(stderr,"[Steam Link Native Passthrough] local flow %s: certificate callbacks/queued/queue-refused=%llu/%llu/%llu; decoded callbacks/queued/queue-refused=%llu/%llu/%llu; source miss image/lease/current/binding=%llu/%llu/%llu/%llu; received certificate/authenticated/auth-refused=%llu/%llu/%llu; received decoded/retained=%llu/%llu; receive miss certificate/lease/kernel=%llu/%llu/%llu\n",
         p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::CertifiedCallback),get(Flow::CertifiedQueued),get(Flow::CertifiedQueueRefused),get(Flow::DecodedCallback),get(Flow::DecodedQueued),get(Flow::DecodedQueueRefused),get(Flow::ImageMiss),get(Flow::LeaseMiss),get(Flow::NativeStale),get(Flow::BindingMiss),get(Flow::CertifiedReceived),get(Flow::Authenticated),get(Flow::AuthenticationRefused),get(Flow::DecodedReceived),get(Flow::PicturesRetained),get(Flow::CertificateMiss),get(Flow::ReceivedLeaseMiss),get(Flow::KernelMiss));
-    std::fprintf(stderr,"[Steam Link Native Passthrough] paired decoder handoff %s: ready queued/received=%llu/%llu; waited/ready/emergency-timeout=%llu/%llu/%llu\n",
-        p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::ReadyQueued),get(Flow::ReadyReceived),get(Flow::HandoffWait),get(Flow::HandoffReady),get(Flow::HandoffTimeout));
+    std::fprintf(stderr,"[Steam Link Native Passthrough] paired decoder handoff %s: ready queued/received=%llu/%llu; waited/ready/emergency-timeout=%llu/%llu/%llu; exact-unavailable=%llu\n",
+        p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::ReadyQueued),get(Flow::ReadyReceived),get(Flow::HandoffWait),get(Flow::HandoffReady),get(Flow::HandoffTimeout),get(Flow::HandoffUnavailable));
     std::fprintf(stderr,"[Steam Link Native Passthrough] paired handoff latency %s: max-us=%llu; over-11ms/22ms/50ms=%llu/%llu/%llu; decoder callback only, not end-to-end latency\n",
         p.kind==ProcessKind::Vrlink?"video":"compositor",static_cast<unsigned long long>(p.handoffMaxMicros.load(std::memory_order_relaxed)),get(Flow::HandoffOverFrame),get(Flow::HandoffOverTwoFrames),get(Flow::HandoffOver50ms));
     std::fprintf(stderr,"[Steam Link Native Passthrough] camera demand %s: active/none=%llu/%llu; revoked source/channel/lease=%llu/%llu/%llu; opaque deferred=%llu\n",
@@ -119,11 +120,14 @@ void handoff(const native::CaptureObservation& capture,void* context) noexcept {
         std::unique_lock<std::mutex> lock(p.gate);
         const auto current=[&]{local::LeaseReference lease;return p.writer.reference(capture,lease);};
         const auto ready=[&]{local::LeaseReference lease;if(!p.writer.reference(capture,lease))return false;for(const auto& receipt:p.acknowledged)if(receipt.peerConfirmed&&sameLease(receipt.lease,lease))return true;return false;};
+        const auto unavailable=[&]{local::LeaseReference lease;return p.writer.reference(capture,lease)&&lease.slot<p.unavailable.size()&&sameLease(p.unavailable[lease.slot],lease);};
         if(ready()&&current()){count(p,Flow::HandoffReady);return;}
+        if(unavailable()&&current()){count(p,Flow::HandoffUnavailable);return;}
         if(!current()||!p.peerConfirmed.load(std::memory_order_acquire)||p.channel.state()!=local::State::Connected)return;
         count(p,Flow::HandoffWait);
-        const bool woke=p.released.wait_for(lock,std::chrono::milliseconds(100),[&]{return ready()||!current()||!p.peerConfirmed.load(std::memory_order_acquire)||p.channel.state()!=local::State::Connected;});
+        const bool woke=p.released.wait_for(lock,std::chrono::milliseconds(100),[&]{return ready()||unavailable()||!current()||!p.peerConfirmed.load(std::memory_order_acquire)||p.channel.state()!=local::State::Connected;});
         if(woke&&ready()&&current())count(p,Flow::HandoffReady);
+        else if(woke&&unavailable()&&current())count(p,Flow::HandoffUnavailable);
         else if(!woke)count(p,Flow::HandoffTimeout);
     }catch(...){/* Genuine local failure preserves the original native result. */}
 }
@@ -152,6 +156,25 @@ void decoded(const native::DecodedFrame& frame,void* context) noexcept{
             if(lease.slot<p.awaiting.size()){p.awaiting[lease.slot]=std::move(receipt);p.acknowledged[lease.slot]={};}notify(p);
         }else count(p,Flow::DecodedQueueRefused);close(message.readOnlyLeases);}else count(p,Flow::LeaseMiss);
     }catch(...){/* Missing selected lease is ordinary native output. */}
+}
+void captureChanged(const native::SourceIdentity&,const native::CaptureObservation& capture,void* context) noexcept{
+    if(capture.kind==native::CaptureKind::Decoded)return;
+    auto&p=*static_cast<Process*>(context);
+    try{
+        // The synchronous native sink has already revoked the old lease. Pair
+        // this cold-worker notification with the wait's check/enqueue lock;
+        // the sink itself must never acquire a Process or provider lock.
+        std::lock_guard<std::mutex> lock(p.gate);p.released.notify_all();
+    }catch(...){/* The unchanged emergency deadline still bounds native DQ. */}
+}
+void captureUnavailable(const native::SourceIdentity&,const native::CaptureObservation& capture,void* context) noexcept{
+    auto&p=*static_cast<Process*>(context);
+    try{
+        std::lock_guard<std::mutex> lock(p.gate);local::LeaseReference lease;
+        if(p.writer.reference(capture,lease)&&lease.slot<p.unavailable.size()){
+            p.unavailable[lease.slot]=lease;p.released.notify_all();
+        }
+    }catch(...){/* Failure retains the unchanged emergency deadline. */}
 }
 void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
     auto&p=*static_cast<Process*>(context);
@@ -372,7 +395,7 @@ bool prepareProcessCold() noexcept{
         if(kind==ProcessKind::Vrlink){
             if(!p.writer.prepareCold()){p.kind=ProcessKind::Off;return;}
             native::RuntimeRequest request;request.explicitlyEnabled=true;request.buildId=712;request.pairingsDirectory=p.root/"pairings";std::copy_n(address,std::strlen(address)+1,request.producerAddress.data());request.producerPort=std::uint16_t(port);
-            request.callbacks={certified,decoded,nullptr,sourceNotice,&p};request.imageRoutePrepared=imageRoutePrepared;request.imageRouteContext=&p;
+            request.callbacks={certified,decoded,captureChanged,sourceNotice,&p,captureUnavailable};request.imageRoutePrepared=imageRoutePrepared;request.imageRouteContext=&p;
             if(!native::startPinnedReceiver(request)||!native::setPinnedCaptureSink(local::LeaseWriter::sink,&p.writer)||!native::setPinnedCaptureHandoff(handoff,&p)){native::stopPinnedReceiver();p.kind=ProcessKind::Off;return;}
         }
         p.prepared=true;p.worker=std::thread(work,&p);p.worker.detach();note(p,kind==ProcessKind::Vrlink?"early video source prepared":"native compositor bridge prepared");

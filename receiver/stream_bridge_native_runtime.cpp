@@ -133,12 +133,17 @@ struct ReceiverWorker::Impl {
         blocked=false;notice(RuntimeState::Negotiating);return true;
     }
     bool matches(int fd,std::uint64_t pool) const {return source.decoderFd==fd&&source.outputPoolGeneration==pool&&pool!=0;}
+    void unavailable(const CaptureObservation& event){
+        if(matches(event.fd,event.sourcePoolGeneration)&&!blocked&&request.callbacks.unavailable
+            &&provider.captureCurrent(event,provider.context))
+            request.callbacks.unavailable(source,event,request.callbacks.context);
+    }
     bool retireExact(int fd,std::uint64_t pool,std::uint32_t token){
         if(!retire(fd,pool,token))return false;
         for(auto& p:pending)if(p.used&&p.submitted.fd==fd&&p.submitted.poolGeneration==pool
             &&p.submitted.nativeTimestampToken==token)p={};
         for(auto& e:early)if(e.used&&e.event.fd==fd&&e.event.sourcePoolGeneration==pool
-            &&e.event.nativeTimestampToken==token)e={};
+            &&e.event.nativeTimestampToken==token){unavailable(e.event);e={};}
         return true;
     }
     // Missing input bytes may still be in the independent owned OUTPUT queue.
@@ -147,7 +152,8 @@ struct ReceiverWorker::Impl {
         if(!matches(event.fd,event.sourcePoolGeneration)||blocked)return true;
         auto* q=quarantine(event.fd,event.sourcePoolGeneration);
         if(!q){unknownLoss();clear(RuntimeState::SourceLost,true,RuntimeReason::QuarantineCapacity);return true;}
-        if(event.nativeTimestampToken>0xffff||q->hard||q->tokens.test(event.nativeTimestampToken))return true;
+        if(event.nativeTimestampToken>0xffff||q->hard)return true;
+        if(q->tokens.test(event.nativeTimestampToken)){unavailable(event);return true;}
         Pending* found=nullptr;unsigned count=0;
         for(auto& p:pending)if(p.used&&p.submitted.nativeTimestampToken==event.nativeTimestampToken){found=&p;++count;}
         if(count!=1||!found)return false;
@@ -229,7 +235,8 @@ struct ReceiverWorker::Impl {
         }
         if(event.kind!=CaptureKind::Decoded||blocked||event.index>=early.size())return;
         auto* q=quarantine(event.fd,event.sourcePoolGeneration);
-        if(!q||q->hard||event.nativeTimestampToken>0xffff||q->tokens.test(event.nativeTimestampToken))return;
+        if(!q||q->hard||event.nativeTimestampToken>0xffff)return;
+        if(q->tokens.test(event.nativeTimestampToken)){unavailable(event);return;}
         const auto& seen=seenCapture[event.index];
         if(seen.sourcePoolGeneration==event.sourcePoolGeneration&&seen.capturePoolGeneration==event.capturePoolGeneration
             &&(seen.contentGeneration>event.contentGeneration

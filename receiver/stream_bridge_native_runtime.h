@@ -54,6 +54,11 @@ struct RuntimeCallbacks {
     void (*capture)(const SourceIdentity&,const CaptureObservation&,void*) noexcept=nullptr;
     void (*notice)(const RuntimeNotice&,void*) noexcept=nullptr;
     void* context=nullptr;
+    // Terminal negative disposition for one still-current exact CAPTURE:
+    // its OUTPUT token is permanently quarantined in this native source pool.
+    // Releases optional decoder waiting only; never certifies pixels, grants
+    // image/mask/camera permission or substitutes for an outstanding AU check.
+    void (*unavailable)(const SourceIdentity&,const CaptureObservation&,void*) noexcept=nullptr;
 };
 struct RuntimeRequest {
     bool explicitlyEnabled=false;

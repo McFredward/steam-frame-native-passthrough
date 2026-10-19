@@ -34,6 +34,7 @@ struct Event {nd::Observation fact{};std::vector<std::uint8_t> coded;};
 struct Fixture {
     Files files;std::deque<Event> input;std::deque<nd::CaptureObservation> capture;
     nd::DecodeProvider* ownedNative=nullptr;std::vector<nd::DecodedFrame> decodedFrames;
+    std::vector<nd::CaptureObservation> unavailableFrames;nd::SourceIdentity unavailableSource{};
     nd::SnapshotStats counts{};unsigned polls=0,capturePolls=0,randomCalls=0,certified=0,decoded=0;
     bool randomFails=false,routeReady=true,publishGapAfterEmptyPoll=false,leaseCurrent=true;unsigned leaseChecks=0;std::uint64_t clock=100;std::vector<nd::RuntimeNotice> notices;std::vector<nd::CaptureObservation> invalidations;
     nd::DecodedFrame lastDecoded{};nd::CertifiedFrame lastCertified{};sb::CertifiedAccessUnit retained{};
@@ -47,7 +48,7 @@ struct Fixture {
     static tx::VerifiedSource source(){tx::VerifiedSource s;s.verified=s.ordinaryStream=s.completeAccessUnit=true;s.codec=tx::VerifiedSource::Codec::HevcAnnexB;s.moduleSha256[0]=1;s.apiVersion=0x7102000b;s.encoderGeneration=81;return s;}
     nd::RuntimeRequest request(){nd::RuntimeRequest r;r.explicitlyEnabled=true;r.buildId=712;r.pairingsDirectory=files.receiver;r.producerPort=producer.localPort();std::strcpy(r.producerAddress.data(),"127.0.0.1");
         r.imageRoutePrepared=[](void* v) noexcept{return static_cast<Fixture*>(v)->routeReady;};r.imageRouteContext=this;
-        r.callbacks={onCertified,onDecoded,onCapture,onNotice,this};return r;}
+        r.callbacks={onCertified,onDecoded,onCapture,onNotice,this,onUnavailable};return r;}
     nd::SourceProvider provider(){return {poll,pollCapture,stats,random,this,monotonic,currentCapture};}
     static std::uint64_t monotonic(void* v) noexcept{return static_cast<Fixture*>(v)->clock;}
     static bool poll(nd::Observation& out,std::uint8_t* destination,std::size_t capacity,void* v) noexcept {
@@ -63,6 +64,9 @@ struct Fixture {
     static void onCertified(const nd::CertifiedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.certified;f.lastCertified=frame;f.retained=*frame.certificate;f.lastCertified.certificate=&f.retained;}
     static void onDecoded(const nd::DecodedFrame& frame,void* v) noexcept{auto& f=*static_cast<Fixture*>(v);++f.decoded;f.lastDecoded=frame;f.decodedFrames.push_back(frame);}
     static void onCapture(const nd::SourceIdentity&,const nd::CaptureObservation& c,void* v) noexcept{static_cast<Fixture*>(v)->invalidations.push_back(c);}
+    static void onUnavailable(const nd::SourceIdentity& source,const nd::CaptureObservation& capture,void* v) noexcept{
+        auto& f=*static_cast<Fixture*>(v);f.unavailableFrames.push_back(capture);f.unavailableSource=source;
+    }
     static void onNotice(const nd::RuntimeNotice& n,void* v) noexcept{static_cast<Fixture*>(v)->notices.push_back(n);}
     void enqueue(std::vector<std::uint8_t> coded,std::uint32_t token,std::uint64_t pool=7){nd::Observation o{23,2,static_cast<std::uint32_t>(coded.size()),pool,++content,token,false,4096};input.push_back({o,std::move(coded)});}
     void pump(){for(unsigned i=0;i<80;++i){worker.tick();producer.tick();sb::VerifiedControl got{};while(producer.pollVerified(got))check(sender.receive(bytes(got.payload),got.channel)==sb::Status::Ok,"actual verified reverse handshake");}}
@@ -170,6 +174,26 @@ void actualNativeBurst(){
     }
     f.worker.stop();f.ownedNative=nullptr;
 }
+void actualNativeTerminalDisposition(){
+    Fixture f;auto native=std::make_unique<NativeBurst>();f.ownedNative=&native->provider;
+    check(f.worker.prepare(f.request(),f.provider()),"native terminal disposition pipeline prepares");
+    native->input(bytes(ordinary),9,0);f.pump();
+    for(unsigned token=10;token<13;++token){native->input(bytes(f.certifiedDiscovery()),token,0);native->capture(token,0);f.pump();}
+    check(f.sender.confirmed()&&f.decoded==3,"terminal disposition starts from real public native ownership and mutual admission");
+    const auto source=f.worker.status().source;
+    native->input(bytes(ordinary),200,0);native->capture(200,0);f.pump();
+    check(f.unavailableFrames.size()==1&&f.decoded==3&&f.unavailableFrames.back().nativeTimestampToken==200
+        &&native->provider.captureLeaseCurrentOnWorker(f.unavailableFrames.back()),"real original QBUF and DQBUF with final ordinary inspection produce one exact still-current negative disposition");
+    auto corrupt=f.certifiedFrame();corrupt.back()^=1;native->input(bytes(corrupt),201,1);native->capture(201,1);f.pump();
+    check(f.unavailableFrames.size()==2&&f.decoded==3&&f.unavailableFrames.back().nativeTimestampToken==201,
+        "real native capture with invalid original-AU proof stays unselected and terminates only its own waiting");
+    native->capture(202,2);f.pump();
+    check(f.unavailableFrames.size()==2&&f.decoded==3,"actual native DQ ahead of the owned OUTPUT snapshot cannot be declared ordinary");
+    native->input(bytes(f.certifiedFrame()),202,2);f.pump();
+    check(f.unavailableFrames.size()==2&&f.decoded==4&&f.lastDecoded.capture.nativeTimestampToken==202
+        &&f.worker.status().source.stream.connection==source.stream.connection,"actual delayed certified native input publishes its exact capture without resetting the confirmed stream");
+    f.worker.stop();f.ownedNative=nullptr;
+}
 
 // A real STREAMOFF/STREAMON reset is not REQBUFS: native code retains the
 // existing MMAP and DMABUF allocations. Exercise the complete observer ->
@@ -250,6 +274,37 @@ void ordinaryWithoutCapture(){
         "ordinary no-CAPTURE inputs never exhaust certified pending receipts");
     f.enqueue(f.certifiedFrame(),200);f.pump();f.capture.push_back({nd::CaptureKind::Decoded,23,73,0,200,7,21,200});f.pump();
     check(f.certified==before+1&&f.decoded==4,"fresh exact certified picture survives an arbitrary ordinary input run");
+}
+void terminalCaptureDisposition(){
+    Fixture f;f.negotiate();f.unavailableFrames.clear();const auto before=f.decoded,certified=f.certified;
+    const nd::CaptureObservation early{nd::CaptureKind::Decoded,23,73,0,40,7,21,40};
+    f.capture.push_back(early);f.pump();
+    check(f.unavailableFrames.empty()&&f.decoded==before,"a pending owned input never creates a terminal negative capture disposition");
+    f.enqueue(f.certifiedFrame(),40);f.pump();
+    check(f.unavailableFrames.empty()&&f.decoded==before+1,"late exact authenticated input still publishes its early capture without a negative shortcut");
+    auto ordinaryCapture=early;ordinaryCapture.nativeTimestampToken=41;ordinaryCapture.contentGeneration=41;
+    f.enqueue(ordinary,41);f.pump();f.capture.push_back(ordinaryCapture);f.pump();
+    check(f.unavailableFrames.size()==1&&f.unavailableFrames.back().nativeTimestampToken==41&&f.unavailableFrames.back().contentGeneration==41
+        &&f.unavailableSource.stream.connection==f.worker.status().source.stream.connection&&f.unavailableSource.outputPoolGeneration==7
+        &&f.decoded==before+1&&f.certified==certified+1,"final ordinary OUTPUT rejection closes only its exact current capture without certifying a picture");
+    auto earlyOrdinary=ordinaryCapture;earlyOrdinary.nativeTimestampToken=42;earlyOrdinary.contentGeneration=42;
+    f.capture.push_back(earlyOrdinary);f.pump();
+    check(f.unavailableFrames.size()==1,"early ordinary-looking capture waits for actual input inspection");
+    f.enqueue(ordinary,42);f.pump();
+    check(f.unavailableFrames.size()==2&&f.unavailableFrames.back().nativeTimestampToken==42,"ordinary input inspection terminates the exact capture that arrived before its owned bytes");
+    auto invalid=earlyOrdinary;invalid.nativeTimestampToken=43;invalid.contentGeneration=43;
+    auto corrupt=f.certifiedFrame();corrupt.back()^=1;f.capture.push_back(invalid);f.pump();f.enqueue(corrupt,43);f.pump();
+    check(f.unavailableFrames.size()==3&&f.unavailableFrames.back().nativeTimestampToken==43&&f.decoded==before+1&&f.certified==certified+1,
+        "invalid original-AU proof remains unselected while its exact rejected capture stops waiting");
+    auto stale=invalid;stale.nativeTimestampToken=44;stale.contentGeneration=44;f.enqueue(ordinary,44);f.pump();f.leaseCurrent=false;
+    f.capture.push_back(stale);f.pump();check(f.unavailableFrames.size()==3,"retired native storage cannot receive a fresh terminal capture disposition");f.leaseCurrent=true;
+    auto gap=stale;gap.nativeTimestampToken=45;gap.contentGeneration=45;f.capture.push_back(gap);f.pump();
+    ++f.counts.dropped;f.capture.push_back({nd::CaptureKind::InputGap,23,-1,2,45,7,0,0,nd::InputLoss::SnapshotFull,1});f.pump();
+    check(f.unavailableFrames.size()==4&&f.unavailableFrames.back().nativeTimestampToken==45&&f.worker.status().state==nd::RuntimeState::PeerConfirmed,
+        "exact known input loss closes its early capture while independent certified source authority remains live");
+    auto unknown=gap;unknown.nativeTimestampToken=46;unknown.contentGeneration=46;f.capture.push_back(unknown);f.pump();++f.counts.captureDropped;f.pump();
+    f.enqueue(ordinary,46);f.pump();
+    check(f.unavailableFrames.size()==4&&f.worker.status().state==nd::RuntimeState::SourceLost,"unknown capture loss retains emergency source revocation without inventing an ordinary disposition");
 }
 
 void earlyDecodedOrdering(){
@@ -553,4 +608,4 @@ void transportRecoveryRejectsOldProof(){
         "transport retry never retries authenticated-control rejection or grants pixels");
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--native-restart")==0){actualNativeRestart();std::cout<<checks<<" actual native restart checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--native-burst")==0){actualNativeBurst();std::cout<<checks<<" actual native burst checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-validity")==0){earlyDecodedValidity();std::cout<<checks<<" early decoded validity checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-decoded")==0){earlyDecodedOrdering();std::cout<<checks<<" early decoded checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();actualNativeBurst();actualNativeRestart();earlyDecodedOrdering();earlyDecodedValidity();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--native-restart")==0){actualNativeRestart();std::cout<<checks<<" actual native restart checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--native-burst")==0){actualNativeBurst();std::cout<<checks<<" actual native burst checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-validity")==0){earlyDecodedValidity();std::cout<<checks<<" early decoded validity checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--early-decoded")==0){earlyDecodedOrdering();std::cout<<checks<<" early decoded checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--pool-order")==0){sameFdPoolOrdering();std::cout<<checks<<" pool-order checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--route-gaps")==0){routeQuarantineAndBackoff();std::cout<<checks<<" route-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--live-switch")==0){liveDecoderSwitch();std::cout<<checks<<" live-switch checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--known-gap")==0){knownGapRecovery();std::cout<<checks<<" known-gap checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--native-disposition")==0){actualNativeTerminalDisposition();std::cout<<checks<<" actual native terminal disposition checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--capture-disposition")==0){terminalCaptureDisposition();std::cout<<checks<<" terminal capture disposition checks PASS\n";return 0;}if(argc==2&&std::strcmp(argv[1],"--ordinary-gap")==0){ordinaryWithoutCapture();std::cout<<checks<<" no-capture checks PASS\n";return 0;}offAndPreparation();actualNativeBurst();actualNativeTerminalDisposition();actualNativeRestart();earlyDecodedOrdering();earlyDecodedValidity();realVideoAndCapture();unprovedInputs();ordinaryWithoutCapture();terminalCaptureDisposition();knownGapRecovery();routeQuarantineAndBackoff();liveDecoderSwitch();sameFdPoolOrdering();lifecycleAndLoss();ambiguityAndBound();imageRouteAdmission();lateTransportReadiness();transportRecoveryRejectsOldProof();std::cout<<checks<<" hosted native receiver checks PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

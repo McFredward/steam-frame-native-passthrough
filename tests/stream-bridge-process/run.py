@@ -16,7 +16,7 @@ def main():
     parser.add_argument("--causal", action="store_true")
     parser.add_argument("--decoded-control", action="store_true")
     parser.add_argument("--handoff-only", action="store_true")
-    parser.add_argument("--handoff-control", choices=("early-receipt", "single-packet", "stale-receipt", "camera-receipt"))
+    parser.add_argument("--handoff-control", choices=("early-receipt", "single-packet", "stale-receipt", "camera-receipt", "retired-lease", "unavailable-lease"))
     parser.add_argument("--camera-control", choices=("future-metadata", "early-none", "old-epoch"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -38,6 +38,10 @@ def main():
             raise RuntimeError("decoded dispatch causal anchor changed")
         source = source.replace(old, b"if(false&&wantsDecoded&&consumer.decodedCoverage)")
     controls = {
+        "unavailable-lease": (b"p.unavailable[lease.slot]=lease;p.released.notify_all();", b"p.released.notify_all();",
+                              "terminal exact unavailable disposition releases native DQ without the emergency deadline"),
+        "retired-lease": (b"std::lock_guard<std::mutex> lock(p.gate);p.released.notify_all();", b"(void)p;",
+                          "actual worker capture notification releases retired lease without emergency timeout"),
         "early-receipt": (b"if(needsCoverage&&(!any||!all||!p.camera.ready()))continue;", b"(void)any;(void)all;",
                           "active certificate and picture do not acknowledge unpublished exact mask storage"),
         "single-packet": (b"n<native::MaxBuffers*4&&p.channel.receive(message)", b"n<1&&p.channel.receive(message)",
@@ -101,6 +105,8 @@ def main():
                 "process_header_sha256": hashlib.sha256(header).hexdigest(),
                 "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
                 "local_transport_sha256": hashlib.sha256((root / "receiver/stream_bridge_local.cpp").read_bytes()).hexdigest(),
+                "native_runtime_sha256": hashlib.sha256((root / "receiver/stream_bridge_native_runtime.cpp").read_bytes()).hexdigest(),
+                "native_runtime_header_sha256": hashlib.sha256((root / "receiver/stream_bridge_native_runtime.h").read_bytes()).hexdigest(),
                 "sanitized": args.sanitized, "handoff_only": args.handoff_only,
                 "causal": args.causal, "decoded_control": args.decoded_control, "handoff_control": args.handoff_control, "camera_control": args.camera_control,
                 "exit_status": result.returncode,

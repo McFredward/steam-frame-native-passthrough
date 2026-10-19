@@ -174,7 +174,12 @@ struct HandoffFixture {
     }
     void cycle(){renderer::workCycle(display,displayState);renderer::workCycle(source,sourceState);}
     std::future<void> start(const local::Message& decoded){return std::async(std::launch::async,[this,capture=decoded.lease.capture]{renderer::handoff(capture,&source);});}
-    void waiting(){const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(1);while(!source.flow[unsigned(renderer::Flow::HandoffWait)].load()&&std::chrono::steady_clock::now()<end)std::this_thread::yield();check(source.flow[unsigned(renderer::Flow::HandoffWait)]==1,"exact native DQ handoff reaches asynchronous publication wait");}
+    void waiting(unsigned expected=1){const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(1);while(source.flow[unsigned(renderer::Flow::HandoffWait)].load()<expected&&std::chrono::steady_clock::now()<end)std::this_thread::yield();check(source.flow[unsigned(renderer::Flow::HandoffWait)]==expected,"exact native DQ handoff reaches asynchronous publication wait");
+        // Counting precedes the CV predicate. Taking its lock proves that the
+        // decoder completed the atomic check/enqueue boundary before a test
+        // publishes a revoke, even when the callback under test omits its lock.
+        std::lock_guard<std::mutex> lock(source.gate);
+    }
     void receipt(local::Message message){message.kind=local::Kind::Ready;message.certifiedMetadata.clear();check(display.channel.enqueue(message),"receipt travels through actual authenticated reverse local channel");display.channel.tick();renderer::workCycle(source,sourceState);}
 };
 struct TransientPublication {
@@ -227,8 +232,38 @@ void interruptedHandoff(){
     {HandoffFixture f;const auto decoded=f.queue();f.source.peerConfirmed=false;auto dq=f.start(decoded);check(dq.wait_for(std::chrono::seconds(1))==std::future_status::ready,"unpaired native video bypasses optional handoff wait");dq.get();check(!f.source.flow[unsigned(renderer::Flow::HandoffWait)],"unpaired flow never reports a mask publication wait");}
     {HandoffFixture f;const auto decoded=f.queue();auto dq=f.start(decoded);f.waiting();native::RuntimeNotice lost;lost.state=native::RuntimeState::SourceLost;renderer::sourceNotice(lost,&f.source);check(dq.wait_for(std::chrono::seconds(1))==std::future_status::ready,"source revoke wakes native handoff without a compositor-thread wait");dq.get();check(!f.source.flow[unsigned(renderer::Flow::HandoffReady)]&&!f.source.flow[unsigned(renderer::Flow::HandoffTimeout)],"revocation never fabricates successful mask readiness or emergency timeout");}
     {HandoffFixture f;const auto decoded=f.queue();auto dq=f.start(decoded);f.waiting();{std::lock_guard<std::mutex> lock(f.source.gate);f.source.channel.stop();f.source.released.notify_all();}check(dq.wait_for(std::chrono::seconds(1))==std::future_status::ready,"transport stop releases blocked native handoff");dq.get();check(!f.source.flow[unsigned(renderer::Flow::HandoffReady)],"dropped local channel never counts as exact readiness");}
-    {HandoffFixture f;const auto decoded=f.queue();auto dq=f.start(decoded);f.waiting();auto requeue=decoded.lease.capture;requeue.kind=native::CaptureKind::Requeue;f.source.writer.captureEvent(requeue);f.source.released.notify_all();check(dq.wait_for(std::chrono::seconds(1))==std::future_status::ready,"native requeue invalidates and releases old exact DQ wait");dq.get();f.receipt(decoded);check(!f.source.flow[unsigned(renderer::Flow::ReadyReceived)]&&!f.source.flow[unsigned(renderer::Flow::HandoffReady)],"receipt for requeued capture cannot revive old mask authority");}
+    {HandoffFixture f;const auto decoded=f.queue();auto dq=f.start(decoded);f.waiting();
+     // A different capture's worker notification must not expose this still
+     // current picture while its own exact certificate/GPU publish is pending.
+     auto unrelated=decoded.lease.capture;++unrelated.index;unrelated.kind=native::CaptureKind::Requeue;
+     renderer::captureChanged(decoded.source,unrelated,&f.source);
+     check(dq.wait_for(std::chrono::milliseconds(0))==std::future_status::timeout,"unrelated capture notification never grants current picture readiness");
+     auto requeue=decoded.lease.capture;requeue.kind=native::CaptureKind::Requeue;f.source.writer.captureEvent(requeue);
+     renderer::captureChanged(decoded.source,requeue,&f.source);
+     check(dq.wait_for(std::chrono::milliseconds(50))==std::future_status::ready,"actual worker capture notification releases retired lease without emergency timeout");dq.get();
+     check(!f.source.flow[unsigned(renderer::Flow::HandoffTimeout)],"actual worker capture notification releases retired lease without emergency timeout");
+     f.receipt(decoded);check(!f.source.flow[unsigned(renderer::Flow::ReadyReceived)]&&!f.source.flow[unsigned(renderer::Flow::HandoffReady)],"receipt for requeued capture cannot revive old mask authority");}
     {HandoffFixture f;const auto decoded=f.queue();const auto start=std::chrono::steady_clock::now();auto dq=f.start(decoded);dq.get();const auto elapsed=std::chrono::steady_clock::now()-start;check(elapsed>=std::chrono::milliseconds(80)&&elapsed<std::chrono::seconds(2),"genuine missing peer receipt uses bounded emergency deadline, never an indefinite native freeze");check(f.source.flow[unsigned(renderer::Flow::HandoffTimeout)]==1&&!f.source.flow[unsigned(renderer::Flow::HandoffReady)],"emergency release is explicitly counted and never misreported as an exact mask");}
+}
+void unavailableHandoff(){
+    HandoffFixture f(false);local::Message exact;
+    exact.source.stream={f.connection,7};exact.source.outputPoolGeneration=7;
+    exact.lease.capture={native::CaptureKind::Decoded,23,f.file.fd,2,199,7,21,4000};
+    f.source.writer.captureEvent(exact.lease.capture);
+    check(f.source.writer.reference(exact.lease.capture,exact.lease),"uncertified capture retains its actual native lease without a fabricated certificate");
+    auto dq=f.start(exact);f.waiting();
+    auto foreign=exact.lease.capture;++foreign.contentGeneration;renderer::captureUnavailable(exact.source,foreign,&f.source);
+    check(dq.wait_for(std::chrono::milliseconds(0))==std::future_status::timeout,"negative disposition for a foreign capture never releases the current exact DQ");
+    renderer::captureUnavailable(exact.source,exact.lease.capture,&f.source);
+    check(dq.wait_for(std::chrono::milliseconds(50))==std::future_status::ready,"terminal exact unavailable disposition releases native DQ without the emergency deadline");dq.get();
+    check(f.source.flow[unsigned(renderer::Flow::HandoffUnavailable)]==1&&!f.source.flow[unsigned(renderer::Flow::HandoffReady)]&&!f.source.flow[unsigned(renderer::Flow::HandoffTimeout)]
+        &&!f.display.flow[unsigned(renderer::Flow::ReadyQueued)]&&!f.publication.queries&&!f.display.camera.ready(),"negative disposition cannot fabricate Ready, GPU publication or independent camera authority");
+    auto next=exact.lease.capture;++next.contentGeneration;f.source.writer.captureEvent(next);
+    check(f.source.writer.reference(next,exact.lease),"same native slot has fresh exact capture generation");
+    exact.lease.capture=next;auto later=f.start(exact);f.waiting(2);
+    check(later.wait_for(std::chrono::milliseconds(0))==std::future_status::timeout,"old unavailable lease cannot release reused native storage or a pending certificate");
+    renderer::captureUnavailable(exact.source,next,&f.source);
+    check(later.wait_for(std::chrono::milliseconds(50))==std::future_status::ready,"fresh terminal disposition independently releases only its exact new capture");later.get();
 }
 void cameraHandoff(){
     HandoffFixture f(false,true);f.publication.ready=true;const auto decoded=f.queue();
@@ -269,4 +304,4 @@ void cameraPictureDemand(){
     check(f.display.camera.ready()&&f.display.cameraDemand,"same signed source can recover with a fresh exact decoded epoch instead of repeatedly revoking on its old mapping");
 }
 }
-int main(int argc,char** argv){try{const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();decodedDispatch();}exactHandoff();noneAndBurst();interruptedHandoff();cameraHandoff();cameraPictureDemand();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+int main(int argc,char** argv){try{const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();decodedDispatch();}exactHandoff();noneAndBurst();interruptedHandoff();unavailableHandoff();cameraHandoff();cameraPictureDemand();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
