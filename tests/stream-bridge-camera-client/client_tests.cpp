@@ -59,7 +59,7 @@ void refusal(){
     {Root root;std::filesystem::rename(root.path/"tools/stream_bridge_camera.py",root.path/"owned.py");std::filesystem::create_symlink(root.path/"owned.py",root.path/"tools/stream_bridge_camera.py");stream_bridge_camera::Client client;client.request(true);client.tickCold(root.path,true);check(!client.runningCold()&&!client.ready()&&!std::filesystem::exists(root.path/"events"),"symlink helper cannot acquire runtime settings authority");}
 }
 struct Clock {
-    stream_bridge_camera::ClockSample sample{10000000000ULL,10000000000ULL};
+    stream_bridge_camera::ClockSample sample{12000000000ULL,10000000000ULL};
     static bool read(stream_bridge_camera::ClockSample& out,void* p) noexcept{out=static_cast<Clock*>(p)->sample;return true;}
 };
 unsigned enables(const Root& root){unsigned count=0;std::istringstream lines(root.events());std::string line;while(std::getline(lines,line))if(line.rfind("E ",0)==0)++count;return count;}
@@ -68,6 +68,9 @@ void resume(){
     until(client,root,true,[&]{return client.ready();},"unchanged active source initially has an acknowledged camera session");
     const auto initial=root.events();clock.sample.bootNanoseconds+=7000000000ULL;clock.sample.monotonicNanoseconds+=7000000000ULL;client.tickCold(root.path,true);
     check(client.ready()&&root.events()==initial,"pure scheduling stall advances both clocks and never renews settings");
+    clock.sample.monotonicNanoseconds+=20000000ULL;client.tickCold(root.path,true);
+    clock.sample.bootNanoseconds+=20000000ULL;client.tickCold(root.path,true);
+    check(client.ready()&&root.events()==initial,"preemption between native clock reads never lowers resume baseline or invents renewal");
     clock.sample.bootNanoseconds+=4000000ULL;client.tickCold(root.path,true);check(client.ready(),"sub-threshold sampling jitter does not invent a suspend");
     clock.sample.bootNanoseconds+=3000000000ULL;client.tickCold(root.path,true);check(!client.ready(),"real suspend offset revokes old ready acknowledgment immediately despite unchanged MR demand");
     until(client,root,true,[&]{return root.events().find("restore-pending")!=std::string::npos;},"resume requests explicit baseline restore before renewal");
@@ -84,4 +87,4 @@ void health(){
     stop(client,root);
 }
 }
-int main(){try{lifecycle();stale();refusal();resume();health();std::printf("%u actual camera client subprocess checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::string(argv[1])=="resume")resume();else{lifecycle();stale();refusal();resume();health();}std::printf("%u actual camera client subprocess checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

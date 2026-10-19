@@ -71,7 +71,11 @@ struct Client::Impl {
         if(clockKnown&&offset>sleepOffset&&offset-sleepOffset>5000000ULL){
             ready.store(false,std::memory_order_release);restoreBarrier=true;next();note("resume observed; restore acknowledgment required before native alpha renewal");
         }
-        sleepOffset=offset;clockKnown=true;
+        // Preemption between these two clock reads can only lower their
+        // observed offset. Never adopt that lower sample as a new baseline:
+        // its later recovery is CPU scheduling, not another OS suspend.
+        if(!clockKnown||offset>sleepOffset)sleepOffset=offset;
+        clockKnown=true;
     }
     void reap(){if(child>0){int result=0;const auto reaped=waitpid(child,&result,WNOHANG);if(reaped==child||(reaped<0&&errno==ECHILD)){const bool normal=!failed&&closing&&reaped==child&&WIFEXITED(result)&&!WEXITSTATUS(result);child=-1;closeChannel();retry=normal?std::chrono::steady_clock::time_point{}:std::chrono::steady_clock::now()+std::chrono::seconds(1);}}}
     bool spawn(const std::filesystem::path& root){
