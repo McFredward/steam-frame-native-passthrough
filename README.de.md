@@ -50,7 +50,7 @@ irm https://raw.githubusercontent.com/McFredward/steam-link-native-passthrough/m
 ```
 
 1. Folge der [geführten Einrichtung](docs/PC-FRAME-SETUP.md#start-the-assistant).
-   Sie zeigt installierte und verfügbare Patch-Versionen für PC und Frame und bietet Installation oder Update an.
+   Sie zeigt erkannte SteamVR-/Steam-Link-Laufzeiten und installierte sowie verfügbare Patch-Versionen und bietet Installation oder Update an.
 2. Starte Steam Link und ein unterstütztes Spiel. Aktiviere dort natives
    Steam-Link-Passthrough. Mit derselben Option erhältst du das normale Bild zurück.
 
