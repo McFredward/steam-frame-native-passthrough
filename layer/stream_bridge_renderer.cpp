@@ -1,4 +1,5 @@
 #include "stream_bridge_renderer.h"
+#include "stream_bridge_report_policy.h"
 #include "stream_bridge_process.h"
 #include "stream_bridge_coverage_gpu.h"
 #include "native_presenter_pipeline.h"
@@ -98,9 +99,7 @@ struct Renderer::Impl {
         std::atomic<std::uint64_t> descriptorAllocated{0},descriptorAllocationRefused{0},descriptorPoolRetirements{0},descriptorSetsRetired{0},descriptorUnknownUpdates{0},descriptorCopies{0};
         std::atomic<std::uint32_t> firstNextType{0},firstRefusedNextType{0};
     } counts;
-    std::chrono::steady_clock::time_point nextReport{};
-    std::uint64_t lastReportedMetadata=0;
-    std::uint64_t reportedMilestones=0;unsigned reportedLevel=0,statusLines=0;
+    ColdReportPolicy reportPolicy;
     void refused(DrawRefusal reason) noexcept {counts.refusals[static_cast<std::size_t>(reason)].fetch_add(1,std::memory_order_relaxed);}
     void submitRefused(SubmitRefusal reason,std::uint32_t next=0) noexcept {
         ++counts.submitRefusals[static_cast<std::size_t>(reason)];
@@ -127,22 +126,9 @@ struct Renderer::Impl {
         out.prepared=out.pipelines!=0;out.lost=lost.load(std::memory_order_acquire);return out;
     }
     void reportCold() noexcept{
-        if(statusLines>=192)return;
-        const auto s=stats();if(!s.metadata&&!s.pictures)return;
-        std::uint64_t milestones=0;
-        const std::array<std::uint64_t,11> events{{s.metadata,s.maskDecoded,s.maskRejected,s.uploadAccepted,s.uploadRefused,s.pictures,s.selected,s.guardAccepted,s.guardRefused,s.ready,s.quarantined}};
-        for(unsigned n=0;n<events.size();++n)if(events[n])milestones|=std::uint64_t(1)<<n;
-        for(unsigned n=0;n<s.drawRefusals.size();++n)if(s.drawRefusals[n])milestones|=std::uint64_t(1)<<(16+n);
-        for(unsigned n=0;n<s.collectRefusals.size();++n)if(s.collectRefusals[n])milestones|=std::uint64_t(1)<<(32+n);
-        for(unsigned n=0;n<s.submitRefusals.size();++n)if(s.submitRefusals[n])milestones|=std::uint64_t(1)<<(48+n);
-        if(s.firstNextType)milestones|=std::uint64_t(1)<<56;
-        if(s.collected)milestones|=std::uint64_t(1)<<57;
-        const auto progress=std::max({s.metadata,s.guardAttempts,s.opaqueSubmits});unsigned level=0;for(auto value=progress;value>1;value>>=1)++level;
         const auto now=std::chrono::steady_clock::now();
-        const bool periodic=now>=nextReport&&s.metadata!=lastReportedMetadata;
-        if(!(milestones&~reportedMilestones)&&level<=reportedLevel&&!periodic)return;
-        nextReport=now+std::chrono::seconds(5);lastReportedMetadata=s.metadata;
-        reportedMilestones|=milestones;reportedLevel=std::max(level,reportedLevel);++statusLines;
+        RendererStats s;
+        if(!reportPolicy.inspect(now,[this]{return stats();},s))return;
         const auto miss=[&](DrawRefusal r){return static_cast<unsigned long long>(s.drawRefusals[static_cast<std::size_t>(r)]);};
         std::fprintf(stderr,"[Steam Link Native Passthrough] renderer flow: metadata=%llu; mask decoded/none/rejected=%llu/%llu/%llu; upload accepted/refused=%llu/%llu, actual=%llu; pool pending/copying/ready/quarantined=%u/%u/%u/%u; pictures=%llu; record selected/attempts=%llu/%llu, begins=%llu; miss unavailable/busy/cb/epoch/pipeline/ineligible/descriptor/image/exact/mask/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu; submit guarded-accepted/attempts/refused=%llu/%llu/%llu, opaque=%llu; pipelines=%u, lost=%u\n",
             static_cast<unsigned long long>(s.metadata),static_cast<unsigned long long>(s.maskDecoded),static_cast<unsigned long long>(s.maskNone),static_cast<unsigned long long>(s.maskRejected),
