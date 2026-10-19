@@ -89,12 +89,17 @@ on:
         description: Run only an affected platform after a bounded repair
         type: choice
         default: all
-        options: [all, linux, windows, windows-auth, python39]
+        options: [all, linux, windows, windows-auth, windows-ui, python39]
       auth_case:
         description: Repeat only the affected synthetic sign-in case
         type: choice
         default: all
         options: [all, automatic-discovery, manual-discovery, ui-session]
+      ui_case:
+        description: Repeat only the affected packaged Windows screen case
+        type: choice
+        default: all
+        options: [all, copy-controls]
 
 permissions:
   contents: read
@@ -157,7 +162,7 @@ jobs:
           python -B tools/package_setup_textual.py --cache "${{ runner.temp }}/textual-wheels" --download
           python -B tests/test_textual_dependencies.py --wheels "${{ runner.temp }}/textual-wheels" --pilot tests/test_setup_textual.py
   windows-bootstrap:
-    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'windows' || inputs.scope == 'windows-auth'
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'windows' || inputs.scope == 'windows-auth' || inputs.scope == 'windows-ui'
     runs-on: windows-2025
     timeout-minutes: 6
     steps:
@@ -166,11 +171,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Actual Windows PowerShell archive parser and bootstrap fixtures
-        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'windows-auth' && inputs.scope != 'windows-ui')
         shell: powershell
         run: python -B tests/test_setup_bootstrap.py --pwsh "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
       - name: Session reuse and persistent failure logs on Windows
-        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'windows-auth' && inputs.scope != 'windows-ui')
         shell: powershell
         run: |
           python -B tests/test_setup_session.py
@@ -189,6 +194,9 @@ jobs:
       - name: Execute the actual packaged portable Python without Frame access
         if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
         shell: powershell
+        env:
+          SFNP_SETUP_SCOPE: ${{ inputs.scope }}
+          SFNP_UI_CASE: ${{ inputs.ui_case }}
         run: |
           $ErrorActionPreference = 'Stop'
           $pin = Get-Content packaging/setup-python.json -Raw | ConvertFrom-Json
@@ -223,17 +231,28 @@ jobs:
           $target = Join-Path $env:RUNNER_TEMP 'actual-inspection-package'
           [void][IO.Directory]::CreateDirectory($target)
           $runtime = Expand-SfnpPackage $package $target $true
-          & (Join-Path $target $runtime) -I -B tests/test_embedded_setup_runtime.py --package $target
-          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup runtime failed.' }
-          & (Join-Path $target $runtime) -I -B tests/test_setup_ui.py
-          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup presentation failed.' }
-          & (Join-Path $target $runtime) -I -B tests/test_setup_textual.py
-          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual keyboard/mouse and screen checks failed.' }
-          & (Join-Path $target $runtime) -I -B tests/test_setup_textual_integration.py
-          if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual entry-point and console ownership checks failed.' }
+          if ($env:SFNP_SETUP_SCOPE -eq 'windows-ui') {
+            if ($env:SFNP_UI_CASE -eq 'copy-controls') {
+              & (Join-Path $target $runtime) -I -B tests/test_setup_textual.py TextualSetupTests.test_copy_controls_are_compact_secondary_utilities_in_main_view_and_modal
+            } else {
+              & (Join-Path $target $runtime) -I -B tests/test_setup_textual.py
+            }
+            if ($LASTEXITCODE -ne 0) { throw 'Focused packaged Textual screen checks failed.' }
+          } else {
+            & (Join-Path $target $runtime) -I -B tests/test_embedded_setup_runtime.py --package $target
+            if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup runtime failed.' }
+            & (Join-Path $target $runtime) -I -B tests/test_setup_ui.py
+            if ($LASTEXITCODE -ne 0) { throw 'Actual embedded setup presentation failed.' }
+            & (Join-Path $target $runtime) -I -B tests/test_setup_textual.py
+            if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual keyboard/mouse and screen checks failed.' }
+            & (Join-Path $target $runtime) -I -B tests/test_setup_textual_integration.py
+            if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Textual entry-point and console ownership checks failed.' }
+          }
 
       - uses: ilammy/msvc-dev-cmd@v1
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-ui'
       - name: Real Windows OpenSSH sign-in and UI cancellation
+        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-ui'
         shell: powershell
         env:
           SFNP_AUTH_CASE: ${{ inputs.auth_case }}
@@ -281,7 +300,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Actual Windows OpenSSH sign-in failed.' }
 
       - name: Actual packaged management mode (no Frame contact or removal)
-        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'windows-auth'
+        if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'windows-auth' && inputs.scope != 'windows-ui')
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'

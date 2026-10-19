@@ -81,6 +81,8 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 await until(pilot, lambda: app.prompt is not None)
                 for width, height in ((80, 24), (42, 16)):
                     await pilot.resize_terminal(width, height)
+                    # Scroll only after the resized viewport has been laid out.
+                    await pilot.pause()
                     app.query_one("#copy-log", Button).focus(scroll_visible=False)
                     app.query_one("#file-buttons").scroll_visible(animate=False)
                     await pilot.pause()
