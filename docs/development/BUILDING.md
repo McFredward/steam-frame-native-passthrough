@@ -81,7 +81,8 @@ exact checked runtime, not by distributing Valve-derived shader files.
 
 ## Package, publish and retain evidence
 
-Increment [`VERSION`](../../VERSION) for each externally published candidate.
+Increment [`VERSION`](../../VERSION) for installer changes and the relevant
+component in [`PATCH_VERSIONS.json`](../../PATCH_VERSIONS.json) for native patch changes.
 The native components, installer source, SDK/tools and dependencies need exact
 hashes in the runtime profile. `tools/package_stream_bridge.py` defaults to an
 uninstallable prototype. Release admission requires a source/artifact-bound

@@ -149,6 +149,7 @@ TEXT = {
         'runtime_steam_link': 'Steam Link: {version}',
         'runtime_build': 'build {build}',
         'version_installed': 'Installed patch: {version}',
+        'installer_version': 'Installer: {version}',
         'version_target': 'Available patch: {version}',
         'version_missing': 'Not installed',
         'version_unknown': 'Version unknown',
@@ -286,6 +287,7 @@ TEXT = {
         'runtime_steam_link': 'Steam Link: {version}',
         'runtime_build': 'Build {build}',
         'version_installed': 'Installierter Patch: {version}',
+        'installer_version': 'Installer: {version}',
         'version_target': 'Verfügbarer Patch: {version}',
         'version_missing': 'Nicht installiert',
         'version_unknown': 'Version unbekannt',
@@ -334,6 +336,13 @@ def version_labels(text,record):
     elif record.get('installed') is not True:current=text('version_unchecked')
     elif current is None:current=text('version_unknown')
     return current,safe(record.get('target_version')) or text('version_unknown')
+
+
+def installer_label(text,report):
+    version=report.get('installer_version') if type(report)is dict else None
+    if type(version)is str and re.fullmatch(r'[0-9A-Za-z][0-9A-Za-z.+-]{0,79}',version):
+        return text('installer_version').format(version=version)
+    return None
 
 
 def runtime_labels(text, record):
@@ -625,6 +634,8 @@ class Presenter:
     def inventory(self,*,pc=None,frame=None,report=None):
         if type(report)is dict:pc=report.get('pc',pc);frame=report.get('frame',frame)
         with self._lock:
+            label=installer_label(self.text,report)
+            if label:self._paragraph(label)
             for role,value in (('pc',pc),('frame',frame)):
                 if type(value)is not dict or not {'installed_version','target_version','runtime_versions'}&set(value):continue
                 current,target=version_labels(self.text,value)

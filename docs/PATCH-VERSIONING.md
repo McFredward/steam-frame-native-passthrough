@@ -1,15 +1,15 @@
 # Patch versions
 
-`VERSION` contains this project's semantic version, initially **0.2.0**. It is
-independent of SteamVR's supported runtime version, GloomhavenVR's minimum mod
-version, the wire protocol version, and the source revision. The product remains
-experimental; a semantic version is not a compatibility or hardware guarantee.
+`VERSION` identifies the installer. `PATCH_VERSIONS.json` independently identifies
+the PC sender and Frame receiver patches. Installer-only changes increment
+`VERSION` without claiming a new native patch: installer **0.2.12**, for example,
+still delivers PC and Frame patch **0.2.11**. A semantic version never establishes
+SteamVR compatibility or a hardware result.
 
-Increment `VERSION` for **every externally published patch candidate**. Increment
-the patch component for corrections and the minor component for a new feature set.
-Publishing changed native artifacts under the same version is not the normal
-release workflow. The installer still handles that defensively by offering
-Update whenever the exact checked package differs.
+Increment the affected component in `PATCH_VERSIONS.json` when its native patch
+changes. The other component can retain its version. Publishing different native
+artifacts under the same component version is not the normal workflow; exact
+artifact checks still detect such differences and do not call them current.
 
 Routine candidates are delivered through the stable repository installation
 line in the English/German READMEs. The maintainer does not want a separate
@@ -20,15 +20,19 @@ Release. Package and installed-component versions remain independently
 inspectable. The [payload procedure](../distribution/README.md) describes the
 two source-pinned publication steps.
 
-The package assembler source-pins `VERSION` and stamps it in the outer package's
-owned `VERSION` file, source/packaging receipts, and the two component entries in
-`stream-bridge-bundle.json`. Both components currently share the project version;
-the installed PC and Frame receipts are inspected independently, so a partial or
-older installation can show different current versions.
+The package assembler source-pins and ships both version files. The outer
+package's `VERSION`, bundle root version and source/packaging receipts identify
+the installer. The `pc.version` and `frame.version` entries in
+`stream-bridge-bundle.json` come from `PATCH_VERSIONS.json`. Installed receipts
+retain their component versions independently.
 
 The installer displays each component's **installed patch** and **available
 patch**, and repeats the independent `from → to` values in the Apply confirmation.
-Inspection JSON and bounded session logs include the same values. There are
+The installer version is displayed separately. A newer installer alone does not
+recommend a patch update when both native patches are already current. Check is
+recommended in that case; Repair remains available for missing files and setup
+tools. A newer PC or Frame component offers Update. Inspection JSON and bounded
+session logs include independent component values. There are
 three distinct absence states: not installed (confirmed missing), unversioned
 (an old installed receipt without a version), and not checked (the Frame has not
 been inspected). No version is guessed from an old binary hash or a Git date.
@@ -45,7 +49,7 @@ admit changed installed files. A known newer installed component blocks an
 automatic update to an older or unversioned target. Explicit restoration of an
 owned previous checkpoint remains available through Undo.
 
-The online bootstrap's strict outer schema is unchanged. `VERSION` is an
-additional ordinary source-pinned member, and all new semantic metadata is in
+The online bootstrap's strict outer schema is unchanged. Both version files are
+ordinary source-pinned members, and semantic metadata is in
 the inner bridge manifest or owned installation receipts. The receiver handshake
 and video/coverage associations do not use semantic versions as authority.

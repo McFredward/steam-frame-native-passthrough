@@ -525,6 +525,19 @@ class DnsPackets(unittest.TestCase):
 
 
 class Presentation(unittest.TestCase):
+    def test_installer_and_patch_versions_are_separate_in_inventory(self):
+        for lang in ('en','de'):
+            output=io.StringIO()
+            presenter=ui.Presenter(lang=lang,stream=output,input_enabled=False)
+            presenter.inventory(pc={'installed':True,'installed_version':'0.2.11','target_version':'0.2.11'},
+                frame={'installed':True,'installed_version':'0.2.11','target_version':'0.2.11'},report={'installer_version':'0.2.12'})
+            text=output.getvalue()
+            self.assertIn('Installer: 0.2.12',text)
+            self.assertIn(presenter.text('version_installed').format(version='0.2.11'),text)
+            self.assertIn(presenter.text('version_target').format(version='0.2.11'),text)
+            self.assertNotIn(presenter.text('version_target').format(version='0.2.12'),text)
+            self.assertIsNone(ui.installer_label(presenter.text,{'installer_version':'0.2.12\nFORGED'}))
+
     def test_locale_automatic_german_and_english_fallback(self):
         for value, expected in [('de_DE', 'de'), ('German_Germany', 'de'), ('en_US', 'en'), ('fr_FR', 'en')]:
             with mock.patch.object(ui.locale, 'getlocale', return_value=(value, 'UTF-8')):

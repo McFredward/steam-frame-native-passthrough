@@ -87,6 +87,8 @@ Run the same command again. The assistant inspects the current files and offers
 appropriate actions, including **Update**, **Repair**, **Uninstall** and
 **Restore previous setup** (Undo). A current installation needs no changes.
 Changed or unknown files are preserved rather than silently replaced.
+The installer has its own version, separate from the PC and Frame patch versions.
+Updating only the installer does not propose reinstalling already-current patches.
 
 **Uninstall** restores ordinary, unpatched Steam Link on the PC and Frame. It
 also removes a recorded older Frame-only receiver instead of reactivating it,

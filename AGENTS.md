@@ -56,6 +56,9 @@
   release download channels are no longer present: deliver the validated archive
   from an immutable repository commit with exact size/SHA256 in the bootstrap,
   without recreating GitHub Releases.
+- Installer `VERSION` and PC/Frame `PATCH_VERSIONS.json` are independent. An
+  installer-only update must not invent a native patch version or recommend a
+  patch update when the installed native components are already current.
 - The maintainer's 2026-10-19 installer request permits installation on untested
   SteamVR versions after an explicit additional warning and confirmation. Do not
   hide Install/Update/Repair solely because a runtime differs. Installation

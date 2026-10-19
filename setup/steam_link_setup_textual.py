@@ -891,6 +891,8 @@ class SetupApp(App[int]):
             self.query_one("#frame-status", Static).update(self.words[{"found": "connected", "receiver_ready": "ready", "receiver_changed": "attention", "pc_only": "absent"}[key]])
 
     def update_inventory(self, pc=None, frame=None, report=None):
+        label=_existing_words().installer_label(lambda k:self.texts[k],report)
+        if label:self.query_one("#brand", Static).update(_plain("◉  STEAM LINK  /  NATIVE PASSTHROUGH  ·  "+label))
         if isinstance(report, dict):
             pc = report.get("pc", pc)
             frame = report.get("frame", frame)

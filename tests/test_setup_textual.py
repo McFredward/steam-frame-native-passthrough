@@ -416,7 +416,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
             frame={"runtime_compatible":True,"installed":True,"installed_version":None,"target_version":"0.2.1"}
             def backend():
                 p=UI.active_presenter()
-                p.inventory(pc=pc,frame=frame)
+                p.inventory(pc=pc,frame=frame,report={"installer_version":"0.2.12"})
                 p.say("bridge_install_plan")
                 p.version_plan(pc={**pc,"installed_version":"0.0.9"},frame=frame)
                 p.version_plan(pc=pc,frame=frame)
@@ -428,6 +428,8 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 underlying=app.screen_stack[0]
                 pc_status=str(underlying.query_one("#pc-status",Static).render())
                 frame_status=str(underlying.query_one("#frame-status",Static).render())
+                self.assertIn("Installer: 0.2.12",str(underlying.query_one("#brand",Static).render()))
+                self.assertNotIn("0.2.12",pc_status);self.assertNotIn("0.2.12",frame_status)
                 self.assertIn("0.1.9",pc_status);self.assertIn("0.2.0",pc_status)
                 self.assertNotIn("0.1.9",frame_status);self.assertIn("0.2.1",frame_status)
                 self.assertIn(app.texts["version_unknown"],frame_status)
