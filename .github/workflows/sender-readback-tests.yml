@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Build production nonblocking GPU readback and old-order causal control
+      - name: Build actual GPU submission/query fixture and dispatch causal controls
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "SFNP_VS=%%i"
@@ -30,9 +30,11 @@ jobs:
           mkdir build
           cl /nologo /std:c++17 /EHsc /W4 /WX /I. tests/test_stream_bridge_sender_readback_gpu.cpp pc/stream-bridge-sender-provider-coverage-render.cpp /Fe:build\readback.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
           if errorlevel 1 exit /b 1
-          python -c "from pathlib import Path; p=Path('pc/stream-bridge-sender-provider-coverage-render.cpp'); s=p.read_text(); a='    if(readback'+chr(38)+chr(38)+'coverage)nativeCopy(context,readback,coverage);\n    nativeCopy(context,nativeDestination,nativeSource);'; b='    nativeCopy(context,nativeDestination,nativeSource);\n    if(readback'+chr(38)+chr(38)+'coverage)nativeCopy(context,readback,coverage);'; assert s.count(a)==1; Path('build/old-order.cpp').write_text(s.replace(a,b))"
+          python -c "from pathlib import Path; s=Path('pc/stream-bridge-sender-provider-coverage-render.cpp').read_text(); a='        nativeFlush(context);'; assert s.count(a)==1; Path('build/no-flush.cpp').write_text(s.replace(a,'        (void)nativeFlush;')); a='    const auto ready=nativeGetData(context,completion,'; assert s.count(a)==1; i=s.index(a); j=s.index(';',i); Path('build/no-query.cpp').write_text(s[:i]+'    (void)nativeGetData; completed=TRUE; const auto ready=S_OK'+s[j:])"
           if errorlevel 1 exit /b 1
-          cl /nologo /std:c++17 /EHsc /W4 /WX /I. /Ipc tests/test_stream_bridge_sender_readback_gpu.cpp build/old-order.cpp /Fe:build\old-order.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I. /Ipc tests/test_stream_bridge_sender_readback_gpu.cpp build/no-flush.cpp /Fe:build\no-flush.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX /I. /Ipc tests/test_stream_bridge_sender_readback_gpu.cpp build/no-query.cpp /Fe:build\no-query.exe /Fo:build\ /link d3d11.lib d3dcompiler.lib dxgi.lib dxguid.lib uuid.lib
           if errorlevel 1 exit /b 1
       - name: Verify current-frame nonblocking availability with real full-size GPU resources
         shell: cmd
@@ -41,14 +43,20 @@ jobs:
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\readback.log
           exit /b %SFNP_RESULT%
-      - name: Require old colour-first order to expose the actual GPU readiness gap
+      - name: Require missing submission/completion dispatch to fail without assuming no-Flush GPU liveness
         shell: cmd
         run: |
-          build\old-order.exe >build\old-order.log 2>&1
+          build\no-flush.exe >build\no-flush.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"
-          type build\old-order.log
+          type build\no-flush.log
           if "%SFNP_RESULT%"=="0" exit /b 1
-          findstr /c:"production-Map-hr=0x887a000a" build\old-order.log >nul
+          findstr /c:"active-MR production dispatch is copy" build\no-flush.log >nul
+          if errorlevel 1 exit /b 1
+          build\no-query.exe >build\no-query.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\no-query.log
+          if "%SFNP_RESULT%"=="0" exit /b 1
+          findstr /c:"production readback must query its own exact completion event" build\no-query.log >nul
           if errorlevel 1 exit /b 1
       - uses: actions/upload-artifact@v4
         if: always()

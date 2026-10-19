@@ -34,6 +34,7 @@ struct Driver:Fake {
  std::map<std::uint64_t,std::vector<Update>> commands;
  std::map<std::uint64_t,std::uint64_t> boundMemory,setBuffer,appControl;std::map<std::uint64_t,VkDeviceSize> bufferSizes,setOffset,appOffset;
  std::vector<float> reads;std::vector<VkFence> originalFences;std::vector<std::size_t> nativeSubmitCounts;std::vector<const void*> originalNexts,allForwardedExtensions;std::vector<VkFence> allSubmitFences;
+ std::vector<VkSubmitInfo> lastSubmitInfos;std::vector<VkCommandBuffer> lastSubmitCommands;
  std::vector<VkPipeline> createdPipelines,destroyedPipelines;
  VkSemaphore wait=handle<VkSemaphore>(0x9871),signalSemaphore=handle<VkSemaphore>(0x9872);VkFence appFence=handle<VkFence>(0x9998);
  bool failOriginal=false,failCoverage=false;unsigned forwardOriginal=0,waitPreserved=0,signalPreserved=0,barrierReads=0,khrCalls=0;
@@ -66,7 +67,7 @@ struct Driver:Fake {
   for(unsigned i=0;i<n;++i){if(ci[i].pNext)s.allForwardedExtensions.push_back(ci[i].pNext);if(ci[i].waitSemaphoreCount){check(ci[i].pWaitSemaphores&&*ci[i].pWaitSemaphores==s.wait&&ci[i].pWaitDstStageMask&&*ci[i].pWaitDstStageMask==VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,"original wait semaphore/stage retained");++s.waitPreserved;}
    if(ci[i].signalSemaphoreCount){check(ci[i].pSignalSemaphores&&*ci[i].pSignalSemaphores==s.signalSemaphore,"original signal retained");++s.signalPreserved;}
    for(unsigned k=0;k<ci[i].commandBufferCount;++k){original|=s.appControl.count(number(ci[i].pCommandBuffers[k]));execute(ci[i].pCommandBuffers[k]);}}
-  if(original){for(unsigned i=0;i<n;++i)for(unsigned k=0;k<ci[i].commandBufferCount;++k)if(s.appControl.count(number(ci[i].pCommandBuffers[k])))s.originalNexts.push_back(ci[i].pNext);++s.forwardOriginal;s.originalFences.push_back(fence);s.nativeSubmitCounts.push_back(n);if(s.failOriginal)return VK_ERROR_DEVICE_LOST;}
+  if(original){s.lastSubmitInfos.assign(ci,ci+n);s.lastSubmitCommands.clear();for(unsigned i=0;i<n;++i)if(ci[i].commandBufferCount)s.lastSubmitCommands.insert(s.lastSubmitCommands.end(),ci[i].pCommandBuffers,ci[i].pCommandBuffers+ci[i].commandBufferCount);for(unsigned i=0;i<n;++i)for(unsigned k=0;k<ci[i].commandBufferCount;++k)if(s.appControl.count(number(ci[i].pCommandBuffers[k])))s.originalNexts.push_back(ci[i].pNext);++s.forwardOriginal;s.originalFences.push_back(fence);s.nativeSubmitCounts.push_back(n);if(s.failOriginal)return VK_ERROR_DEVICE_LOST;}
   if(fence){if(s.autoSignal)s.fences[number(fence)]=true;else s.pending.push_back(number(fence));}return VK_SUCCESS;
  }
  static VkResult VKAPI_CALL submit2(VkQueue q,std::uint32_t n,const VkSubmitInfo2* ci,VkFence fence){for(unsigned i=0;i<n;++i)for(unsigned k=0;k<ci[i].commandBufferInfoCount;++k)execute(ci[i].pCommandBufferInfos[k].commandBuffer);if(fence){if(self->autoSignal)self->fences[number(fence)]=true;else self->pending.push_back(number(fence));}check(q==self->queue,"submit2 exact queue");return self->failOriginal?VK_ERROR_DEVICE_LOST:VK_SUCCESS;}
@@ -181,6 +182,57 @@ void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint3
   f.writeView(f.view);f.renderer.imageDestroyed(f.image);f.renderer.beforeDraw(f.cb);s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Image)]==1,"retired imported image has a distinct draw refusal");
  }
 }
+void timeline(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ for(unsigned mode=0;mode<9;++mode){Integration f(vs,ps);check(f.record().ready,"timeline case records an exact current picture");
+  const VkPipelineStageFlags stage=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;const std::uint64_t waitValue=17,signalValue=29;
+  VkTimelineSemaphoreSubmitInfo extension{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};extension.waitSemaphoreValueCount=extension.signalSemaphoreValueCount=1;extension.pWaitSemaphoreValues=&waitValue;extension.pSignalSemaphoreValues=&signalValue;
+  VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.pNext=&extension;info.commandBufferCount=1;info.pCommandBuffers=&f.cb;info.waitSemaphoreCount=info.signalSemaphoreCount=1;info.pWaitSemaphores=&f.vk.wait;info.pWaitDstStageMask=&stage;info.pSignalSemaphores=&f.vk.signalSemaphore;
+  VkProtectedSubmitInfo tail{VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO};
+  if(mode==1){extension.waitSemaphoreValueCount=extension.signalSemaphoreValueCount=0;extension.pWaitSemaphoreValues=extension.pSignalSemaphoreValues=nullptr;info.waitSemaphoreCount=info.signalSemaphoreCount=0;info.pWaitSemaphores=info.pSignalSemaphores=nullptr;info.pWaitDstStageMask=nullptr;}
+  if(mode==2)extension.waitSemaphoreValueCount=0;
+  if(mode==3)extension.signalSemaphoreValueCount=0;
+  if(mode==4)extension.pWaitSemaphoreValues=nullptr;
+  if(mode==5)extension.pSignalSemaphoreValues=nullptr;
+  if(mode==6)extension.pNext=&tail;
+  if(mode==7)extension.sType=VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO;
+  if(mode==8)extension.sType=static_cast<VkStructureType>(0x7ffffffe);
+  const auto original=info;const auto originalExtension=extension;
+  check(f.renderer.submit(f.vk.queue,1,&info,f.vk.appFence)==VK_SUCCESS,"timeline call preserves original native result");
+  const bool accepted=mode<2;
+  check(f.vk.reads.back()==float(accepted),"canonical timeline retains current exact guard; malformed or unknown extension stays opaque");
+  check(f.renderer.statsCold().guardAccepted==unsigned(accepted),"canonical timeline reaches actual guarded submission rather than merely selection");
+  const auto stats=f.renderer.statsCold();
+  check(stats.firstNextType==static_cast<std::uint32_t>(extension.sType)&&stats.firstRefusedNextType==(accepted?0:static_cast<std::uint32_t>(extension.sType)),"cold diagnostics retain actual first native extension and refusal types");
+  check(stats.collects==unsigned(accepted)&&stats.collected==unsigned(accepted),"unsupported timeline is distinguished from selected draw failing pre-submit collection");
+  check(stats.submitRefusals[std::size_t(sr::SubmitRefusal::Shape)]==unsigned(mode>=2&&mode<=5)&&stats.submitRefusals[std::size_t(sr::SubmitRefusal::Extension)]==unsigned(mode>=6),"malformed timeline shape and unsupported extension have distinct bounded counters");
+  check(std::memcmp(&original,&info,sizeof info)==0&&std::memcmp(&originalExtension,&extension,sizeof extension)==0&&waitValue==17&&signalValue==29,"original timeline arrays values counts chain and submit remain byte-identical");
+  check(f.vk.lastSubmitInfos.size()==2,"zero guard precedes exactly one original native timeline submit");
+  const auto& zero=f.vk.lastSubmitInfos[0];const auto& forwarded=f.vk.lastSubmitInfos[1];
+  check(!zero.pNext&&!zero.waitSemaphoreCount&&!zero.signalSemaphoreCount&&zero.commandBufferCount==1,"synthetic zero has no inherited timeline values or semaphores");
+  check(forwarded.pNext==original.pNext&&forwarded.waitSemaphoreCount==original.waitSemaphoreCount&&forwarded.signalSemaphoreCount==original.signalSemaphoreCount&&forwarded.pWaitSemaphores==original.pWaitSemaphores&&forwarded.pWaitDstStageMask==original.pWaitDstStageMask&&forwarded.pSignalSemaphores==original.pSignalSemaphores,"native timeline pointer and all semaphore metadata forwarded exactly");
+  check(forwarded.commandBufferCount==unsigned(accepted?2:1)&&f.vk.lastSubmitCommands.back()==f.cb&&f.vk.originalFences.back()==f.vk.appFence,"guard only changes native command list preserving native order and original fence");
+  f.freshFrame();check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"timeline refusal does not poison subsequent fresh exact coverage");
+ }
+ // A valid extension never bypasses the actual submit-time source/CB/lease join.
+ for(unsigned mode=0;mode<5;++mode){Integration f(vs,ps);check(f.record().ready,"collect refusal begins with a genuinely selected recording");
+  sr::CollectRefusal reason=sr::CollectRefusal::Ineligible;
+  if(mode==0)f.renderer.commandUnknown(f.cb);
+  if(mode==1){leaseCurrent=false;reason=sr::CollectRefusal::Lease;}
+  if(mode==2){f.writeView(handle<VkImageView>(0xdead));reason=sr::CollectRefusal::Descriptor;}
+  if(mode==3){f.renderer.trackingLost();reason=sr::CollectRefusal::Epoch;}
+  if(mode==4){f.renderer.commandReset(f.cb);reason=sr::CollectRefusal::Empty;}
+  VkTimelineSemaphoreSubmitInfo extension{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.pNext=&extension;info.commandBufferCount=1;info.pCommandBuffers=&f.cb;
+  check(f.renderer.submit(f.vk.queue,1,&info,f.vk.appFence)==VK_SUCCESS&&f.vk.reads.back()==0,"canonical timeline still renders opaque when original exact collection fails");
+  const auto stats=f.renderer.statsCold();if(!(stats.collects==1&&!stats.collected&&!stats.guardAttempts&&stats.collectRefusals[std::size_t(reason)]==1)){std::cerr<<"collect diagnostic mode="<<mode<<" expected="<<unsigned(reason)<<" attempts="<<stats.collects<<" accepted="<<stats.collected<<" misses=";for(auto n:stats.collectRefusals)std::cerr<<n<<'/';std::cerr<<'\n';}check(stats.collects==1&&!stats.collected&&!stats.guardAttempts&&stats.collectRefusals[std::size_t(reason)]==1,"post-selection collect refusal identifies its exact first invalidation cause");
+  consumer.tick(consumer.owner);
+ }
+ for(unsigned mode=0;mode<3;++mode){Integration f(vs,ps);check(f.record().ready,"Submit2 diagnostic starts selected");VkProtectedSubmitInfo extension{VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO};VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=f.cb;VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.commandBufferInfoCount=1;info.pCommandBufferInfos=&cb;
+  if(mode<2)info.pNext=&extension;else info.flags=VK_SUBMIT_PROTECTED_BIT;
+  check(f.renderer.submit2(f.vk.queue,1,&info,f.vk.appFence,mode==1)==VK_SUCCESS&&f.vk.reads.back()==0,"core and KHR Submit2 unsupported flags/extensions remain opaque");const auto stats=f.renderer.statsCold();
+  check(stats.submits2==1&&!stats.collects&&!stats.guardAttempts&&stats.submitRefusals[std::size_t(mode<2?sr::SubmitRefusal::Extension:sr::SubmitRefusal::Flags)]==1,"Submit2 reports refusal before collection without changing admission");
+  check(stats.firstNextType==unsigned(mode<2?VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO:0),"Submit2 reports its actual first native pNext numeric type");consumer.tick(consumer.owner);
+ }
+}
 void fallbackRecovery(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
  for(unsigned mode=0;mode<6;++mode){
   Integration f(vs,ps);const auto initial=f.record();check(initial.ready,"initial supported coverage recording");
@@ -253,6 +305,7 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
  if(argc==5&&std::strcmp(argv[4],"telemetry")==0)telemetry(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"fallback-recovery")==0)fallbackRecovery(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"timeline")==0)timeline(vs,ps);
  else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else {integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);}
+ else {integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

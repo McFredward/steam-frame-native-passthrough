@@ -285,6 +285,9 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 static_cast<unsigned long long>(stats.readbackReady),static_cast<unsigned long long>(stats.readbackBusy),static_cast<unsigned long long>(stats.readbackErrors),stats.lastReadbackResult,
                 static_cast<unsigned long long>(stats.lastCopyAgeUs),static_cast<unsigned long long>(stats.maxCopyAgeUs),static_cast<unsigned long long>(stats.lastSubmissionAgeUs),
                 static_cast<unsigned long long>(stats.lastReadbackUs),static_cast<unsigned long long>(stats.maxReadbackUs));report(text);
+            std::snprintf(text,sizeof text,
+                "coverage completion: submitted=%llu, ready=%llu, pending=%llu, errors=%llu, last-hr=0x%08x; copy-age-us=%llu/max%llu",
+                static_cast<unsigned long long>(stats.submittedReadbacks),static_cast<unsigned long long>(stats.queryReady),static_cast<unsigned long long>(stats.queryPending),static_cast<unsigned long long>(stats.queryErrors),stats.lastQueryResult,static_cast<unsigned long long>(stats.lastQueryAgeUs),static_cast<unsigned long long>(stats.maxQueryAgeUs));report(text);
             // Public COM table metadata only; never query a new immediate
             // context here, since even a diagnostic getter may change dispatch.
             std::snprintf(text,sizeof text,

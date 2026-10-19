@@ -3,6 +3,7 @@
 #include "stream_bridge_coverage_gpu.h"
 #include "native_presenter_pipeline.h"
 #include "pixel_ssbo_profile_transform.h"
+#include "submit_timeline_contract.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -69,16 +70,28 @@ struct Renderer::Impl {
         std::atomic<std::uint64_t> metadata{0},maskNone{0},maskDecoded{0},maskRejected{0},uploadAccepted{0},uploadRefused{0},pictures{0};
         std::atomic<std::uint64_t> begins{0},draws{0},selected{0},guardAttempts{0},guardAccepted{0},guardRefused{0},opaqueSubmits{0};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(DrawRefusal::Count)> refusals{};
+        std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
+        std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(SubmitRefusal::Count)> submitRefusals{};
+        std::atomic<std::uint64_t> collects{0},collected{0},coreSubmits{0},submits2{0};
+        std::atomic<std::uint32_t> firstNextType{0},firstRefusedNextType{0};
     } counts;
     std::uint64_t reportedMilestones=0;unsigned reportedLevel=0,statusLines=0;
     void refused(DrawRefusal reason) noexcept {counts.refusals[static_cast<std::size_t>(reason)].fetch_add(1,std::memory_order_relaxed);}
+    void submitRefused(SubmitRefusal reason,std::uint32_t next=0) noexcept {
+        ++counts.submitRefusals[static_cast<std::size_t>(reason)];
+        std::uint32_t empty=0;if(next)counts.firstRefusedNextType.compare_exchange_strong(empty,next,std::memory_order_relaxed);
+    }
+    void nextObserved(std::uint32_t next) noexcept {std::uint32_t empty=0;if(next)counts.firstNextType.compare_exchange_strong(empty,next,std::memory_order_relaxed);}
     RendererStats stats()const noexcept{
         RendererStats out;
 #define COUNT(n) out.n=counts.n.load(std::memory_order_relaxed);
         COUNT(metadata) COUNT(maskNone) COUNT(maskDecoded) COUNT(maskRejected) COUNT(uploadAccepted) COUNT(uploadRefused) COUNT(pictures)
         COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
+        COUNT(collects) COUNT(collected) COUNT(coreSubmits) COUNT(submits2) COUNT(firstNextType) COUNT(firstRefusedNextType)
 #undef COUNT
         for(std::size_t n=0;n<out.drawRefusals.size();++n)out.drawRefusals[n]=counts.refusals[n].load(std::memory_order_relaxed);
+        for(std::size_t n=0;n<out.collectRefusals.size();++n)out.collectRefusals[n]=counts.collectRefusals[n].load(std::memory_order_relaxed);
+        for(std::size_t n=0;n<out.submitRefusals.size();++n)out.submitRefusals[n]=counts.submitRefusals[n].load(std::memory_order_relaxed);
         const auto gpu=pool.statusCold();out.pending=gpu.pending;out.copying=gpu.copying;out.ready=gpu.ready;out.quarantined=gpu.quarantined;
         out.poolUploaded=gpu.uploaded;out.poolRefused=gpu.refused;out.pipelines=admittedPipelines.load(std::memory_order_acquire);
         out.prepared=out.pipelines!=0;out.lost=lost.load(std::memory_order_acquire);return out;
@@ -90,6 +103,10 @@ struct Renderer::Impl {
         const std::array<std::uint64_t,11> events{{s.metadata,s.maskDecoded,s.maskRejected,s.uploadAccepted,s.uploadRefused,s.pictures,s.selected,s.guardAccepted,s.guardRefused,s.ready,s.quarantined}};
         for(unsigned n=0;n<events.size();++n)if(events[n])milestones|=std::uint64_t(1)<<n;
         for(unsigned n=0;n<s.drawRefusals.size();++n)if(s.drawRefusals[n])milestones|=std::uint64_t(1)<<(16+n);
+        for(unsigned n=0;n<s.collectRefusals.size();++n)if(s.collectRefusals[n])milestones|=std::uint64_t(1)<<(32+n);
+        for(unsigned n=0;n<s.submitRefusals.size();++n)if(s.submitRefusals[n])milestones|=std::uint64_t(1)<<(48+n);
+        if(s.firstNextType)milestones|=std::uint64_t(1)<<56;
+        if(s.collected)milestones|=std::uint64_t(1)<<57;
         const auto progress=std::max({s.metadata,s.draws,s.guardAttempts,s.opaqueSubmits});unsigned level=0;for(auto value=progress;value>1;value>>=1)++level;
         if(!(milestones&~reportedMilestones)&&level<=reportedLevel)return;
         reportedMilestones|=milestones;reportedLevel=std::max(level,reportedLevel);++statusLines;
@@ -100,6 +117,13 @@ struct Renderer::Impl {
             static_cast<unsigned long long>(s.pictures),static_cast<unsigned long long>(s.selected),static_cast<unsigned long long>(s.draws),static_cast<unsigned long long>(s.begins),
             miss(DrawRefusal::Unavailable),miss(DrawRefusal::Busy),miss(DrawRefusal::Command),miss(DrawRefusal::Epoch),miss(DrawRefusal::Pipeline),miss(DrawRefusal::Ineligible),miss(DrawRefusal::Descriptor),miss(DrawRefusal::Image),miss(DrawRefusal::ExactPicture),miss(DrawRefusal::ReadyMask),miss(DrawRefusal::Capacity),
             static_cast<unsigned long long>(s.guardAccepted),static_cast<unsigned long long>(s.guardAttempts),static_cast<unsigned long long>(s.guardRefused),static_cast<unsigned long long>(s.opaqueSubmits),s.pipelines,unsigned(s.lost));
+        const auto collect=[&](CollectRefusal r){return static_cast<unsigned long long>(s.collectRefusals[static_cast<std::size_t>(r)]);};
+        const auto submit=[&](SubmitRefusal r){return static_cast<unsigned long long>(s.submitRefusals[static_cast<std::size_t>(r)]);};
+        std::fprintf(stderr,"[Steam Link Native Passthrough] renderer submit: core/submit2=%llu/%llu; first-pNext/refused-pNext=%u/%u; unsupported busy/bounds/shape/extension/flags=%llu/%llu/%llu/%llu/%llu; collect accepted/attempts=%llu/%llu; collect miss cb/empty/ineligible/epoch/lease/descriptor/image/memory/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
+            static_cast<unsigned long long>(s.coreSubmits),static_cast<unsigned long long>(s.submits2),s.firstNextType,s.firstRefusedNextType,
+            submit(SubmitRefusal::Busy),submit(SubmitRefusal::Bounds),submit(SubmitRefusal::Shape),submit(SubmitRefusal::Extension),submit(SubmitRefusal::Flags),
+            static_cast<unsigned long long>(s.collected),static_cast<unsigned long long>(s.collects),
+            collect(CollectRefusal::Command),collect(CollectRefusal::Empty),collect(CollectRefusal::Ineligible),collect(CollectRefusal::Epoch),collect(CollectRefusal::Lease),collect(CollectRefusal::Descriptor),collect(CollectRefusal::Image),collect(CollectRefusal::Memory),collect(CollectRefusal::Capacity));
     }
     bool load(){
 #define LOAD(n) n=reinterpret_cast<PFN_vk##n>(gdpa(device,"vk" #n));if(!n)return false;
@@ -198,23 +222,31 @@ struct Renderer::Impl {
         return output!=nullptr;
     }
     bool collect(VkCommandBuffer cb){
-        auto* command=find(commands,handle(cb));if(!command||!command->used)return false;
-        bool valid=command->eligible&&!lost.load(std::memory_order_acquire)&&command->epoch==observationEpoch.load(std::memory_order_acquire);
-        for(std::size_t n=0;n<command->used;++n){auto& use=command->uses[n];valid=valid&&current(use.picture);
+        ++counts.collects;
+        const auto refuse=[&](CollectRefusal reason){++counts.collectRefusals[static_cast<std::size_t>(reason)];return false;};
+        auto* command=find(commands,handle(cb));if(!command)return refuse(CollectRefusal::Command);
+        if(!command->used)return refuse(CollectRefusal::Empty);
+        CollectRefusal why=CollectRefusal::Count;
+        const auto require=[&](bool condition,CollectRefusal reason){if(!condition&&why==CollectRefusal::Count)why=reason;};
+        require(command->eligible,CollectRefusal::Ineligible);
+        require(!lost.load(std::memory_order_acquire)&&command->epoch==observationEpoch.load(std::memory_order_acquire),CollectRefusal::Epoch);
+        for(std::size_t n=0;n<command->used;++n){auto& use=command->uses[n];require(current(use.picture),CollectRefusal::Lease);
             // A descriptor can legally change after recording but before
             // submission. It must still name this EXACT leased image.
             const auto* descriptor=find(descriptors,use.descriptor);
             const auto* view=descriptor&&descriptor->valid?find(views,descriptor->view):nullptr;
             const auto* image=view?find(images,view->image):nullptr;
             const auto* memory=image?find(memories,image->memory):nullptr;
-            valid=valid&&view&&view->serial==use.viewSerial&&descriptor->viewSerial==use.viewSerial&&
-                image&&image->id==use.image&&image->generation==use.imageGeneration&&view->generation==use.imageGeneration&&
-                memory&&memory->generation==use.memoryGeneration&&image->memoryGeneration==use.memoryGeneration&&
-                local::KernelIdentity{{memory->device,memory->inode}}==use.picture.metadata.lease.kernel;
+            require(descriptor&&descriptor->valid,CollectRefusal::Descriptor);
+            require(view&&view->serial==use.viewSerial&&descriptor->viewSerial==use.viewSerial&&
+                image&&image->id==use.image&&image->generation==use.imageGeneration&&view->generation==use.imageGeneration,CollectRefusal::Image);
+            require(memory&&memory->generation==use.memoryGeneration&&image->memoryGeneration==use.memoryGeneration&&
+                local::KernelIdentity{{memory->device,memory->inode}}==use.picture.metadata.lease.kernel,CollectRefusal::Memory);
             bool seen=false;for(std::size_t k=0;k<submittedCount;++k)seen|=submittedLeases[k].slot==use.lease.slot&&submittedLeases[k].generation==use.lease.generation;
-            if(!seen){if(submittedCount==submittedLeases.size())valid=false;else submittedLeases[submittedCount++]=use.lease;}
+            if(!seen){if(submittedCount==submittedLeases.size())require(false,CollectRefusal::Capacity);else submittedLeases[submittedCount++]=use.lease;}
         }
-        return valid;
+        if(why!=CollectRefusal::Count)return refuse(why);
+        ++counts.collected;return true;
     }
 
 };
@@ -391,6 +423,7 @@ void Renderer::trackingLost() noexcept{impl_->lost.store(true,std::memory_order_
 VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* infos,VkFence fence) noexcept{
     auto&p=*impl_;if(!p.QueueSubmit)return VK_ERROR_INITIALIZATION_FAILED;
     if(!p.coveragePrepared||queue!=p.queue)return p.QueueSubmit(queue,count,infos,fence);
+    ++p.counts.coreSubmits;
     p.pool.drainUploads(queue);
     // Same native queue owner, bounded stack-only scratch, original semaphores,
     // pNext and fence retained. A leading immutable zero command makes even a
@@ -399,8 +432,17 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
     submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submits[0].commandBufferCount=1;submits[0].pCommandBuffers=&p.zero;
     std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
     bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0,guards=0;p.submittedCount=0;
+    if(!supported)p.submitRefused(!lock.owns_lock()?SubmitRefusal::Busy:count>64?SubmitRefusal::Bounds:SubmitRefusal::Shape);
     if(supported)for(unsigned n=0;n<count;++n){
-        if(infos[n].pNext||infos[n].commandBufferCount>512||(!infos[n].pCommandBuffers&&infos[n].commandBufferCount)||used+infos[n].commandBufferCount*2>commands.size()){supported=false;break;}
+        const auto& info=infos[n];std::uint32_t nextType=0;
+        const auto timeline=stream_bridge_submit::canonicalTimeline(info,nextType);p.nextObserved(nextType);
+        SubmitRefusal why=SubmitRefusal::Count;
+        if(timeline==stream_bridge_submit::TimelineStatus::Extension)why=SubmitRefusal::Extension;
+        else if(timeline==stream_bridge_submit::TimelineStatus::Shape||info.sType!=VK_STRUCTURE_TYPE_SUBMIT_INFO||
+            (!info.pCommandBuffers&&info.commandBufferCount)||(info.waitSemaphoreCount&&(!info.pWaitSemaphores||!info.pWaitDstStageMask))||
+            (info.signalSemaphoreCount&&!info.pSignalSemaphores))why=SubmitRefusal::Shape;
+        else if(info.commandBufferCount>512||info.waitSemaphoreCount>64||info.signalSemaphoreCount>64||used+info.commandBufferCount*2>commands.size())why=SubmitRefusal::Bounds;
+        if(why!=SubmitRefusal::Count){p.submitRefused(why,nextType);supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBuffers=commands.data()+used;submits[n+1].commandBufferCount=0;
         for(unsigned k=0;k<infos[n].commandBufferCount;++k){const auto cb=infos[n].pCommandBuffers[k];
             if(p.collect(cb)){auto* command=find(p.commands,handle(cb));if(command&&command->control){commands[used++]=command->control->one;++submits[n+1].commandBufferCount;++guards;}}
@@ -448,13 +490,17 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
 VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2* infos,VkFence fence,bool khr) noexcept{
     auto&p=*impl_;const auto forward=khr?p.QueueSubmit2KHR:p.QueueSubmit2;if(!forward)return VK_ERROR_EXTENSION_NOT_PRESENT;
     if(!p.coveragePrepared||queue!=p.queue)return forward(queue,count,infos,fence);
+    ++p.counts.submits2;
     p.pool.drainUploads(queue);
     std::array<VkSubmitInfo2,65> submits{};std::array<VkCommandBufferSubmitInfo,1024> commands{};
     const VkCommandBufferSubmitInfo zero{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,p.zero,1};
     submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submits[0].commandBufferInfoCount=1;submits[0].pCommandBufferInfos=&zero;
     std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0,guards=0;p.submittedCount=0;
+    if(!supported)p.submitRefused(!lock.owns_lock()?SubmitRefusal::Busy:count>64?SubmitRefusal::Bounds:SubmitRefusal::Shape);
     if(supported)for(unsigned n=0;n<count;++n){
-        if(infos[n].pNext||infos[n].flags||infos[n].commandBufferInfoCount>512||(!infos[n].pCommandBufferInfos&&infos[n].commandBufferInfoCount)||used+infos[n].commandBufferInfoCount*2>commands.size()){supported=false;break;}
+        const auto& info=infos[n];const auto nextType=info.pNext?static_cast<std::uint32_t>(static_cast<const VkBaseInStructure*>(info.pNext)->sType):0;p.nextObserved(nextType);
+        if(info.pNext||info.flags||info.commandBufferInfoCount>512||(!info.pCommandBufferInfos&&info.commandBufferInfoCount)||used+info.commandBufferInfoCount*2>commands.size()){
+            p.submitRefused(info.pNext?SubmitRefusal::Extension:info.flags?SubmitRefusal::Flags:(!info.pCommandBufferInfos&&info.commandBufferInfoCount)?SubmitRefusal::Shape:SubmitRefusal::Bounds,nextType);supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBufferInfos=commands.data()+used;submits[n+1].commandBufferInfoCount=0;
         for(unsigned k=0;k<infos[n].commandBufferInfoCount;++k){const auto& cb=infos[n].pCommandBufferInfos[k];
             if(p.collect(cb.commandBuffer)){auto* command=find(p.commands,handle(cb.commandBuffer));if(command&&command->control){commands[used++]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,command->control->one,1};++submits[n+1].commandBufferInfoCount;++guards;}}

@@ -1,4 +1,5 @@
 #include "pixel_ssbo_draw_transaction.h"
+#include "submit_timeline_contract.h"
 
 namespace frame_pixel_ssbo_transaction {
 namespace {
@@ -467,13 +468,9 @@ Transaction::SubmitTicket Transaction::beforeSubmit(VkQueue queue,std::uint32_t 
            (info.waitSemaphoreCount && (!info.pWaitSemaphores || !info.pWaitDstStageMask)) ||
            (info.signalSemaphoreCount && !info.pSignalSemaphores)){refuse(Reason::SubmitShape);return ticket;}
         if(info.pNext){
-            const auto* base=static_cast<const VkBaseInStructure*>(info.pNext);
-            submitObservation_.nextType=static_cast<std::uint32_t>(base->sType);
-            if(base->sType!=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO || base->pNext){refuse(Reason::SubmitExtension);return ticket;}
-            const auto* timeline=static_cast<const VkTimelineSemaphoreSubmitInfo*>(info.pNext);
-            if(timeline->waitSemaphoreValueCount!=info.waitSemaphoreCount || timeline->signalSemaphoreValueCount!=info.signalSemaphoreCount ||
-               (timeline->waitSemaphoreValueCount && !timeline->pWaitSemaphoreValues) ||
-               (timeline->signalSemaphoreValueCount && !timeline->pSignalSemaphoreValues)){refuse(Reason::SubmitShape);return ticket;}
+            const auto timeline=stream_bridge_submit::canonicalTimeline(info,submitObservation_.nextType);
+            if(timeline==stream_bridge_submit::TimelineStatus::Extension){refuse(Reason::SubmitExtension);return ticket;}
+            if(timeline==stream_bridge_submit::TimelineStatus::Shape){refuse(Reason::SubmitShape);return ticket;}
         }
         for(std::uint32_t n=0;n<info.commandBufferCount;++n)if(info.pCommandBuffers[n]==command_){
             ++occurrences;submitObservation_.selectedOccurrences=occurrences;

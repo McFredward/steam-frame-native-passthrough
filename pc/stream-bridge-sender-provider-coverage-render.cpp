@@ -33,15 +33,26 @@ bool submittedSharedResource(ID3D11Resource* native,ID3D11Texture2D* held,
         &&allocationHandle(native,submitted.handle)&&allocationHandle(held,submitted.handle);
 }
 void copyCoverageBeforeNative(ID3D11DeviceContext* context,ID3D11Resource* nativeDestination,
-    ID3D11Resource* nativeSource,ID3D11Resource* readback,ID3D11Resource* coverage,NativeCopy nativeCopy)noexcept{
-    if(readback&&coverage)nativeCopy(context,readback,coverage);
+    ID3D11Resource* nativeSource,ID3D11Resource* readback,ID3D11Resource* coverage,ID3D11Query* completion,
+    NativeCopy nativeCopy,NativeEnd nativeEnd,NativeFlush nativeFlush)noexcept{
+    if(readback&&coverage&&completion){
+        nativeCopy(context,readback,coverage);
+        nativeEnd(context,completion);
+        nativeFlush(context);
+    }
     nativeCopy(context,nativeDestination,nativeSource);
 }
-HRESULT readCoverageNonblocking(ID3D11DeviceContext* context,ID3D11Resource* readback,
+HRESULT readCoverageNonblocking(ID3D11DeviceContext* context,ID3D11Resource* readback,ID3D11Query* completion,
     std::uint32_t width,std::uint32_t height,std::uint8_t* destination,std::size_t capacity,
-    NativeMap nativeMap,NativeUnmap nativeUnmap)noexcept{
-    if(!context||!readback||!width||!height||!destination||!nativeMap||!nativeUnmap||
+    NativeGetData nativeGetData,NativeMap nativeMap,NativeUnmap nativeUnmap,CoverageReadbackResult& receipt)noexcept{
+    receipt={};
+    if(!context||!readback||!completion||!width||!height||!destination||!nativeGetData||!nativeMap||!nativeUnmap||
         std::size_t(width)>capacity/height)return E_INVALIDARG;
+    BOOL completed=FALSE;
+    const auto ready=nativeGetData(context,completion,&completed,sizeof completed,D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    receipt.query=ready==S_OK&&!completed?S_FALSE:ready;
+    if(receipt.query!=S_OK)return FAILED(receipt.query)?receipt.query:DXGI_ERROR_WAS_STILL_DRAWING;
+    receipt.mapAttempted=true;
     D3D11_MAPPED_SUBRESOURCE data{};
     const auto result=nativeMap(context,readback,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&data);
     if(FAILED(result))return result;
