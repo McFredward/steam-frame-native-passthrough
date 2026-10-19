@@ -69,3 +69,14 @@ The focused tests exercise production camera and transaction code with the
 native boundary replaced. They prove ownership, ordering, settings deltas and
 checkpoint behavior, not headset pixels. The separate visible confirmation
 above is hardware evidence from the maintainer.
+
+## Separate camera-migration follow-up
+
+Installing the paired receiver directly over an enabled retired receiver still
+needs its own migration review. `plan()` suspends the retired layer, but its
+`camera_config(previous=None)` does not consume the retired
+`camera-before.json`. That can incorrectly treat the retired patch's persistent
+`true` as a user preference. This is source-proven and is not fixed by the
+Uninstall continuation changes. The clean Frame baseline established above no
+longer has that inherited override. Do not equate a successful uninstall or the
+new pending-upload repair with hardware acceptance of a legacy-to-paired update.
