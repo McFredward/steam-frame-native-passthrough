@@ -31,6 +31,7 @@ class Workflow:
             value=self.ports.original_health() if original else self.ports.prepared_health()
             self.check_cancelled()
             if type(value)is not dict:return value is True
+            self.camera_warning(value)
             if value.get('software_ready') is True:return True
             if value.get('status')!='not-ready':return False
             # A slow start is not a crash. A bounded probe offers another
@@ -41,12 +42,19 @@ class Workflow:
             self.check_cancelled()
             if action!='retry':return False
 
+    def camera_warning(self,value):
+        """Camera faults are a visible warning, never automatic recovery."""
+        observation=value.get('camera_health') if type(value)is dict else None
+        if type(observation)is dict and observation.get('status')=='warning':
+            self.ui.say('bridge_camera_warning')
+
     def picture_health(self,*,original=False):
         """Observe again after a rejected picture, without changing either device."""
         self.check_cancelled()
         self.ui.say('bridge_picture_rechecking')
         try:
             value=self.ports.original_health() if original else self.ports.prepared_health()
+            self.camera_warning(value)
             ready=value is True or type(value)is dict and value.get('software_ready')is True
         except KeyboardInterrupt:raise
         except Exception as error:

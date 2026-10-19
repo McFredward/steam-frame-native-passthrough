@@ -624,11 +624,23 @@ class StartupHealth:
         result=self.module.wait_ready(source,receipt['baseline'],timeout=20,poll_seconds=.25,
                                       stable_seconds=1,no_progress_seconds=10)
         # A green service, process tree or even fresh UI logs are not a pixel verdict.
-        return {'schema':'sfnp-install-startup-health-v1','software_ready':result.get('status')=='ready',
+        report={'schema':'sfnp-install-startup-health-v1','software_ready':result.get('status')=='ready',
                 'headset_picture_verified':False,'status':result.get('status'),
                 'reason':str(result.get('reason') or '')[:512],
                 'process_identities':result.get('process_identities',{}),
                 'automatic_restart':False,'automatic_rollback':False}
+        # The camera can fail while Steam's interface remains usable. Observe
+        # that independently; missing journal permission cannot fail setup or
+        # authorize another restart. The headset picture still needs a verdict.
+        camera=getattr(source,'camera_health',None)
+        if callable(camera):
+            try:observation=camera(receipt['baseline'])
+            except Exception:observation=None
+            if type(observation)is dict:report['camera_health']=observation
+            else:report['camera_health']={'schema':'frame-camera-startup-observation-v1',
+                'status':'unavailable','camera_pixels_verified':False,
+                'automatic_restart':False,'automatic_rollback':False}
+        return report
 
 
 def offer_undo(health,picture_ok):
@@ -1022,7 +1034,7 @@ def remote_request(engine,request,*,unit=None):
     if command in ('bridge-runtime-snapshot','bridge-runtime-restart','bridge-runtime-restored'):
         lifecycle=load_helper(e,'steam_link_setup_frame').FrameLifecycle(e,unit.root)
         if command=='bridge-runtime-snapshot':return lifecycle.snapshot()
-        if command=='bridge-runtime-restart':return lifecycle.restart()
+        if command=='bridge-runtime-restart':return lifecycle.restart(restoring=request.get('restoring') is True)
         return lifecycle.restored(health_ok=request.get('health_ok') is True)
     if command=='bridge-restore':
         result=unit.checkpoint().restore();unit.system('daemon-reload');return result
@@ -1100,7 +1112,10 @@ class Remote:
             auth=self.auth.open(self.address,self.login) if self.auth is not None and self.interactive else None
             self.session=session.Session(e.ssh_args(self.address,self.login,interactive=self.interactive,inline_auth=auth is not None),source,
                 interactive=self.interactive,timeout=90,auth=auth,cancelled=self.cancelled)
-        try:result=self.session.call(request)
+        # Ordered Frame activation may wait for three native service phases.
+        # Their individual 30-second bounds plus RPC overhead must fit inside
+        # this request; other operations retain their existing timeout.
+        try:result=self.session.call(request,timeout=120) if command=='bridge-runtime-restart' else self.session.call(request)
         except (OSError,ValueError,TimeoutError) as error:
             if self.log:self.log.record_failure(stage,error,command=command,
                 reason=error.reason if isinstance(error,getattr(self,'_session_errors',())) else None)
@@ -1220,7 +1235,7 @@ class Automation:
 
     def restart_original(self):
         self.phase('runtime_start');self.restore_baseline=self.call('bridge-health-baseline')
-        self.call('bridge-runtime-restart')
+        self.call('bridge-runtime-restart',restoring=True)
         if self.pc_recovery_error is None:
             try:self.runtime.restore()
             except Exception as error:
