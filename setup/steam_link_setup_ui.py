@@ -135,6 +135,7 @@ TEXT = {
         'done_prompt': 'Press Enter to close. ',
         'title': 'Steam Link Native Passthrough',
         'runtime_unknown': 'Unknown',
+        'runtime_bundled': 'Bundled with SteamVR',
         'runtime_steamvr': 'SteamVR: {version}',
         'runtime_steam_link': 'Steam Link: {version}',
         'runtime_build': 'build {build}',
@@ -262,6 +263,7 @@ TEXT = {
         'done_prompt': 'Zum Schließen Enter drücken. ',
         'title': 'Steam Link Native Passthrough',
         'runtime_unknown': 'Unbekannt',
+        'runtime_bundled': 'Mit SteamVR geliefert',
         'runtime_steamvr': 'SteamVR: {version}',
         'runtime_steam_link': 'Steam Link: {version}',
         'runtime_build': 'Build {build}',
@@ -322,6 +324,7 @@ def runtime_labels(text, record):
     if type(versions) is not dict:
         return []
     rows = []
+    steamvr_known = False
     for component in ('steamvr', 'steam_link'):
         item = versions.get(component)
         item = item if type(item) is dict else {}
@@ -330,7 +333,14 @@ def runtime_labels(text, record):
             version = None
         if type(build) is not str or not re.fullmatch(r'[0-9]{1,20}', build):
             build = None
+        if component == 'steamvr':
+            steamvr_known = bool(version or build)
         label = version or text('runtime_unknown')
+        if component == 'steam_link' and not version and not build and steamvr_known and (
+                record.get('compatible') is True or record.get('runtime_compatible') is True):
+            # This is a package relationship; the SteamVR label above carries
+            # its actual version/build. Never invent a separate Link version.
+            label = text('runtime_bundled')
         if build:
             label = version + ' (' + build + ')' if version else text('runtime_build').format(build=build)
         rows.append(text('runtime_' + component).format(version=label))

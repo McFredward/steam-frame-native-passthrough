@@ -121,6 +121,19 @@ class Menus(unittest.TestCase):
         result = ui.Presenter(stream, lambda _: next(values), lang='en', input_enabled=True, width=22)
         return result, stream
 
+    def test_bundled_link_label_refers_to_known_steamvr_without_inventing_own_version(self):
+        for lang in ('en','de'):
+            text=lambda key:ui.TEXT[lang][key]
+            record={'compatible':True,'runtime_versions':{'steamvr':{'version':None,'build':'1789498647'},'steam_link':{'version':None,'build':None}}}
+            rows=ui.runtime_labels(text,record)
+            self.assertEqual(rows[0],'SteamVR: '+text('runtime_build').format(build='1789498647'))
+            self.assertEqual(rows[1],'Steam Link: '+text('runtime_bundled'))
+            self.assertNotIn('1789498647',rows[1])
+            self.assertIsNone(record['runtime_versions']['steam_link']['version'])
+            self.assertIn(text('runtime_unknown'),ui.runtime_labels(text,{**record,'compatible':False})[1])
+            record['runtime_versions']['steam_link']['version']='9.8.7'
+            self.assertEqual(ui.runtime_labels(text,record)[1],'Steam Link: 9.8.7')
+
     def test_runtime_labels_are_distinct_from_patch_versions_and_sanitize_unknown_metadata(self):
         for lang in ('en','de'):
             stream=io.StringIO();presenter=ui.Presenter(stream,lang=lang,width=80)

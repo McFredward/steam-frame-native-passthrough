@@ -59,7 +59,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 for key in ('pc','frame'):
                     text=str(app.query_one('#'+key+'-status',Static).render())
                     self.assertIn('SteamVR: 2.18.2 (1791331621)',text)
-                    self.assertIn('Steam Link: '+app.texts['runtime_unknown'],text)
+                    self.assertIn('Steam Link: '+app.texts['runtime_unknown' if key=='pc' else 'runtime_bundled'],text)
                     self.assertIn('0.2.0',text);self.assertIn('0.2.1',text)
                     self.assertTrue(body.content_region.contains_region(app.query_one('#'+key+'-status').region),key)
                 self.assertIn(app.words['attention'],str(app.query_one('#pc-status',Static).render()))

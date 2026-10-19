@@ -448,6 +448,15 @@ def runtime_versions(steamvr):
                 result['steamvr']['build_source'] = 'appmanifest_250820.acf'
         except (OSError, ValueError, UnicodeError):
             pass
+    if result['steamvr']['build'] is None:
+        try:
+            raw, _ = read_public_reference(root / 'bin/version.txt', 64)
+            build = raw.decode('ascii').strip()
+            if re.fullmatch(r'[0-9]{1,20}', build):
+                result['steamvr']['build'] = build
+                result['steamvr']['build_source'] = 'bin/version.txt'
+        except (OSError, ValueError, UnicodeError):
+            pass
     for name in ('tools/vrlink/version.vrmanifest', 'drivers/vrlink/version.vrmanifest'):
         observed = manifest(name)
         if observed['version'] is not None:
