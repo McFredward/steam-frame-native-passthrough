@@ -253,8 +253,10 @@ def unpaused(root):
 
 def load_lease(root, config_sha):
     raw, _ = read_file(root / LEASE, MAX_JSON, private=True);v = parsed(raw)
-    require(type(v) is dict and set(v) == {'schema', 'config_sha256', 'helper_pid', 'helper_start_ticks',
-        'override', 'effective', 'section_present', 'write_intent', 'settings_signature'}
+    require(type(v) is dict and set(v) in ({'schema', 'config_sha256', 'helper_pid', 'helper_start_ticks',
+        'override', 'effective', 'section_present', 'write_intent', 'settings_signature'},
+        {'schema', 'config_sha256', 'helper_pid', 'helper_start_ticks', 'override', 'effective',
+        'section_present', 'write_intent', 'settings_signature', 'restore_signature'})
         and v['schema'] == LEASE_SCHEMA and v['config_sha256'] == config_sha
         and type(v['helper_pid']) is int and 0 < v['helper_pid'] < 2**31
         and type(v['helper_start_ticks']) is int and v['helper_start_ticks'] >= 0
@@ -265,7 +267,10 @@ def load_lease(root, config_sha):
         and (v['override'] is None or v['section_present'])
         and v['write_intent'] is (v['effective'] is not True)
         and type(v['settings_signature']) is list and len(v['settings_signature']) == 5
-        and all(type(n) is int and n >= 0 for n in v['settings_signature']), 'unknown camera lease preserved')
+        and all(type(n) is int and n >= 0 for n in v['settings_signature'])
+        and (v.get('restore_signature') is None or type(v['restore_signature']) is list
+            and len(v['restore_signature']) == 5 and all(type(n) is int and n >= 0 for n in v['restore_signature'])),
+        'unknown camera lease preserved')
     return v, raw
 
 
@@ -375,10 +380,12 @@ class Session:
             self.save({'schema':LEASE_SCHEMA, 'config_sha256':self.sha, 'helper_pid':os.getpid(),
                 'helper_start_ticks':own_start(os.getpid()), 'override':before, 'effective':effective,
                 'section_present':SECTION in value, 'write_intent':effective is not True,
-                'settings_signature':signature(info)})
+                'settings_signature':signature(info), 'restore_signature':None})
         else:
             require(before is self.lease['override'] or self.lease['write_intent'] and before is True,
                     'changed camera override preserved')
+        if self.lease.get('restore_signature') is not None:
+            renewed = dict(self.lease);renewed['restore_signature'] = None;self.save(renewed)
         if effective is not True:
             require(effective is self.lease['effective'], 'changed runtime camera baseline preserved')
             self.camera.write(True)
@@ -393,6 +400,9 @@ class Session:
         require(current_override is self.lease['override'] or self.lease['write_intent'] and current_override is True,
                 'changed camera override preserved')
         require(current is wanted or self.lease['write_intent'] and current is True, 'changed runtime camera preserved')
+        if self.lease['write_intent'] and self.lease.get('restore_signature') is None:
+            # Distinguish a save after D from unrelated saves that preceded D.
+            restoring = dict(self.lease);restoring['restore_signature'] = signature(info);self.save(restoring)
         if current is not wanted:
             if self.lease['override'] is None:self.camera.remove_override()
             else:self.camera.write(self.lease['override'])
@@ -400,7 +410,7 @@ class Session:
         self.enabled = False
         _, observed, _, info = settings(self.path)
         persisted = observed is self.lease['override'] and (
-            not self.lease['write_intent'] or signature(info) != self.lease['settings_signature'])
+            not self.lease['write_intent'] or signature(info) != self.lease['restore_signature'])
         if persisted:
             remove_owned(self.root / LEASE, self.raw);self.lease = self.raw = None
 

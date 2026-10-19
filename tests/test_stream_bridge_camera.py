@@ -243,6 +243,17 @@ class Controls(unittest.TestCase):
         state['error']=2
         with self.assertRaises(tool.SafetyError):camera.read()
         self.assertEqual(calls,[(b'camera',b'forceSceneAlphaBlending',True),(b'camera',b'forceSceneAlphaBlending','remove')])
+    def test_unrelated_pre_disable_file_save_is_not_restore_persistence(self):
+        self.camera.persist=False;session=self.session();session.enable()
+        value=json.loads(self.settings.read_text());value['unrelated-save-before-D']=True;self.write_settings(value)
+        session.restore()
+        self.assertIs(self.camera.value,False)
+        self.assertTrue((self.root/tool.LEASE).exists())
+        self.assertIsNotNone(session.lease['restore_signature'])
+        # Only a later native file generation matching the original override
+        # permits ownership removal; an old baseline file is not a D receipt.
+        self.write_settings(value);session.restore()
+        self.assertFalse((self.root/tool.LEASE).exists())
     def test_repeated_enable_cannot_overwrite_changed_active_native_value(self):
         session=self.session();session.enable();self.camera.value=False
         with self.assertRaisesRegex(tool.SafetyError,'readiness lost'):session.enable()
