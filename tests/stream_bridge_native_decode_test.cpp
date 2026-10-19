@@ -258,5 +258,5 @@ void captureOwnership(){
     check(p->setCaptureSink(nullptr,nullptr),"sink can detach only after stopped native ownership");
 }
 }
-int main(){try{identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
 #endif
