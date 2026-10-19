@@ -1,4 +1,5 @@
 """Camera faults must remain visible without overriding a user's picture verdict."""
+import base64
 import importlib.util
 from pathlib import Path
 import types
@@ -142,9 +143,12 @@ class DurableActivation(unittest.TestCase):
         self.assertEqual(ports.baseline,before);self.assertNotEqual(ports.baseline,self.current_health())
 
     def test_restart_rpc_supplies_the_pinned_observer_source(self):
-        bundle=types.SimpleNamespace(value={'schema':'fixture'},files={'frame/tools/compositor_startup_health.py':b'owned checker'})
+        bundle=types.SimpleNamespace(value={'schema':'fixture'},files={
+            'frame/tools/compositor_startup_health.py':b'owned checker',
+            'frame/'+bridge.CAMERA_TOOL:b'owned camera helper'})
         request=bridge.request(bundle,'bridge-runtime-restart',restoring=True)
         self.assertTrue(request['restoring']);self.assertEqual(request['health_source'],'b3duZWQgY2hlY2tlcg==')
+        self.assertEqual(base64.b64decode(request['camera_source']),b'owned camera helper')
 
     def test_actual_remote_dispatch_retains_health_and_rejects_changed_observer_before_actions(self):
         files=fixture.fixtures.Tests('runTest');files.setUp();self.addCleanup(files.doCleanups)
