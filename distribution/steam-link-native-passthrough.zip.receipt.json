@@ -1,7 +1,7 @@
 {
   "archive": {
-    "bytes": 18322569,
-    "sha256": "450cb5a510d1c0b21e5a0c5639ec0f5c7f8657626de085c961eb82a63788270e"
+    "bytes": 18325128,
+    "sha256": "c542a75c445c41295188f4969e0a42e8dc34f98beaa300fd71d8e521da17c939"
   },
   "artifacts": {
     "frame_layer": {
@@ -13,13 +13,13 @@
       "sha256": "3ee160069c02826cf6312e8644a98d5dd148d3afac58a67bfee0987bae79e2ec"
     },
     "pc_provider": {
-      "bytes": 1282560,
-      "sha256": "52874a2fbe5d1b72d6b576fbce92018eb9999d0ba84966e35377f99d8dddd718"
+      "bytes": 1287168,
+      "sha256": "390f1a86c4516fc06e2e13019c85160c495ffe66a0fe21b35e0ab8d83df85af7"
     }
   },
   "component_versions": {
     "frame": "0.2.12",
-    "pc": "0.2.11"
+    "pc": "0.2.12"
   },
   "device_actions": false,
   "hardware_verified": false,
@@ -29,7 +29,7 @@
   "result": "PASS",
   "runtime_profile": {
     "bytes": 9587,
-    "sha256": "6db577fdbecb92c93b4fd57f926664d6b9de1df1aa6675fc9e6a10541f277e61"
+    "sha256": "67c73c1ef1152a5309ed5cef4fa0406dac857a3f0e47adefaadb36252de7b518"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -39,7 +39,7 @@
     },
     "PATCH_VERSIONS.json": {
       "bytes": 80,
-      "sha256": "18420f4f94b32ac9ba83f25074c4fb9daec762a35e20d6eae861c2d236013f27"
+      "sha256": "f816e7e403454791375810c6b418924ee2d4d00e4a294ffa9054fdd22c8f8bba"
     },
     "VERSION": {
       "bytes": 7,
@@ -186,7 +186,7 @@
       "sha256": "1cd6c79752e2cdc87dd74e02b2f75ac75aba2d3e3c852653c4bacb3ad8e6b734"
     }
   },
-  "source_revision": "768190ab1d58f315f92f8570190c7ae3a800475e",
+  "source_revision": "dea5ca7d252e63b91445fe0b470d38aa09bb7591",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -204,7 +204,7 @@
       "hardware_verified": false,
       "pin": {
         "bytes": 6767,
-        "sha256": "3ab04fd4ed19bd44f888c5fd975fe4cb8ca0b6488f404e0adc2cf17957a61602"
+        "sha256": "a4272f37f9964672d67f03346ecb9cd9db0d695d19d15b161a8e859a8fb3a976"
       }
     }
   ],
