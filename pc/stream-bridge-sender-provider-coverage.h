@@ -2,6 +2,7 @@
 #include "stream-bridge-sender-provider-directmode.h"
 #include "stream-bridge-sender-provider-core.h"
 #include "stream-bridge-source-contract.h"
+#include "stream-bridge-source-alpha-stats.h"
 #include "bridge/stream_bridge_control.h"
 #include <memory>
 #include <limits>
@@ -205,6 +206,8 @@ public:
     bool ready(std::uint32_t processId)const noexcept;
     bool operational(std::uint32_t processId)const noexcept;
     CoverageGateStats gateStats()const noexcept; // Cold, approximate diagnostics only.
+    bool sourceAlpha(unsigned eye,SourceAlphaSample&)const noexcept;
+    std::uint32_t sourceAlphaError()const noexcept;
     const char* stateName()const noexcept; // Bounded cold-worker status, no identifiers/secrets.
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

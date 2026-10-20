@@ -242,6 +242,10 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         std::uint64_t seenSignals=0,seenRefusals=0,nextGateSample=1;
         unsigned gateTransitions=0,gateSamples=0;
         stream_bridge::sender::CoverageSourceReportBudget sourceReports;
+        unsigned alphaReports=0,alphaSources=0;
+        std::uint32_t alphaPid=0;
+        bool alphaUnavailableReported=false;
+        auto nextAlphaReport=std::chrono::steady_clock::now();
         auto nextGateReport=std::chrono::steady_clock::now()+std::chrono::seconds(2);
         const auto reportCoverage=[&](bool final){
             const auto now=std::chrono::steady_clock::now();if(!final&&now<nextGateReport)return;
@@ -250,6 +254,38 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             // on every 8 ms worker tick instead of this cold five-second cadence.
             nextGateReport=now+std::chrono::seconds(5);
             const auto stats=coverage_.gateStats();
+            // Sample source alpha at the actual native shared-texture input,
+            // independently of the native shader's output alpha. A coherent
+            // sample contains its own PID/present/eye/extent/CB metadata; it is
+            // diagnostic evidence only, never an activation/frame certificate.
+            stream_bridge::sender::SourceAlphaSample alpha[2]{};
+            const bool haveAlpha[2]{coverage_.sourceAlpha(0,alpha[0]),coverage_.sourceAlpha(1,alpha[1])};
+            const auto observedPid=haveAlpha[0]?alpha[0].source.pid:haveAlpha[1]?alpha[1].source.pid:0;
+            const auto alphaError=coverage_.sourceAlphaError();
+            if(alphaError&&!observedPid&&!alphaUnavailableReported){
+                char alphaText[160]{};std::snprintf(alphaText,sizeof alphaText,
+                    "native source alpha: diagnostic unavailable, readback-hr=0x%08x; coverage admission and rendering unchanged",alphaError);
+                report(alphaText);alphaUnavailableReported=true;
+            }
+            if(observedPid&&observedPid!=alphaPid&&alphaSources<8){alphaPid=observedPid;++alphaSources;alphaReports=0;nextAlphaReport=now;}
+            if(observedPid&&(final||(alphaReports<14&&now>=nextAlphaReport))){
+                ++alphaReports;nextAlphaReport=now+std::chrono::seconds(alphaReports<6?5:30);
+                for(unsigned eye=0;eye<2;++eye)if(haveAlpha[eye]){
+                    const auto& a=alpha[eye];const auto& m=a.source;
+                    char alphaText[736]{};int used=std::snprintf(alphaText,sizeof alphaText,
+                        "native source alpha: pid=%u, eye=%u, present=%llu, samples=%llu, source=%ux%u/resource-f%u/view-f%u; app-uv=%g,%g,%g,%g; nonfoveal-a=%g, direct-foveated=%g, sharpness=%g; readback-hr=0x%08x",
+                        m.pid,eye,static_cast<unsigned long long>(m.present),static_cast<unsigned long long>(a.samples),m.width,m.height,m.resourceFormat,m.viewFormat,
+                        double(m.uv[0]),double(m.uv[1]),double(m.uv[2]),double(m.uv[3]),double(m.nonFovealAlpha),double(m.directFoveated),double(m.sharpness),alphaError);
+                    for(unsigned region=0;region<3&&used>0&&std::size_t(used)<sizeof alphaText;++region){
+                        const auto v=a.alpha[region];const auto remaining=sizeof alphaText-std::size_t(used);
+                        const auto n=std::snprintf(alphaText+used,remaining,"; region%u=%u/%u/%u, zero/partial=%u/%u",
+                            region,unsigned(v&255),unsigned((v>>8)&255),unsigned((v>>16)&255),unsigned((v>>24)&65535),unsigned((v>>40)&65535));
+                        if(n<0)break;
+                        used+=n;
+                    }
+                    report(alphaText);
+                }
+            }
             if(sourceReports.observe(stats,final)){
                 using Source=stream_bridge::sender::SourceContractStatus;
                 const auto at=[](Source why){return static_cast<unsigned>(why);};

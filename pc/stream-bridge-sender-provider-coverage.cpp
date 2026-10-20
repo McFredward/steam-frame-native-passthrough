@@ -1,5 +1,6 @@
 #include "stream-bridge-sender-provider-coverage.h"
 #include "stream-bridge-sender-provider-coverage-render.h"
+#include "stream-bridge-source-alpha-probe.h"
 #include "stream-bridge-sender-provider-coverage-stages.h"
 #include "stream-bridge-source-contract.h"
 #include <d3d11_4.h>
@@ -124,6 +125,7 @@ struct SenderCoverage::Impl {
     void* nativeDevicePointer=nullptr; // Comparison only; never dereferenced as a guessed interface.
     ID3D11Multithread* multithread=nullptr;CoverageContextFacade facade;
     SourceContract sourceContract;
+    SourceAlphaProbe sourceAlpha;
     ID3D11Texture2D* target=nullptr;ID3D11RenderTargetView* targetView=nullptr;ID3D11BlendState* blend=nullptr;
     std::uint32_t width=0,height=0;std::uint64_t activeSerial=0,activeEpoch=0;unsigned drawBits=0;std::uint64_t activeContract=0;bool invalid=false,poolReady=false;
     IUnknown* nativeOutput=nullptr;std::uint32_t activePid=0;
@@ -272,6 +274,9 @@ struct SenderCoverage::Impl {
         D3D11_QUERY_DESC query{};query.Query=D3D11_QUERY_EVENT;
         for(auto& slot:all){auto& gpu=slot->resources;gpu.context=context;if(FAILED(device->CreateTexture2D(&desc,nullptr,&gpu.texture))||FAILED(device->CreateQuery(&query,&gpu.completion)))return false;}
         if(!blend&&!createTransmittanceBlend(device,&blend))return false;
+        // Optional diagnostics use independent tiny staging/query storage.
+        // Failure never withdraws valid native coverage or source permission.
+        (void)sourceAlpha.prepare(device);
         width=w;height=h;activeSerial=0;release(nativeOutput);
         for(auto& slot:all)slot.publish(Stages::Phase::Free);
         poolReady=true;prepared=true;return true;
@@ -318,6 +323,16 @@ struct SenderCoverage::Impl {
         const auto declared=sourceContract.snapshot(pid);
         if(!drawBits)activeContract=declared;
         else if(activeContract!=declared)activeContract=0;
+        if(declared&&sourceCurrent(declared,pid)){
+            SourceAlphaMetadata sample{};sample.present=frame.presentSerial;sample.pid=pid;
+            sample.width=sourceDesc.Width;sample.height=sourceDesc.Height;
+            sample.resourceFormat=sourceDesc.Format;sample.viewFormat=viewDesc.Format;
+            std::memcpy(sample.uv.data(),cb->bytes.data(),16);
+            std::memcpy(&sample.nonFovealAlpha,cb->bytes.data()+44,4);
+            std::memcpy(&sample.directFoveated,cb->bytes.data()+108,4);
+            std::memcpy(&sample.sharpness,cb->bytes.data()+116,4);
+            sourceAlpha.sample(ctx,resource,eye,sample,clockMicros(),{forwardGetData,forwardMap,forwardUnmap});
+        }
         release(resource);
 
         ID3D11RenderTargetView* out=nullptr;ID3D11DepthStencilView* depth=nullptr;ctx->OMGetRenderTargets(1,&out,&depth);if(depth){release(depth);release(out);return gates.refuse(CoverageGate::OutputDepth);}
@@ -454,6 +469,8 @@ CoverageGateStats SenderCoverage::gateStats()const noexcept{
     result.contextFacadeSlots=s.facade.slotCount();result.nativeDispatchMutations=s.facade.nativeMutationCount();
     result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;return result;
 }
+bool SenderCoverage::sourceAlpha(unsigned eye,SourceAlphaSample& sample)const noexcept{return impl_->sourceAlpha.read(eye,sample);}
+std::uint32_t SenderCoverage::sourceAlphaError()const noexcept{return impl_->sourceAlpha.error();}
 const char* SenderCoverage::stateName()const noexcept{
     switch(impl_->state.load()){case 0:return "coverage-waiting-native-device";case 1:return "coverage-unsupported-device";case 2:return "coverage-device-observed";case 3:return "coverage-context-or-hook-refused";case 4:return "coverage-waiting-supported-encoder-or-source";case 5:return "coverage-pool-preparation-refused";case 6:return "coverage-source-pair-prepared-waiting-raw-receipt";case 7:return "coverage-native-receipt-certified-not-selected-proof";case 9:return "coverage-public-context-dispatch-changed";default:return "coverage-stopped";}
 }
