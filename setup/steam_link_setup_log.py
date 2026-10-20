@@ -251,6 +251,22 @@ def _versions(value):
     return result
 
 
+def _runtime_checks(value):
+    """Retain only fixed component match flags, never runtime observations."""
+    roles = {'pc': ('vrlink', 'vrpathreg', '_runtime_versions'),
+             'frame': ('vrlink', 'compositor', 'fragment', 'openvr', '_runtime_versions')}
+    _require(type(value) is dict and len(value) == len(roles) and
+             set(value) == set(roles), 'invalid_event')
+    result = {}
+    for role, keys in roles.items():
+        record = value[role]
+        _require(type(record) is dict and len(record) == len(keys) and
+                 set(record) == set(keys) and
+                 all(type(record[key]) is bool for key in keys), 'invalid_event')
+        result[role] = {key: record[key] for key in keys}
+    return result
+
+
 class SessionLog:
     """One exclusive JSONL file, capped at 256 KiB; no log rotation/deletion.
 
@@ -326,7 +342,8 @@ class SessionLog:
         os.fsync(self._fd)
 
     def event(self, stage, kind, *, status=None, command=None, reason=None,
-              error_type=None, errno=None, winerror=None, recovery=None, action=None,versions=None):
+              error_type=None, errno=None, winerror=None, recovery=None, action=None,versions=None,
+              runtime_checks=None):
         with self._lock:
             self.last_event_error = None
             if not self.available or self._closed or self._limited:
@@ -355,6 +372,8 @@ class SessionLog:
                 if recovery is not None:
                     value['recovery'] = _recovery(recovery)
                 if versions is not None:value['versions']=_versions(versions)
+                if runtime_checks is not None:
+                    value['runtime_checks'] = _runtime_checks(runtime_checks)
                 # Reserve one final, guaranteed limit marker instead of silently
                 # growing or overwriting old evidence. No feature timer is used.
                 if self._bytes + MAX_EVENT_BYTES > MAX_BYTES - _LIMIT_RESERVE:

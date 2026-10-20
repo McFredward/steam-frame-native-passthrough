@@ -18,6 +18,55 @@ spec.loader.exec_module(log)
 
 
 class SessionLogs(unittest.TestCase):
+    def runtime_checks(self):
+        return {'pc': {'vrlink': True, 'vrpathreg': True, '_runtime_versions': False},
+                'frame': {'vrlink': True, 'compositor': True, 'fragment': False,
+                          'openvr': True, '_runtime_versions': True}}
+
+    def test_runtime_checks_retain_only_fixed_boolean_match_results(self):
+        session = self.open()
+        checks = self.runtime_checks()
+        self.assertTrue(session.event('preflight', 'result', status='pending',
+                                     runtime_checks=checks))
+        recorded = self.entries(session)[-1]
+        self.assertEqual(recorded['schema'], log.SCHEMA)
+        self.assertEqual(recorded['runtime_checks'], checks)
+        self.assertEqual(set(recorded), {'schema', 'sequence', 'utc', 'stage',
+                                         'kind', 'status', 'runtime_checks'})
+        checks['pc']['_runtime_versions'] = True
+        self.assertFalse(self.entries(session)[-1]['runtime_checks']['pc']['_runtime_versions'])
+        self.assertTrue(session.event('preflight', 'result', status='ok',
+                                     runtime_checks=checks))
+        self.assertTrue(self.entries(session)[-1]['runtime_checks']['pc']['_runtime_versions'])
+
+    def test_runtime_checks_reject_unknown_roles_keys_and_raw_observations(self):
+        session = self.open()
+        before = session.path.read_bytes()
+        invalid = [[], {}, {'pc': self.runtime_checks()['pc']},
+                   {**self.runtime_checks(), 'password': 'SECRET'}]
+        for role in ('pc', 'frame'):
+            keys = tuple(self.runtime_checks()[role])
+            for key in keys:
+                for value in (0, 1, None, 'SECRET', {'matches': True, 'path': 'SECRET'}, [True]):
+                    checks = self.runtime_checks()
+                    checks[role][key] = value
+                    invalid.append(checks)
+            checks = self.runtime_checks()
+            checks[role]['path'] = 'SECRET'
+            invalid.append(checks)
+            checks = self.runtime_checks()
+            del checks[role][keys[0]]
+            invalid.append(checks)
+        for checks in invalid:
+            with self.subTest(checks=checks):
+                self.assertFalse(session.event('preflight', 'result', runtime_checks=checks))
+                self.assertEqual(session.last_event_error, 'invalid_event')
+                self.assertTrue(session.available)
+        self.assertEqual(session.path.read_bytes(), before)
+        self.assertNotIn(b'SECRET', session.path.read_bytes())
+        self.assertTrue(session.event('preflight', 'result', status='ok'))
+        self.assertNotIn('runtime_checks', self.entries(session)[-1])
+
     def test_component_versions_are_bounded_metadata_without_a_transcript(self):
         session=self.open()
         versions={'pc':{'installed':True,'installed_version':'0.2.0','target_version':'0.2.1'},
@@ -272,14 +321,16 @@ class SessionLogs(unittest.TestCase):
         before = session.path.read_bytes()
         with mock.patch.object(log, 'MAX_BYTES', 8192):
             for _ in range(1000):
-                if not session.event('startup_health', 'stage', status='pending'):
+                if not session.event('startup_health', 'stage', status='pending',
+                                     runtime_checks=self.runtime_checks()):
                     break
             self.assertTrue(session.available)
             self.assertEqual(session.last_event_error, 'log_limit')
             self.assertLessEqual(session.path.stat().st_size, 8192)
             length = session.path.stat().st_size
             for _ in range(100):
-                self.assertFalse(session.event('startup_health', 'stage', status='pending'))
+                self.assertFalse(session.event('startup_health', 'stage', status='pending',
+                                               runtime_checks=self.runtime_checks()))
             self.assertEqual(session.path.stat().st_size, length)
         events = self.entries(session)
         self.assertEqual(sum(event.get('reason') == 'log_limit' for event in events), 1)
