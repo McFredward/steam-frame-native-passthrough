@@ -163,9 +163,10 @@ def runtime_snapshot(engine,pins,bases,*,side,versions):
     tested='2.17.10' if side=='pc' else '2.18.2'
     native_build='1789498647' if side=='pc' else '1791331621'
     # Steam package buildids and native timestamp builds are separate namespaces.
-    # No package buildid has a reviewed reference; require consent for that label.
+    # A package label alone is not evidence of untested native code: the exact
+    # file pins above and known semantic/native labels still decide the warning.
+    # Retain every observed label in the consent snapshot to detect later changes.
     result['_runtime_versions']={'value':versions,'matches':(version is None or version==tested) and
-        (label.get('build_source')!='appmanifest_250820.acf' or build is None) and
         (label.get('build_source')!='bin/version.txt' or build is None or build==native_build)}
     return result
 
@@ -1958,7 +1959,12 @@ class Automation:
 
     def confirm_runtime(self):
         observed,pc,frame=self.runtime_view()
-        if not all(item['matches'] for side in ('pc','frame') for item in observed[side].values()):
+        matched=all(item['matches'] for side in ('pc','frame') for item in observed[side].values())
+        log=self.context.get('log')
+        if log:
+            log.event('preflight','result',status='ok' if matched else 'pending',runtime_checks={
+                side:{role:item['matches'] is True for role,item in observed[side].items()} for side in ('pc','frame')})
+        if not matched:
             show=getattr(self.ui,'untested_runtime',None)
             if show:show(pc=pc.get('runtime_versions'),frame=frame.get('runtime_versions'))
             if not self.ui.confirm('bridge_untested_confirm'):return False

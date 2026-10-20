@@ -346,21 +346,52 @@ class Tests(unittest.TestCase):
             pins=self.bundle.pc['runtime_files'] if side=='pc' else self.bundle.frame['runtime_files']
             bases={'steamvr':self.runtime if side=='pc' else self.fsvr}
             for source,number,known in (('bin/version.txt',build,True),('bin/version.txt','1999999999',False),
-                                        ('appmanifest_250820.acf','29999999',False),('appmanifest_250820.acf',build,False)):
+                                        ('appmanifest_250820.acf','29999999',True),('appmanifest_250820.acf',build,True)):
                 versions={'steamvr':{'version':version,'build':number,'build_source':source}}
                 snapshot=b.runtime_snapshot(s,pins,bases,side=side,versions=versions)
                 self.assertEqual(snapshot['_runtime_versions']['matches'],known)
                 self.assertEqual(snapshot['_runtime_versions']['value'],versions)
 
-    def test_unreviewed_package_build_warns_with_known_version_and_keeps_native_active(self):
+    def test_package_build_is_informational_with_known_version_and_exact_native_files(self):
         def versions(path):
             return {'steamvr':{'version':'2.17.10' if path==self.runtime else '2.18.2',
                 'build':'29999999','build_source':'appmanifest_250820.acf'},'steam_link':{'version':None,'build':None,'source':None}}
         with mock.patch.object(s,'runtime_versions',side_effect=versions),self.fake_generation():result,ui=self.wizard()
-        self.assertEqual(result,0);self.assertIn('bridge_untested_confirm',ui.questions)
-        self.assertEqual(ui.warnings[0]['pc']['steamvr']['build_source'],'appmanifest_250820.acf')
+        self.assertEqual(result,0);self.assertNotIn('bridge_untested_confirm',ui.questions)
+        self.assertEqual(ui.warnings,[])
+        events=[json.loads(line) for path in (self.local.root/'logs').glob('*.jsonl') for line in path.read_text().splitlines()]
+        checks=[event['runtime_checks'] for event in events if 'runtime_checks' in event]
+        self.assertTrue(checks)
+        self.assertTrue(all(match for record in checks for side in record.values() for match in side.values()))
         self.assertTrue(self.local.inventory()['registered']);self.assertTrue((self.froot/'receiver.enable').exists())
         self.assertNotIn('bridge_untested_installed',ui.messages)
+
+    def test_package_build_does_not_hide_changed_native_bytes_or_semantic_version(self):
+        for changed in ('native','version'):
+            with self.subTest(changed=changed):
+                pins=self.bundle.pc['runtime_files'];bases={'steamvr':self.runtime}
+                versions={'steamvr':{'version':'2.99.1' if changed=='version' else '2.17.10',
+                    'build':'29999999','build_source':'appmanifest_250820.acf'}}
+                if changed=='native':path,old=self.change_runtime('pc','vrlink')
+                try:
+                    snapshot=b.runtime_snapshot(s,pins,bases,side='pc',versions=versions)
+                    self.assertFalse(all(item['matches'] for item in snapshot.values()))
+                    self.assertEqual(snapshot['_runtime_versions']['matches'],changed!='version')
+                    self.assertEqual(b.native_admitted('pc',snapshot),changed!='native')
+                    self.assertEqual(snapshot['_runtime_versions']['value'],versions)
+                    with self.assertRaises(s.SetupError):b.runtime_admission(s,self.bundle,'pc',snapshot,None)
+                finally:
+                    if changed=='native':path.write_bytes(old)
+
+    def test_package_build_change_still_invalidates_the_exact_confirmed_snapshot(self):
+        installed=b.LocalInstall(s,self.local)
+        def versions(build):return {'steamvr':{'version':'2.17.10','build':build,'build_source':'appmanifest_250820.acf'}}
+        with mock.patch.object(s,'runtime_versions',return_value=versions('29999999')):consent=self.consent('pc')
+        with mock.patch.object(s,'runtime_versions',return_value=versions('30000000')):
+            with self.assertRaisesRegex(s.SetupError,'changed or was not'):
+                installed.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,runtime_consent=consent)
+        self.assertIsNone(installed.state());self.assertEqual(self.system.calls,[])
+        self.assertFalse((self.local.root/'pc-provider').exists())
 
     def test_only_public_registration_tool_change_keeps_native_path_active(self):
         self.change_runtime('pc','vrpathreg');installer=b.LocalInstall(s,self.local)

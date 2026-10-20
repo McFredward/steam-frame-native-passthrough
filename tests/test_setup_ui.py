@@ -764,6 +764,8 @@ class ActionChooser(unittest.TestCase):
                 self.assertIn(p.text('version_pc'),text)
                 self.assertIn(p.text('version_frame'),text)
                 self.assertIn(p.text('bridge_untested_versions'),text)
+                self.assertIn(p.text('runtime_bundled'),text)
+                self.assertNotIn('Steam Link: '+p.text('runtime_unknown'),text)
         p,output,_=self.make([],width=80)
         p.untested_runtime(pc={'steamvr':{'version':'2.19.1\nFORGED'}},frame=None)
         self.assertNotIn('FORGED',output.getvalue())

@@ -52,6 +52,13 @@ information is available in **Details**. Press **F3** for selectable file paths
 and **Copy** / **Copy all**, or **F4** to copy the log path directly.
 **Ctrl+Shift+C** also copies the log path; **Ctrl+C** still aborts setup.
 
+Steam Link is normally bundled with SteamVR and may have no separate version
+manifest. In that case the assistant says **Bundled with SteamVR**, including
+in a compatibility warning. The Steam package build ID is informative; its
+presence alone does not make an otherwise verified runtime untested. Different
+SteamVR semantic/native-build labels or checked file contents still require the
+additional confirmation. Complete observed snapshots remain bound to consent.
+
 ## Connect and apply
 
 1. Let the assistant find the Frame. It tries known addresses and nearby
@@ -131,6 +138,9 @@ setup logs normally live under:
 
 Keep that log when reporting a problem. Logs contain bounded setup stages and
 recognized failure reasons, not SSH passwords, pairing keys or console captures.
+Compatibility checks also record fixed per-component match flags, so a future
+warning can be distinguished from a missing version label without logging raw
+runtime files or settings.
 The PC installation receipt is `bridge-install.json` in the same application
 data root. The Frame reports its exact private recovery-record path; a displayed
 path alone does not prove that a record was created there.

@@ -2,8 +2,8 @@
 
 `VERSION` identifies the installer. `PATCH_VERSIONS.json` independently identifies
 the PC sender and Frame receiver patches. Installer-only changes increment
-`VERSION` without claiming a new native patch: installer **0.2.12**, for example,
-still delivers PC and Frame patch **0.2.11**. A semantic version never establishes
+`VERSION` without claiming a new native patch: installer **0.2.13**, for example,
+still delivers PC patch **0.2.11** and Frame patch **0.2.12**. A semantic version never establishes
 SteamVR compatibility or a hardware result.
 
 Increment the affected component in `PATCH_VERSIONS.json` when its native patch

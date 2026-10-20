@@ -363,8 +363,7 @@ def runtime_labels(text, record):
         if component == 'steamvr':
             steamvr_known = bool(version or build)
         label = version or text('runtime_unknown')
-        if component == 'steam_link' and not version and not build and steamvr_known and (
-                record.get('compatible') is True or record.get('runtime_compatible') is True):
+        if component == 'steam_link' and not version and not build and steamvr_known:
             # This is a package relationship; the SteamVR label above carries
             # its actual version/build. Never invent a separate Link version.
             label = text('runtime_bundled')

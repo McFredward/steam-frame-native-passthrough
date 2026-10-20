@@ -332,7 +332,7 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                 for key in ('pc','frame'):
                     text=str(app.query_one('#'+key+'-status',Static).render())
                     self.assertIn('SteamVR: 2.18.2 (1791331621)',text)
-                    self.assertIn('Steam Link: '+app.texts['runtime_unknown' if key=='pc' else 'runtime_bundled'],text)
+                    self.assertIn('Steam Link: '+app.texts['runtime_bundled'],text)
                     self.assertIn('0.2.0',text);self.assertIn('0.2.1',text)
                     self.assertTrue(body.content_region.contains_region(app.query_one('#'+key+'-status').region), (key, body.content_region, app.query_one('#'+key+'-status').region, body.scroll_y))
                 self.assertIn(app.words['attention'],str(app.query_one('#pc-status',Static).render()))
@@ -396,6 +396,8 @@ class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.focused.id,'cancel')
                     self.assertIn('2.19.1 (1800000001)',app.screen.plan)
                     self.assertIn('2.19.2 (1800000002)',app.screen.plan)
+                    self.assertIn('Steam Link: '+app.texts['runtime_bundled'],app.screen.plan)
+                    self.assertNotIn('Steam Link: '+app.texts['runtime_unknown'],app.screen.plan)
                     self.assertEqual(str(app.screen.query_one('#accept',Button).label),app.texts['bridge_untested_accept'])
                     underlay=app.screen_stack[0]
                     self.assertIn(app.texts['bridge_untested_inactive'],str(underlay.query_one('#frame-status',Static).render()))

@@ -130,7 +130,7 @@ class Menus(unittest.TestCase):
             self.assertEqual(rows[1],'Steam Link: '+text('runtime_bundled'))
             self.assertNotIn('1789498647',rows[1])
             self.assertIsNone(record['runtime_versions']['steam_link']['version'])
-            self.assertIn(text('runtime_unknown'),ui.runtime_labels(text,{**record,'compatible':False})[1])
+            self.assertEqual(ui.runtime_labels(text,{**record,'compatible':False})[1],'Steam Link: '+text('runtime_bundled'))
             record['runtime_versions']['steam_link']['version']='9.8.7'
             self.assertEqual(ui.runtime_labels(text,record)[1],'Steam Link: 9.8.7')
 
@@ -143,7 +143,7 @@ class Menus(unittest.TestCase):
             presenter.inventory(pc=record)
             output=stream.getvalue()
             self.assertIn('SteamVR: 2.18.2 (1791331621)',output)
-            self.assertIn('Steam Link: '+presenter.text('runtime_unknown'),output)
+            self.assertIn('Steam Link: '+presenter.text('runtime_bundled'),output)
             self.assertIn('0.2.1',output);self.assertIn('0.2.2',output)
             bad={'runtime_versions':{'steamvr':{'version':'\x1b[31m2.18.2','build':'oops'},
                                      'steam_link':{'version':'2.18.2\n[bad]','build':True}}}
