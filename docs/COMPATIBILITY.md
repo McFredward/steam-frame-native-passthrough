@@ -67,11 +67,13 @@ owned menu head across native menu-anchor replacement.
 The latest automated and log results do not certify arbitrary game materials,
 new runtimes or a final like-for-like sharpness/latency comparison. See the
 [continuity evidence and limits](development/FRAME-CONTINUITY.md).
-The dev PC0.2.14 candidate repairs two separately reproduced encoder callback
-overlap gaps: exact output during known bitrate changes, and successful output
-completion before Encode returns. Its full-size140-frame software pipeline has
-zero missing masks. Demeo intro flashes still require a new headset test; this
-is not an uninterrupted-picture certification. Frame0.2.12 is unchanged.
+The maintainer's October21 Demeo1.4.11 test confirms the PC0.2.14 repair:
+correct opacity/matching eyes and no recurring flashes or noticed glitches.
+The log confirms29exact output completions during QoS with0unmatched outputs;
+all14,629certified masks reach Frame metadata. Frame0.2.12 is unchanged.
+Short authored game fades and native loading/source switches remain distinct.
+Demeo mod1.4.12 separately changes identified game fades toward passthrough;
+its new fades and the other two games still require their own headset tests.
 Simultaneous local Steam menu/game mixed reality remains unconfirmed.
 
 The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)

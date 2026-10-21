@@ -572,3 +572,41 @@ Frame payload and manifest pin byte-for-byte. The component-scoped installer
 updates only the PC when the installed Frame already matches, with no Frame
 writes, settings changes or service restart. Software evidence closes the two
 reproduced gaps; zero visible black flashes remains a headset acceptance test.
+
+
+### Maintainer headset confirmation, October21
+
+The maintainer reports that the PC0.2.14 Demeo test removes the previous opacity,
+eye mismatch, recurring flashes and noticed glitches. Demeo remains1.4.11 and
+Frame remains0.2.12. The new bounded counter confirms29exact output completions
+inside known QoS calls,17,799exact output associations and0unmatched outputs.
+No output completed before Encode returned in this particular run, so the second
+software-proven schedule is not newly demonstrated on hardware.
+
+All14,629certified PC masks reach Frame metadata. Readback busy/errors, rejected
+masks, refused uploads and guarded-submit refusals remain0. Video-process
+exact-unavailable and emergency-timeout milestones remain0. Frame totals are
+still cumulative across sessions: intro14:05:20–50 and menu14:06:00–14:07:00 /
+14:07:30–14:08:00 have no increase in None, exact-picture misses or opaque submits.
+The native hard reset at14:05:01 precedes the Demeo connection at14:05:12.
+Only startup and lobby standing-origin changes remain, without repeated bursts.
+
+This is positive headset evidence for the repaired active Demeo stream, not a
+claim of zero interruption during every native source switch. The maintainer
+still observes short black transitions before/after the logo. Demeo explicitly
+fades its own fullscreen mesh opaque at initialization and before lobby activation;
+its authored source-over alpha blend blocks the room. A lobby source switch also
+submits the native PC compositor PID with None coverage. Later brief source gaps
+and recovered native packet retries remain in the logs; their aggregate counts
+do not locate additional visible defects. The private frozen PC/Frame log set
+and hashes live in the Demeo repository's ignored
+`frame-pc0214-20261021-141019` capture. Only read-only logs were collected.
+
+At the maintainer's request, Demeo mod1.4.12 separately changes the identified
+Demeo/Battles controller fades and Battlemarked presenter fade into a material
+fade of both RGB and coverage toward the room. Game timing/state/callbacks stay
+intact; its existing opaque coverage bundle is byte-identical. The new game
+fades have GPU/software evidence and still require headset tests, Demeo first.
+They do not change PC0.2.14, Frame0.2.12, this archive or any Gloomhaven code.
+No new Battles, Battlemarked or Gloomhaven hardware result is claimed. Loading
+without an admitted current eye image is separate from a game material fade.
