@@ -194,8 +194,10 @@ public:
         // encodings. Exact old modules retain their original fast path.
         definition.role=ci.codeSize==6620?clone::ShaderRole::Fragment:clone::ShaderRole::Vertex;
         if(!clone::captureShader(ci,definition.role,definition.shader,why)){
+            const auto first=why;
             definition.role=definition.role==clone::ShaderRole::Vertex?clone::ShaderRole::Fragment:clone::ShaderRole::Vertex;
-            if(!clone::captureShader(ci,definition.role,definition.shader,why))return fail(out,Reason::Contract,ObjectKind::Shader,value,0,why);
+            if(!clone::captureShader(ci,definition.role,definition.shader,why))return fail(out,Reason::Contract,ObjectKind::Shader,value,0,
+                (ci.codeSize==9460||ci.codeSize==6620)?first:why);
         }
         return insert(shaders_,value,definition,ObjectKind::Shader,out);
     }

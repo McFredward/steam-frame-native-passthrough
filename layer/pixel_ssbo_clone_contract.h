@@ -614,7 +614,7 @@ inline bool captureShader(const VkShaderModuleCreateInfo& in,ShaderRole role,Sha
     }
     namespace contract=stream_bridge_shader_contract;std::size_t used=0;
     const auto profile=role==ShaderRole::Vertex?contract::vertex():contract::fragment();
-    if(!contract::normalize(in.pCode,in.codeSize,profile,out.words.data(),out.words.size(),used)||used*4!=expected)return refuse(why,Reason::ShaderProfile);
+    if(!contract::normalize(in.pCode,in.codeSize,profile,out.words.data(),out.words.size(),used)||used*4!=expected)return refuse(why,in.codeSize==expected?Reason::ShaderPin:Reason::ShaderProfile);
     frame_receiver::Sha256 canonical;canonical.update(out.words.data(),used*4);out.sha256=canonical.finish();
     if(!digestMatches(out.sha256,pin))return refuse(why,Reason::ShaderPin);
     out.bytes=static_cast<std::uint32_t>(used*4);out.complete=true;return true;

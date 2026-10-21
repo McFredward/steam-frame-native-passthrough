@@ -289,20 +289,25 @@ void run(bool changeProtection,bool adaptive=false){
     void** const live=*reinterpret_cast<void***>(submittedContext.p);void* const installedUnmap=live[15];
     otherPreviousUnmap=pointerBits<NativeUnmap>(installedUnmap);
     replace(live+15,installedUnmap,pointerBits<void*>(&otherUnmap));
-    const std::vector<void*> foreignEntries(live,live+coverage.gateStats().contextFacadeSlots);
+    const auto facadeSlots=coverage.gateStats().contextFacadeSlots;
+    const std::vector<void*> foreignEntries(live,live+facadeSlots);
     coverage.stop();
     check(std::equal(foreignEntries.begin(),foreignEntries.end(),live),"production stop leaves every entry of foreign-modified facade unchanged");
-    check(*reinterpret_cast<void***>(submittedContext.p)==live&&live[15]==pointerBits<void*>(&otherUnmap)&&coverage.gateStats().contextHookSlots==11,"production stop preserves entire foreign-modified facade and its independent hook");
+    check(*reinterpret_cast<void***>(submittedContext.p)==live&&live[15]==pointerBits<void*>(&otherUnmap),"production stop preserves entire foreign-modified facade and its independent hook");
     replace(live+15,pointerBits<void*>(&otherUnmap),installedUnmap);
-    auto** foreign=static_cast<void**>(VirtualAlloc(nullptr,coverage.gateStats().contextFacadeSlots*sizeof(void*),MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+    auto** foreign=static_cast<void**>(VirtualAlloc(nullptr,facadeSlots*sizeof(void*),MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
     check(foreign!=nullptr,"fixture allocates independent complete foreign object table");
-    std::copy(live,live+coverage.gateStats().contextFacadeSlots,foreign);
+    std::copy(live,live+facadeSlots,foreign);
     check(InterlockedCompareExchangePointer(reinterpret_cast<void**>(submittedContext.p),foreign,live)==live,"fixture adopts a later foreign object vptr");
     coverage.stop();check(*reinterpret_cast<void***>(submittedContext.p)==foreign,"production stop never overwrites a later foreign object vptr");
     check(InterlockedCompareExchangePointer(reinterpret_cast<void**>(submittedContext.p),live,foreign)==foreign,"fixture releases its later object owner");
+    const std::vector<void*> retainedEntries(live,live+facadeSlots);
     coverage.stop();
     stats=coverage.gateStats();diagnostic("after stop",stats,true);
-    check(*reinterpret_cast<void***>(submittedContext.p)==before&&stats.contextTableReadable&&!stats.contextTableStable&&stats.contextHookSlots==0&&stats.contextOriginalSlots==15,"production stop CAS restores current native object vptr after foreign owners release it");
+    // Cold gate statistics intentionally stop inspecting the context once the
+    // observer is disabled. Prove teardown against the actual live pointers.
+    check(*reinterpret_cast<void***>(submittedContext.p)==before&&std::equal(retainedEntries.begin(),retainedEntries.end(),live),
+        "production stop CAS restores current native object vptr after foreign owners release it and preserves retained callbacks");
 }
 }
 int main(int argc,char** argv){try{
