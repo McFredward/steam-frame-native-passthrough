@@ -10,7 +10,7 @@ namespace stream_bridge_native {
 namespace {
 constexpr std::uint32_t DmaBuf=0x200;
 bool prepared(std::uintptr_t caller,void*) noexcept {
-    const auto base=preparedImageBase();return base&&decodeImportsPublished()&&caller==base+0x34574;
+    return decodeImportsPublished()&&preparedNativeExportCaller(caller);
 }
 bool identity(int fd,std::uint64_t& device,std::uint64_t& inode) noexcept {
     struct stat value{};if(fd<0||fstat(fd,&value)!=0||!value.st_ino)return false;

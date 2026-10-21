@@ -78,7 +78,10 @@ void retire(const NvencOutputEvidence& e,void*){retirementValid=retirementValid&
 bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8_t>& owned,void*){++augments;observed=e;if(!allowAugment||!e.exactInput)return false;owned.assign(candidate.data,candidate.data+candidate.size);owned.resize(owned.size()+augmentBytes,0xab);return true;}
 void run(){
     NvencBoundary bridge({{1}});activeBoundary=&bridge;bridge.setInputObserver({capture,retire,nullptr});bridge.setDeviceObserver({device,nullptr});bridge.setOutputAugmenter({augment,nullptr});
+    std::array<std::uint8_t,32> verified{{9}};
+    check(!bridge.bindVerifiedModule({})&&bridge.bindVerifiedModule(verified),"only nonzero observed native identity binds before public callback publication");
     NV_ENCODE_API_FUNCTION_LIST table{};table.version=NV_ENCODE_API_FUNCTION_LIST_VER;check(bridge.create(factory,&table)==NV_ENC_SUCCESS,"actual public input/output API table wrapped");
+    verified[0]=10;check(!bridge.bindVerifiedModule(verified),"active public dispatch cannot be rebound to another image");
     void* handle=nullptr;NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS op{};op.version=NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;op.device=reinterpret_cast<void*>(0x9090);op.deviceType=NV_ENC_DEVICE_TYPE_DIRECTX;table.nvEncOpenEncodeSessionEx(&op,&handle);
     check(observedDevice==op.device&&observedDeviceType==op.deviceType&&deviceGeneration==bridge.generation(handle),"actual public Open device and epoch observed without guessed object layout");
     NV_ENC_CONFIG codecConfig{};codecConfig.version=NV_ENC_CONFIG_VER;codecConfig.rcParams.version=NV_ENC_CONFIG_VER;codecConfig.rcParams.averageBitRate=10000000;codecConfig.rcParams.rateControlMode=NV_ENC_PARAMS_RC_CBR;

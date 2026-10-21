@@ -80,8 +80,8 @@ PC_FILES = {'pc-provider/driver.vrdrivermanifest',
             'pc-provider/bin/win64/driver_steam_link_native_passthrough.dll'}
 TOOLS = frozenset('frame/tools/'+name+'.py' for name in (
     'app_payload_probe','compositor_startup_health','native_fragment_count1_interface',
-    'native_fragment_ssa_probe','native_fragment_stream_coverage','pixel_payload_recovery','stream_bridge_camera'))
-PROFILES = frozenset()
+    'native_fragment_ssa_probe','native_fragment_stream_coverage','native_shader_contract','pixel_payload_recovery','stream_bridge_camera'))
+PROFILES = frozenset({'frame/tools/native_shader_contract.json'})
 GENERATED = {'coverage.spv': {'bytes':7188,'sha256':'316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e'}}
 # Removal/recovery allowlist only. These files are never generated, installed or
 # selected by this version. An owned update removes them while retaining their
@@ -962,9 +962,9 @@ class FrameInstall:
         for role,pin in bundle.frame['runtime_files'].items():
             base={'steamvr':self.steamvr,'home':self.home,'system':Path('/')}[pin['base']]
             try:
-                raw,_=self.e.read_public_reference(base/self.e.relative(pin['path']),pin['bytes'])
+                raw,_=self.e.read_public_reference(base/self.e.relative(pin['path']),65536 if role=='fragment' else pin['bytes'])
                 match=len(raw)==pin['bytes'] and self.e.sha(raw)==pin['sha256']
-                if role=='fragment' and match:original=raw
+                if role=='fragment':original=raw
                 good=good and match
             except (OSError,ValueError):good=False
         return good,original
@@ -1010,8 +1010,9 @@ class FrameInstall:
                 'bytes':observed.get('bytes'),'sha256':observed.get('sha256')}
             config=operations.get(str(self.root/CAMERA_CONFIG))
             try:
-                configuration_current=bool(observed['format_valid'] and config and config['kind']=='file' and
-                    self.e.parse(base64.b64decode(config['bytes'],validate=True)).get('library')==expected)
+                saved=self.e.parse(base64.b64decode(config['bytes'],validate=True)).get('library') if config and config['kind']=='file' else None
+                provider_current=saved==expected or type(saved)is dict and saved.get('interface')=='FnTable:IVRSettings_003' and saved.get('path')==expected['path']
+                configuration_current=bool(observed['format_valid'] and provider_current)
             except (ValueError,TypeError,AttributeError):configuration_current=False
         return {**version_status(state,bundle.frame),**activation_status(admitted,state),'runtime_snapshot':snapshot,
                 'architecture':self.machine(),'runtime_compatible':compatible,
@@ -1231,12 +1232,13 @@ class FrameInstall:
         return result
 
     def camera_config(self,bundle,settings,*,previous=None,library=None):
-        """Pinned native API and one stable, explicitly granted legacy migration."""
+        """Versioned public native API and one stable, explicitly granted legacy migration."""
         e=self.e
         if library is None:
             pin=bundle.frame['runtime_files']['openvr']
             base={'steamvr':self.steamvr,'home':self.home,'system':Path('/')}[pin['base']]
             library={'path':str(base/e.relative(pin['path'])),'bytes':pin['bytes'],'sha256':pin['sha256']}
+        if bundle is not None:library={**library,'interface':'FnTable:IVRSettings_003'}
         value={'schema':'sfnp-camera-session-config-v1','settings':settings['path'],'library':library}
         if previous is not None:
             old_config=next((op['after'] for op in previous['operations'] if op['path']==str(self.root/CAMERA_CONFIG)),None)
@@ -1297,8 +1299,9 @@ class FrameInstall:
             return 'none'
         module=self.camera_helper();value,sha=module.load_config(self.root);pin=value['library']
         try:
-            raw,_=self.e.read_public_reference(Path(pin['path']),pin['bytes'])
+            raw,_=self.e.read_public_reference(Path(pin['path']),2*1024*1024 if pin.get('interface')=='FnTable:IVRSettings_003' else pin['bytes'])
             if len(raw)==pin['bytes'] and self.e.sha(raw)==pin['sha256']:return 'live'
+            if pin.get('interface')=='FnTable:IVRSettings_003' and module.provider_elf_compatible(raw):return 'live'
         except (OSError,ValueError):pass
         with module.locked(self.root):pending=module.cleanup_pending(self.root,value,sha)
         return 'offline' if pending else 'none'

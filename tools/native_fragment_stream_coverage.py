@@ -13,11 +13,13 @@ import struct
 import subprocess
 import tempfile
 
+import native_shader_contract as shader_contract
 import native_fragment_ssa_probe as ssa
 import native_fragment_count1_interface as count1
 
 
 def transform(original, descriptor_count=1):
+    original = shader_contract.normalize(original, 'fragment')
     ssa.require(type(descriptor_count) is int and descriptor_count in (1, 3),
                 'explicit owned descriptor count1 or3 required')
     ssa.require(len(original) == ssa.ORIGINAL_BYTES and

@@ -1,4 +1,5 @@
 #include "stream_bridge_process.h"
+#include "../receiver/stream_bridge_native_image_runtime.h"
 #include "stream_bridge_artifacts.h"
 #include "pixel_snapshot_io.h"
 #include "../receiver/stream_bridge_native_loader.h"
@@ -377,7 +378,13 @@ bool prepareProcessCold() noexcept{
         ProcessKind kind=ProcessKind::Off;
         if(selfMatches(local::vrlinkPin()))kind=ProcessKind::Vrlink;
         else if(selfMatches(local::compositorPin()))kind=ProcessKind::Compositor;
-        else return;
+        else {
+            native::RuntimeNativeImage observed;
+            const auto role=native::nativeImageRole(native::processImagePath(getpid()));
+            if(role==native::NativeRole::None||!native::currentNativeImage(role,observed))return;
+            kind=role==native::NativeRole::Vrlink?ProcessKind::Vrlink:ProcessKind::Compositor;
+            note(p,"native runtime capabilities verified; version and executable digest are observations");
+        }
         cleanPayloadEnvironment();
         const auto* xdg=std::getenv("XDG_DATA_HOME");const auto* home=std::getenv("HOME");
         if(xdg&&xdg[0]=='/'&&strnlen(xdg,1025)<900)p.root=std::filesystem::path(xdg)/"SteamLinkNativePassthrough"/"stream-bridge";

@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 #include "../receiver/sha256.h"
+#include "native_shader_contract.h"
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -603,13 +604,20 @@ inline bool captureShader(const VkShaderModuleCreateInfo& in,ShaderRole role,Sha
     out={};why={};if(!ordinary(in,VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,why))return false;
     if(role!=ShaderRole::Vertex && role!=ShaderRole::Fragment)return refuse(why,Reason::ShaderProfile);
     const std::size_t expected=role==ShaderRole::Vertex?9460:6620;
-    if(in.flags || in.codeSize!=expected || !in.pCode || in.pCode[0]!=0x07230203u)
+    if(in.flags || in.codeSize<20 || in.codeSize>65536 || in.codeSize%4 || !in.pCode || in.pCode[0]!=0x07230203u)
         return refuse(why,Reason::ShaderProfile);
     frame_receiver::Sha256 hash;hash.update(in.pCode,in.codeSize);out.sha256=hash.finish();
     const char* pin=role==ShaderRole::Vertex?"94abc0c24124e8b4a301e7f1df5a4c8c0e8b0eb50e4c6ea78f3521370a6897c5":
         "f28dd5d22a570cbee64057da03d0418b80aee88a8eeed988b2f776e8d9a513f2";
+    if(in.codeSize==expected&&digestMatches(out.sha256,pin)){
+        out.bytes=static_cast<std::uint32_t>(in.codeSize);std::memcpy(out.words.data(),in.pCode,in.codeSize);out.complete=true;return true;
+    }
+    namespace contract=stream_bridge_shader_contract;std::size_t used=0;
+    const auto profile=role==ShaderRole::Vertex?contract::vertex():contract::fragment();
+    if(!contract::normalize(in.pCode,in.codeSize,profile,out.words.data(),out.words.size(),used)||used*4!=expected)return refuse(why,Reason::ShaderProfile);
+    frame_receiver::Sha256 canonical;canonical.update(out.words.data(),used*4);out.sha256=canonical.finish();
     if(!digestMatches(out.sha256,pin))return refuse(why,Reason::ShaderPin);
-    out.bytes=static_cast<std::uint32_t>(in.codeSize);std::memcpy(out.words.data(),in.pCode,in.codeSize);out.complete=true;return true;
+    out.bytes=static_cast<std::uint32_t>(used*4);out.complete=true;return true;
 }
 
 } // namespace frame_pixel_ssbo_clone

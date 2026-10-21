@@ -1,10 +1,13 @@
-// Version-pinned Windows provider. Explicit settings opt in to authenticated
-// discovery/control; image coverage still requires its separate exact GPU route.
-// Only this exact vrlink module's future public NVENC factory is intercepted.
+// Public-ABI Windows provider. Explicit settings opt in to authenticated
+// discovery/control; coverage still requires exact live GPU/input/eye proofs.
+// Native imports and DirectMode RTTI are discovered before publishing hooks.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <bcrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
+#include <wincrypt.h>
 #include <shlobj.h>
 #include <openvr_driver.h>
 #include "stream-bridge-sender-provider-core.h"
@@ -58,7 +61,7 @@ FARPROC WINAPI procAddress(HMODULE module,LPCSTR name){
     }
     SetLastError(error);return result;
 }
-bool hashFile(HANDLE file,std::array<std::uint8_t,32>& hash){
+[[maybe_unused]] bool hashFile(HANDLE file,std::array<std::uint8_t,32>& hash){
     BCRYPT_ALG_HANDLE alg=nullptr;BCRYPT_HASH_HANDLE handle=nullptr;
     DWORD objectBytes=0,count=0;bool okay=false;
     if(BCryptOpenAlgorithmProvider(&alg,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)return false;
@@ -108,6 +111,51 @@ bool imageProof(HMODULE module,void*** slot){
     *slot=reinterpret_cast<void**>(address);
     return **slot==pointerBits<void*>(OriginalGetProcAddress);
 }
+bool valvePublisher(const wchar_t* path,HANDLE handle){
+    WINTRUST_FILE_INFO file{};file.cbStruct=sizeof(file);file.pcwszFilePath=path;file.hFile=handle;
+    WINTRUST_DATA trust{};trust.cbStruct=sizeof(trust);trust.dwUIChoice=WTD_UI_NONE;
+    trust.fdwRevocationChecks=WTD_REVOKE_NONE;trust.dwUnionChoice=WTD_CHOICE_FILE;trust.pFile=&file;
+    trust.dwStateAction=WTD_STATEACTION_VERIFY;trust.dwProvFlags=WTD_CACHE_ONLY_URL_RETRIEVAL|WTD_REVOCATION_CHECK_NONE;
+    GUID action=WINTRUST_ACTION_GENERIC_VERIFY_V2;bool okay=false;
+    if(WinVerifyTrust(nullptr,&action,&trust)==ERROR_SUCCESS){
+        auto* provider=WTHelperProvDataFromStateData(trust.hWVTStateData);
+        auto* signer=provider?WTHelperGetProvSignerFromChain(provider,0,FALSE,0):nullptr;
+        auto* certificate=signer?WTHelperGetProvCertFromChain(signer,0):nullptr;
+        wchar_t organization[128]{};
+        if(certificate&&certificate->pCert&&CertGetNameStringW(certificate->pCert,CERT_NAME_ATTR_TYPE,0,
+            const_cast<char*>(szOID_ORGANIZATION_NAME),organization,128)>1){
+            okay=!std::wcscmp(organization,L"Valve Corp.")||!std::wcscmp(organization,L"Valve Corporation");
+        }
+    }
+    trust.dwStateAction=WTD_STATEACTION_CLOSE;WinVerifyTrust(nullptr,&action,&trust);return okay;
+}
+bool nativeFile(HANDLE file,std::vector<std::uint8_t>& raw){
+    LARGE_INTEGER size{},zero{};
+    if(!GetFileSizeEx(file,&size)||size.QuadPart<512||size.QuadPart>64*1024*1024||!SetFilePointerEx(file,zero,nullptr,FILE_BEGIN))return false;
+    raw.resize(static_cast<std::size_t>(size.QuadPart));std::size_t total=0;
+    while(total<raw.size()){DWORD count=0;
+        if(!ReadFile(file,raw.data()+total,static_cast<DWORD>(std::min<std::size_t>(65536,raw.size()-total)),&count,nullptr)||!count)return false;
+        total+=count;
+    }return true;
+}
+bool loadedCodeMatches(HMODULE module,const stream_bridge::sender::NativePeImage& image,
+    const stream_bridge::sender::NativeImageLayout& layout){
+    const auto base=reinterpret_cast<std::uintptr_t>(module);
+    for(unsigned i=0;i<layout.executableCount;++i){const auto& range=layout.executable[i];
+        const auto* expected=image.at(range.begin,range.size);if(!expected)return false;
+        std::vector<std::uint8_t> actual(range.size);SIZE_T count=0;
+        if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(base+range.begin),actual.data(),actual.size(),&count)||count!=actual.size()||
+           std::memcmp(actual.data(),expected,actual.size()))return false;
+        std::size_t offset=0;while(offset<range.size){MEMORY_BASIC_INFORMATION info{};
+            if(!VirtualQuery(reinterpret_cast<const void*>(base+range.begin+offset),&info,sizeof(info))||
+               info.AllocationBase!=module||info.State!=MEM_COMMIT||info.Type!=MEM_IMAGE||info.Protect&(PAGE_GUARD|PAGE_NOACCESS)||
+               !(info.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)))return false;
+            const auto end=reinterpret_cast<std::uintptr_t>(info.BaseAddress)+info.RegionSize;
+            if(end<=base+range.begin+offset)return false;
+            offset=std::min<std::size_t>(range.size,end-base-range.begin);
+        }
+    }return true;
+}
 class Provider final:public vr::IServerTrackedDeviceProvider {
     std::mutex mutex_;std::condition_variable changed_;std::thread worker_;
     bool stopped_=false,initialized_=false;void** slot_=nullptr;HMODULE source_=nullptr;HANDLE file_=INVALID_HANDLE_VALUE;
@@ -143,9 +191,10 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             DWORD ignored=0;VirtualProtect(directSlots_,sizeof(void*)*8,old,&ignored);
         }directSlots_=nullptr;
     }
-    bool attachDirect(HMODULE module){
-        constexpr std::array<std::uint32_t,8> rvas{{0x9f40f0,0x9f4920,0x9f45a0,0x9e5da0,0x9ed780,0x9ea110,0x9e95c0,0x9e5850}};
-        auto* base=reinterpret_cast<std::uint8_t*>(module);auto* slots=reinterpret_cast<void**>(base+0xc349b8);
+    bool attachDirect(HMODULE module,const stream_bridge::sender::NativeImageLayout* layout=nullptr){
+        constexpr std::array<std::uint32_t,8> legacyRvas{{0x9f40f0,0x9f4920,0x9f45a0,0x9e5da0,0x9ed780,0x9ea110,0x9e95c0,0x9e5850}};
+        const auto& rvas=layout?layout->directMethods:legacyRvas;
+        auto* base=reinterpret_cast<std::uint8_t*>(module);auto* slots=reinterpret_cast<void**>(base+(layout?layout->directTable:0xc349b8));
         for(unsigned i=0;i<8;++i){directOriginal_[i]=base+rvas[i];if(slots[i]!=directOriginal_[i])return false;}
         stream_bridge::sender::DirectModeFunctions original{};static_assert(sizeof(original)==sizeof(directOriginal_),"public DirectMode009 table layout");
         original.create=pointerBits<decltype(original.create)>(directOriginal_[0]);original.destroy=pointerBits<decltype(original.destroy)>(directOriginal_[1]);
@@ -168,8 +217,25 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         if(!n||n>=32768)return false;
         file_=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         if(file_==INVALID_HANDLE_VALUE)return false;
-        LARGE_INTEGER size{};std::array<std::uint8_t,32> hash{};
-        if(!GetFileSizeEx(file_,&size)||size.QuadPart!=13908632||!hashFile(file_,hash)||hash!=ExpectedHash||!imageProof(candidate,&slot_))return false;
+        std::vector<std::uint8_t> raw;std::array<std::uint8_t,32> hash{};
+        if(!nativeFile(file_,raw)||!hashMemory(raw.data(),static_cast<ULONG>(raw.size()),hash))return false;
+        const bool legacy=hash==ExpectedHash;
+        stream_bridge::sender::NativeImageLayout layout;
+        if(legacy){if(!imageProof(candidate,&slot_))return false;}
+        else {
+            if(!valvePublisher(path,file_)){report("capability refused: native module Valve publisher could not be verified");return false;}
+            stream_bridge::sender::NativePeImage image;const char* why="invalid bounded x64 PE image";
+            if(!image.open(raw.data(),raw.size())||!image.discover(layout,why)){report(why);return false;}
+            if(!loadedCodeMatches(candidate,image,layout)){report("capability refused: mapped native executable differs from its verified file");return false;}
+            auto* address=reinterpret_cast<std::uint8_t*>(candidate)+layout.getProcAddress;
+            MEMORY_BASIC_INFORMATION memory{};
+            if(!VirtualQuery(address,&memory,sizeof(memory))||memory.AllocationBase!=candidate||memory.State!=MEM_COMMIT||
+               memory.Protect&(PAGE_GUARD|PAGE_NOACCESS)||memory.RegionSize<sizeof(void*))return false;
+            slot_=reinterpret_cast<void**>(address);
+            if(*slot_!=pointerBits<void*>(OriginalGetProcAddress))return false;
+            if(!boundary().bindVerifiedModule(hash))return false;
+            report("native capabilities verified: public NVENC lookup, DirectMode009 RTTI, mapped executable; adaptive native luma/resource association");
+        }
         HMODULE self=nullptr;
         // Public function-list pointers may outlive IAT restoration and Cleanup.
         // Pin our DLL for the process lifetime BEFORE publishing any callback.
@@ -177,8 +243,8 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             pointerBits<LPCWSTR>(&procAddress),&self))return false;
         (void)boundary();
         if(request_.explicitlyEnabled){
-            if(!attachDirect(candidate))return false;
-            if(!coverage_.configure(reinterpret_cast<std::uintptr_t>(candidate))){
+            if(!attachDirect(candidate,legacy?nullptr:&layout))return false;
+            if(!(legacy?coverage_.configure(reinterpret_cast<std::uintptr_t>(candidate)):coverage_.configure(reinterpret_cast<std::uintptr_t>(candidate),layout))){
                 coverage_.stop();restoreDirect();return false;
             }
         }
@@ -212,7 +278,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(250),[this]{return stopped_;});
         }
         if(!attached)return;
-        report("pinned native sender attached");
+        report("verified native sender attached");
         auto last=stream_bridge::sender::RuntimeState::Off;const char* lastCoverage=nullptr;
         std::array<const char*,32> reported{};
         // Repeated startup churn must not spend the budget before a later

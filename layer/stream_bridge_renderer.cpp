@@ -317,7 +317,7 @@ frame_pixel_ssbo_journal::Journal& Renderer::definitions() noexcept{return impl_
 RendererStats Renderer::statsCold()const noexcept{return impl_->stats();}
 void Renderer::shaderCreated(VkShaderModule value,const VkShaderModuleCreateInfo& info) noexcept{
     auto&p=*impl_;try{
-        if(!p.definitions.createShader(value,info,VK_SUCCESS)||!p.prepared||info.codeSize!=6620)return;
+        if(!p.definitions.createShader(value,info,VK_SUCCESS)||!p.prepared||info.codeSize<20||info.codeSize>65536)return;
         std::lock_guard<std::mutex> lock(p.gate);if(p.count1Authorized)return;
         auto original=std::make_unique<frame_pixel_ssbo_clone::ShaderDefinition>();
         auto proof=std::make_unique<frame_pixel_ssbo_profile::Artifact>();

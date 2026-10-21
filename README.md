@@ -18,9 +18,9 @@
 > [!IMPORTANT]
 > **Currently supports <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows PCs with an <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA GPU only.**
 >
-> **Tested with Steam Frame SteamVR 2.18.2 · build 1791331621**
+> **Successfully tested: PC SteamVR 2.17.10 · Steam Frame SteamVR 2.18.2 (build 1791331621).**
 >
-> Untested SteamVR versions require an extra confirmation. Install anyway enables the patch for testing; compatibility is not guaranteed.
+> These are test results, not version limits. The patch recognizes the required interfaces after updates and continues when their contracts remain intact. Untested versions show a warning; **Install anyway** enables the patch for testing.
 
 Play supported PC VR games in your real room over Steam Link.
 
@@ -72,7 +72,7 @@ Run the same command again to **update, uninstall or restore the previous setup*
 
 ## For developers
 
-[Integrate your game](docs/DEVELOPING.md) · [Compatibility](docs/COMPATIBILITY.md) ·
+[Integrate your game](docs/DEVELOPING.md) · [Tested versions and evidence](docs/COMPATIBILITY.md) ·
 [Setup and recovery reference](docs/PC-FRAME-SETUP.md)
 
 ## Credits
@@ -83,15 +83,19 @@ developed here by McFredward and contributors.
 
 Unofficial project, not affiliated with Valve.
 
-## Producer metadata budget candidate (PC0.2.15)
+## Update recognition candidate (installer/PC0.2.16, Frame0.2.13)
 
-Demeo1.4.21 can request rate accounting for its additional lossless coverage
-traffic. The PC-only candidate reserves measured metadata inside the requested
-video bitrate; video compression may increase under load. Resolution/frame rate
-and mask precision are retained. Current GloomhavenVR v1 clients keep their
-original encoder behavior. Installer0.2.15 leaves PC SteamVR closed even after recovery and enables the
-patch when an untested-build warning is accepted. PC0.2.15 and Frame0.2.12
-payloads are unchanged; matching Frame files/settings/services require no update
-or restart. This corrects a
-reproduced budget overrun, not a guarantee against all native packet-loss resets.
-See the [capture and validation limits](docs/development/FRAME-CONTINUITY.md#producer-metadata-rate-accounting-dev-pc0215).
+SteamVR 2.18.4 changed the PC sender's internal positions. This candidate finds
+its public imports and DirectMode interface in the current module, retaining the
+actual native shader and resource bindings. The Frame recognizes its public
+ELF/V4L2/OpenVR contracts; shader ID/debug metadata changes are accepted only
+when normalization proves unchanged executable logic and bindings. An unknown
+version or whole-file digest alone no longer disables passthrough.
+
+The supplied PC2.18.4 image passes static binding discovery. **A new headset test
+is still needed**; it is not listed as successfully tested above. Gloomhaven's
+existing producer protocol and encoder policy remain unchanged. This candidate
+also updates the Frame component; later updates with unchanged Frame files,
+settings and components still leave the Frame untouched and do not restart it.
+PC SteamVR remains closed after setup. See the [implementation and validation
+limits](docs/development/NATIVE-UPDATE-RECOGNITION.md).

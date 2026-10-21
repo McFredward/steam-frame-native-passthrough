@@ -18,9 +18,9 @@
 > [!IMPORTANT]
 > **Aktuell nur für <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows-PCs mit <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA-GPU.**
 >
-> **Getestet mit Steam Frame SteamVR 2.18.2 · Build 1791331621**
+> **Erfolgreich getestet: PC SteamVR 2.17.10 · Steam Frame SteamVR 2.18.2 (Build 1791331621).**
 >
-> Ungetestete SteamVR-Versionen erfordern eine zusätzliche Bestätigung. „Trotzdem installieren“ aktiviert den Patch zum Ausprobieren; die Kompatibilität ist nicht garantiert.
+> Das sind Testergebnisse, keine Versionsgrenzen. Der Patch erkennt die benötigten Schnittstellen nach Updates und arbeitet weiter, solange deren Eigenschaften erhalten bleiben. Bei ungetesteten Versionen erscheint eine Warnung; **„Trotzdem installieren“** aktiviert den Patch zum Ausprobieren.
 
 Spiele unterstützte PC-VR-Spiele über Steam Link in deinem echten Zimmer.
 
@@ -72,7 +72,7 @@ Dieselbe Zeile bietet später **Update, Deinstallation oder Rücknahme** an.
 
 ## Für Entwickler
 
-[Spiel integrieren](docs/DEVELOPING.md) · [Kompatibilität](docs/COMPATIBILITY.md) ·
+[Spiel integrieren](docs/DEVELOPING.md) · [Getestete Versionen und Nachweise](docs/COMPATIBILITY.md) ·
 [Referenz für Einrichtung und Wiederherstellung](docs/PC-FRAME-SETUP.md)
 
 ## Credits
@@ -83,16 +83,22 @@ wird hier von McFredward und Mitwirkenden entwickelt.
 
 Inoffizielles Projekt, nicht mit Valve verbunden.
 
-## Kandidat für das Datenbudget (PC0.2.15)
+## Kandidat mit Update-Erkennung (Installer/PC0.2.16, Frame0.2.13)
 
-Demeo1.4.21 kann die zusätzliche verlustfreie Maskenübertragung in das
-Videobudget einrechnen lassen. Unter Last kann die Videokompression steigen;
-Auflösung, Bildrate und Maskengenauigkeit bleiben erhalten. GloomhavenVR nutzt
-weiter seinen bisherigen v1-Pfad. Installer0.2.15 lässt PC-SteamVR auch nach
-einer Wiederherstellung geschlossen und aktiviert den Patch nach bestätigter
-Warnung vor einem ungetesteten Build. Die Komponenten PC0.2.15 und Frame0.2.12
-bleiben unverändert; bei passender Frame-Installation ist kein Update oder
-Neustart der Frame nötig. Ob dies auch den beobachteten Stream-Ausfall verhindert,
-muss ein neuer Headset-Test zeigen. Die
-[Untersuchung](docs/development/FRAME-CONTINUITY.md#producer-metadata-rate-accounting-dev-pc0215)
-trennt Softwareprüfung und Hardware-Ergebnis.
+SteamVR 2.18.4 hat die internen Positionen des PC-Senders verändert. Dieser
+Kandidat findet dessen öffentliche Imports und DirectMode-Schnittstelle in der
+aktuellen Datei und verwendet weiterhin die tatsächlichen nativen Shader und
+Ressourcen. Die Frame erkennt ihre öffentlichen ELF-, V4L2- und OpenVR-Verträge.
+Geänderte Shader-IDs und Debug-Metadaten werden akzeptiert, wenn nach der
+Normalisierung die ausführbare Berechnung und ihre Bindungen unverändert sind.
+Eine unbekannte Versionsnummer oder Dateiprüfsumme allein deaktiviert Passthrough
+nicht mehr.
+
+Die bereitgestellte PC-Datei aus 2.18.4 besteht die statische Erkennungsprüfung.
+**Der neue Test auf dem Headset steht noch aus**; deshalb zählt diese Version
+oben noch nicht zu den erfolgreich getesteten. Gloomhavens bisheriges
+Producer-Protokoll und dessen Encoder-Verhalten bleiben erhalten. Dieser
+Kandidat aktualisiert auch die Frame-Komponente. Bei späteren Updates mit
+unveränderten Frame-Dateien, Einstellungen und Komponenten bleibt die Frame
+weiterhin unangetastet und wird nicht neu gestartet. PC-SteamVR bleibt nach dem
+Setup geschlossen. [Details und Testgrenzen](docs/development/NATIVE-UPDATE-RECOGNITION.md).

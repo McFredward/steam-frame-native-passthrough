@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "stream_bridge_native_loader.h"
+#include "stream_bridge_native_image_runtime.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -58,19 +59,23 @@ bool publishPinnedDecodeImports() noexcept{
 #if !defined(__aarch64__)
     return false;
 #else
-    Main main{};dl_iterate_phdr(mainImage,&main);if(!main.base||!main.begin||!main.end)return false;
+    RuntimeNativeImage image;if(!currentNativeImage(NativeRole::Vrlink,image))return false;
+    const auto base=image.base;
     std::array<void*,4> originals{};const char* names[] {"mmap","munmap","close","ioctl"};
     std::array<ImportSlot,4> candidate{};
     for(std::size_t i=0;i<candidate.size();++i){
         originals[i]=dlvsym(RTLD_NEXT,names[i],"GLIBC_2.17");if(!originals[i])return false;
-        const auto address=main.base+Rvas[i];if(address<main.begin||address>main.end-sizeof(std::uintptr_t)||!writable(address))return false;
+        const auto offset=image.layout.imports[i],address=base+offset;
+        if(!image.layout.writable(offset,sizeof(std::uintptr_t))||!writable(address))return false;
         const auto value=__atomic_load_n(reinterpret_cast<std::uintptr_t*>(address),__ATOMIC_ACQUIRE);
-        if(value!=main.base+0x1a450&&value!=bits(originals[i]))return false;
+        // An unresolved PLT entry must still belong to this verified native
+        // executable. Foreign hooks are left untouched rather than overwritten.
+        if(value!=bits(originals[i])&&!image.layout.caller(base,value))return false;
         candidate[i]={reinterpret_cast<std::uintptr_t*>(address),value,0};
     }
     const Originals calls{function<OriginalIoctl>(originals[3]),function<OriginalMmap>(originals[0]),
         function<OriginalMunmap>(originals[1]),function<OriginalClose>(originals[2])};
-    if(!preparePinnedProcess(calls)||preparedImageBase()!=main.base)return false;
+    if(!preparePinnedProcess(calls)||preparedImageBase()!=base)return false;
     const auto entries=preparedEntries();candidate[0].replacement=bits(entries.mmap);candidate[1].replacement=bits(entries.munmap);
     candidate[2].replacement=bits(entries.close);candidate[3].replacement=bits(entries.ioctl);
     if(!publishSlots(candidate,exchange,nullptr)){stopPinnedProcess();return false;}

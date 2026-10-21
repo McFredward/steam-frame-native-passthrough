@@ -4,12 +4,16 @@ on:
     branches: [dev]
     paths:
       - 'pc/stream-bridge-source-contract.h'
+      - 'pc/stream-bridge-sender-provider-coverage-render.*'
+      - 'tests/test_stream_bridge_sender_provider_coverage_gpu.cpp'
       - 'pc/stream-bridge-sender-provider-sourceipc.*'
       - 'tests/test_stream_bridge_source_*'
       - '.github/workflows/source-format-tests.yml'
   pull_request:
     paths:
       - 'pc/stream-bridge-source-contract.h'
+      - 'pc/stream-bridge-sender-provider-coverage-render.*'
+      - 'tests/test_stream_bridge_sender_provider_coverage_gpu.cpp'
       - 'pc/stream-bridge-sender-provider-sourceipc.*'
       - 'tests/test_stream_bridge_source_*'
       - '.github/workflows/source-format-tests.yml'

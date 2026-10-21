@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import struct
 import sys
 import tempfile
 import threading
@@ -622,6 +623,35 @@ class Controls(unittest.TestCase):
             with mock.patch.object(tool.ctypes,'CDLL',side_effect=AssertionError('unverified library load')):
                 with self.assertRaisesRegex(tool.SafetyError,'identity'):
                     with tool.NativeCamera(pin):pass
+    def test_changed_provider_requires_public_interface_before_any_settings_write(self):
+        raw=bytearray(256);raw[:7]=b'\x7fELF\x02\x01\x01'
+        struct.pack_into('<HH',raw,16,3,183);struct.pack_into('<Q',raw,32,64)
+        struct.pack_into('<HH',raw,54,56,1);struct.pack_into('<IIQQQQQ',raw,64,1,5,0,0,0,256,256)
+        library=self.root/'libopenvr_api.so';library.write_bytes(raw);library.chmod(0o600)
+        pin={'path':str(library),'bytes':64,'sha256':'00'*32,'interface':'FnTable:IVRSettings_003'}
+        writes=[]
+        @tool._FN(None,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_bool,tool._ERR)
+        def set_bool(section,key,value,error):writes.append(value);error[0]=0
+        @tool._FN(ctypes.c_bool,ctypes.c_char_p,ctypes.c_char_p,tool._ERR)
+        def get_bool(section,key,error):error[0]=0;return False
+        @tool._FN(None,ctypes.c_char_p,ctypes.c_char_p,tool._ERR)
+        def remove(section,key,error):writes.append('remove');error[0]=0
+        fn=tool.SettingsTable(tool._FN(ctypes.c_char_p,ctypes.c_int)(),set_bool,None,None,None,get_bool,None,None,None,None,remove)
+        api=mock.Mock();api.VR_GetGenericInterface.return_value=ctypes.addressof(fn)
+        with mock.patch.object(tool.os,'uname',return_value=mock.Mock(machine='aarch64')),mock.patch.object(tool,'runtime_generation',return_value=((10,11,'vrserver'),)),mock.patch.object(tool.ctypes,'CDLL',return_value=api) as load:
+            with tool.NativeCamera(pin) as camera:self.assertIs(camera.read(),False)
+            self.assertTrue(load.call_args.args[0].startswith('/proc/self/fd/'))
+            self.assertEqual(api.VR_GetGenericInterface.call_args.args[0],b'FnTable:IVRSettings_003')
+            api.VR_ShutdownInternal.assert_called_once();self.assertEqual(writes,[])
+            api.reset_mock();api.VR_GetGenericInterface.return_value=0
+            with self.assertRaisesRegex(tool.SafetyError,'interface unavailable'):
+                with tool.NativeCamera(pin):pass
+            api.VR_ShutdownInternal.assert_called_once();self.assertEqual(writes,[])
+        for position,value in ((18,62),(68,7),(54,55)):
+            broken=raw[:];struct.pack_into('<H',broken,position,value)
+            self.assertFalse(tool.provider_elf_compatible(broken))
+        self.assertFalse(tool.provider_elf_compatible(raw[:80]))
+
     def test_reconnect_adopts_only_dead_lease_and_preserves_initial_baseline(self):
         self.dead_lease()
         camera=FakeCamera(self,True);self.camera=camera

@@ -15,6 +15,20 @@ bool textureShape(ID3D11Resource* resource,const SharedTextureShape& expected)no
     return sharedTextureDescriptionMatches(actual,expected);
 }
 }
+bool nativeLumaTarget(ID3D11DeviceContext* ctx)noexcept{
+        ID3D11RenderTargetView* target=nullptr;ID3D11DepthStencilView* depth=nullptr;ctx->OMGetRenderTargets(1,&target,&depth);
+        D3D11_RENDER_TARGET_VIEW_DESC view{};if(target)target->GetDesc(&view);
+        ID3D11Resource* resource=nullptr;if(target)target->GetResource(&resource);
+        ID3D11Texture2D* texture=nullptr;if(resource)resource->QueryInterface(IID_ID3D11Texture2D,reinterpret_cast<void**>(&texture));
+        D3D11_TEXTURE2D_DESC shape{};if(texture)texture->GetDesc(&shape);
+        const bool okay=!depth&&texture&&((shape.Format==DXGI_FORMAT_NV12&&view.Format==DXGI_FORMAT_R8_UNORM)||
+            (shape.Format==DXGI_FORMAT_P010&&view.Format==DXGI_FORMAT_R16_UNORM));
+        if(texture)texture->Release();
+        if(resource)resource->Release();
+        if(target)target->Release();
+        if(depth)depth->Release();
+        return okay;
+    }
 bool sharedTextureDescriptionMatches(const D3D11_TEXTURE2D_DESC& actual,
     const SharedTextureShape& expected)noexcept{
     return expected.width&&expected.width<=16384&&expected.height&&expected.height<=16384

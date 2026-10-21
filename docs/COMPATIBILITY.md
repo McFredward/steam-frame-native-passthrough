@@ -1,11 +1,12 @@
-# Compatibility and evidence
+# Tested versions and evidence
 
-## Supported combination
+## Successfully tested runtimes
 
 | Component | Current paired route |
 |---|---|
 | Headset and transport | Steam Frame over Steam Link |
-| Frame SteamVR | **2.18.2 · build 1791331621**, exact checked runtime files |
+| PC SteamVR | **2.17.10**, user-confirmed Demeo/Battles and Gloomhaven picture |
+| Frame SteamVR | **2.18.2 · build 1791331621**, user-confirmed paired picture |
 | PC sender | Windows x86_64, supported NVIDIA encoder, HEVC |
 | Game source | Explicit integration; Gamma SDR UNorm, MultiPass, real RGB contribution and alpha |
 | Installation | Matching PC and Frame companions, [guided setup](PC-FRAME-SETUP.md) |
@@ -15,9 +16,12 @@ The supported game and minimum version have their own [table](../README.md#suppo
 A matching development build is needed before an upcoming game release is available.
 Steam Frame standalone passthrough is separate and requires neither streamed companion.
 
-A version label alone is insufficient: exact checked binaries, interfaces and
-rendering contracts must match for native activation. The Frame version does not imply a PC SteamVR
-version. Native Linux PC sender installation is not yet supported; running the
+These are recorded successful tests, not a runtime version allowlist. The PC
+and Frame independently recognize the interfaces and rendering properties they
+need after an update. Whole-file hashes record provenance and preserve the known
+path; a changed hash alone does not disable the patch. PC SteamVR2.18.4
+build1792185270 is the current software-checked candidate, awaiting a headset
+test. The Frame version does not imply a PC SteamVR version. Native Linux PC sender installation is not yet supported; running the
 Windows game through Proton still uses Linux SteamVR as the driver host. Other
 headsets, Virtual Desktop, ALVR, HDR and unknown stereo/source formats are outside
 this route's current validated combination.
@@ -88,19 +92,21 @@ and requires a separate, default-No **Install anyway** confirmation. Inspection
 alone cannot approve a write. The approval belongs to this exact package and
 runtime snapshot; changed inputs or a retry need a new decision.
 
-Installation is separate from native activation. If the private native bindings
-or shader input cannot be verified, the assistant can install the owned payload,
-pairing and receipt in an explicitly inactive state. It does not guess hook
-offsets, generate a shader from an unrecognized native binary or leave a previous
-active layer behind. The status must say inactive rather than imply a working
-passthrough session. A later compatible patch can activate the prepared files;
-Uninstall and recovery remain available. This exception concerns runtime versions,
-not damaged packages, unknown user files or unsupported PC platforms.
+Accepting **Install anyway** enables the installation for testing; setup does
+not actively leave it disabled because a runtime version or file digest is new.
+The installed PC sender discovers public imports and the versioned DirectMode
+RTTI table, verifies its current mapped executable and retains exact allocation,
+source/eye and accepted-output proof. The Frame discovers its ELF imports and
+uses public V4L2 queue structures, authenticated local peers and the versioned
+OpenVR settings API. Equivalent shader compiler/debug/ID changes normalize to
+the independently reviewed executable logic; arithmetic or interface changes do
+not inherit that permission.
 
-The installer checks exact runtime fingerprints before activation. A SteamVR or
-Steam Link update can invalidate those checks. A mismatch must refuse native
-passthrough and preserve ordinary video; it does not make an unreviewed runtime
-compatible. Install a compatible companion release when available.
+Compatible updates can therefore continue automatically without a new hash
+allowlist. A genuinely unrecognized necessary API, shader contract or current
+frame association still withholds that specific native operation and reports its
+reason. The patch never substitutes an old mask or guesses an unknown ABI.
+[Update recognition and its tested limits](development/NATIVE-UPDATE-RECOGNITION.md).
 
 Files live in user-owned directories; no system partition or SteamVR binary is
 replaced. Exact ownership receipts/checkpoints protect update, uninstall and Undo.

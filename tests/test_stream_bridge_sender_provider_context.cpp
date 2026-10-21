@@ -205,7 +205,7 @@ void runFacade(){
 // This is deliberately a real native context, not a fake COM object. The
 // public CreateDevice output is retained on the rendering thread while the
 // production observer obtains GetImmediateContext and installs on its worker.
-void run(bool changeProtection){
+void run(bool changeProtection,bool adaptive=false){
     Com<ID3D11Device> device;Com<ID3D11DeviceContext> submittedContext;D3D_FEATURE_LEVEL level{};
     const auto result=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,device.out(),&level,submittedContext.out());
     check(SUCCEEDED(result)&&level>=D3D_FEATURE_LEVEL_11_0,"actual native D3D11 WARP context created");
@@ -216,7 +216,9 @@ void run(bool changeProtection){
     const auto drawBefore=before[13],mapBefore=before[14],unmapBefore=before[15],copyBefore=before[47];
     NvencBoundary boundary({{1}});DirectModeBoundary direct;ControlRuntime control;
     SenderCoverage coverage(direct,boundary,control);
-    check(coverage.configure(1),"production observer configured without granting a native callsite");
+    if(adaptive){NativeImageLayout layout;layout.imageSize=4096;layout.executableCount=1;layout.executable[0]={0,1};
+        check(coverage.configure(1,layout),"adaptive observer configured with a bounded executable range that grants no fixture callsite");
+    }else check(coverage.configure(1),"production observer configured without granting a native callsite");
     NV_ENCODE_API_FUNCTION_LIST api{};api.version=NV_ENCODE_API_FUNCTION_LIST_VER;
     check(boundary.create(factory,&api)==NV_ENC_SUCCESS,"production public NVENC Open boundary installed");
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS parameters{};parameters.version=NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
@@ -306,5 +308,6 @@ void run(bool changeProtection){
 int main(int argc,char** argv){try{
 const bool changed=argc==2&&std::strcmp(argv[1],"--protection-change")==0;
 const bool facade=argc==2&&std::strcmp(argv[1],"--facade")==0;
-check(argc==1||changed||facade,"fixture arguments are explicit");if(facade)runFacade();else run(changed);std::printf("production native D3D11 context observer: %u checks PASS\n",checks);return 0;}
+const bool adaptive=argc==2&&std::strcmp(argv[1],"--adaptive")==0;
+check(argc==1||changed||facade||adaptive,"fixture arguments are explicit");if(facade)runFacade();else run(changed,adaptive);std::printf("production native D3D11 context observer: %u checks PASS\n",checks);return 0;}
 catch(const std::exception& e){std::fprintf(stderr,"native context observer failed after %u: %s\n",checks,e.what());return 1;}}

@@ -193,6 +193,10 @@ jobs:
       - name: Exercise actual facade API and production observer from cold context
         shell: cmd
         run: |
+          build\native-context.exe --adaptive >build\context-adaptive.log 2>&1
+          set "SFNP_ADAPTIVE_RESULT=%ERRORLEVEL%"
+          type build\context-adaptive.log
+          if not "%SFNP_ADAPTIVE_RESULT%"=="0" exit /b %SFNP_ADAPTIVE_RESULT%
           build\native-context.exe --facade >build\native-context-facade.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\native-context-facade.log

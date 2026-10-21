@@ -58,6 +58,8 @@ int main(){try{
 #else
 namespace {
 constexpr std::uintptr_t base=0x100000;
+bool adaptiveTest=false;
+std::uintptr_t site(std::uintptr_t offset){return base+offset+(adaptiveTest?0x80000:0);}
 struct Fake{
     std::array<std::array<std::uint8_t,4096>,nd::MaxBuffers> memory{};
     unsigned ioctlCalls=0,mapCalls=0,unmapCalls=0,closeCalls=0,reads=0,dataReads=0;
@@ -91,9 +93,9 @@ int originalIoctl(int fd,unsigned long request,...){
             auto& b=*static_cast<v4l2_buffer*>(p);
             if(fake.zeroCopyDuringQbuf&&b.index<fake.memory.size())fake.memory[b.index].fill(0xee);
             if(fake.revokeDuringQbuf)fake.revokeDuringQbuf->stop();
-            if(fake.streamOffDuringQbuf){auto* provider=fake.streamOffDuringQbuf;fake.streamOffDuringQbuf=nullptr;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;provider->invokeIoctl(base+0x312e8,fd,VIDIOC_STREAMOFF,&type);}
+            if(fake.streamOffDuringQbuf){auto* provider=fake.streamOffDuringQbuf;fake.streamOffDuringQbuf=nullptr;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;provider->invokeIoctl(site(0x312e8),fd,VIDIOC_STREAMOFF,&type);}
         }
-        if(request==VIDIOC_DQBUF&&static_cast<v4l2_buffer*>(p)->type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE&&fake.streamOffDuringCaptureDequeue){auto* provider=fake.streamOffDuringCaptureDequeue;fake.streamOffDuringCaptureDequeue=nullptr;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;provider->invokeIoctl(0x100000+0x312e8,fd,VIDIOC_STREAMOFF,&type);}
+        if(request==VIDIOC_DQBUF&&static_cast<v4l2_buffer*>(p)->type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE&&fake.streamOffDuringCaptureDequeue){auto* provider=fake.streamOffDuringCaptureDequeue;fake.streamOffDuringCaptureDequeue=nullptr;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;provider->invokeIoctl(site(0x312e8),fd,VIDIOC_STREAMOFF,&type);}
     }
     if(request==VIDIOC_QBUF&&static_cast<v4l2_buffer*>(p)->type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE&&fake.requireCaptureSink)
         check(fake.sinkCalls&&fake.lastSink.kind==nd::CaptureKind::Requeue,"synchronous registered sink invalidates capture before original QBUF even on failure");
@@ -107,29 +109,37 @@ void* originalMmap(void* address,std::size_t size,int prot,int flags,int fd,off_
 int originalMunmap(void*,std::size_t){++fake.unmapCalls;fake.receivedErrno=errno;errno=fake.error;return fake.result;}
 int originalClose(int fd){++fake.closeCalls;fake.receivedErrno=errno;check(fd==23,"original close fd exact");errno=fake.error;return fake.result;}
 nd::Originals calls(){return {originalIoctl,originalMmap,originalMunmap,originalClose};}
-nd::ImageIdentity image(){return {base,nd::ExpectedVrlinkHash,nd::ExpectedExecutableSegmentHash};}
+nd::ImageIdentity image(){
+    nd::ImageIdentity result{base,nd::ExpectedVrlinkHash,nd::ExpectedExecutableSegmentHash};
+    if(adaptiveTest){
+        result.file[0]^=1;result.executableSegment[0]^=1;result.publicAbiVerified=true;
+        result.layout.codeCount=1;result.layout.code[0]={0xb0000,0x5000};
+        result.layout.loadCount=1;result.layout.loads[0]={0x200000,0x1000,0,0,6};
+        result.layout.imports={0x200000,0x200008,0x200010,0x200018};
+    }return result;
+}
 std::unique_ptr<nd::DecodeProvider> provider(){fake=Fake{};auto p=std::make_unique<nd::DecodeProvider>();check(p->prepare(image(),calls(),{copy,nullptr}),"exact pinned source and public originals prepared");return p;}
 v4l2_format format(){v4l2_format f{};f.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;f.fmt.pix_mp.pixelformat=V4L2_PIX_FMT_HEVC;return f;}
 void setup(nd::DecodeProvider& p,unsigned count=4){
     auto f=format();errno=EALREADY;const auto before=fake.ioctlCalls;
-    check(p.invokeIoctl(base+0x32edc,23,VIDIOC_S_FMT,&f)==0&&errno==fake.error&&fake.receivedErrno==EALREADY,"S_FMT result and errno exact despite observer reads");
+    check(p.invokeIoctl(site(0x32edc),23,VIDIOC_S_FMT,&f)==0&&errno==fake.error&&fake.receivedErrno==EALREADY,"S_FMT result and errno exact despite observer reads");
     check(fake.ioctlCalls==before+1,"S_FMT original exactly once");
     v4l2_requestbuffers r{};r.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;r.memory=V4L2_MEMORY_MMAP;r.count=count;
-    check(p.invokeIoctl(base+0x32f18,23,VIDIOC_REQBUFS,&r)==0,"actual REQBUFS allocation");
+    check(p.invokeIoctl(site(0x32f18),23,VIDIOC_REQBUFS,&r)==0,"actual REQBUFS allocation");
 }
 struct Buffer{
     v4l2_buffer b{};v4l2_plane plane{};
     explicit Buffer(unsigned index){b.index=index;b.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;b.memory=V4L2_MEMORY_MMAP;b.length=1;b.m.planes=&plane;b.flags=V4L2_BUF_FLAG_TIMESTAMP_COPY;b.timestamp.tv_sec=0x12345678;plane.length=4096;plane.bytesused=64;}
 };
 void map(nd::DecodeProvider& p,unsigned index){
-    Buffer b(index);check(p.invokeIoctl(base+0x32fec,23,VIDIOC_QUERYBUF,&b.b)==0,"QUERYBUF successful original");
+    Buffer b(index);check(p.invokeIoctl(site(0x32fec),23,VIDIOC_QUERYBUF,&b.b)==0,"QUERYBUF successful original");
     errno=EALREADY;
-    check(p.invokeMmap(base+0x33008,nullptr,4096,PROT_READ|PROT_WRITE,MAP_SHARED,23,index*4096)==fake.memory[index].data()
+    check(p.invokeMmap(site(0x33008),nullptr,4096,PROT_READ|PROT_WRITE,MAP_SHARED,23,index*4096)==fake.memory[index].data()
         &&errno==fake.error&&fake.receivedErrno==EALREADY,"QUERYBUF offset/length bound to successful mmap, exact result+errno");
 }
-int queue(nd::DecodeProvider& p,unsigned index){Buffer b(index);errno=EALREADY;const auto before=fake.ioctlCalls;const auto result=p.invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&b.b);
+int queue(nd::DecodeProvider& p,unsigned index){Buffer b(index);errno=EALREADY;const auto before=fake.ioctlCalls;const auto result=p.invokeIoctl(site(0x31e0c),23,VIDIOC_QBUF,&b.b);
     check(fake.ioctlCalls==before+1&&fake.receivedErrno==EALREADY&&errno==fake.error,"QBUF original once with exact errno");return result;}
-void dequeue(nd::DecodeProvider& p,unsigned index){fake.dequeue=index;Buffer b(0);check(p.invokeIoctl(base+0x32bc0,23,VIDIOC_DQBUF,&b.b)==0,"output DQBUF successful original");}
+void dequeue(nd::DecodeProvider& p,unsigned index){fake.dequeue=index;Buffer b(0);check(p.invokeIoctl(site(0x32bc0),23,VIDIOC_DQBUF,&b.b)==0,"output DQBUF successful original");}
 void noObservation(nd::DecodeProvider& p,const char* label){nd::Observation fact{};fact.usedBytes=123;std::array<std::uint8_t,128> out{};out.fill(0x87);const auto saved=out;check(!p.poll(fact,out.data(),out.size())&&fact.usedBytes==123&&out==saved,label);}
 nd::Observation poll(nd::DecodeProvider& p,std::uint8_t expected){nd::Observation fact{};std::array<std::uint8_t,128> out{};
     check(p.poll(fact,out.data(),out.size())&&fact.usedBytes==64,"successful source chunk copied into caller-owned storage");
@@ -140,7 +150,19 @@ void identityAndOwnership(){
     auto p=provider();auto wrong=image();wrong.file[0]^=1;
     check(!p->prepare(wrong,calls(),{copy,nullptr}),"wrong exact executable refuses admission");
     wrong=image();wrong.executableSegment[0]^=1;check(!p->prepare(wrong,calls(),{copy,nullptr}),"loaded executable must match independent RX hash");
-    check(p->knownIoctl(base+0x31e0c,VIDIOC_QBUF)&&!p->knownIoctl(base+0x31e0c,VIDIOC_DQBUF)&&!p->knownIoctl(base+0x31e10,VIDIOC_QBUF),"exact return address and public request pair required");
+    check(p->knownIoctl(site(0x31e0c),VIDIOC_QBUF),"current verified native RX caller and public request admitted");
+    check(p->knownIoctl(site(0x31e0c),VIDIOC_DQBUF)==adaptiveTest&&p->knownIoctl(site(0x31e10),VIDIOC_QBUF)==adaptiveTest,
+        "legacy callsite pins stay exact; adaptive mode uses actual V4L2 structure and native RX authority");
+    check(!p->knownIoctl(site(0x31e0c),VIDIOC_G_FMT)&&!p->knownIoctl(base+0x200000,VIDIOC_QBUF),"unknown public requests and non-executable callers never gain ownership");
+    check(p->nativeExportCaller(site(0x34574)),"native exported capture admitted at verified caller");
+    if(adaptiveTest){
+        auto unproved=image();unproved.publicAbiVerified=false;nd::DecodeProvider clean;
+        check(!clean.prepare(unproved,calls(),{copy,nullptr}),"new executable digest alone grants no public-ABI authority");
+        auto broken=image();broken.layout.imports[1]=broken.layout.imports[0];
+        check(!clean.prepare(broken,calls(),{copy,nullptr}),"ambiguous import targets refused before publication");
+        broken=image();broken.layout.codeCount=99;
+        check(!clean.prepare(broken,calls(),{copy,nullptr}),"caller range count bounded");
+    }
     setup(*p);queue(*p,0);noObservation(*p,"no query/mmap no pointer reading");dequeue(*p,0);map(*p,0);
     fake.memory[0].fill(0x42);fake.zeroCopyDuringQbuf=true;queue(*p,0);
     std::array<std::uint8_t,8> small{};small.fill(0x29);nd::Observation untouched{};untouched.usedBytes=999;
@@ -152,7 +174,7 @@ void identityAndOwnership(){
     fake.result=0;fake.error=EOVERFLOW;fake.memory[0].fill(0x64);queue(*p,0);poll(*p,0x64);
     dequeue(*p,0);fake.memory[0].fill(0x11);std::fill(fake.memory[0].begin()+16,fake.memory[0].begin()+80,0x75);
     Buffer offset(0);offset.plane.data_offset=16;offset.plane.bytesused=80;
-    check(p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&offset.b)==0,"valid public data-offset buffer forwarded");poll(*p,0x75);
+    check(p->invokeIoctl(site(0x31e0c),23,VIDIOC_QBUF,&offset.b)==0,"valid public data-offset buffer forwarded");poll(*p,0x75);
 }
 void boundsAndLoss(){
     auto p=provider();setup(*p,nd::MaxBuffers);for(unsigned i=0;i<nd::MaxBuffers;++i)map(*p,i);
@@ -166,7 +188,7 @@ void boundsAndLoss(){
     dequeue(*p,0);fake.memory[0].fill(0x43);queue(*p,0);const auto old=poll(*p,0x43);
     dequeue(*p,0);fake.memory[0].fill(0x54);queue(*p,0);
     int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;fake.result=-1;fake.error=EBUSY;
-    check(p->invokeIoctl(base+0x312e8,23,VIDIOC_STREAMOFF,&type)==-1&&errno==EBUSY,"failed STREAMOFF still forwarded exactly");
+    check(p->invokeIoctl(site(0x312e8),23,VIDIOC_STREAMOFF,&type)==-1&&errno==EBUSY,"failed STREAMOFF still forwarded exactly");
     noObservation(*p,"attempted real stream reset invalidates old queued evidence");
     fake.result=0;fake.error=EOVERFLOW;setup(*p);map(*p,0);fake.memory[0].fill(0x65);queue(*p,0);const auto fresh=poll(*p,0x65);
     check(fresh.poolGeneration>old.poolGeneration,"new native OUTPUT pool obtains new lifetime");
@@ -177,7 +199,7 @@ void boundsAndLoss(){
     check(p->invokeClose(0x999,23)==0&&fake.receivedErrno==EALREADY&&errno==fake.error,"close exact original and errno");
     noObservation(*p,"close invalidates native device snapshots");
     setup(*p);map(*p,0);fake.revokeDuringQbuf=p.get();queue(*p,0);noObservation(*p,"late original success cannot revive stopped source");
-    check(!p->knownIoctl(base+0x31e0c,VIDIOC_QBUF),"stopped observer keeps forwarding native calls");
+    check(!p->knownIoctl(site(0x31e0c),VIDIOC_QBUF),"stopped observer keeps forwarding native calls");
 }
 
 void exactSuccessfulGaps(){
@@ -200,7 +222,7 @@ void exactSuccessfulGaps(){
         &&event.inputLoss==nd::InputLoss::CopyRejected&&event.lossSequence==1&&event.index==1,"known scalar ownership plus failed copy gives exact successful gap");
     dequeue(*p,1);fake.result=-1;queue(*p,1);check(p->stats().rejected==1&&!p->pollCapture(event),"native rejected copy failure gives no successful gap");
     fake.result=0;fake.dataReadFails=false;dequeue(*p,2);Buffer malformed(2);malformed.b.timestamp.tv_usec=1;
-    p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&malformed.b);
+    p->invokeIoctl(site(0x31e0c),23,VIDIOC_QBUF,&malformed.b);
     check(p->stats().rejected==2&&!p->pollCapture(event),"unknown malformed timestamp remains unattributed hard loss");
     setup(*p,nd::MaxBuffers);for(unsigned i=0;i<nd::MaxBuffers;++i)map(*p,i);while(p->pollCapture(event)){}
     for(unsigned i=0;i<nd::SnapshotCapacity;++i)queue(*p,i);
@@ -219,31 +241,31 @@ void unsafeShapes(){
         if(which==4)b.b.timestamp.tv_usec=1;
         if(which==5)b.b.flags=V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
         const auto reads=fake.dataReads;
-        check(p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&b.b)==0,"unsupported shape preserves original successful return");
+        check(p->invokeIoctl(site(0x31e0c),23,VIDIOC_QBUF,&b.b)==0,"unsupported shape preserves original successful return");
         check(fake.dataReads==reads,"unsupported buffer never dereferenced as coded bytes");noObservation(*p,"unsupported shape yields no fact");
         setup(*p);map(*p,0);
     }
     fake.readFails=true;queue(*p,0);noObservation(*p,"failed safe self-read cannot invent metadata");fake.readFails=false;
-    setup(*p);Buffer q(0);fake.mapFails=true;p->invokeIoctl(base+0x32fec,23,VIDIOC_QUERYBUF,&q.b);
-    check(p->invokeMmap(base+0x33008,nullptr,4096,PROT_READ|PROT_WRITE,MAP_SHARED,23,0)==MAP_FAILED,"failed original map retained");
+    setup(*p);Buffer q(0);fake.mapFails=true;p->invokeIoctl(site(0x32fec),23,VIDIOC_QUERYBUF,&q.b);
+    check(p->invokeMmap(site(0x33008),nullptr,4096,PROT_READ|PROT_WRITE,MAP_SHARED,23,0)==MAP_FAILED,"failed original map retained");
     fake.mapFails=false;queue(*p,0);noObservation(*p,"failed map grants no mapped ownership");
     check(!nd::preparePinnedProcess(calls()),"actual host executable cannot impersonate pinned vrlink");
     const auto entries=nd::preparedEntries();check(!entries.ioctl&&!entries.mmap&&!entries.close&&!entries.munmap,"unprepared runtime exposes no hook entries");
 }
 void configureCapture(nd::DecodeProvider& p,unsigned count=2){
     auto f=format();f.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    check(p.invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&f)==0,"restart capture format initially configured");
+    check(p.invokeIoctl(site(0x3242c),23,VIDIOC_S_FMT,&f)==0,"restart capture format initially configured");
     v4l2_requestbuffers r{};r.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;r.memory=V4L2_MEMORY_DMABUF;r.count=count;
-    check(p.invokeIoctl(base+0x324a8,23,VIDIOC_REQBUFS,&r)==0,"restart capture physical allocation initially configured");
-    for(unsigned n=0;n<count;++n){Buffer b(n);b.b.type=r.type;b.b.memory=r.memory;check(p.invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b)==0,"restart capture slot initially queried");}
+    check(p.invokeIoctl(site(0x324a8),23,VIDIOC_REQBUFS,&r)==0,"restart capture physical allocation initially configured");
+    for(unsigned n=0;n<count;++n){Buffer b(n);b.b.type=r.type;b.b.memory=r.memory;check(p.invokeIoctl(site(0x325c8),23,VIDIOC_QUERYBUF,&b.b)==0,"restart capture slot initially queried");}
 }
 void captureQueue(nd::DecodeProvider& p,unsigned index){
     Buffer b(index);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;b.plane.m.fd=73+static_cast<int>(index);b.b.timestamp.tv_sec=0x4321;
-    check(p.invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==0,"retained capture slot fresh QBUF original succeeds");
+    check(p.invokeIoctl(site(0x310f8),23,VIDIOC_QBUF,&b.b)==0,"retained capture slot fresh QBUF original succeeds");
 }
 void captureDequeue(nd::DecodeProvider& p,unsigned index){
     Buffer b(index);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;b.b.timestamp.tv_sec=0x4321;fake.dequeue=index;
-    check(p.invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0,"retained capture slot native DQ original succeeds");
+    check(p.invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b)==0,"retained capture slot native DQ original succeeds");
 }
 nd::CaptureObservation decodedEvent(nd::DecodeProvider& p){nd::CaptureObservation result{};bool found=false;while(p.pollCapture(result))if(result.kind==nd::CaptureKind::Decoded){found=true;break;}check(found,"fresh successful capture has exact decoded lease event");return result;}
 void streamRestart(){
@@ -254,15 +276,15 @@ void streamRestart(){
         captureQueue(*p,1);queue(*p,1);nd::CaptureObservation event{};while(p->pollCapture(event)){}
         const auto reads=fake.dataReads,callsBefore=fake.ioctlCalls,maps=fake.mapCalls;int type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         fake.result=failedStop?-1:0;fake.error=failedStop?EBUSY:EOVERFLOW;errno=EALREADY;
-        check(p->invokeIoctl(base+0x312e8,23,VIDIOC_STREAMOFF,&type)==fake.result&&fake.ioctlCalls==callsBefore+1&&fake.receivedErrno==EALREADY&&errno==fake.error,"successful or failed STREAMOFF preserves exact original count/result/errno");
+        check(p->invokeIoctl(site(0x312e8),23,VIDIOC_STREAMOFF,&type)==fake.result&&fake.ioctlCalls==callsBefore+1&&fake.receivedErrno==EALREADY&&errno==fake.error,"successful or failed STREAMOFF preserves exact original count/result/errno");
         check(!p->captureLeaseCurrentOnWorker(old),"attempted stream reset revokes every old capture before native reuse");
         check(p->pollCapture(event)&&event.kind==nd::CaptureKind::SourceReset&&event.sourcePoolGeneration==before.poolGeneration&&event.resetReason==nd::ResetReason::OutputStreamOff,"logical OUTPUT retirement identifies old pool and bounded concrete reset cause");
         noObservation(*p,"STREAMOFF discards all old queued snapshot evidence");
         fake.result=0;fake.error=EOVERFLOW;captureDequeue(*p,1);
         check(!p->pollCapture(event),"late pre-reset CAPTURE DQ cannot become a new-source picture");
-        fake.result=-1;fake.error=EIO;check(p->invokeIoctl(base+0x31368,23,VIDIOC_STREAMON,&type)==-1&&errno==EIO,"failed native STREAMON preserves error and grants no new capture authority");
+        fake.result=-1;fake.error=EIO;check(p->invokeIoctl(site(0x31368),23,VIDIOC_STREAMON,&type)==-1&&errno==EIO,"failed native STREAMON preserves error and grants no new capture authority");
         check(!p->captureLeaseCurrentOnWorker(old)&&!p->pollCapture(event),"STREAMON attempt never restores retired leases or fabricates decoded content");
-        fake.result=0;fake.error=EOVERFLOW;check(p->invokeIoctl(base+0x31368,23,VIDIOC_STREAMON,&type)==0,"native normal reset restarts original OUTPUT queue without allocation calls");
+        fake.result=0;fake.error=EOVERFLOW;check(p->invokeIoctl(site(0x31368),23,VIDIOC_STREAMON,&type)==0,"native normal reset restarts original OUTPUT queue without allocation calls");
         fake.memory[0].fill(0x53);queue(*p,0);const auto after=poll(*p,0x53);
         check(after.poolGeneration>before.poolGeneration&&fake.dataReads==reads+1&&fake.mapCalls==maps,"STREAMOFF/ON reuses original queried MMAP storage under a strictly newer source lifetime");
         captureQueue(*p,0);captureDequeue(*p,0);const auto fresh=decodedEvent(*p);
@@ -271,43 +293,43 @@ void streamRestart(){
         check(std::strcmp(nd::resetReasonName(nd::ResetReason::OutputStreamOff),"output-stream-off")==0&&std::strcmp(nd::resetReasonName(static_cast<nd::ResetReason>(255)),"unknown")==0,"reset reasons are bounded scalar diagnostics with explicit unknown value");
     }
     {auto p=provider();setup(*p,2);map(*p,0);map(*p,1);fake.memory[0].fill(0x42);fake.streamOffDuringQbuf=p.get();Buffer b(0);const auto callsBefore=fake.ioctlCalls;
-     check(p->invokeIoctl(base+0x31e0c,23,VIDIOC_QBUF,&b.b)==0&&fake.ioctlCalls==callsBefore+2,"in-flight original QBUF can overlap real logical STREAMOFF");noObservation(*p,"old reserved snapshot cannot publish after concurrent stream retirement");
+     check(p->invokeIoctl(site(0x31e0c),23,VIDIOC_QBUF,&b.b)==0&&fake.ioctlCalls==callsBefore+2,"in-flight original QBUF can overlap real logical STREAMOFF");noObservation(*p,"old reserved snapshot cannot publish after concurrent stream retirement");
      fake.memory[1].fill(0x53);queue(*p,1);poll(*p,0x53);}
     {auto p=provider();setup(*p);map(*p,0);configureCapture(*p);captureQueue(*p,0);fake.streamOffDuringCaptureDequeue=p.get();captureDequeue(*p,0);nd::CaptureObservation event{};bool decoded=false;while(p->pollCapture(event))decoded|=event.kind==nd::CaptureKind::Decoded;check(!decoded,"DQ begun before STREAMOFF cannot publish under a post-reset capture generation");captureQueue(*p,0);captureDequeue(*p,0);check(p->captureLeaseCurrentOnWorker(decodedEvent(*p)),"fresh CAPTURE queue after concurrent reset establishes new current ownership");}
-    {auto p=provider();setup(*p);map(*p,0);configureCapture(*p);captureQueue(*p,0);captureDequeue(*p,0);const auto old=decodedEvent(*p);int type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;p->invokeIoctl(base+0x312e8,23,VIDIOC_STREAMOFF,&type);check(!p->captureLeaseCurrentOnWorker(old),"CAPTURE-only STREAMOFF also revokes exact decoded leases");captureQueue(*p,0);captureDequeue(*p,0);const auto fresh=decodedEvent(*p);check(fresh.sourcePoolGeneration==old.sourcePoolGeneration&&fresh.capturePoolGeneration>old.capturePoolGeneration&&fresh.contentGeneration>old.contentGeneration,"capture restart preserves OUTPUT allocation/source but requires new capture cycle");}
+    {auto p=provider();setup(*p);map(*p,0);configureCapture(*p);captureQueue(*p,0);captureDequeue(*p,0);const auto old=decodedEvent(*p);int type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;p->invokeIoctl(site(0x312e8),23,VIDIOC_STREAMOFF,&type);check(!p->captureLeaseCurrentOnWorker(old),"CAPTURE-only STREAMOFF also revokes exact decoded leases");captureQueue(*p,0);captureDequeue(*p,0);const auto fresh=decodedEvent(*p);check(fresh.sourcePoolGeneration==old.sourcePoolGeneration&&fresh.capturePoolGeneration>old.capturePoolGeneration&&fresh.contentGeneration>old.contentGeneration,"capture restart preserves OUTPUT allocation/source but requires new capture cycle");}
 }
 void captureOwnership(){
     auto p=provider();check(p->setCaptureSink([](const nd::CaptureObservation& fact,void*) noexcept{++fake.sinkCalls;fake.lastSink=fact;},nullptr),"source sink registers before actual native pool");
     setup(*p);check(!p->setCaptureSink(nullptr,nullptr),"late sink registration refused after lifecycle already began");
     map(*p,0);map(*p,1);fake.memory[0].fill(0x42);fake.memory[1].fill(0x43);
     auto capture=format();capture.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    check(p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&capture)==0,"actual capture format forwarded");
+    check(p->invokeIoctl(site(0x3242c),23,VIDIOC_S_FMT,&capture)==0,"actual capture format forwarded");
     v4l2_requestbuffers request{};request.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;request.memory=V4L2_MEMORY_DMABUF;request.count=4;
-    check(p->invokeIoctl(base+0x324a8,23,VIDIOC_REQBUFS,&request)==0,"capture DMABUF pool configured");
+    check(p->invokeIoctl(site(0x324a8),23,VIDIOC_REQBUFS,&request)==0,"capture DMABUF pool configured");
     Buffer b(0);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;
-    check(p->invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b)==0,"capture slot query observed");
+    check(p->invokeIoctl(site(0x325c8),23,VIDIOC_QUERYBUF,&b.b)==0,"capture slot query observed");
     nd::CaptureObservation event{};while(p->pollCapture(event)){}
     b.plane.m.fd=73;b.b.timestamp.tv_sec=0x4321;b.b.timestamp.tv_usec=0;fake.requireCaptureSink=true;
-    check(p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==0,"DMABUF capture queued unchanged");
+    check(p->invokeIoctl(site(0x310f8),23,VIDIOC_QBUF,&b.b)==0,"DMABUF capture queued unchanged");
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Requeue&&event.dmabufFd==73&&event.index==0
         &&event.sourcePoolGeneration&&event.capturePoolGeneration&&event.contentGeneration==1,"requeue invalidation precedes decode and names exact DMABUF lease");
     auto claimed=event;claimed.kind=nd::CaptureKind::Decoded;
     check(!p->captureLeaseCurrent(claimed),"queued buffer cannot be authorized by a claimed decoded enum");
     const auto generation=event.capturePoolGeneration;
-    fake.dequeue=0;check(p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0,"actual capture result original once");
+    fake.dequeue=0;check(p->invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b)==0,"actual capture result original once");
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Decoded&&event.dmabufFd==73&&event.nativeTimestampToken==0x4321
         &&event.capturePoolGeneration==generation&&event.contentGeneration==1,"decoded timestamp distinct from capture index and content lease");
     const auto validLease=event;check(p->captureLeaseCurrent(validLease)&&p->captureLeaseCurrentOnWorker(validLease),"render and worker scalar checks admit only successful actual current DQBUF lease");
     auto wrongLease=validLease;++wrongLease.nativeTimestampToken;
     check(!p->captureLeaseCurrent(wrongLease),"current scalar lease also binds actual timestamp token");
-    check(p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b)==0&&!p->pollCapture(event),"unqueued duplicate capture gives no evidence");
+    check(p->invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b)==0&&!p->pollCapture(event),"unqueued duplicate capture gives no evidence");
     queue(*p,0);poll(*p,0x42); // Capture setup must not destroy unrelated OUTPUT mappings.
-    fake.result=-1;check(p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b)==-1,"failed capture queue original preserved");
+    fake.result=-1;check(p->invokeIoctl(site(0x310f8),23,VIDIOC_QBUF,&b.b)==-1,"failed capture queue original preserved");
     check(!p->captureLeaseCurrent(validLease)&&!p->captureLeaseCurrentOnWorker(validLease),"attempted QBUF invalidates old lease for both renderer and worker before delayed consumption");
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Requeue,"attempted reuse conservatively invalidates old image");
-    fake.result=0;p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);
+    fake.result=0;p->invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b);
     check(!p->pollCapture(event),"failed queue cannot establish decoded ownership");
-    p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&capture);
+    p->invokeIoctl(site(0x3242c),23,VIDIOC_S_FMT,&capture);
     check(p->pollCapture(event)&&event.kind==nd::CaptureKind::Reset&&event.capturePoolGeneration!=generation,"capture reconfiguration retires exact old pool");
     queue(*p,1);poll(*p,0x43);
     p->stop();check(fake.lastSink.kind==nd::CaptureKind::SourceReset,"stop revokes shared source sink synchronously before teardown");
@@ -329,18 +351,18 @@ void captureHandoff(){
         auto p=provider();HandoffProbe probe;probe.provider=p.get();
         check(p->setCaptureHandoff(handoff,&probe)&&p->setObservationWake(observed,&probe),"handoff and observation wake register before native lifecycle");
         setup(*p);check(!p->setCaptureHandoff(nullptr,nullptr)&&!p->setObservationWake(nullptr,nullptr),"late handoff/wake mutation refused");
-        auto f=format();f.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;p->invokeIoctl(base+0x3242c,23,VIDIOC_S_FMT,&f);
-        v4l2_requestbuffers request{};request.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;request.memory=V4L2_MEMORY_DMABUF;request.count=4;p->invokeIoctl(base+0x324a8,23,VIDIOC_REQBUFS,&request);
-        Buffer b(0);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;p->invokeIoctl(base+0x325c8,23,VIDIOC_QUERYBUF,&b.b);b.plane.m.fd=73;b.b.timestamp.tv_sec=0x4321;b.b.timestamp.tv_usec=0;
+        auto f=format();f.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;p->invokeIoctl(site(0x3242c),23,VIDIOC_S_FMT,&f);
+        v4l2_requestbuffers request{};request.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;request.memory=V4L2_MEMORY_DMABUF;request.count=4;p->invokeIoctl(site(0x324a8),23,VIDIOC_REQBUFS,&request);
+        Buffer b(0);b.b.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;b.b.memory=V4L2_MEMORY_DMABUF;p->invokeIoctl(site(0x325c8),23,VIDIOC_QUERYBUF,&b.b);b.plane.m.fd=73;b.b.timestamp.tv_sec=0x4321;b.b.timestamp.tv_usec=0;
         nd::CaptureObservation discard{};while(p->pollCapture(discard)){}
-        p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b);fake.dequeue=0;
+        p->invokeIoctl(site(0x310f8),23,VIDIOC_QBUF,&b.b);fake.dequeue=0;
         const auto before=fake.ioctlCalls,wakes=probe.wakes;std::atomic<bool> returned{false};int result=-2,resultErrno=0;
-        std::thread native([&]{errno=EALREADY;result=p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);resultErrno=errno;returned.store(true,std::memory_order_release);});
+        std::thread native([&]{errno=EALREADY;result=p->invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b);resultErrno=errno;returned.store(true,std::memory_order_release);});
         {std::unique_lock<std::mutex> lock(probe.mutex);check(probe.changed.wait_for(lock,std::chrono::seconds(3),[&]{return probe.entered;}),"exact successful DQ reaches handoff before native exposure");}
         std::mutex doneMutex;std::condition_variable doneChanged;bool done=false,current=false,published=false,afterReset=false;
         std::thread observer([&]{
             current=p->captureLeaseCurrentOnWorker(probe.event);nd::CaptureObservation event{};while(p->pollCapture(event))if(event.kind==nd::CaptureKind::Decoded)published=event.nativeTimestampToken==probe.event.nativeTimestampToken&&event.contentGeneration==probe.event.contentGeneration;
-            if(invalidate==1)p->invokeIoctl(base+0x310f8,23,VIDIOC_QBUF,&b.b);
+            if(invalidate==1)p->invokeIoctl(site(0x310f8),23,VIDIOC_QBUF,&b.b);
             if(invalidate==2)p->stop();
             afterReset=p->captureLeaseCurrentOnWorker(probe.event);
             {std::lock_guard<std::mutex> lock(doneMutex);done=true;}doneChanged.notify_all();
@@ -355,14 +377,14 @@ void captureHandoff(){
         check(afterReset==(invalidate==0),"concurrent exact requeue/reset invalidates waiting native capture without reviving stale source");
         check(probe.event.dmabufFd==73&&probe.event.nativeTimestampToken==0x4321&&probe.event.sourcePoolGeneration&&probe.event.capturePoolGeneration,"handoff is bound to exact source, capture generation, native token and buffer");
         const auto prior=probe.calls;
-        p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);check(probe.calls==prior+unsigned(invalidate==1),"only a newly requeued successful native DQ can create another handoff");
+        p->invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b);check(probe.calls==prior+unsigned(invalidate==1),"only a newly requeued successful native DQ can create another handoff");
         const auto last=probe.calls;
-        p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"duplicate successful DQ cannot invent another decoded handoff");
-        fake.result=-1;p->invokeIoctl(base+0x32a5c,23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"failed native DQ never waits");fake.result=0;
-        p->invokeIoctl(base+0xdead,23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"foreign native caller never waits");
+        p->invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"duplicate successful DQ cannot invent another decoded handoff");
+        fake.result=-1;p->invokeIoctl(site(0x32a5c),23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"failed native DQ never waits");fake.result=0;
+        p->invokeIoctl(site(0xdead),23,VIDIOC_DQBUF,&b.b);check(probe.calls==last,"foreign native caller never waits");
         p->stop();check(p->setCaptureHandoff(nullptr,nullptr)&&p->setObservationWake(nullptr,nullptr),"stopped ownership permits optional handoff/wake detach");
     }
 }
 }
-int main(int argc,char** argv){try{if(argc==2&&std::strcmp(argv[1],"--restart")==0){streamRestart();std::printf("%u exact native stream restart checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--handoff")==0){captureHandoff();std::printf("%u exact native handoff checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();captureHandoff();streamRestart();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+int main(int argc,char** argv){try{adaptiveTest=argc==2&&std::strcmp(argv[1],"--adaptive")==0;if(argc==2&&std::strcmp(argv[1],"--restart")==0){streamRestart();std::printf("%u exact native stream restart checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--gaps")==0){exactSuccessfulGaps();std::printf("%u exact native gap checks PASS\n",checks);return 0;}if(argc==2&&std::strcmp(argv[1],"--handoff")==0){captureHandoff();std::printf("%u exact native handoff checks PASS\n",checks);return 0;}identityAndOwnership();boundsAndLoss();unsafeShapes();captureOwnership();exactSuccessfulGaps();captureHandoff();streamRestart();std::printf("public V4L2 coded-input provider: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
 #endif

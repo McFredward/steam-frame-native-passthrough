@@ -30,6 +30,12 @@ static_assert(offsetof(NV_ENCODE_API_FUNCTION_LIST,nvEncLockBitstream)==0x90&&
               offsetof(NV_ENCODE_API_FUNCTION_LIST,nvEncUnlockBitstream)==0x98,"source-proven copy/unlock slots");
 std::atomic<NvencBoundary*> NvencBoundary::instance_{nullptr};
 NvencBoundary::NvencBoundary(const std::array<std::uint8_t,32>& hash):hash_(hash){}
+bool NvencBoundary::bindVerifiedModule(const std::array<std::uint8_t,32>& hash){
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(installed_||!enabled_||!std::any_of(hash.begin(),hash.end(),[](auto b){return b!=0;}))return false;
+    for(const auto& session:sessions_)if(session.encoder)return false;
+    hash_=hash;return true;
+}
 NvencBoundary::Session* NvencBoundary::find(void* e){for(auto& s:sessions_)if(s.encoder==e&&e)return &s;return nullptr;}
 void NvencBoundary::retireSubmissions(Session& s){
     for(auto& p:s.submissions)if(p.evidence.submission&&inputObserver_.retire)try{inputObserver_.retire(p.evidence,inputObserver_.context);}catch(...){}

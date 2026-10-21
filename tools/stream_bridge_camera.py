@@ -217,7 +217,8 @@ def load_config(root):
         and value['schema'] == CONFIG_SCHEMA, 'unknown camera configuration preserved')
     absolute(value['settings'])
     lib = value['library']
-    require(type(lib) is dict and set(lib) == {'path', 'bytes', 'sha256'}
+    require(type(lib) is dict and set(lib) in ({'path', 'bytes', 'sha256'}, {'path', 'bytes', 'sha256', 'interface'})
+        and ('interface' not in lib or lib['interface'] == 'FnTable:IVRSettings_003')
         and type(lib['bytes']) is int and 64 <= lib['bytes'] <= MAX_LIBRARY
         and type(lib['sha256']) is str and re.fullmatch('[0-9a-f]{64}', lib['sha256']), 'unknown native provider pin')
     absolute(lib['path'])
@@ -376,6 +377,26 @@ class SettingsTable(ctypes.Structure):
         ('RemoveSection', ctypes.c_void_p), ('RemoveKeyInSection', _FN(None, ctypes.c_char_p, ctypes.c_char_p, _ERR))]
 
 
+def provider_elf_compatible(raw):
+    """Bound the current public provider image before loading its versioned API."""
+    if not 64 <= len(raw) <= MAX_LIBRARY or raw[:7] != b'\x7fELF\x02\x01\x01':
+        return False
+    kind, machine = struct.unpack_from('<HH', raw, 16)
+    offset = struct.unpack_from('<Q', raw, 32)[0]
+    stride, count = struct.unpack_from('<HH', raw, 54)
+    if kind != 3 or machine != 183 or stride != 56 or not 0 < count <= 64 or offset + count * stride > len(raw):
+        return False
+    executable = False
+    for i in range(count):
+        at = offset + i * stride
+        tag, flags, position, _, _, size, memory = struct.unpack_from('<IIQQQQQ', raw, at)
+        if tag == 1:
+            if size > memory or position + size > len(raw) or flags & 3 == 3:
+                return False
+            executable = executable or bool(flags & 1)
+    return executable
+
+
 class NativeCamera:
     def __init__(self, pin):self.pin, self.fd, self.started = pin, -1, False
 
@@ -385,9 +406,13 @@ class NativeCamera:
         try:
             info = os.fstat(self.fd)
             require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in (0, os.getuid())
-                and not info.st_mode & 0o022 and info.st_size == self.pin['bytes'], 'native provider ownership differs')
+                and not info.st_mode & 0o022 and 64 <= info.st_size <= MAX_LIBRARY, 'native provider ownership differs')
             raw = os.read(self.fd, MAX_LIBRARY + 1)
-            require(len(raw) == self.pin['bytes'] and digest(raw) == self.pin['sha256']
+            after = os.fstat(self.fd)
+            stable = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            matched = len(raw) == self.pin['bytes'] and digest(raw) == self.pin['sha256']
+            compatible = self.pin.get('interface') == 'FnTable:IVRSettings_003' and provider_elf_compatible(raw)
+            require(stable and len(raw) == info.st_size and (matched or compatible)
                 and raw[:7] == b'\x7fELF\x02\x01\x01' and struct.unpack_from('<H', raw, 18)[0] == 183,
                 'native provider identity differs')
             self.api = ctypes.CDLL('/proc/self/fd/' + str(self.fd))

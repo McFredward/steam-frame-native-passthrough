@@ -66,6 +66,9 @@ public:
     NvencBoundary(const NvencBoundary&)=delete;
     NvencBoundary& operator=(const NvencBoundary&)=delete;
     NVENCSTATUS create(NvencFactory,NV_ENCODE_API_FUNCTION_LIST*);
+    // Cold bootstrap only, before any factory has published callbacks. The
+    // image identity records the actual verified source, not a build allowlist.
+    bool bindVerifiedModule(const std::array<std::uint8_t,32>&);
     // Authenticated local authority only. The explicit provider worker starts
     // discovery after private pairing and an actual supported encoder exist.
     DiscoveryAdmission tryRequestDiscovery(void* encoder,const LocalConfig&,const VerifiedChannel&,PayloadSealer sealer={});

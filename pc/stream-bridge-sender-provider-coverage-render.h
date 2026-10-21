@@ -32,6 +32,9 @@ void copyCoverageBeforeNative(ID3D11DeviceContext*,ID3D11Resource* nativeDestina
 HRESULT readCoverageNonblocking(ID3D11DeviceContext*,ID3D11Resource* readback,ID3D11Query*,
     std::uint32_t width,std::uint32_t height,std::uint8_t* destination,std::size_t capacity,
     NativeGetData,NativeMap,NativeUnmap,CoverageReadbackResult&)noexcept;
+// Observe the actual public planar render target; chroma and ordinary targets
+// never count as a luma coverage draw. Does not change native state.
+bool nativeLumaTarget(ID3D11DeviceContext*)noexcept;
 using NativeDraw=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT);
 struct SharedTextureOwner {std::uint64_t handle=0,generation=0;std::uint32_t processId=0;};
 // Cold import compares the public kernel texture description against normalized

@@ -190,10 +190,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);const auto value=clone::handle(object);
         if(!beginCreate(shaders_,value,result,ObjectKind::Shader,out))return false;
         ShaderSnapshot definition;clone::Refusal why;
-        if(ci.codeSize==9460)definition.role=clone::ShaderRole::Vertex;
-        else if(ci.codeSize==6620)definition.role=clone::ShaderRole::Fragment;
-        else return fail(out,Reason::Contract,ObjectKind::Shader,value,0,{clone::Reason::ShaderProfile});
-        if(!clone::captureShader(ci,definition.role,definition.shader,why))return fail(out,Reason::Contract,ObjectKind::Shader,value,0,why);
+        // Recognize canonical shader semantics, including equivalent ID/debug
+        // encodings. Exact old modules retain their original fast path.
+        definition.role=ci.codeSize==6620?clone::ShaderRole::Fragment:clone::ShaderRole::Vertex;
+        if(!clone::captureShader(ci,definition.role,definition.shader,why)){
+            definition.role=definition.role==clone::ShaderRole::Vertex?clone::ShaderRole::Fragment:clone::ShaderRole::Vertex;
+            if(!clone::captureShader(ci,definition.role,definition.shader,why))return fail(out,Reason::Contract,ObjectKind::Shader,value,0,why);
+        }
         return insert(shaders_,value,definition,ObjectKind::Shader,out);
     }
     bool createPipeline(VkPipeline object,const VkGraphicsPipelineCreateInfo& ci,VkResult result,Event* out=nullptr) {

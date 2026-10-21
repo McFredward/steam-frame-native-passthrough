@@ -41,6 +41,6 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
   "$sender_protocol/receiver/stream_bridge_receiver.cpp" \
   "$sender_protocol/bridge/hevc_bridge_sei.cpp" \
   -shared -s -Wl,--no-insert-timestamp -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic \
-  -lbcrypt -lws2_32 -ladvapi32 -lole32 -lshell32 -ld3d11 -ldxgi -luuid -o "$sender_output/driver_steam_link_native_passthrough.dll"
+  -lwintrust -lcrypt32 -lbcrypt -lws2_32 -ladvapi32 -lole32 -lshell32 -ld3d11 -ldxgi -luuid -o "$sender_output/driver_steam_link_native_passthrough.dll"
 cp -- "$sender_repo/pc/stream-bridge-sender-provider.vrdrivermanifest" "$sender_output/driver.vrdrivermanifest"
 sha256sum -- "$sender_output/driver_steam_link_native_passthrough.dll"

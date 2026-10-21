@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "stream_bridge_native_decode.h"
+#include "stream_bridge_native_image_runtime.h"
 #include "sha256.h"
 #include <algorithm>
 #include <cerrno>
@@ -12,6 +13,7 @@
 #include <link.h>
 #include <linux/videodev2.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -43,7 +45,7 @@ struct DecodeProvider::Impl{
     struct Device{std::uint64_t captureGeneration=0;std::uint32_t captureCount=0;bool captureConfigured=false;std::array<CaptureBuffer,MaxBuffers> capture{};int fd=-1;bool hevc=false;std::uint32_t count=0;std::uint64_t generation=0,content=0;std::array<Buffer,MaxBuffers> buffers{};};
     struct Slot{enum State{Free,Reserved,Ready}state=Free;std::uint64_t ticket=0;Observation fact{};std::array<std::uint8_t,MaxCodedBytes> bytes{};};
     mutable std::mutex mutex;std::uintptr_t base=0;Originals calls{};Reader reader{};
-    bool prepared=false,active=false;std::uint64_t generation=0,ticket=0;
+    bool prepared=false,active=false,adaptive=false;NativeElfLayout layout{};Hash file{},code{};std::uint64_t generation=0,ticket=0;
     CaptureSink sink=nullptr;void* sinkContext=nullptr;
     CaptureHandoff handoff=nullptr;void* handoffContext=nullptr;
     ObservationWake wake=nullptr;void* wakeContext=nullptr;
@@ -94,12 +96,27 @@ const char* resetReasonName(ResetReason reason) noexcept{
 DecodeProvider::DecodeProvider():impl_(new Impl){}
 DecodeProvider::~DecodeProvider()=default;
 bool DecodeProvider::prepare(const ImageIdentity& image,const Originals& originals,Reader reader) noexcept{
-    if(!image.base||image.file!=ExpectedVrlinkHash||image.executableSegment!=ExpectedExecutableSegmentHash
-        ||!originals.ioctl||!originals.mmap||!originals.munmap||!originals.close||!reader.copy)return false;
+    const bool legacy=image.file==ExpectedVrlinkHash&&image.executableSegment==ExpectedExecutableSegmentHash;
+    bool capability=image.publicAbiVerified&&image.base<=UINTPTR_MAX-8&&image.layout.codeCount&&image.layout.codeCount<=image.layout.code.size();
+    capability=capability&&std::any_of(image.file.begin(),image.file.end(),[](auto b){return b!=0;})&&
+        std::any_of(image.executableSegment.begin(),image.executableSegment.end(),[](auto b){return b!=0;});
+    for(auto slot:image.layout.imports)capability=capability&&slot!=0;
+    capability=capability&&image.layout.loadCount&&image.layout.loadCount<=image.layout.loads.size();
+    if(capability){
+        for(unsigned i=0;i<image.layout.codeCount;++i){const auto& range=image.layout.code[i];
+            capability=capability&&range.bytes&&range.offset<=UINTPTR_MAX-image.base&&range.bytes<=UINTPTR_MAX-image.base-range.offset;
+        }
+        for(unsigned i=0;i<image.layout.imports.size();++i){const auto slot=image.layout.imports[i];
+            capability=capability&&!(slot&7)&&image.layout.writable(slot,8)&&slot<=UINTPTR_MAX-image.base-8;
+            for(unsigned j=0;j<i;++j)capability=capability&&slot!=image.layout.imports[j];
+        }
+    }
+    if(!image.base||(!legacy&&!capability)||!originals.ioctl||!originals.mmap||!originals.munmap||!originals.close||!reader.copy)return false;
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if(impl_->prepared&&(impl_->base!=image.base||impl_->calls.ioctl!=originals.ioctl||impl_->calls.mmap!=originals.mmap
+    if(impl_->prepared&&(impl_->file!=image.file||impl_->code!=image.executableSegment||impl_->base!=image.base||impl_->calls.ioctl!=originals.ioctl||impl_->calls.mmap!=originals.mmap
         ||impl_->calls.munmap!=originals.munmap||impl_->calls.close!=originals.close))return false;
-    impl_->base=image.base;impl_->calls=originals;impl_->reader=reader;impl_->prepared=impl_->active=true;return true;
+    if(impl_->prepared)return impl_->active;
+    impl_->file=image.file;impl_->code=image.executableSegment;impl_->base=image.base;impl_->calls=originals;impl_->reader=reader;impl_->adaptive=!legacy;impl_->layout=image.layout;impl_->prepared=impl_->active=true;return true;
 }
 void DecodeProvider::stop() noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);impl_->active=false;
@@ -112,8 +129,17 @@ OriginalIoctl DecodeProvider::originalIoctl()const noexcept{std::lock_guard<std:
 std::uintptr_t DecodeProvider::imageBase()const noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->prepared?impl_->base:0;}
 bool DecodeProvider::knownIoctl(std::uintptr_t address,unsigned long request)const noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);if(!impl_->active||address<impl_->base)return false;
+    if(impl_->adaptive){
+        if(!impl_->layout.caller(impl_->base,address))return false;
+        for(const auto& c:Calls)if(request==c.request)return true;
+        return false;
+    }
     for(const auto& c:Calls)if(address-impl_->base==c.offset&&request==c.request)return true;
     return false;
+}
+bool DecodeProvider::nativeExportCaller(std::uintptr_t address)const noexcept{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->active&&(impl_->adaptive?impl_->layout.caller(impl_->base,address):address==impl_->base+0x34574);
 }
 int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long request,void* argument) noexcept{
     const int incoming=errno;const auto original=originalIoctl();
@@ -124,7 +150,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
     InputLoss inputLoss=InputLoss::None;bool knownGap=false;
     CaptureHandoff handoff=nullptr;void* handoffContext=nullptr;CaptureObservation completed{};
     ObservationWake wake=nullptr;void* wakeContext=nullptr;bool work=false;
-    bool shape=false;const bool captureSite=caller==impl_->base+0x3242c||caller==impl_->base+0x324a8
+    bool shape=false;bool captureSite=caller==impl_->base+0x3242c||caller==impl_->base+0x324a8
         ||caller==impl_->base+0x325c8||caller==impl_->base+0x310f8||caller==impl_->base+0x32a5c;
     std::uint64_t captureGeneration=0;v4l2_buffer captureBuffer{};v4l2_plane capturePlane{};bool captureShape=false;
     if(admitted){
@@ -140,6 +166,16 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
                 else if(streamType==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE){impl_->revokeCapture(*d,false,ResetReason::CaptureStreamOff,true);work=true;}
             }
         }else shape=impl_->shape(argument,buffer,plane);
+        if(impl_->adaptive){
+            if(request==VIDIOC_S_FMT)captureSite=shape&&format.type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            else if(request==VIDIOC_REQBUFS)captureSite=shape&&requested.type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            else if(request==VIDIOC_STREAMON||request==VIDIOC_STREAMOFF)captureSite=shape&&streamType==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            else {
+                v4l2_buffer observed{};
+                const bool readable=impl_->read(&observed,argument,sizeof(observed));
+                captureSite=!readable||observed.type!=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            }
+        }
         if(d&&d->hevc){
             if(captureSite&&(request==VIDIOC_S_FMT||request==VIDIOC_REQBUFS))impl_->revokeCapture(*d,false,request==VIDIOC_S_FMT?ResetReason::CaptureFormat:ResetReason::CaptureBuffers);
             captureGeneration=d->captureGeneration;
@@ -274,7 +310,7 @@ int DecodeProvider::invokeIoctl(std::uintptr_t caller,int fd,unsigned long reque
 void* DecodeProvider::invokeMmap(std::uintptr_t caller,void* address,std::size_t size,int prot,int flags,int fd,off_t offset) noexcept{
     const int incoming=errno;OriginalMmap original;std::uint64_t generation=0;
     {std::lock_guard<std::mutex> lock(impl_->mutex);original=impl_->calls.mmap;
-        if(impl_->active&&caller==impl_->base+0x33008)if(auto* d=impl_->find(fd))generation=d->generation;}
+        if(impl_->active&&(impl_->adaptive?impl_->layout.caller(impl_->base,caller):caller==impl_->base+0x33008))if(auto* d=impl_->find(fd))generation=d->generation;}
     if(!original){errno=ENOSYS;return MAP_FAILED;}
     errno=incoming;void* result=original(address,size,prot,flags,fd,offset);const int error=errno;
     if(result!=MAP_FAILED&&generation&&address==nullptr&&prot==(PROT_READ|PROT_WRITE)&&flags==MAP_SHARED&&offset>=0){
@@ -345,7 +381,7 @@ bool selfRead(void* output,std::uintptr_t source,std::size_t n,void*) noexcept{
     iovec local{output,n},remote{reinterpret_cast<void*>(source),n};
     return process_vm_readv(getpid(),&local,1,&remote,1,0)==static_cast<ssize_t>(n);
 }
-int findMain(dl_phdr_info* info,std::size_t,void* context){
+[[maybe_unused]] int findMain(dl_phdr_info* info,std::size_t,void* context){
     if(info->dlpi_name&&*info->dlpi_name)return 0;
     auto& image=*static_cast<ImageIdentity*>(context);
     for(unsigned i=0;i<info->dlpi_phnum;++i){const auto& p=info->dlpi_phdr[i];
@@ -354,6 +390,7 @@ int findMain(dl_phdr_info* info,std::size_t,void* context){
     return 1;
 }
 int knownEntry(int fd,unsigned long request,void* argument) noexcept{
+    if(!runtime)return ::ioctl(fd,request,argument);
     return runtime->invokeIoctl(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)),fd,request,argument);
 }
 [[maybe_unused]] void* mmapEntry(void* a,std::size_t n,int prot,int flags,int fd,off_t offset) noexcept{
@@ -364,21 +401,22 @@ int knownEntry(int fd,unsigned long request,void* argument) noexcept{
 template<class To,class From>To bits(From value){static_assert(sizeof(To)==sizeof(From),"LP64 code pointers");To out{};std::memcpy(&out,&value,sizeof out);return out;}
 }
 extern "C" void* sfnp_native_decode_classify(int,unsigned long request,void*,std::uintptr_t caller) noexcept{
-    const int incoming=errno;void* target=runtime->knownIoctl(caller,request)?bits<void*>(&knownEntry):bits<void*>(runtime->originalIoctl());errno=incoming;return target;
+    const int incoming=errno;
+    void* target=!runtime?bits<void*>(static_cast<OriginalIoctl>(&::ioctl)):
+        runtime->knownIoctl(caller,request)?bits<void*>(&knownEntry):bits<void*>(runtime->originalIoctl());
+    errno=incoming;return target;
 }
 #if defined(__aarch64__)
 extern "C" void sfnp_stream_decode_ioctl_entry();
 #endif
 bool preparePinnedProcess(const Originals& originals) noexcept{
     if(runtime)return false; // Immutable published originals for process lifetime.
-    ImageIdentity image{};auto* file=std::fopen("/proc/self/exe","rb");if(!file)return false;
-    frame_receiver::Sha256 sha;std::array<std::uint8_t,65536> block{};std::size_t total=0,n=0;
-    while((n=std::fread(block.data(),1,block.size(),file))!=0){total+=n;if(total>2425024)break;sha.update(block.data(),n);}
-    const bool readOkay=!std::ferror(file)&&total==2425024;std::fclose(file);if(!readOkay)return false;
-    image.file=sha.finish();if(image.file!=ExpectedVrlinkHash)return false;
-    dl_iterate_phdr(findMain,&image);if(image.executableSegment!=ExpectedExecutableSegmentHash)return false;
+    RuntimeNativeImage observed;if(!currentNativeImage(NativeRole::Vrlink,observed))return false;
+    ImageIdentity image{observed.base,observed.file,observed.code};
+    if(image.file!=ExpectedVrlinkHash||image.executableSegment!=ExpectedExecutableSegmentHash){image.layout=observed.layout;image.publicAbiVerified=true;}
     try{auto candidate=std::make_unique<DecodeProvider>();if(!candidate->prepare(image,originals,{selfRead,nullptr}))return false;runtime=candidate.release();return true;}catch(...){return false;}
 }
+bool preparedNativeExportCaller(std::uintptr_t caller)noexcept{return runtime&&runtime->nativeExportCaller(caller);}
 void stopPinnedProcess() noexcept{if(runtime)runtime->stop();}
 bool pollPinnedProcess(Observation& fact,std::uint8_t* output,std::size_t size) noexcept{return runtime&&runtime->poll(fact,output,size);}
 bool pollPinnedCapture(CaptureObservation& fact) noexcept{return runtime&&runtime->pollCapture(fact);}

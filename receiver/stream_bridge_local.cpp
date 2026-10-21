@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "stream_bridge_local.h"
+#include "stream_bridge_native_image_runtime.h"
 #include "sha256.h"
 #include <algorithm>
 #include <array>
@@ -146,7 +147,7 @@ bool LeaseReader::epochCurrent(const LeaseReference& ref) const noexcept {
 PeerPin vrlinkPin() noexcept{return {2425024,nd::ExpectedVrlinkHash};}
 PeerPin compositorPin() noexcept{return {6026096,{{0x0b,0xb1,0x48,0xed,0xa6,0xb5,0xe5,0x4e,0x2f,0xbe,0xd0,0x9d,0x47,0x5a,0x43,0x67,0x1f,0x5f,0xf6,0xfc,0xb6,0xc2,0xb4,0xf4,0x83,0x45,0xb1,0xa9,0xfe,0x8d,0x6f,0x96}}};}
 namespace {
-bool verifyPeer(int socket,const PeerPin& pin){
+bool verifyPeer(int socket,const PeerPin& pin,nd::NativeRole role,const std::string& root){
     ucred cred{};socklen_t length=sizeof cred;if(!pin.bytes||pin.bytes>8*1024*1024||getsockopt(socket,SOL_SOCKET,SO_PEERCRED,&cred,&length)
         ||length!=sizeof cred||cred.uid!=geteuid()||cred.pid<=0)return false;
     char path[64];std::snprintf(path,sizeof path,"/proc/%d/exe",cred.pid);const int fd=open(path,O_RDONLY|O_CLOEXEC);if(fd<0)return false;
@@ -154,7 +155,8 @@ bool verifyPeer(int socket,const PeerPin& pin){
     frame_receiver::Sha256 hash;std::array<std::uint8_t,16384> buffer{};std::size_t total=0;
     while(okay&&total<pin.bytes){const auto n=read(fd,buffer.data(),std::min(buffer.size(),pin.bytes-total));if(n<=0){okay=false;break;}hash.update(buffer.data(),static_cast<std::size_t>(n));total+=static_cast<std::size_t>(n);}
     okay=okay&&fstat(fd,&after)==0&&before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&before.st_size==after.st_size
-        &&before.st_mtim.tv_sec==after.st_mtim.tv_sec&&before.st_mtim.tv_nsec==after.st_mtim.tv_nsec&&hash.finish()==pin.sha256;close(fd);return okay;
+        &&before.st_mtim.tv_sec==after.st_mtim.tv_sec&&before.st_mtim.tv_nsec==after.st_mtim.tv_nsec&&hash.finish()==pin.sha256;close(fd);
+    return okay||(role!=nd::NativeRole::None&&nd::compatibleRuntimePeer(cred.pid,role,root));
 }
 int privateParent(const std::filesystem::path& path){
     if(!path.is_absolute()||path.filename().empty())return -1;
@@ -253,6 +255,7 @@ bool decode(const std::array<std::uint8_t,HeaderBytes>& h,Message& m){
 struct Channel::Impl {
     struct Queued {bool used=false;std::array<std::uint8_t,HeaderBytes> header{};std::vector<std::uint8_t> payload;std::size_t at=0;int dma=-1,lease=-1;};
     Endpoint endpoint=Endpoint::CompositorConsumer;State state=State::Off;PeerPin pin{};
+    nd::NativeRole expectedRole=nd::NativeRole::None;std::string runtimeRoot;
     int listen=-1,socket=-1,parent=-1,ownerLock=-1;std::filesystem::path path;std::string lockName;KernelIdentity socketIdentity{};bool ownsPath=false;
     std::array<Queued,stream_bridge_native::MaxBuffers*2> outgoing{};std::size_t head=0,count=0;
     std::array<std::uint8_t,HeaderBytes> header{};std::size_t headerAt=0,payloadAt=0;Message assembling{};bool decoded=false,ready=false;
@@ -260,9 +263,17 @@ struct Channel::Impl {
         closeFd(assembling.dmabuf);closeFd(assembling.readOnlyLeases);assembling={};header={};headerAt=payloadAt=0;decoded=ready=false;state=next;}
 };
 Channel::Channel():impl_(new Impl){}Channel::~Channel(){stop();}
-bool Channel::prepare(Endpoint endpoint,const std::filesystem::path& path) noexcept{return preparePinned(endpoint,path,endpoint==Endpoint::VrlinkProducer?compositorPin():vrlinkPin());}
+bool Channel::prepare(Endpoint endpoint,const std::filesystem::path& path) noexcept{
+    if(!preparePinned(endpoint,path,endpoint==Endpoint::VrlinkProducer?compositorPin():vrlinkPin()))return false;
+    try{
+        const auto own=nd::nativeImageRole(nd::processImagePath(getpid()),&impl_->runtimeRoot);
+        if(own!=nd::NativeRole::None)impl_->expectedRole=endpoint==Endpoint::VrlinkProducer?nd::NativeRole::Compositor:nd::NativeRole::Vrlink;
+        return true;
+    }catch(...){stop();return false;}
+}
 bool Channel::preparePinned(Endpoint endpoint,const std::filesystem::path& path,const PeerPin& pin) noexcept {
     stop();try{
+        impl_->expectedRole=nd::NativeRole::None;impl_->runtimeRoot.clear();
         impl_->parent=privateParent(path);
         if(impl_->parent<0||path.string().size()>=sizeof(sockaddr_un::sun_path)||!pin.bytes||pin.bytes>8*1024*1024){stop();return false;}
         sockaddr_un address{};address.sun_family=AF_UNIX;std::strcpy(address.sun_path,path.c_str());
@@ -307,11 +318,11 @@ void Channel::tick() noexcept {
     try{
         if(impl_->state==State::Listening){const int fd=accept4(impl_->listen,nullptr,nullptr,SOCK_CLOEXEC|SOCK_NONBLOCK);
             if(fd<0){if(!pending())impl_->close(State::Lost);return;}
-            if(!verifyPeer(fd,impl_->pin)){close(fd);impl_->close(State::Refused);return;}
+            if(!verifyPeer(fd,impl_->pin,impl_->expectedRole,impl_->runtimeRoot)){close(fd);impl_->close(State::Refused);return;}
             impl_->socket=fd;closeFd(impl_->listen);impl_->state=State::Connected;}
         if(impl_->state==State::Connecting){int error=0;socklen_t size=sizeof error;
             if(getsockopt(impl_->socket,SOL_SOCKET,SO_ERROR,&error,&size)||error){impl_->close(State::Lost);return;}
-            if(!verifyPeer(impl_->socket,impl_->pin)){impl_->close(State::Refused);return;}impl_->state=State::Connected;}
+            if(!verifyPeer(impl_->socket,impl_->pin,impl_->expectedRole,impl_->runtimeRoot)){impl_->close(State::Refused);return;}impl_->state=State::Connected;}
         if(impl_->state!=State::Connected)return;
         {
             for(unsigned attempt=0;attempt<8&&impl_->count;++attempt){auto& q=impl_->outgoing[impl_->head];

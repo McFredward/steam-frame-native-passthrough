@@ -1,0 +1,61 @@
+name: Public native update contracts
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'pc/stream-bridge-native-image.h'
+      - 'receiver/stream_bridge_native*'
+      - 'layer/native_shader_contract*'
+      - 'tools/native_shader_contract*'
+      - 'tests/native_image_contract_test.cpp'
+      - 'tests/stream_bridge_native_decode_test.cpp'
+      - 'tests/test_native_shader_contract.py'
+      - '.github/workflows/native-update-tests.yml'
+  pull_request:
+    paths:
+      - 'pc/stream-bridge-native-image.h'
+      - 'receiver/stream_bridge_native*'
+      - 'layer/native_shader_contract*'
+      - 'tools/native_shader_contract*'
+      - 'tests/native_image_contract_test.cpp'
+      - 'tests/stream_bridge_native_decode_test.cpp'
+      - 'tests/test_native_shader_contract.py'
+      - '.github/workflows/native-update-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Shader semantic and public literal/ID controls
+        run: python -B tests/test_native_shader_contract.py
+      - name: Linux public image contracts and moved V4L2 callsites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/update -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/update --parallel 4 --target test_native_image_contract test_stream_bridge_native_decode
+          ctest --test-dir build/update --output-on-failure -R '^(native_image_contract|native_shader_contract|stream_bridge_native_decode|stream_bridge_native_decode_adaptive)$'
+          c++ -std=c++17 -O1 -g -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer tests/native_image_contract_test.cpp -o build/image-sanitized
+          build/image-sanitized
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Windows uses the same production PE/RTTI/import parser
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          if not exist build mkdir build
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX tests/native_image_contract_test.cpp /Fe:build\image-contract.exe /Fo:build\
+          if errorlevel 1 exit /b 1
+          build\image-contract.exe
+          exit /b %ERRORLEVEL%

@@ -73,7 +73,9 @@ PeerPin compositorPin() noexcept;
 // A private pre-existing directory owns the socket; foreign paths are preserved.
 // The consumer holds its private endpoint lock for its lifetime. A dead prior
 // owner's exact private socket may be reclaimed only after kernel/probe checks.
-// Actual SO_PEERCRED UID/PID plus peer executable hash are required on BOTH ends.
+// Actual SO_PEERCRED UID/PID plus the expected same-runtime executable are
+// required on BOTH ends. Known hashes retain their original route; shipping
+// endpoints also recognize the bounded public ELF/import contracts after updates.
 class Channel {
 public:
     static constexpr std::size_t MaximumPayload=stream_bridge_native::MaxCodedBytes;

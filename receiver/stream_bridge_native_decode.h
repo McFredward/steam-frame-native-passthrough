@@ -1,4 +1,5 @@
 #pragma once
+#include "stream_bridge_native_elf.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -14,7 +15,7 @@ constexpr std::size_t MaxCodedBytes=2*1024*1024;
 using Hash=std::array<std::uint8_t,32>;
 extern const Hash ExpectedVrlinkHash;
 extern const Hash ExpectedExecutableSegmentHash;
-struct ImageIdentity{std::uintptr_t base=0;Hash file{},executableSegment{};};
+struct ImageIdentity{std::uintptr_t base=0;Hash file{},executableSegment{};NativeElfLayout layout{};bool publicAbiVerified=false;};
 struct Reader{
     bool (*copy)(void* output,std::uintptr_t source,std::size_t bytes,void*) noexcept=nullptr;
     void* context=nullptr;
@@ -72,6 +73,7 @@ public:
     bool prepare(const ImageIdentity&,const Originals&,Reader) noexcept;
     void stop() noexcept;
     bool knownIoctl(std::uintptr_t returnAddress,unsigned long request) const noexcept;
+    bool nativeExportCaller(std::uintptr_t returnAddress)const noexcept;
     int invokeIoctl(std::uintptr_t returnAddress,int fd,unsigned long request,void* argument) noexcept;
     void* invokeMmap(std::uintptr_t returnAddress,void*,std::size_t,int,int,int,off_t) noexcept;
     int invokeMunmap(std::uintptr_t returnAddress,void*,std::size_t) noexcept;
@@ -98,6 +100,7 @@ private:
 // install a service, contact a device, or register a consumer. Exact original
 // targets must be captured from the admitted process before any later hook.
 bool preparePinnedProcess(const Originals&) noexcept;
+bool preparedNativeExportCaller(std::uintptr_t)noexcept;
 void stopPinnedProcess() noexcept;
 bool pollPinnedProcess(Observation&,std::uint8_t*,std::size_t) noexcept;
 bool pollPinnedCapture(CaptureObservation&) noexcept;

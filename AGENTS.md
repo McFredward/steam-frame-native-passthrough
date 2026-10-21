@@ -69,6 +69,11 @@
   hide Install/Update/Repair solely because a runtime differs. Installation
   confirmation enables the patch for testing, including mismatching file pins;
   never install it disabled solely because that build is untested (2026-10-21).
+  Whole-file/runtime-version pins describe tested observations, not activation
+  allowlists. Recognize bounded public APIs/layouts and unchanged shader logic
+  on both PC and Frame after updates; refuse only when necessary properties or
+  current frame/eye/source proof cannot be established. READMEs list successful
+  tested versions, not hard version compatibility limits (2026-10-21).
   Keep native ABI/shader/frame correctness checks and preserve removal/recovery.
 - PC SteamVR must remain closed after Apply, failure recovery and Undo. Never
   relaunch it to restore its historical running state (2026-10-21). A fresh run

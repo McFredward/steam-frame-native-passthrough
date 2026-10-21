@@ -1,4 +1,5 @@
 #pragma once
+#include "stream-bridge-native-image.h"
 #include "stream-bridge-sender-provider-directmode.h"
 #include "stream-bridge-sender-provider-core.h"
 #include "stream-bridge-source-contract.h"
@@ -200,6 +201,7 @@ public:
     SenderCoverage(const SenderCoverage&)=delete;
     SenderCoverage& operator=(const SenderCoverage&)=delete;
     bool configure(std::uintptr_t verifiedNativeModule)noexcept;
+    bool configure(std::uintptr_t verifiedNativeModule,const NativeImageLayout&)noexcept;
     void tick()noexcept;
     void sourceProcess(std::uint32_t processId,bool metadataBudget=false)noexcept; // Cold live-app format lease; zero revokes.
     void stop()noexcept;
