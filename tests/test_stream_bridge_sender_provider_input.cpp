@@ -290,6 +290,7 @@ void run(){
     table.nvEncDestroyEncoder(handle);bridge.stop();check(!bridge.encoderStates()[0].encoder,"destroyed source epoch not exposed to worker");
 }
 void olderCodecPeer(){
+    allowAugment=true; // Independent process, no state inherited from run().
     NvencBoundary bridge({{1}});activeBoundary=&bridge;bridge.setOutputAugmenter({augment,nullptr});
     NV_ENCODE_API_FUNCTION_LIST table{};table.version=NV_ENCODE_API_FUNCTION_LIST_VER;
     check(bridge.create(factory,&table)==NV_ENC_SUCCESS,"older codec test uses actual wrapped NVENC boundary");
