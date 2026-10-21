@@ -21,7 +21,26 @@ class Tests(fixtures.Tests):
                 for p in self.fhome.rglob('*') if p.is_file()}
 
     def pc_candidate(self):
-        self.install_component_fixture(pc='0.2.12',frame='0.2.12')
+        if os.name=='nt':
+            # The Frame's Linux launcher/permission rules cannot be installed
+            # on Windows temp paths. Only the remote inventory is a fixture on
+            # this host; the PC wizard, file update, checkpoints and lifecycle
+            # remain production methods. Linux runs the actual Frame inventory
+            # and paired transaction cases separately.
+            self.version_bundle('0.2.12','0.2.12')
+            b.LocalInstall(s,self.local).install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+            observed={'installed':True,'installed_version':'0.2.12','active_pair':self.pair['pair_id'],
+                'patch_payload_current':True,'component_files_current':True,'owned_files_current':True,
+                'runtime_configuration_current':True,'files_current':False,'runtime_admitted':True,
+                'activation_mode':'active','recovery_pending':False,'legacy_installed':False,
+                'architecture':'aarch64','runtime_compatible':True,'runtime_snapshot':self.unit.snapshot(self.bundle)}
+            # Observable remote files belong to this fixture only, never the PC
+            # runtime or an actual Frame. A PC-only operation cannot change them.
+            for name in self.bundle.frame['files']:
+                path=self.froot/Path(name).relative_to('frame');s.put(path,self.bundle.files[name])
+            self.unit=types.SimpleNamespace(inventory=lambda bundle:copy.deepcopy(observed),
+                tx=types.SimpleNamespace(state=lambda:{'version':'0.2.12','pair':self.pair['pair_id']}))
+        else:self.install_component_fixture(pc='0.2.12',frame='0.2.12')
         name='pc-provider/bin/win64/driver_steam_link_native_passthrough.dll';path=self.bundle_root/name
         raw=path.read_bytes()+b' PC-only candidate';s.put(path,raw,path.read_bytes())
         self.manifest['files'][name]={'bytes':len(raw),'sha256':s.sha(raw)}
@@ -91,6 +110,7 @@ class Tests(fixtures.Tests):
         self.assertIn('bridge_pc_only_plan',run.messages);self.assertIn('bridge_pc_only_installed',run.messages)
         self.assertIn('pc-stop',run.events);self.assertNotIn('pc-restore',run.events)
 
+    @unittest.skipIf(os.name=='nt','Actual Linux Frame inventory/transaction is exercised by the Linux job.')
     def test_unchanged_frame_payload_is_current_despite_new_global_bundle(self):
         self.pc_candidate();inventory=self.unit.inventory(self.bundle)
         self.assertFalse(inventory['files_current'])
@@ -186,6 +206,7 @@ class Tests(fixtures.Tests):
         self.assertEqual(run.result,2);self.assert_frame_read_only(before,run)
         self.assertTrue((self.local.root/b.PC_ONLY_RECORD).exists());self.assertNotIn('pc-stop',run.events)
 
+    @unittest.skipIf(os.name=='nt','Actual Linux Frame inventory/transaction is exercised by the Linux job.')
     def test_untested_unchanged_inactive_frame_stays_untouched(self):
         self.change_runtime('frame','vrlink')
         self.version_bundle('0.2.12','0.2.12');self.assertEqual(self.checked_wizard(action='install').result,0)
@@ -195,6 +216,7 @@ class Tests(fixtures.Tests):
         self.assertEqual(run.result,0);self.assert_frame_read_only(before,run)
         self.assertIn('bridge_untested_confirm',run.questions)
 
+    @unittest.skipIf(os.name=='nt','Actual Linux Frame inventory/transaction is exercised by the Linux job.')
     def test_actual_frame_version_change_keeps_paired_prepare_and_restart(self):
         self.pc_candidate();name='frame/'+b.LIBRARY;path=self.bundle_root/name;raw=path.read_bytes()+b' actual Frame candidate'
         s.put(path,raw,path.read_bytes());self.manifest['files'][name]={'bytes':len(raw),'sha256':s.sha(raw)}
@@ -205,6 +227,7 @@ class Tests(fixtures.Tests):
         self.assertIn('bridge_picture',run.questions);self.assertIn('bridge_install_plan',run.messages)
         self.assertNotIn('bridge_pc_only_plan',run.messages)
 
+    @unittest.skipIf(os.name=='nt','Actual Linux Frame inventory/transaction is exercised by the Linux job.')
     def test_target_frame_helper_change_requires_frame_preparation(self):
         self.pc_candidate();name='frame/tools/compositor_startup_health.py';path=self.bundle_root/name
         raw=path.read_bytes()+b'# actual helper change\n';s.put(path,raw,path.read_bytes())
