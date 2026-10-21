@@ -8,6 +8,15 @@ void run(){
  SourceIpcRequest parsed;check(readSourceRequest(request,0x12345678,parsed),"hand checked SBN1 golden accepted");check(parsed.processId==0x12345678&&parsed.nonce[0]==17&&parsed.nonce[15]==99,"exact kernel PID and nonce kept");
  for(unsigned byte:{0u,4u,6u,8u,10u,12u,16u,20u,40u,63u,127u}){auto bad=request;bad[byte]^=1;SourceIpcRequest original=parsed;check(!readSourceRequest(bad,0x12345678,parsed),"malformed version/flags/PID/reserved refused");check(parsed.processId==original.processId&&parsed.nonce==original.nonce,"invalid request cannot change authority");}
  check(!readSourceRequest(request,0x12345679,parsed)&&!readSourceRequest(request,0,parsed),"kernel client PID cannot be replaced by payload");auto empty=request;for(unsigned i=24;i<40;++i)empty[i]=0;check(!readSourceRequest(empty,0x12345678,parsed),"zero nonce refused");
+ auto v2=request;v2[6]=2;SourceIpcRequest budget;
+ check(readSourceRequest(v2,0x12345678,budget)&&budget.metadataBudget,"v2 explicitly opts this kernel-validated producer into metadata accounting");
+ auto future=v2;future[6]=3;check(!readSourceRequest(future,0x12345678,budget),"unknown future source versions cannot request policy");
+ Nonce v2binding{};v2binding[0]=4;
+ auto budgetReply=sourceReply(budget,99,v2binding,8,true);
+ check(budgetReply[6]==2&&budgetReply[10]==5,"v2 reply acknowledges budget separately from ordinary RGBA format authority");
+ SourceIpcPermission policy;policy.update(budget,99,{v2binding,8,true},true);
+ check(policy.metadataBudget(),"only a granted live v2 pipe enables rate policy");
+ policy.reset();check(!policy.metadataBudget(),"EOF or stop revokes rate policy with source permission");
  Nonce binding{};binding[0]=21;auto reply=sourceReply(parsed,0x87654321,binding,0x0102030405060708ull,true);check(reply[4]==2&&reply[10]==1&&reply[20]==0x21&&reply[23]==0x87&&reply[24]==17&&reply[39]==99&&reply[40]==21&&reply[56]==8&&reply[63]==1,"reply handchecked LE fields, echoed nonce and source preparation flag");
 
  SourceIpcPermission permission;SourceIpcState waiting{},compatible{binding,17,true};

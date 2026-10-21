@@ -28,7 +28,7 @@ struct Client {
 SourceIpcMessage request(std::uint32_t pid,unsigned nonce){SourceIpcMessage out{};std::memcpy(out.data(),"SBN1",4);out[4]=1;out[6]=1;out[8]=128;out[12]=1;for(unsigned i=0;i<4;++i)out[16+i]=std::uint8_t(pid>>(8*i));out[24]=std::uint8_t(nonce);return out;}
 void run(){
  State observed;SourceIpcServer server([](std::uint32_t,void* p){auto&s=*static_cast<State*>(p);++s.preparations;return s.ready;},&observed,
-     [](std::uint32_t pid,void* p)noexcept{auto&s=*static_cast<State*>(p);s.contract.publish(pid);if(pid)++s.grants;else ++s.revokes;});
+     [](std::uint32_t pid,bool budget,void* p)noexcept{auto&s=*static_cast<State*>(p);s.contract.publish(pid,budget);if(pid)++s.grants;else ++s.revokes;});
  SourceIpcState peer;peer.compatible=true;peer.generation=19;peer.binding[0]=31;
  wchar_t name[96]{};std::swprintf(name,96,L"\\\\.\\pipe\\SFNP.StreamBridge.V1.%lu",GetCurrentProcessId());
  server.tick(peer);const auto pid=GetCurrentProcessId();std::uint64_t first=0;
@@ -49,10 +49,11 @@ void run(){
  for(unsigned i=0;i<10;++i)server.tick(peer);
  {
      const auto preparations=observed.preparations;
-     Client client(name);const auto input=request(pid,8);client.send(input);check(client.receive(server,peer)[10]==1,"same actual kernel process reconnects with a new nonce");
+     Client client(name);auto input=request(pid,8);input[6]=2;client.send(input);check(client.receive(server,peer)[10]==5,"same actual kernel process reconnects with a new nonce and explicit v2 budget policy");
      check(observed.preparations>preparations,"new live client must revalidate native source preparation after EOF");
      check(observed.contract.snapshot(pid)!=first&&!observed.contract.current(first,pid),"native reconnect cannot revive the old capture declaration");
-     server.stop();check(!observed.contract.snapshot(pid),"explicit native stop revokes immediately without another tick");
+     check(observed.contract.budgetAuthority(pid)==observed.contract.snapshot(pid),"only this real v2 pipe publishes its current metadata budget authority");
+     server.stop();check(!observed.contract.snapshot(pid)&&!observed.contract.budgetAuthority(pid),"explicit native stop revokes immediately without another tick");
  }
 }
 }

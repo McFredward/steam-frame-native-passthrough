@@ -37,7 +37,7 @@ void NvencBoundary::retireSubmissions(Session& s){
 }
 std::uint64_t NvencBoundary::revoke(Session& s,bool retainRegistrations){
     s.adapter.stop();s.initialized=false;s.hevc=false;s.encoded=false;
-    s.contractKnown=false;s.reconfiguring=false;retireSubmissions(s);
+    s.contractKnown=false;s.reconfiguring=false;s.wireBudget.reset();s.budgetApplied=false;retireSubmissions(s);
     if(!retainRegistrations){s.maps={};s.resources={};}
     s.probeQueued=false;
     s.generation=nextGeneration_==std::numeric_limits<std::uint64_t>::max()?0:++nextGeneration_;
@@ -158,6 +158,7 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
     NV_ENC_INITIALIZE_PARAMS contract{};NV_ENC_CONFIG config{};bool hasConfig=false;
     const bool known=hevc&&snapshotContract(*init,contract,config,hasConfig);
     std::uint64_t generation=0;bool qos=false;
+    NV_ENC_RECONFIGURE_PARAMS budgeted{};NV_ENC_CONFIG budgetConfig{};bool applyBudget=false,applyingBudget=false;
     {
         std::lock_guard<std::mutex> guard(self.mutex_);count(self.reconfigureStats_.total);
         self.reconfigureStats_.lastWidth=width;self.reconfigureStats_.lastHeight=height;
@@ -167,6 +168,29 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
             qos=self.enabled_&&unchanged&&!params->resetEncoder&&!params->reserved;
             if(qos){
                 generation=s->generation;s->reconfiguring=true;
+                const auto authority=s->adapter.mutualConfirmed()&&s->adapter.probeObserved()&&self.augmenter_.budgetAuthority?self.augmenter_.budgetAuthority(self.augmenter_.context):0;
+                const auto metadata=s->wireBudget.reserve(authority,contract.frameRateNum,contract.frameRateDen);
+                const auto& requestedConfig=hasConfig?config:s->contractConfig;
+                const bool haveConfig=hasConfig||s->contractHasConfig;
+                if(metadata&&haveConfig&&requestedConfig.rcParams.averageBitRate&&
+                   (requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_CBR||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_VBR
+                    ||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_CBR_LOWDELAY_HQ
+                    ||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_CBR_HQ||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_VBR_HQ)){
+                    budgeted=*params;budgetConfig=requestedConfig;
+                    const auto requested=requestedConfig.rcParams.averageBitRate;
+                    budgetConfig.rcParams.averageBitRate=WireBudget::videoRate(requested,metadata);
+                    if(requestedConfig.rcParams.maxBitRate)budgetConfig.rcParams.maxBitRate=std::max(budgetConfig.rcParams.averageBitRate,WireBudget::videoRate(requestedConfig.rcParams.maxBitRate,metadata));
+                    budgeted.reInitEncodeParams.encodeConfig=&budgetConfig;applyBudget=applyingBudget=true;
+                    count(self.reconfigureStats_.budgeted);self.reconfigureStats_.requestedVideoRate=requested;
+                    self.reconfigureStats_.appliedVideoRate=budgetConfig.rcParams.averageBitRate;self.reconfigureStats_.metadataRate=metadata;
+                }else if(s->budgetApplied&&!hasConfig&&haveConfig){
+                    // NULL retains the DRIVER's last rate, which may be our
+                    // adjusted value. Restore the caller's saved original rate
+                    // explicitly when the producer policy is withdrawn.
+                    budgeted=*params;budgetConfig=requestedConfig;
+                    budgeted.reInitEncodeParams.encodeConfig=&budgetConfig;applyBudget=true;
+                }
+
             }else{generation=self.revoke(*s,hevc);count(self.reconfigureStats_.revoked);}
         }
     }
@@ -176,13 +200,15 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
     // their normal exact receipts available DURING it as well as after return;
     // a temporary blanket barrier emitted an uncertified video frame. Changed,
     // resetting, nested or unknown contracts already revoke before this call.
-    const auto result=self.original_.nvEncReconfigureEncoder(encoder,params);
+    const auto result=self.original_.nvEncReconfigureEncoder(encoder,applyBudget?&budgeted:params);
     std::lock_guard<std::mutex> guard(self.mutex_);self.reconfigureStats_.lastStatus=static_cast<int>(result);
     if(auto s=self.find(encoder);s&&generation&&s->generation==generation){
         if(qos){
             s->reconfiguring=false;
+            if(applyingBudget){if(result==NV_ENC_SUCCESS)count(self.reconfigureStats_.budgetAccepted);else count(self.reconfigureStats_.budgetRejected);}
             if(self.enabled_&&(result==NV_ENC_SUCCESS||result==NV_ENC_ERR_INVALID_PARAM)){
                 if(result==NV_ENC_SUCCESS){
+                    s->budgetApplied=applyingBudget;
                     // NULL means retain the existing deep-copied configuration.
                     if(!hasConfig){config=s->contractConfig;hasConfig=s->contractHasConfig;}
                     saveContract(*s,contract,config,hasConfig,true);count(self.reconfigureStats_.preservedSuccessful);
@@ -303,7 +329,10 @@ NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* pa
         }
         if(candidate.data!=original.data){s->output=params->outputBitstream;s->ticket=ticket;
             params->bitstreamBufferPtr=const_cast<std::uint8_t*>(candidate.data);
-            params->bitstreamSizeInBytes=static_cast<std::uint32_t>(candidate.size);}
+            params->bitstreamSizeInBytes=static_cast<std::uint32_t>(candidate.size);
+            const auto authority=evidence.coverageSessionAuthorized&&self.augmenter_.budgetAuthority?self.augmenter_.budgetAuthority(self.augmenter_.context):0;
+            s->wireBudget.observe(authority,original.size,candidate.size);
+        }
     }catch(...){if(ticket)s->adapter.complete(ticket,false,s->channel);s->augmented.clear();} // Exact original successful output on any refusal.
 
     return result;

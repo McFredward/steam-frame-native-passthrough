@@ -610,3 +610,71 @@ fades have GPU/software evidence and still require headset tests, Demeo first.
 They do not change PC0.2.14, Frame0.2.12, this archive or any Gloomhaven code.
 No new Battles, Battlemarked or Gloomhaven hardware result is claimed. Loading
 without an admitted current eye image is separate from a game material fade.
+
+## Producer metadata rate accounting (dev PC0.2.15)
+
+The October21 Battles1.4.20 headset test confirms the scenario fades are gone
+and no unsolicited recenter was noticed. The scoped legacy avatar guard executes
+at19:49:24.969, followed by three guarded automatic viewpoints at19:49:52.
+The remaining blackout has a different, recorded failure chain: at19:50:18.529
+FEC retries begin for frame6853 after last good frame6852. Backtrack-window
+failures and unrecoverable FEC follow at18.575/18.595, with late metadata for6858
+and6853. The native decoder stops progressing, requests I-frames and hard-resets
+at19:50:19.599. PC encoder reset requests start at19:50:19.751. Frame camera
+pauses at18.614–19.815 and20.538–20.691 accompany source retirement and renewal.
+Those are real stream/camera interruptions, not another game material fade.
+The private twelve-file hashed capture is retained in the Demeo debug directory
+as `frame-battles1420-20261021-195224`; Frame access was read-only logs.
+
+The user confirms automatic Steam Link bitrate. RSSI around startup/exit is
+roughly-29/-30dBm; no matching WLAN disconnect is recorded. These facts do not
+prove a clean data path or identify WLAN versus native scheduling as the sole
+packet-loss cause. There are no recorded emergency handoff timeouts. The sender
+adds451,046,711 bytes to1,352,068,879 original video bytes across6,285 masked AUs
+(33.36% extra before native FEC/IP overhead). Automatic rate control still passes
+its requested video rate directly to NVENC; our metadata is appended afterward.
+The returned complete AU size is correct, but that does not reserve encoder
+budget for independently generated coverage bytes.
+
+PC0.2.15 adds an explicitly requested application-source v2 policy. Its record
+is the same128-byte layout, with version2 and reply flag4 acknowledging rate
+accounting alongside format flag1. All reserved bytes remain zero. A v1 client,
+including current GloomhavenVR, retains the exact historical native QoS pointer
+and configuration. Kernel PID, nonce, live pipe, prepared source and peer checks
+remain required; EOF/opt-out removes policy. Source policy is separate from every
+image/mask/camera permission. Demeo1.4.21 requests v2 by default and reconnects
+with v1 on older companions. Its INI AccountMaskBandwidth=false uses v1 directly.
+
+For an authenticated current encoder and opted-in producer, a fixed32-sample
+window measures complete added AU bytes, including owned framing and HEVC escape
+bytes. After eight samples, a known same-contract native Reconfigure reserves
+the measured metadata bits per second inside the caller's requested average/max
+video rates. It uses only documented bitrate modes and checked frame rates.
+The original caller data is never modified, nor is another native call or reset
+injected. Resolution, frame rate, source identity, lossless mask precision, HEVC
+format and native FEC/reprojection policy are unchanged. Video compression can
+increase under load. A25% video-rate floor bounds the quality reduction; a
+metadata load above the remaining budget is not claimed to fit. NULL-config QoS
+uses the caller's saved original config, and explicitly restores that rate on
+policy withdrawal rather than retaining the previously adjusted driver value.
+New source/encoder epochs cannot reuse old measurements.
+
+Cold five-second diagnostics report attempts, actual native acceptance/refusal,
+requested/passed video rates and measured metadata rate. No new render-thread
+I/O, waits, GPU work or allocation is introduced. No unknown-loss proof is
+weakened and no previous frame's mask is substituted. The current Frame source
+loss still withdraws camera permission; this candidate does not hide a genuine
+stream loss by leaving camera settings permanently enabled.
+
+The production NVENC fixture observes actual forwarded native arguments, caller
+immutability, accepted/rejected status, NULL-config restoration, v1 compatibility
+and source-window isolation. Restoring just the original unaccounted native
+argument makes its rate assertion fail. Actual Windows pipe tests cover v2
+policy admission and withdrawal; source/alpha/Gloomhaven boundary regressions
+remain required. These are software results. They prove correction of the
+reproduced budget overrun, not that every packet-loss blackout is eliminated.
+Hardware acceptance requires a new extended Battles test and current budget/
+FEC counters. Frame0.2.12 and installer0.2.14 retain their versions; every Frame
+payload/manifest pin must remain byte-identical. The existing component-scoped
+installer performs only the PC update when Frame already matches. No device
+write, install or service restart was performed during development.

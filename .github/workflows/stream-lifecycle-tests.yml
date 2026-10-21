@@ -5,6 +5,8 @@ on:
     paths:
       - 'bridge/stream_bridge_control.*'
       - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-wire-budget.h'
+      - 'tests/check_sender_wire_budget.py'
       - 'pc/stream-bridge-sender-provider-runtime.*'
       - 'receiver/stream_bridge_native_runtime.*'
       - 'receiver/stream_bridge_native_decode.*'
@@ -22,6 +24,8 @@ on:
     paths:
       - 'bridge/stream_bridge_control.*'
       - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-wire-budget.h'
+      - 'tests/check_sender_wire_budget.py'
       - 'pc/stream-bridge-sender-provider-runtime.*'
       - 'receiver/stream_bridge_native_runtime.*'
       - 'receiver/stream_bridge_native_decode.*'
@@ -61,5 +65,7 @@ jobs:
         run: |
           cmake -S . -B build/lifecycle -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
           cmake --build build/lifecycle --parallel 4 --target test_stream_bridge_control test_stream_bridge_native_runtime test_stream_bridge_native_decode test_stream_bridge_local test_stream_bridge_sender_provider test_stream_bridge_sender_provider_input test_stream_bridge_sender_provider_runtime test_stream_bridge_sender_coverage_gates
+      - name: Require the original missing-budget causal control to fail
+        run: python3 tests/check_sender_wire_budget.py --sdk "$PWD/build/nvenc-sdk" --bridge-library "$PWD/build/lifecycle/libsfnp_stream_bridge.a" --output "$PWD/build/wire-budget-control"
       - name: Exercise actual TCP admission, reconfiguration and frame receipts
         run: ctest --test-dir build/lifecycle --output-on-failure --parallel 4 -R '^stream_bridge_(control|native_runtime|native_decode|local|sender_coverage_gates|sender_provider(_input|_runtime)?)$'

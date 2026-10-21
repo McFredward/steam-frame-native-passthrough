@@ -6,11 +6,11 @@
 #include <cwchar>
 namespace stream_bridge::sender {
 struct SourceIpcServer::Impl {
-    Prepared prepared;void* context;Changed changed;std::uint32_t published=0;HANDLE pipe=INVALID_HANDLE_VALUE;OVERLAPPED connect{},read{},write{};
+    Prepared prepared;void* context;Changed changed;std::uint32_t published=0;bool publishedBudget=false;HANDLE pipe=INVALID_HANDLE_VALUE;OVERLAPPED connect{},read{},write{};
     bool connecting=false,reading=false,writing=false,connected=false,cancelling=false,accepted=false;unsigned writes=0;
     SourceIpcMessage request{},reply{},previous{};SourceIpcRequest client{};SourceIpcPermission permission{};std::uint8_t unexpected=0;
     Impl(Prepared p,void* c,Changed notify):prepared(p),context(c),changed(notify){connect.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);read.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);write.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);}
-    void publish(std::uint32_t pid){if(published!=pid){published=pid;if(changed)changed(pid,context);}}
+    void publish(std::uint32_t pid,bool budget=false){if(published!=pid||publishedBudget!=budget){published=pid;publishedBudget=budget;if(changed)changed(pid,budget,context);}}
     bool done(OVERLAPPED& op,DWORD& bytes){return GetOverlappedResult(pipe,&op,&bytes,FALSE)!=0;}
     bool pending(OVERLAPPED& op){DWORD bytes=0;if(done(op,bytes))return false;return GetLastError()==ERROR_IO_INCOMPLETE;}
     void cancel(){permission.reset();publish(0);if(pipe==INVALID_HANDLE_VALUE)return;cancelling=true;CancelIoEx(pipe,nullptr);DisconnectNamedPipe(pipe);}
@@ -61,7 +61,7 @@ struct SourceIpcServer::Impl {
         // permission synchronously, and a new client must prepare again.
         const bool sourcePrepared=permission.process()==client.processId||prepared(client.processId,context);
         const auto next=permission.update(client,GetCurrentProcessId(),state,sourcePrepared);
-        publish(permission.process());
+        publish(permission.process(),permission.metadataBudget());
         if(writes&&next==previous)return;
         if(writes>=256){cancel();return;} // Bounded connection telemetry, no timer.
         reply=next;previous=next;ResetEvent(write.hEvent);writing=true;++writes;

@@ -1,6 +1,7 @@
 #pragma once
 #include "stream-bridge-sender.h"
 #include "stream-bridge-sender-backend.h"
+#include "stream-bridge-wire-budget.h"
 #include <nvEncodeAPI.h> // Explicit, hash-pinned SDK 11.1 input; never downloaded at build time.
 #include <array>
 #include <atomic>
@@ -42,12 +43,17 @@ struct OutputAugmenter {
     // completes any preliminary discovery ticket as unsent.
     bool (*augment)(Bytes,const NvencOutputEvidence&,std::vector<std::uint8_t>&,void*)=nullptr;
     void* context=nullptr;
+    // Optional producer policy, supplied by a live kernel-validated v2 source.
+    // Zero preserves the complete historical encoder behavior (v1 clients).
+    std::uint64_t (*budgetAuthority)(void*) noexcept=nullptr;
 };
 struct ReconfigureStats {
     std::uint64_t total=0,preservedSuccessful=0,preservedRejected=0,revoked=0;
     std::uint64_t overlappingInputs=0,overlappingOutputs=0;
     int lastStatus=0;std::uint32_t lastWidth=0,lastHeight=0;
     bool lastContractKnown=false,lastSameContract=false,lastResetEncoder=false;
+    std::uint64_t budgeted=0,budgetAccepted=0,budgetRejected=0;
+    std::uint32_t requestedVideoRate=0,appliedVideoRate=0,metadataRate=0;
 };
 struct OutputStats {
     std::uint64_t locks=0,exact=0,unmatched=0,completedBeforeEncodeReturn=0;
@@ -86,6 +92,7 @@ private:
         SenderAdapter adapter{};VerifiedChannel channel{};
         NV_ENC_INITIALIZE_PARAMS contract{};NV_ENC_CONFIG contractConfig{};
         bool contractKnown=false,contractHasConfig=false,reconfiguring=false;
+        WireBudget wireBudget;bool budgetApplied=false;
         struct Resource {NV_ENC_REGISTERED_PTR registered=nullptr;void* native=nullptr;std::uint64_t generation=0;std::uint32_t width=0,height=0,subresource=0;NV_ENC_BUFFER_FORMAT format=NV_ENC_BUFFER_FORMAT_UNDEFINED;};
         struct Map {NV_ENC_INPUT_PTR mapped=nullptr;NV_ENC_REGISTERED_PTR registered=nullptr;std::uint64_t generation=0,resourceGeneration=0;};
         struct Submission {NvencOutputEvidence evidence{};bool accepted=false,locked=false;};

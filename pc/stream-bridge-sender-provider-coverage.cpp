@@ -409,7 +409,7 @@ struct SenderCoverage::Impl {
 };
 std::atomic<SenderCoverage::Impl*> SenderCoverage::Impl::instance{nullptr};
 SenderCoverage::SenderCoverage(DirectModeBoundary& d,NvencBoundary& b,ControlRuntime& c):impl_(new Impl(d,b,c)){
-    b.setDeviceObserver({Impl::deviceOpened,impl_.get()});b.setInputObserver({Impl::inputCapture,Impl::inputRetire,impl_.get()});b.setOutputAugmenter({Impl::augment,impl_.get()});
+    b.setDeviceObserver({Impl::deviceOpened,impl_.get()});b.setInputObserver({Impl::inputCapture,Impl::inputRetire,impl_.get()});b.setOutputAugmenter({Impl::augment,impl_.get(),[](void* context)noexcept{auto&s=*static_cast<Impl*>(context);return s.sourceContract.budgetAuthority(s.lastPid.load(std::memory_order_acquire));}});
 }
 SenderCoverage::~SenderCoverage(){stop();(void)impl_.release();} // callbacks/COM retained until process exit
 bool SenderCoverage::configure(std::uintptr_t module)noexcept{std::lock_guard<std::mutex> lock(impl_->mutex);if(impl_->module||!module)return false;impl_->module=module;return true;}
@@ -439,7 +439,7 @@ void SenderCoverage::tick()noexcept{
         s.refresh(inventory);
     }catch(...){s.prepared=false;s.state=5;}
 }
-void SenderCoverage::sourceProcess(std::uint32_t pid)noexcept{impl_->sourceContract.publish(pid);}
+void SenderCoverage::sourceProcess(std::uint32_t pid,bool budget)noexcept{impl_->sourceContract.publish(pid,budget);}
 void SenderCoverage::stop()noexcept{
     auto& s=*impl_;s.sourceContract.publish(0);s.enabled=false;s.prepared=false;s.lastPid=0;s.preparedPid=0;s.state=8;
     std::lock_guard<std::mutex> lock(s.mutex);s.stopped=true;

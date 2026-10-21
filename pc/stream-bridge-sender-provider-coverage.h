@@ -201,7 +201,7 @@ public:
     SenderCoverage& operator=(const SenderCoverage&)=delete;
     bool configure(std::uintptr_t verifiedNativeModule)noexcept;
     void tick()noexcept;
-    void sourceProcess(std::uint32_t processId)noexcept; // Cold live-app format lease; zero revokes.
+    void sourceProcess(std::uint32_t processId,bool metadataBudget=false)noexcept; // Cold live-app format lease; zero revokes.
     void stop()noexcept;
     bool ready(std::uint32_t processId)const noexcept;
     bool operational(std::uint32_t processId)const noexcept;

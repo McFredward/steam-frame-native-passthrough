@@ -82,3 +82,14 @@ Its history and [MIT license](LICENSE) are preserved; native transparency is
 developed here by McFredward and contributors.
 
 Unofficial project, not affiliated with Valve.
+
+## Producer metadata budget candidate (PC0.2.15)
+
+Demeo1.4.21 can request rate accounting for its additional lossless coverage
+traffic. The PC-only candidate reserves measured metadata inside the requested
+video bitrate; video compression may increase under load. Resolution/frame rate
+and mask precision are retained. Current GloomhavenVR v1 clients keep their
+original encoder behavior. Frame0.2.12 and installer0.2.14 are unchanged; matching
+Frame files/settings/services require no update or restart. This corrects a
+reproduced budget overrun, not a guarantee against all native packet-loss resets.
+See the [capture and validation limits](docs/development/FRAME-CONTINUITY.md#producer-metadata-rate-accounting-dev-pc0215).

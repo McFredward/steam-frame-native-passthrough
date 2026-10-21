@@ -115,7 +115,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
     stream_bridge::sender::SenderRuntime runtime_{boundary()};stream_bridge::ControlRequest request_{};
     stream_bridge::sender::SenderCoverage coverage_{directMode(),boundary(),runtime_.control()};
     stream_bridge::sender::SourceIpcServer sourceIpc_{[](std::uint32_t pid,void* context){return static_cast<Provider*>(context)->coverage_.ready(pid);},this,
-        [](std::uint32_t pid,void* context)noexcept{static_cast<Provider*>(context)->coverage_.sourceProcess(pid);}};
+        [](std::uint32_t pid,bool budget,void* context)noexcept{static_cast<Provider*>(context)->coverage_.sourceProcess(pid,budget);}};
     void** directSlots_=nullptr;std::array<void*,8> directOriginal_{},directWrapped_{};
     void report(const char* status){if(log_){char text[384]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
     bool configure(){
@@ -239,6 +239,16 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             report(text);++reconfigureReports;
             reportedSuccess=stats.preservedSuccessful!=0;reportedRejection=stats.preservedRejected!=0;reportedRevoke=stats.revoked!=0;
             nextReconfigureReport=stats.total>~std::uint64_t(0)/8?~std::uint64_t(0):stats.total*8;
+        };
+        auto nextBudgetReport=std::chrono::steady_clock::time_point{};std::uint64_t budgetReports=0;
+        const auto reportWireBudget=[&](bool final){
+            const auto now=std::chrono::steady_clock::now();if(!final&&now<nextBudgetReport)return;
+            nextBudgetReport=now+std::chrono::seconds(5);
+            const auto stats=boundary().reconfigureStats();if(!stats.budgeted||(!final&&stats.budgeted==budgetReports))return;
+            budgetReports=stats.budgeted;char text[320]{};
+            std::snprintf(text,sizeof text,"producer wire budget: attempts/accepted/rejected=%llu/%llu/%llu; last video requested/passed=%u/%u bit/s; measured added metadata=%u bit/s; producer-v2 only, original wire format and exact coverage retained",
+                static_cast<unsigned long long>(stats.budgeted),static_cast<unsigned long long>(stats.budgetAccepted),static_cast<unsigned long long>(stats.budgetRejected),
+                stats.requestedVideoRate,stats.appliedVideoRate,stats.metadataRate);report(text);
         };
         // Atomic metadata is sampled/formatted only here, never inside a D3D
         // callback. Refusal populations distinguish the actual first gate from
@@ -416,13 +426,14 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 }
                 last=runtime_.state();reportState(stream_bridge::sender::runtimeStateName(last));
             }
-            if(request_.explicitlyEnabled){reportReconfigure(false);reportCoverage(false);reportFailure();}
+            if(request_.explicitlyEnabled){reportReconfigure(false);reportWireBudget(false);reportCoverage(false);reportFailure();}
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(8),[this]{return stopped_;});
         }
         report("sender worker stopping");
         report(stream_bridge::sender::runtimeStateName(runtime_.state()));
         report(coverage_.stateName());
         reportReconfigure(true);
+        reportWireBudget(true);
         reportCoverage(true);
         reportFailure();
         sourceIpc_.stop();runtime_.stop();

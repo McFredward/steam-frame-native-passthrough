@@ -5,6 +5,7 @@ on:
     paths:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-wire-budget.h'
       - 'tests/test_stream_bridge_sender_stage_pipeline.cpp'
       - 'tests/test_stream_bridge_sender_provider_input.cpp'
       - 'tests/check_sender_continuity.py'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'pc/stream-bridge-sender-provider-core.*'
+      - 'pc/stream-bridge-wire-budget.h'
       - 'tests/test_stream_bridge_sender_stage_pipeline.cpp'
       - 'tests/test_stream_bridge_sender_provider_input.cpp'
       - 'tests/check_sender_continuity.py'

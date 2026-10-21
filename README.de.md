@@ -82,3 +82,15 @@ Die Vorgeschichte und [MIT-Lizenz](LICENSE) bleiben erhalten; native Transparenz
 wird hier von McFredward und Mitwirkenden entwickelt.
 
 Inoffizielles Projekt, nicht mit Valve verbunden.
+
+## Kandidat für das Datenbudget (PC0.2.15)
+
+Demeo1.4.21 kann die zusätzliche verlustfreie Maskenübertragung in das
+Videobudget einrechnen lassen. Unter Last kann die Videokompression steigen;
+Auflösung, Bildrate und Maskengenauigkeit bleiben erhalten. GloomhavenVR nutzt
+weiter seinen bisherigen v1-Pfad. Frame0.2.12 und Installer0.2.14 bleiben
+unverändert; bei passender Frame-Installation ist kein Update oder Neustart
+der Frame nötig. Ob dies auch den beobachteten Stream-Ausfall verhindert,
+muss ein neuer Headset-Test zeigen. Die
+[Untersuchung](docs/development/FRAME-CONTINUITY.md#producer-metadata-rate-accounting-dev-pc0215)
+trennt Softwareprüfung und Hardware-Ergebnis.

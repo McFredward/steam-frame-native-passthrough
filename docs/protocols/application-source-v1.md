@@ -78,3 +78,20 @@ Test server/client PID mismatch, malformed/partial replies and EOF independently
 Portable record tests do not establish Windows named-pipe behavior or a correct
 headset image. Proton does not make Linux SteamVR a supported Windows provider;
 a Linux host requires its own native backend and source-identity contract.
+
+## Optional producer metadata budget (v2, PC0.2.15)
+
+The same pipe accepts a separately requested version2 record. Its layout, PID,
+nonce, reserved bytes and image-format profile are unchanged. A positive v2
+reply has flag1 plus flag4, acknowledging that this producer requests accounting
+for its additional coverage traffic inside the native encoder's video budget.
+Flag4 alone cannot grant format permission and never grants image/camera proof.
+V1 records/replies and their original encoder behavior remain unchanged.
+
+The policy belongs to the live kernel-validated source generation. EOF, opt-out
+and another producer withdraw it. An updated client can try v2, then reconnect
+with a fresh nonce using v1 after an older provider rejects/closes the request.
+A current accepted v2 session must not have a simultaneous fallback observer.
+Rate accounting can increase video compression under metadata load; it changes
+neither resolution/frame rate nor the lossless mask. See the
+[bounded policy and evidence](../development/FRAME-CONTINUITY.md#producer-metadata-rate-accounting-dev-pc0215).
