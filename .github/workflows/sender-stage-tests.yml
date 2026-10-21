@@ -53,6 +53,7 @@ jobs:
           cmake --build build/stages --parallel 4 --target test_stream_bridge_sender_stage_pipeline test_stream_bridge_sender_provider_input
           build/stages/test_stream_bridge_sender_stage_pipeline | tee build/stage-pipeline.log
           build/stages/test_stream_bridge_sender_provider_input | tee build/input-association.log
+          build/stages/test_stream_bridge_sender_provider_input --legacy-codec | tee build/legacy-codec.log
       - name: Build and run same production native source pipeline on Windows
         if: runner.os == 'Windows'
         shell: cmd
@@ -72,6 +73,10 @@ jobs:
           build\input-association.exe >build\input-association.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\input-association.log
+          if not "%SFNP_RESULT%"=="0" exit /b %SFNP_RESULT%
+          build\input-association.exe --legacy-codec >build\legacy-codec.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\legacy-codec.log
           exit /b %SFNP_RESULT%
       - name: Require cross-stage reader coupling to fail the deterministic pipeline
         if: runner.os == 'Linux'

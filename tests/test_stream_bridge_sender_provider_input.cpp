@@ -324,4 +324,6 @@ void olderCodecPeer(){
     table.nvEncUnlockBitstream(handle,output);table.nvEncDestroyEncoder(handle);bridge.stop();
 }
 }
-int main(){try{run();olderCodecPeer();std::printf("sender public input association: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"input association failed after %u: %s\n",checks,e.what());return 1;}}
+// The native API table is a process-lifetime singleton. Run legacy negotiation
+// in a separate process instead of relying on optimized stack-address reuse.
+int main(int argc,char** argv){try{if(argc==2&&!std::strcmp(argv[1],"--legacy-codec"))olderCodecPeer();else run();std::printf("sender public input association: %u checks PASS\n",checks);return 0;}catch(const std::exception& e){std::fprintf(stderr,"input association failed after %u: %s\n",checks,e.what());return 1;}}

@@ -68,4 +68,4 @@ jobs:
       - name: Require the original missing-budget causal control to fail
         run: python3 tests/check_sender_wire_budget.py --sdk "$PWD/build/nvenc-sdk" --bridge-library "$PWD/build/lifecycle/libsfnp_stream_bridge.a" --output "$PWD/build/wire-budget-control"
       - name: Exercise actual TCP admission, reconfiguration and frame receipts
-        run: ctest --test-dir build/lifecycle --output-on-failure --parallel 4 -R '^stream_bridge_(control|native_runtime|native_decode|local|sender_coverage_gates|sender_provider(_input|_runtime)?)$'
+        run: ctest --test-dir build/lifecycle --output-on-failure --parallel 4 -R '^stream_bridge_(control|native_runtime|native_decode|local|sender_coverage_gates|sender_provider(_input(_legacy)?|_runtime)?)$'
