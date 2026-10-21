@@ -172,7 +172,8 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
                 const auto metadata=s->wireBudget.reserve(authority,contract.frameRateNum,contract.frameRateDen);
                 const auto& requestedConfig=hasConfig?config:s->contractConfig;
                 const bool haveConfig=hasConfig||s->contractHasConfig;
-                if(metadata&&haveConfig&&requestedConfig.rcParams.averageBitRate&&
+                if(metadata&&haveConfig&&requestedConfig.rcParams.averageBitRate
+                   &&(!requestedConfig.rcParams.maxBitRate||requestedConfig.rcParams.maxBitRate>=requestedConfig.rcParams.averageBitRate)&&
                    (requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_CBR||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_VBR
                     ||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_CBR_LOWDELAY_HQ
                     ||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_CBR_HQ||requestedConfig.rcParams.rateControlMode==NV_ENC_PARAMS_RC_VBR_HQ)){

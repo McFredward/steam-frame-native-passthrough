@@ -216,6 +216,10 @@ void run(){
     check(rates.budgeted==1&&rates.budgetAccepted==1&&!rates.budgetRejected&&rates.requestedVideoRate==100000000&&rates.appliedVideoRate==32800000&&rates.metadataRate==67200000,"cold accounting reports requested video, applied video and escaped metadata separately");
     reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
     check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_ERR_INVALID_PARAM&&bridge.generation(handle)==qosGeneration,"a native refusal is forwarded without pretending the budget was applied or revoking valid input");
+    codecConfig.rcParams.maxBitRate=1;
+    check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_ERR_INVALID_PARAM&&receivedRateParams==&qos&&receivedMaximum==1,
+        "unsupported original max-below-average config reaches native validation unchanged, never normalized by rate policy");
+    codecConfig.rcParams.maxBitRate=120000000;
     reconfigureResult=NV_ENC_SUCCESS;qos.reInitEncodeParams.encodeConfig=nullptr;
     table.nvEncReconfigureEncoder(handle,&qos);
     check(receivedRateParams!=&qos&&receivedRate==32800000,"NULL-config QoS still accounts metadata against the caller's saved original config");
@@ -236,7 +240,7 @@ void run(){
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"QoS never resurrects a resource unregistered by the native callback");release();
     table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"native re-registration gets fresh valid input after QoS");release();
-    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==13&&qosStats.preservedRejected==2,"cold QoS counters distinguish successes from rejected attempts");
+    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==13&&qosStats.preservedRejected==3,"cold QoS counters distinguish successes from rejected attempts");
     check(qosStats.overlappingInputs==1&&qosStats.overlappingOutputs==2,"cold counters identify exact completions across both QoS overlap schedules");
     const auto paddingStart=offsetof(NV_ENC_INITIALIZE_PARAMS,privDataSize)+sizeof qos.reInitEncodeParams.privDataSize;
     const auto paddingEnd=offsetof(NV_ENC_INITIALIZE_PARAMS,privData);
