@@ -1,7 +1,7 @@
 {
   "archive": {
-    "bytes": 18325128,
-    "sha256": "c542a75c445c41295188f4969e0a42e8dc34f98beaa300fd71d8e521da17c939"
+    "bytes": 18328529,
+    "sha256": "b32fc207aaf79797b3f5a7d699bb06cd2e59f8a1f5e72bf295e6a77a702adfda"
   },
   "artifacts": {
     "frame_layer": {
@@ -13,13 +13,13 @@
       "sha256": "3ee160069c02826cf6312e8644a98d5dd148d3afac58a67bfee0987bae79e2ec"
     },
     "pc_provider": {
-      "bytes": 1287168,
-      "sha256": "390f1a86c4516fc06e2e13019c85160c495ffe66a0fe21b35e0ab8d83df85af7"
+      "bytes": 1289728,
+      "sha256": "c448a44c929b2eadf49612180176882d8990bb607cb4c6989c25ca2dfbe3873b"
     }
   },
   "component_versions": {
     "frame": "0.2.12",
-    "pc": "0.2.12"
+    "pc": "0.2.14"
   },
   "device_actions": false,
   "hardware_verified": false,
@@ -29,7 +29,7 @@
   "result": "PASS",
   "runtime_profile": {
     "bytes": 9587,
-    "sha256": "67c73c1ef1152a5309ed5cef4fa0406dac857a3f0e47adefaadb36252de7b518"
+    "sha256": "a8add0a6eb88a53846d9e2b55fe9b3b220d8c16c1391aad0bae498aee01efbc9"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -39,11 +39,11 @@
     },
     "PATCH_VERSIONS.json": {
       "bytes": 80,
-      "sha256": "f816e7e403454791375810c6b418924ee2d4d00e4a294ffa9054fdd22c8f8bba"
+      "sha256": "56a0b47d498bf6b4a83077eabaa1e28ac75a68f51d67b358a1fe5092fcbdf161"
     },
     "VERSION": {
       "bytes": 7,
-      "sha256": "a2360447b0685602375f211322ff397b0eb8be1d291f4c95173fccb189d19175"
+      "sha256": "26e6ebd4b069ddb03df79ec9a299ee4a39c60bf8d34a2b6a3ff059d4f2e21b88"
     },
     "packaging/setup-openssh.json": {
       "bytes": 1029,
@@ -114,24 +114,24 @@
       "sha256": "d9c112646f124f792aeefa4de7721c972f0537688a844c9f9b5512a17c897ccc"
     },
     "setup/steam_link_setup_textual.py": {
-      "bytes": 59713,
-      "sha256": "8dc4f61d5907a1a6f9a7b13abe8516efe7a25aa6f93c02289190ec393bd425c1"
+      "bytes": 59855,
+      "sha256": "3298d94454b63f1067a6add2496ed8754135751dd19d6e5c8f4ebbcab409173d"
     },
     "setup/steam_link_setup_ui.py": {
-      "bytes": 78373,
-      "sha256": "3815acdfe6a76c51bebb4c0b6764413ebf0b5270586dea25a237766687b16a0e"
+      "bytes": 81965,
+      "sha256": "a09b4a8294fc149ecd09e430728ffcaeb312ebbcfcee29c3ebdd1e80e5129a15"
     },
     "setup/steam_link_setup_vendor.py": {
       "bytes": 2108,
       "sha256": "00208745e459d4d0303dbcde8c2bc9c3e1c20072eeeb48a025396c7bdb4d62a1"
     },
     "setup/steam_link_setup_workflow.py": {
-      "bytes": 10825,
-      "sha256": "e33b15e371b6ed03532df82853c02404557725311fa8e9c266d7d75c4ea63233"
+      "bytes": 11433,
+      "sha256": "06dcc953d97bdea5aad9740e2513514ab7ee6cf514ff336fd3bd72f81db45208"
     },
     "setup/stream_bridge_install.py": {
-      "bytes": 158743,
-      "sha256": "9c9778f148731624d331e5ffd2ae768a6a7bbf79730414249011bce0a147543b"
+      "bytes": 168174,
+      "sha256": "9cb87c5a6cb163c63fe2e0a6dbe3ef8d572ab59f85c64ba0e7badcdbaaaebd81"
     },
     "third_party/lz4/LICENSE": {
       "bytes": 1311,
@@ -170,8 +170,8 @@
       "sha256": "fe07748a2ba42932aa98e2526cd477f73b75860d0b962878aca5940768f1d2a7"
     },
     "tools/package_stream_bridge.py": {
-      "bytes": 17903,
-      "sha256": "d4df87615fc5d7082dddc6fa7e9fa02197b535b862c54cb610794dadc21974b8"
+      "bytes": 18029,
+      "sha256": "126426e8f026c88920bd6d075cd04aacf6ce65b4c0a355f1752a205d37342484"
     },
     "tools/package_stream_link_setup.py": {
       "bytes": 7826,
@@ -186,7 +186,7 @@
       "sha256": "1cd6c79752e2cdc87dd74e02b2f75ac75aba2d3e3c852653c4bacb3ad8e6b734"
     }
   },
-  "source_revision": "dea5ca7d252e63b91445fe0b470d38aa09bb7591",
+  "source_revision": "29c5c5d0b60a8627f8ece35d3d466c8dc9ad30a4",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -204,9 +204,9 @@
       "hardware_verified": false,
       "pin": {
         "bytes": 6767,
-        "sha256": "a4272f37f9964672d67f03346ecb9cd9db0d695d19d15b161a8e859a8fb3a976"
+        "sha256": "e5fbd2d286f398e8ada98cc7f0a8c87d4a0f5aa2fb1a27f180e8bb553f649678"
       }
     }
   ],
-  "version": "0.2.13"
+  "version": "0.2.14"
 }
