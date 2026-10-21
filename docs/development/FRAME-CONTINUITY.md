@@ -473,3 +473,41 @@ quality, tracking origin or native FEC policy is changed speculatively.
 This PC-only candidate does not claim the long reset fixed. Frame0.2.12 and
 installer0.2.13 retain their independent versions. Device work remains limited
 to the already secured read-only logs; no unattended installation or restart.
+
+
+## Component-scoped setup (installer0.2.14)
+
+The maintainer's October21 instruction requires a PC-only patch update to leave
+the working Frame patch and services untouched. Earlier per-component version
+reporting did not scope the Apply workflow: even a PC-only native update called
+Frame prepare/commit, lifecycle snapshot/restart/health and Frame finalization.
+The new regression reproduces those exact calls before the repair.
+
+Frame inventory now compares all target Frame-owned files independently of the
+global bundle hash, retaining native/generated payload, actual ownership,
+version, runtime configuration, activation and pending-recovery checks. With an
+unchanged current Frame, matching pairing and the existing listener endpoint,
+a PC update/repair uses separate production ports. The ports admit only the
+read-only Frame inventory RPC. They preserve pairing/listener settings, stop
+only verified PC SteamVR processes, install/verify PC files and finish only PC
+journals. A missing/changed Frame component, runtime configuration or endpoint
+requires the existing paired plan instead of silently extending a PC-only plan.
+
+A private bounded PC scope record precedes PC runtime/file changes. It binds
+interrupted retries and Undo to PC recovery, including fresh installer processes.
+Before deleting PC completion journals, the record stores the finalization
+boundary and exact current PC receipt hash. A partial/lost finalization reply
+therefore offers cleanup only, without replaying Apply, restoring the Frame,
+restarting it or asking about its picture. Changed/unknown records are preserved.
+Ctrl+C retains scope and exact checkpoints without automatic recovery.
+
+The production temp-file fixture checks success, failures after real PC file
+publication, failed pre-stop snapshots, Ctrl+C/resume/Undo, exact real PC
+lifecycle persistence, finalization failure/lost reply, unknown/changed records,
+inactive unchanged Frame, target Frame payload/helper changes and repeated
+status checks. Frame bytes, permissions, mtime and inode remain identical during
+PC-only cases; every Frame command must be inventory. Mixed updates retain
+Frame preparation and one restart/picture flow. Existing paired workflow,
+rollback, UI, package and native artifact-pin checks remain required. These are
+software fixtures, not device operations or a new Gloomhaven headset result.
+PC0.2.13 and Frame0.2.12 binary payloads remain byte-for-byte unchanged.

@@ -11,6 +11,10 @@ class Workflow:
     def __init__(self,ports,ui):
         self.ports=ports;self.ui=ui;self._cancellation_reported=False
 
+    @property
+    def frame_required(self):
+        return getattr(self.ports,'frame_required',True) is not False
+
     def check_cancelled(self):
         cancelled=getattr(self.ui,'cancelled',None)
         if cancelled and cancelled():raise KeyboardInterrupt()
@@ -107,7 +111,7 @@ class Workflow:
                 try:self.ports.failure(error,recovery=restored)
                 except Exception:pass
                 self.check_cancelled()
-                self.ui.say('bridge_finalize_incomplete')
+                self.ui.say('bridge_finalize_incomplete' if self.frame_required else 'bridge_pc_finalize_incomplete')
                 self.check_cancelled()
                 action=self.ui.choose_action(['retry','exit'],recommended='retry')
                 self.check_cancelled()
@@ -144,8 +148,8 @@ class Workflow:
                     self.ports.restart_original()
                     self.check_cancelled()
                     healthy=self.healthy(original=True)
-                    if not healthy:raise self.ports.error('The original Frame startup could not be confirmed; recovery remains incomplete.')
-                    if not self.picture(original=True):
+                    if not healthy:raise self.ports.error('The original installation could not be confirmed; recovery remains incomplete.')
+                    if self.frame_required and not self.picture(original=True):
                         raise self.ports.error('The original Frame picture could not be confirmed; recovery remains incomplete.')
                     self.check_cancelled()
                     break
@@ -154,14 +158,14 @@ class Workflow:
                     self.check_cancelled()
                     self.ports.failure(error,recovery=True)
                     self.check_cancelled()
-                    self.ui.say('bridge_recovery_incomplete')
+                    self.ui.say('bridge_recovery_incomplete' if self.frame_required else 'bridge_pc_recovery_incomplete')
                     self.check_cancelled()
                     action=self.ui.choose_action(['retry','exit'],recommended='retry')
                     self.check_cancelled()
                     if action!='retry':return False
-            # Yes is a boundary: cleanup cannot restart recovery afterwards.
+            # Verification is a boundary: cleanup cannot restart recovery.
             if not self.finish_confirmed(restored=True):return False
-            self.announce_completed('bridge_rolled_back')
+            self.announce_completed('bridge_rolled_back' if self.frame_required else 'bridge_pc_rolled_back')
             return True
         except KeyboardInterrupt as error:
             self.retain_cancelled(error,recovery=True)
@@ -173,27 +177,28 @@ class Workflow:
                 try:
                     self.check_cancelled()
                     if reconcile:
-                        self.ui.say('bridge_pending_apply')
+                        self.ui.say('bridge_pending_apply' if self.frame_required else 'bridge_pc_pending_apply')
                         self.check_cancelled()
                         self.ports.reconcile_for_apply()
                         self.check_cancelled()
                     self.ports.begin()
                     self.check_cancelled()
-                    self.ui.say('bridge_stopping')
+                    self.ui.say('bridge_stopping' if self.frame_required else 'bridge_pc_only_stopping')
                     self.check_cancelled()
                     self.ports.stop_pc()
                     self.check_cancelled()
                     self.ports.prepare(action)
                     self.check_cancelled()
-                    self.ui.say('bridge_starting')
-                    self.check_cancelled()
-                    self.ports.restart_prepared()
-                    self.check_cancelled()
+                    if self.frame_required:
+                        self.ui.say('bridge_starting')
+                        self.check_cancelled()
+                        self.ports.restart_prepared()
+                        self.check_cancelled()
                     if not self.healthy():
-                        raise self.ports.error('The prepared Frame startup failed its health check.')
-                    self.ui.say('bridge_health_ok')
+                        raise self.ports.error('The prepared installation failed its health check.')
+                    self.ui.say('bridge_health_ok' if self.frame_required else 'bridge_pc_health_ok')
                     self.check_cancelled()
-                    picture=self.picture()
+                    picture=self.picture() if self.frame_required else True
                     # A concurrent Ctrl+C overrides even a just-resolved Yes
                     # or explicit Undo selection; neither may proceed afterward.
                     self.check_cancelled()
@@ -215,10 +220,10 @@ class Workflow:
                     if answer!='retry':return 2
                 else:
                     # Keep finalization outside the automatic failure recovery
-                    # scope. The user has just confirmed this running picture.
+                    # scope. Required file/startup/picture checks passed.
                     if not self.finish_confirmed(restored=False):return 2
                     self.announce_completed('bridge_pc_stopped',
-                        'bridge_removed' if action=='uninstall' else 'bridge_installed')
+                        'bridge_removed' if action=='uninstall' else 'bridge_installed' if self.frame_required else 'bridge_pc_only_installed')
                     return 0
         except KeyboardInterrupt as error:
             self.retain_cancelled(error)

@@ -991,6 +991,15 @@ class FrameInstall:
                 value=operations.get(str(self.root/name))
                 raw=base64.b64decode(value['bytes'],validate=True) if value and value['kind']=='file' else b''
                 patch_current=patch_current and len(raw)==pin['bytes'] and self.e.sha(raw)==pin['sha256']
+        # The complete Frame payload is independent of the global bundle pin.
+        # A changed PC DLL/installer does not make unchanged Frame files stale.
+        component_files_current=state is not None
+        if state:
+            for name in bundle.frame['files']:
+                owned=operations.get(str(self.root/Path(name).relative_to('frame')))
+                raw=base64.b64decode(owned['bytes'],validate=True) if owned and owned['kind']=='file' else b''
+                pin=bundle.value['files'][name]
+                component_files_current=component_files_current and len(raw)==pin['bytes'] and self.e.sha(raw)==pin['sha256']
         configuration_current=state is not None
         if state and state.get('activation_mode','active')=='active':
             provider=bundle.frame['runtime_files']['openvr'];observed=snapshot['openvr']
@@ -1007,6 +1016,7 @@ class FrameInstall:
                 'runtime_versions':self.e.runtime_versions(self.steamvr),
                 'installed':state is not None,'files_current':current,
                 'patch_payload_current':patch_current,'owned_files_current':intact,
+                'component_files_current':component_files_current,
                 'runtime_configuration_current':configuration_current,
                 'recovery_pending':(self.root/'setup-restore.json').exists() or (self.root/'lifecycle.json').exists(),
                 'legacy_installed':(self.home/'.config/SteamFrameNativePassthrough/install.json').exists(),
@@ -1922,6 +1932,41 @@ def terminal_scope(engine,ui,remote):
     return ui.suspend() if ui and getattr(remote,'needs_terminal',True) else engine.nullcontext()
 
 
+PC_ONLY_SCOPE='sfnp-pc-only-update-v1'
+PC_ONLY_RECORD='pc-only-update.json'
+
+
+def pc_only_scope(engine,local):
+    path=engine.no_links(local.root/PC_ONLY_RECORD)
+    if not os.path.lexists(path):return None
+    value=engine.parse(engine.read(path,4096,private=True))
+    engine.require(type(value)is dict and set(value)=={'schema','bundle','pair','completion'} and
+        value['schema']==PC_ONLY_SCOPE and type(value['bundle'])is str and re.fullmatch('[0-9a-f]{64}',value['bundle']) and
+        type(value['pair'])is str and re.fullmatch('[0-9a-f]{32}',value['pair']),
+        'Unknown PC-only recovery scope was preserved.')
+    completion=value['completion']
+    engine.require(completion is None or type(completion)is dict and set(completion)=={'restored','receipt'} and
+        type(completion['restored'])is bool and (completion['receipt'] is None or
+        type(completion['receipt'])is str and re.fullmatch('[0-9a-f]{64}',completion['receipt'])),
+        'Unknown PC-only completion scope was preserved.')
+    return value
+
+
+def frame_component_current(bundle,frame):
+    return (type(frame)is dict and frame.get('installed')is True and not frame.get('recovery_pending') and not frame.get('legacy_installed') and
+        frame.get('installed_version') is not None and frame.get('installed_version')==bundle.frame.get('version') and
+        all(frame.get(key)is True for key in ('patch_payload_current','component_files_current','owned_files_current','runtime_configuration_current')) and
+        frame.get('runtime_admitted')==(frame.get('activation_mode')=='active'))
+
+
+def pc_only_candidate(bundle,state,frame,address):
+    if not state or not frame_component_current(bundle,frame) or state['pair']!=frame.get('active_pair'):return False
+    # Keep the existing pairing and listener endpoint. A network move needs a
+    # separately planned paired update of the Frame's receiver.conf as well.
+    settings=state['settings']['baseline'][SETTINGS_SECTION]['keys']
+    return settings['controlListenAddress']['installed']==local_address(address)
+
+
 class Automation:
     """Production ports for the confirmed, recoverable setup workflow."""
     def __init__(self,engine,bundle,local,installed,remote,ui,context,factory,address,login):
@@ -2111,6 +2156,95 @@ class Automation:
         if isinstance(error,self.e.SetupError):print(str(error),file=sys.stderr)
 
 
+class PcOnlyAutomation(Automation):
+    """Update/recover PC-owned files only; all Frame operations are read-only."""
+    frame_required=False
+
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self.scope_path=self.e.no_links(self.local.root/PC_ONLY_RECORD)
+        self.pc_snapshot_ready=(self.local.root/'lifecycle.json').exists()
+
+    def call(self,command,**values):
+        self.e.require(command=='bridge-inventory','A PC-only operation cannot change or restart the Frame.')
+        return super().call(command,**values)
+
+    def begin(self):
+        self.require_runtime_approval(consume=True)
+        state=self.installed.state();frame=self.call('bridge-inventory')
+        self.e.require(pc_only_candidate(self.bundle,state,frame,self.address),
+            'The PC-only plan changed. Check both devices again before applying a different plan.')
+        value={'schema':PC_ONLY_SCOPE,'bundle':self.bundle.pin,'pair':state['pair'],'completion':None}
+        previous=pc_only_scope(self.e,self.local)
+        self.e.require(previous is None or previous['completion']is None and previous['pair']==state['pair'],
+            'Finish the recorded PC-only operation before starting another update.')
+        before=self.e.read(self.scope_path,4096,private=True) if previous else None
+        self.e.put(self.scope_path,self.e.encoded(value),before)
+        self.pc=self.local.inventory();self.runtime.snapshot();self.pc_snapshot_ready=True
+        self.local.apply_started=True
+
+    def prepare(self,action):
+        self.e.require(action in ('update','repair'),'A PC-only plan requires an existing paired installation.')
+        state=self.installed.state();scope=pc_only_scope(self.e,self.local)
+        self.e.require(state is not None and scope is not None and state['pair']==scope['pair'],
+            'The original PC pairing is required for this PC-only update.')
+        pair=self.local.pairing(state['pair']);settings=state['settings']['baseline'][SETTINGS_SECTION]['keys']
+        self.phase('pc_install')
+        self.installed.install(self.bundle,self.local.inventory(),pair,
+            settings['controlListenAddress']['installed'],settings['controlPort']['installed'],
+            backup=True,runtime_consent=self.consent('pc'))
+        self.inactive=self.installed.state().get('activation_mode')=='inactive'
+
+    def prepared_health(self):
+        self.phase('pc_install')
+        state=self.installed.state();status=self.installed.payload_status(self.bundle,state)
+        return bool(state and state.get('version')==self.bundle.pc.get('version') and
+            status['patch_payload_current'] and status['owned_files_current'])
+
+    def restore_files(self,*,continuation=False):
+        self.phase('rollback');self.pc_recovery_error=None
+        if self.pc_snapshot_ready or (self.local.root/'lifecycle.json').exists():
+            self.runtime.snapshot();self.pc_snapshot_ready=True;self.runtime.stop()
+        result=self.installed.checkpoint().restore()
+        if result['registered'] is not None:
+            desired=result['registered'];pc=self.local.inventory()
+            if bool(pc.get('registered'))!=desired:
+                self.installed.registration(pc,desired,self.bundle.pc['runtime_files']['vrpathreg'])
+            self.e.require(bool(self.local.inventory().get('registered'))==desired,
+                'The original PC driver registration could not be restored.')
+
+    def restart_original(self):
+        if self.pc_snapshot_ready or (self.local.root/'lifecycle.json').exists():self.runtime.restore()
+
+    def original_health(self):
+        self.installed.checkpoint().verify_restored()
+        return True
+
+    def reconcile_for_apply(self):
+        self.require_runtime_approval()
+        self.restore_files(continuation=True)
+        self.installed.checkpoint().reconcile(self.bundle.pin)
+
+    def finish(self,*,restored):
+        # Persist the finalization boundary before deleting either PC journal.
+        # Re-entry after a lost reply/partial cleanup only finishes PC records;
+        # it cannot enter the paired Frame recovery or replay installation.
+        scope=pc_only_scope(self.e,self.local)
+        if scope is None:
+            self.e.require(not (self.local.root/'setup-restore.json').exists() and
+                not (self.local.root/'lifecycle.json').exists(),'PC-only recovery scope is missing; existing records were preserved.')
+            return
+        receipt=self.e.sha(self.e.read(self.installed.receipt,2*1024*1024,private=True)) if self.installed.receipt.exists() else None
+        completion={'restored':restored,'receipt':receipt}
+        self.e.require(scope['completion'] is None or scope['completion']==completion,
+            'The completed PC installation changed; its recovery records were preserved.')
+        if scope['completion'] is None:
+            scope={**scope,'completion':completion}
+            self.e.put(self.scope_path,self.e.encoded(scope),self.e.read(self.scope_path,4096,private=True))
+        self.installed.checkpoint().finish(restored=restored);self.runtime.finish()
+        self.e.remove_owned(self.scope_path,self.e.read(self.scope_path,4096,private=True))
+
+
 def support_paths(local,context):
     """Show durable evidence before Undo prompts and again on terminal failures."""
     if context.get('paths_printed'):return
@@ -2268,7 +2402,8 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         if type(path)is str and path.startswith('/') and path.endswith('/SteamLinkNativePassthrough/stream-bridge/setup-restore.json') and len(path)<=2048 and not any(c in path for c in ('\n','\r','\x00')) and '..' not in path.split('/'):
             context['frame_recovery']=path
     available=bundle.value['readiness']=='release' and bundle.pc['reviewed'] and bundle.frame['reviewed'] and local.system=='Windows'
-    state=installed.state()
+    state=installed.state();pc_scope=pc_only_scope(e,local)
+    pc_finishing=pc_scope is not None and pc_scope['completion'] is not None
     pc_versions=version_status(state,bundle.pc)
     frame_versions={'installed':frame.get('installed'),'installed_version':patch_version(frame.get('installed_version')),
                     'target_version':patch_version(bundle.frame.get('version'))} if frame is not None else {
@@ -2301,7 +2436,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         # Presentation after a committed operation cannot turn a successful
         # installation into rollback. A lost read-only refresh leaves an honest
         # status notice; the exact completed operation and logs stay intact.
-        if not hasattr(ui,'inventory'):return
+        if not hasattr(ui,'inventory') or remote is None:return
         try:
             current_pc=local.inventory()
             with terminal_scope(e,ui,remote):current_frame=remote.call(request(bundle,'bridge-inventory'))
@@ -2313,25 +2448,27 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         if downgrade:ui.say('version_downgrade')
         display_inventory(pc,frame)
     actions=['retry','check','exit']
-    pending=(local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
-    if pending and frame is not None:actions.insert(0,'rollback')
+    pending=pc_scope is not None or (local.root/'setup-restore.json').exists() or (local.root/'lifecycle.json').exists() or frame is not None and frame.get('recovery_pending')
+    if pending and (frame is not None or pc_scope is not None):actions.insert(0,'rollback')
     if frame is not None and (pending or state or frame.get('installed') or frame.get('legacy_installed')):actions.insert(0,'uninstall')
     frame_snapshot=frame.get('runtime_snapshot',{}) if frame is not None else {}
     frame_present=frame_snapshot and all(frame_snapshot.get(role,{}).get('format_valid') for role in ('vrlink','compositor','fragment'))
     components_current=all(v['installed'] and v['target_version'] is not None and
         v['installed_version']==v['target_version'] for v in versions.values()) and report['pc']['patch_payload_current'] and frame is not None and frame.get('patch_payload_current') is True
     if available and not downgrade and frame is not None and pc_snapshot['vrlink']['format_valid'] and (frame_present or frame.get('runtime_compatible')):
-        if state is None:actions.insert(0,'install')
+        if pc_scope is not None:actions.insert(0,'update')
+        elif state is None:actions.insert(0,'install')
         elif components_current or state['bundle']==bundle.pin and frame.get('files_current') is True:actions.insert(0,'repair')
         else:actions.insert(0,'update')
     recommended='install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'rollback' if pending else 'check'
     if components_current and not pending and report['pc']['owned_files_current'] and frame.get('owned_files_current') is True and frame.get('runtime_configuration_current') is True and bool(pc.get('registered'))==(report['pc']['activation_mode']=='active') and all(
             item['runtime_admitted']==(item['activation_mode']=='active') for item in (report['pc'],frame)):
         recommended='check'
+    if pc_finishing:actions=['retry','check','exit'];recommended='retry'
     resumed=context.pop('confirmed_apply',None)
     if resumed is not None:
         e.require(type(resumed)is dict and set(resumed)=={'bundle','intent'} and resumed['bundle']==bundle.pin and
-                  resumed['intent'] in ('install','update','repair'),
+                  resumed['intent'] in ('install','update','repair','uninstall'),
                   'The recovered operation does not match this checked package.')
         # Recovery can restore the original legacy-only baseline. An update
         # then becomes a fresh installation of the SAME already-confirmed
@@ -2346,25 +2483,39 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         if action=='check' and ui:ui.say('check_finish')
         return 0
     e.require(interactive and action in actions,'That action is not available for this checked package.')
+    if pc_finishing:
+        if action!='retry':return 0
+        context['operation_action']='pc-finalize'
+        ports=PcOnlyAutomation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
+        flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
+        ui.say('bridge_pc_finalize_pending')
+        restored=pc_scope['completion']['restored']
+        result=0 if flow.finish_confirmed(restored=restored) else 2
+        if result==0:
+            flow.announce_completed('bridge_pc_rolled_back' if restored else 'bridge_pc_only_installed')
+            refresh_inventory()
+        return result
     if action=='retry':return -1
+    pc_plan=action in ('update','repair') and (not pending or pc_scope is not None) and pc_only_candidate(bundle,state,frame,address)
     def confirm(key,*,remove=False):
         if resumed is not None:return True
         accepted=ui.confirm_uninstall() if remove else ui.confirm(key)
         if log:log.event('preflight','result',action=action,status='ok' if accepted else 'cancelled')
         return accepted
     if action=='rollback':
-        ui.say('bridge_recovery_pending')
-        if not confirm('bridge_recover_confirm'):return 0
+        ui.say('bridge_recovery_pending' if pc_scope is None else 'bridge_pc_recovery_pending')
+        if not confirm('bridge_recover_confirm' if pc_scope is None else 'bridge_pc_recover_confirm'):return 0
     elif action=='uninstall':
         ui.say('bridge_remove_plan')
         if not confirm('confirm_uninstall',remove=True):return 0
     else:
         bundle.admit(local.system)
-        ui.say('bridge_install_plan')
+        ui.say('bridge_pc_only_plan' if pc_plan else 'bridge_install_plan')
         if hasattr(ui,'version_plan'):ui.version_plan(pc=pc_versions,frame=frame_versions)
         if not confirm('bridge_confirm'):return 0
     context['operation_action']=action
-    ports=Automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
+    automation=PcOnlyAutomation if pc_plan or pc_scope is not None else Automation
+    ports=automation(e,bundle,local,installed,remote,ui,context,factory,address,args.user)
     if action in ('install','update','repair') and not ports.confirm_runtime():return 0
     flow=load_helper(e,'steam_link_setup_workflow').Workflow(ports,ui)
     def completed(result):
@@ -2372,13 +2523,13 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
             refresh_inventory()
             if ports.inactive:ui.say('bridge_untested_installed')
         return result
-    if pending and action in ('install','update','repair','uninstall'):
+    if pending and action in ('install','update','repair','uninstall') and not (pc_scope is not None and not pc_plan):
         result=flow.run(action,reconcile=True)
         return completed(result)
     if pending or action=='rollback':
-        ui.say('bridge_recovery_pending')
+        ui.say('bridge_recovery_pending' if pc_scope is None else 'bridge_pc_recovery_pending')
         if not flow.recover():return 2
-        if action in ('install','update','repair'):
+        if action in ('install','update','repair') or pc_scope is not None and action=='uninstall':
             context['confirmed_apply']={'bundle':bundle.pin,'intent':action}
         if action=='rollback':refresh_inventory()
         return 0 if action=='rollback' else -1

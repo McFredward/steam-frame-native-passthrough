@@ -190,7 +190,8 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
         ('Run patch-steam-link.cmd on Windows. Confirmed setup prepares Frame files while its interface stays running, then coordinates and monitors the required restart.\n'
          if release else 'Checks only: installation and pairing are deliberately blocked in this prototype.\n')+
         'The Linux PC sender is not included. Native-derived shaders are generated locally, never shipped.\n'+
-        'Setup closes only verified PC SteamVR processes and leaves PC SteamVR closed. It restarts/checks the Frame interface and asks you to confirm the picture.\n'+
+        'Setup closes only verified PC SteamVR processes and leaves PC SteamVR closed. PC-only updates preserve Frame files, settings and services without a Frame restart.\n'+
+        'When Frame changes are needed, setup restarts/checks its interface and asks you to confirm the picture.\n'+
         'A failed start restores the exact original operation checkpoint and restarts the original Frame interface. Incomplete recovery offers Retry.\n'+
         'Use the current guided paired setup. There is no Frame-only atlas fallback.\n').encode()
     engine.require(len(files)<4096 and sum(map(len,files.values()))<=MAX_EXPANDED,'Setup package exceeds its bounded inventory.')

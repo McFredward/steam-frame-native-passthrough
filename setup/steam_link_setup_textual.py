@@ -880,7 +880,7 @@ class SetupApp(App[int]):
         notice.set_class(state == "warning" or key in ("bridge_partial", "bridge_recovery_incomplete", "bridge_recovery_pending", "missing", "bridge_untested_installed"), "warning")
         notice.set_class(state == "ok", "ok")
         self.add_detail(value)
-        if key in ("bridge_installed", "bridge_removed", "bridge_rolled_back", "bridge_current", "check_finish", "bridge_untested_installed"):
+        if key in ("bridge_installed", "bridge_pc_only_installed", "bridge_removed", "bridge_rolled_back", "bridge_pc_rolled_back", "bridge_current", "check_finish", "bridge_untested_installed"):
             self.outcome = key
         if key.endswith("_plan") or key in ("bridge_stop_first", "bridge_retry_ambiguous"):
             self.plan = value
@@ -1017,7 +1017,7 @@ class SetupApp(App[int]):
         self.query_one("#work").display = False
         self.query_one("#complete-area").display = True
         self.set_stage("complete")
-        outcome = {"bridge_installed": "connection_installed", "bridge_untested_installed": "installed_inactive", "bridge_removed": "removed",
+        outcome = {"bridge_pc_only_installed": "connection_installed", "bridge_pc_rolled_back": "restored", "bridge_installed": "connection_installed", "bridge_untested_installed": "installed_inactive", "bridge_removed": "removed",
                    "bridge_rolled_back": "restored", "bridge_current": "current", "check_finish": "check_done"}.get(self.outcome)
         heading = "cancelled" if code == 130 else outcome or ("finished" if code == 0 else "failed")
         self.query_one("#complete-title", Static).update(self.words[heading])

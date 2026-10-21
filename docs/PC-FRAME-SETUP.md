@@ -73,8 +73,13 @@ additional confirmation. Complete observed snapshots remain bound to consent.
    an additional **Install anyway** confirmation with the detected versions.
    Unknown native bindings leave the installed patch inactive. A missing payload
    or an unknown changed user file is still preserved rather than overwritten.
-4. The assistant prepares Frame files while its current interface remains
-   running, then performs the required coordinated Steam/SteamVR restart. It
+4. A **PC-only update** closes PC SteamVR, updates and verifies only the PC
+   files, and preserves the existing pairing. Frame patch files, settings,
+   installation records and services remain unchanged. There is no Frame
+   restart or picture-confirmation step. Frame status is checked read-only.
+   If the Frame itself needs changes, the assistant prepares its files while
+   its current interface remains running, then performs the required coordinated
+   Steam/SteamVR restart. It
    checks fresh startup and asks whether the Frame picture is normal. Keep the
    Frame awake until this is complete. **Yes** accepts the installation;
    **No** offers rechecking or an explicit Undo. A cleanup error after Yes
@@ -93,6 +98,20 @@ composition is correct.
 Run the same command again. The assistant inspects the current files and offers
 appropriate actions, including **Update**, **Repair**, **Uninstall** and
 **Restore previous setup** (Undo). A current installation needs no changes.
+
+Installer0.2.14 compares the complete Frame component independently of the
+whole download's hash. A different PC patch or installer version does not make
+unchanged Frame files stale. A changed Frame version/payload, damaged installed
+files, pending Frame recovery, changed runtime configuration, or a changed
+pairing/network endpoint still needs its own checked paired plan.
+
+A PC-only operation records its scope on the PC before the first change.
+Failure recovery and continuation after Ctrl+C restore/retry only the PC. They
+never enter Frame preparation, camera-setting, service-restart or Frame-journal
+cleanup operations. If only finalization remains, Retry clears the remaining
+PC records without replaying the update. Ctrl+C keeps these records until a
+later deliberate action. These are installer changes; PC0.2.13 and Frame0.2.12
+remain the exact same native artifacts, including Gloomhaven's working path.
 Changed or unknown files are preserved rather than silently replaced.
 The installer has its own version, separate from the PC and Frame patch versions.
 Updating only the installer does not propose reinstalling already-current patches.

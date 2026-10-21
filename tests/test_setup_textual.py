@@ -69,6 +69,27 @@ class PicturePorts:
 
 
 class TextualSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pc_only_apply_finishes_without_frame_restart_or_picture_prompt(self):
+        for lang in ('en','de'):
+            ports=PicturePorts();ports.frame_required=False
+            def backend():
+                p=UI.active_presenter();p.say('bridge_pc_only_plan')
+                if not p.confirm('bridge_confirm'):return 130
+                return FLOW.Workflow(ports,p).run('update')
+            app=UI.SetupApp(backend,lang)
+            async with app.run_test(size=(80,24)) as pilot:
+                await until(pilot,lambda:isinstance(app.screen,UI.ConfirmScreen))
+                self.assertIn(app.texts['bridge_pc_only_plan'],app.screen.plan)
+                await until(pilot,lambda:app.focused is not None)
+                await pilot.pause()
+                self.assertTrue(await pilot.click('#accept'))
+                await until(pilot,lambda:app.backend_finished)
+                self.assertEqual(app.backend_result,0)
+                self.assertEqual(app.outcome,'bridge_pc_only_installed')
+                self.assertIn(app.words['connection_installed'],str(app.query_one('#complete-title',Static).render()))
+                self.assertEqual(ports.events,['begin','stop_pc','prepare','prepared_health','finish_prepared'])
+            app.backend.join()
+
     async def test_copy_controls_are_compact_secondary_utilities_in_main_view_and_modal(self):
         for lang in ("en", "de"):
             def backend():

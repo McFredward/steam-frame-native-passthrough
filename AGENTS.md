@@ -57,6 +57,10 @@
   release download channels are no longer present: deliver the validated archive
   from an immutable repository commit with exact size/SHA256 in the bootstrap,
   without recreating GitHub Releases.
+- The maintainer's 2026-10-21 PC-only update instruction requires unchanged
+  Frame components, settings and services to remain untouched. Such an update,
+  its failure recovery and interrupted-run continuation must not restart the
+  Frame or replay the paired Frame installation/finalization workflow.
 - Installer `VERSION` and PC/Frame `PATCH_VERSIONS.json` are independent. An
   installer-only update must not invent a native patch version or recommend a
   patch update when the installed native components are already current.
