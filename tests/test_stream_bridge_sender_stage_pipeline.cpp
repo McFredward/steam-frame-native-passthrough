@@ -9,6 +9,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <functional>
 using namespace stream_bridge;using namespace stream_bridge::sender;
 namespace {
 constexpr std::uint32_t Width=1152,Height=4608,Pid=123;
@@ -29,13 +30,16 @@ std::uintptr_t index(void* p){return reinterpret_cast<std::uintptr_t>(p)-0x2000;
 void* input(unsigned i){return reinterpret_cast<void*>(std::uintptr_t(0x2000)+i);}
 NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void** e){*e=encoder;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*){return NV_ENC_SUCCESS;}
-NVENCSTATUS NVENCAPI reconfigure(void*,NV_ENC_RECONFIGURE_PARAMS*){return NV_ENC_SUCCESS;}
+std::function<void()> duringQos;
+std::function<void()> duringEncode;
+NVENCSTATUS qosResult=NV_ENC_SUCCESS;
+NVENCSTATUS NVENCAPI reconfigure(void*,NV_ENC_RECONFIGURE_PARAMS*){if(duringQos)duringQos();return qosResult;}
 NVENCSTATUS NVENCAPI destroy(void*){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI registration(void*,NV_ENC_REGISTER_RESOURCE* r){r->registeredResource=r->resourceToRegister;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI unregistration(void*,NV_ENC_REGISTERED_PTR){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI map(void*,NV_ENC_MAP_INPUT_RESOURCE* p){p->mappedResource=p->registeredResource;p->mappedBufferFmt=NV_ENC_BUFFER_FORMAT_NV12;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI unmap(void*,NV_ENC_INPUT_PTR){return NV_ENC_SUCCESS;}
-NVENCSTATUS NVENCAPI encode(void*,NV_ENC_PIC_PARAMS* p){timestamps.at(index(p->outputBitstream))=p->inputTimeStamp;return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI encode(void*,NV_ENC_PIC_PARAMS* p){timestamps.at(index(p->outputBitstream))=p->inputTimeStamp;if(duringEncode)duringEncode();return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI lock(void*,NV_ENC_LOCK_BITSTREAM* p){p->bitstreamBufferPtr=const_cast<std::uint8_t*>(au.data());p->bitstreamSizeInBytes=static_cast<std::uint32_t>(au.size());p->outputTimeStamp=timestamps.at(index(p->outputBitstream));p->pictureType=NV_ENC_PIC_TYPE_IDR;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI unlock(void*,NV_ENC_OUTPUT_PTR){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI factory(NV_ENCODE_API_FUNCTION_LIST* p){p->nvEncOpenEncodeSessionEx=open;p->nvEncInitializeEncoder=init;p->nvEncReconfigureEncoder=reconfigure;p->nvEncDestroyEncoder=destroy;p->nvEncRegisterResource=registration;p->nvEncUnregisterResource=unregistration;p->nvEncMapInputResource=map;p->nvEncUnmapInputResource=unmap;p->nvEncEncodePicture=encode;p->nvEncLockBitstream=lock;p->nvEncUnlockBitstream=unlock;return NV_ENC_SUCCESS;}
@@ -118,8 +122,54 @@ void run(){
     copy(0,91);copy(1,92);submit(1);check(!stages.read(1,encoder,boundary.generation(handle)),"stale submission cannot borrow latest captured input");
     check(!stages.read(lastCaptured.submission,encoder,lastCaptured.encoderGeneration+1)&&!stages.read(lastCaptured.submission,input(0),lastCaptured.encoderGeneration),"foreign encoder/generation cannot retire another native frame");
     Stages::PoolClaim pending;check(!stages.maintenance(pending),"Bound stage excludes cold replacement after a partial Captured claim");expectedPresent=92;p=get(1);release(1);expectedPresent=91;submit(0);p=get(0);release(0);
-    check(stages.maintenance(pending),"all exact native stages retire independently");
-    std::printf("PASS: %u checks; 92/92 active native frames fully masked at %ux%u; 60 concurrent native copies; no GPU wait or latest-mask fallback\n",checks,Width,Height);
+    {check(stages.maintenance(pending),"all exact native stages retire independently");}
+    pending={};
+    // Complete real production native Lock and full-size mask encoding on an
+    // output thread BEFORE the original QoS call returns. Alternate inputs
+    // accepted before that call and inputs captured/accepted while it runs.
+    // This is the formerly missing overlap in the after-return QoS checks.
+    const auto qosGeneration=boundary.generation(handle);
+    for(std::uint64_t present=93;present<=124;++present){
+        const bool early=(present&1)!=0;
+        if(early){copy(0,present);submit(0);}
+        qosResult=(present&2)?NV_ENC_SUCCESS:NV_ENC_ERR_INVALID_PARAM;
+        duringQos=[&]{
+            if(!early){copy(0,present);submit(0);}
+            expectedPresent=present;std::exception_ptr failure;
+            std::thread completion([&]{try{
+                const auto value=get(0);
+                check(value.bitstreamBufferPtr!=au.data()&&value.bitstreamSizeInBytes>au.size(),
+                    "every exact full-size frame completed DURING QoS keeps its mask");
+                release(0);
+            }catch(...){failure=std::current_exception();}});
+            completion.join();if(failure)std::rethrow_exception(failure);
+        };
+        NV_ENC_RECONFIGURE_PARAMS qos{};qos.version=NV_ENC_RECONFIGURE_PARAMS_VER;qos.reInitEncodeParams=ip;
+        qos.reInitEncodeParams.frameRateNum=120;
+        check(api.nvEncReconfigureEncoder(handle,&qos)==qosResult&&boundary.generation(handle)==qosGeneration,
+            "same-contract successful/rejected QoS preserves exact current session during native completion");
+        duringQos={};
+    }
+    const auto continuity=boundary.reconfigureStats();
+    check(captures==124&&masks==124&&retirements==124&&continuity.overlappingInputs==16&&continuity.overlappingOutputs==32,
+        "all active frames have their own masks through both in-call QoS schedules without a blackout");
+    for(std::uint64_t present=125;present<=140;++present){
+        copy(0,present);expectedPresent=present;
+        duringEncode=[&]{
+            std::exception_ptr failure;
+            std::thread completion([&]{try{
+                const auto value=get(0);
+                check(value.bitstreamBufferPtr!=au.data()&&value.bitstreamSizeInBytes>au.size(),
+                    "every full-size exact native output completed BEFORE Encode returns keeps its mask");
+                release(0);
+            }catch(...){failure=std::current_exception();}});
+            completion.join();if(failure)std::rethrow_exception(failure);
+        };
+        submit(0);duringEncode={};
+    }
+    check(captures==140&&masks==140&&retirements==140&&boundary.outputStats().completedBeforeEncodeReturn==16,
+        "early native completion and later Encode return neither lose nor resurrect any exact frame");
+    std::printf("PASS: %u checks; 140/140 active native frames fully masked at %ux%u; 60 concurrent native copies; 32 in-call QoS and 16 early Encode completions; no GPU wait or latest-mask fallback\n",checks,Width,Height);
 }
 }
 int main(){try{run();return 0;}catch(const std::exception& e){std::fprintf(stderr,"FAIL: %s\n",e.what());return 1;}}

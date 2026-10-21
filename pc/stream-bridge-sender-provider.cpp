@@ -227,11 +227,15 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             const auto stats=boundary().reconfigureStats();if(!stats.total)return;
             const bool newOutcome=(!reportedSuccess&&stats.preservedSuccessful)||(!reportedRejection&&stats.preservedRejected)||(!reportedRevoke&&stats.revoked);
             if(!final&&((!newOutcome&&stats.total<nextReconfigureReport)||reconfigureReports>=8))return;
-            char text[288]{};std::snprintf(text,sizeof text,
-                "encoder reconfigure: calls=%llu; same-contract accepted=%llu, rejected=%llu; revoked=%llu; last native status=%d, extent=%ux%u, contract-known=%u, same=%u, reset=%u",
+            const auto outputs=boundary().outputStats();
+            char text[512]{};std::snprintf(text,sizeof text,
+                "encoder reconfigure: calls=%llu; same-contract accepted=%llu, rejected=%llu; revoked=%llu; last native status=%d, extent=%ux%u, contract-known=%u, same=%u, reset=%u; in-call exact input-captures/output-completions=%llu/%llu; output exact/unmatched/early-completed=%llu/%llu/%llu",
                 static_cast<unsigned long long>(stats.total),static_cast<unsigned long long>(stats.preservedSuccessful),
                 static_cast<unsigned long long>(stats.preservedRejected),static_cast<unsigned long long>(stats.revoked),stats.lastStatus,stats.lastWidth,stats.lastHeight,
-                unsigned(stats.lastContractKnown),unsigned(stats.lastSameContract),unsigned(stats.lastResetEncoder));
+                unsigned(stats.lastContractKnown),unsigned(stats.lastSameContract),unsigned(stats.lastResetEncoder),
+                static_cast<unsigned long long>(stats.overlappingInputs),static_cast<unsigned long long>(stats.overlappingOutputs),
+                static_cast<unsigned long long>(outputs.exact),static_cast<unsigned long long>(outputs.unmatched),
+                static_cast<unsigned long long>(outputs.completedBeforeEncodeReturn));
             report(text);++reconfigureReports;
             reportedSuccess=stats.preservedSuccessful!=0;reportedRejection=stats.preservedRejected!=0;reportedRevoke=stats.revoked!=0;
             nextReconfigureReport=stats.total>~std::uint64_t(0)/8?~std::uint64_t(0):stats.total*8;

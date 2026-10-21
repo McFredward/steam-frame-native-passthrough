@@ -511,3 +511,64 @@ Frame preparation and one restart/picture flow. Existing paired workflow,
 rollback, UI, package and native artifact-pin checks remain required. These are
 software fixtures, not device operations or a new Gloomhaven headset result.
 PC0.2.13 and Frame0.2.12 binary payloads remain byte-for-byte unchanged.
+
+
+## Exact output during native encoder calls (dev PC0.2.14)
+
+Demeo1.4.11 retains its hardware-confirmed equal eyes and opaque scene objects.
+The October21 control run without OVR Advanced Settings still has intro flashes,
+but no reported menu jitter. The PC records the OVR process exiting before Demeo
+connects; only two isolated standing-origin changes remain at startup/lobby,
+instead of the prior repeated menu bursts. This supports an OVR interaction for
+position jitter without establishing the caller of each origin change. Do not
+change tracking/reprojection to compensate.
+
+During the intro the Frame's exact-picture draw misses increase154→182 and its
+opaque submits89346→89360, with no new signed-None, mask rejection or guarded
+upload refusal. Both counters remain unchanged through120seconds of menu. All
+14,523 PC-certified masks reach the Frame metadata path; this aggregate does not
+prove every video picture was certified. The native decoder reset precedes game
+startup. No in-game hard decoder reset explains this run's intro flashes. Native
+Reconfigure is called16,574times, with16,570 known same-contract adjustments and
+four actual revocations. The audit is read-only; original logs/hashes are private.
+
+Two production-boundary regressions independently reproduce avoidable missing
+certificates. First, a deeply compared bitrate/framerate-only Reconfigure marks
+its session as reconfiguring while the original driver call runs. Former Encode
+and Lock guards refuse all input/output evidence during that interval, including
+an already accepted exact native frame. Keep normal unique receipts available
+through this known QoS overlap; unknown, nested, resetting and changed source
+contracts still revoke before calling the driver.
+
+Second, a successful original Lock can complete on the output thread before the
+Encode caller returns and publishes its CPU status. The previous accepted flag
+then rejects the real pending receipt. Match that successful original output to
+its unique live output-buffer/input-timestamp tuple and retained captured input,
+map and source generation. Native completion retires normally at Unlock even
+when Encode has not returned. Its later return cannot resurrect that receipt.
+Failed/busy Lock, failed Encode, wrong timestamp, duplicate ambiguous tuples,
+unregistered resources, extent changes and real source resets remain refused.
+The timestamp is the exact NVENC input/output association, not an approximate
+clock or a latest-frame choice. NVIDIA documents asynchronous completion/output
+processing in its [NVENC programming guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/11.1/pdf/NVENC_VideoEncoder_API_ProgGuide.pdf).
+
+The complete production source/capture/encoder/certificate/compression pipeline
+passes140/140 full1152×4608 R8 frames with byte-identical decompression, including
+60concurrent source copies,32in-call QoS completions and16outputs completed before
+Encode returns. Each causal control independently restores a former barrier and
+must fail its exact-frame coverage assertion. The boundary suite also covers
+native return codes, handshake/probe authority, early Unlock retirement and
+negative source transitions. Both suites run on native Linux/Windows CI; local
+ASan/UBSan and all25 host CTest suites pass. These use controlled native API ports,
+not the NVIDIA driver or a headset. Existing shared DirectMode/opaque/coverage
+regressions remain required; no new Gloomhaven hardware result is claimed.
+
+Cold bounded diagnostics add exact input/output counts during QoS plus exact,
+unmatched and completed-before-Encode-return output counts. They perform no new
+hot-path I/O or waits. There is no shader, camera, projection, codec, wire,
+Frame component or application mod change. Only PC advances to0.2.14; Frame0.2.12
+and installer0.2.14 retain their versions. The full archive must retain every
+Frame payload and manifest pin byte-for-byte. The component-scoped installer
+updates only the PC when the installed Frame already matches, with no Frame
+writes, settings changes or service restart. Software evidence closes the two
+reproduced gaps; zero visible black flashes remains a headset acceptance test.

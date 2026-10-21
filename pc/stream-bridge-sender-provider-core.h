@@ -45,8 +45,12 @@ struct OutputAugmenter {
 };
 struct ReconfigureStats {
     std::uint64_t total=0,preservedSuccessful=0,preservedRejected=0,revoked=0;
+    std::uint64_t overlappingInputs=0,overlappingOutputs=0;
     int lastStatus=0;std::uint32_t lastWidth=0,lastHeight=0;
     bool lastContractKnown=false,lastSameContract=false,lastResetEncoder=false;
+};
+struct OutputStats {
+    std::uint64_t locks=0,exact=0,unmatched=0,completedBeforeEncodeReturn=0;
 };
 // Public NVENC ABI boundary. No private Steam object layout or function jump.
 // Single process-lifetime instance; factory tables may retain these callbacks.
@@ -68,6 +72,7 @@ public:
     void setDeviceObserver(DeviceObserver);
     std::array<EncoderState,4> encoderStates()const;
     ReconfigureStats reconfigureStats()const; // Cold worker snapshot; no hot-path logging.
+    OutputStats outputStats()const;
     // Revokes only that observed encoder generation; borrowed output stays alive.
     void revokeDiscovery(void*,std::uint64_t generation);
     void stop();
@@ -111,7 +116,7 @@ private:
     std::array<Session,4> sessions_{};
     std::array<std::uint8_t,32> hash_{};
     NV_ENCODE_API_FUNCTION_LIST original_{};
-    std::uint64_t nextGeneration_=0;ReconfigureStats reconfigureStats_{};
+    std::uint64_t nextGeneration_=0;ReconfigureStats reconfigureStats_{};OutputStats outputStats_{};
     bool installed_=false,enabled_=true,inputHooks_=false;
     OutputAugmenter augmenter_{};InputObserver inputObserver_{};DeviceObserver deviceObserver_{};
 };

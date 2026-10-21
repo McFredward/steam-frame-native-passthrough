@@ -67,6 +67,11 @@ owned menu head across native menu-anchor replacement.
 The latest automated and log results do not certify arbitrary game materials,
 new runtimes or a final like-for-like sharpness/latency comparison. See the
 [continuity evidence and limits](development/FRAME-CONTINUITY.md).
+The dev PC0.2.14 candidate repairs two separately reproduced encoder callback
+overlap gaps: exact output during known bitrate changes, and successful output
+completion before Encode returns. Its full-size140-frame software pipeline has
+zero missing masks. Demeo intro flashes still require a new headset test; this
+is not an uninterrupted-picture certification. Frame0.2.12 is unchanged.
 Simultaneous local Steam menu/game mixed reality remains unconfirmed.
 
 The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)

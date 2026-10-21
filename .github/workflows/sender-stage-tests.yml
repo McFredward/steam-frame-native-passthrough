@@ -6,6 +6,8 @@ on:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'tests/test_stream_bridge_sender_stage_pipeline.cpp'
+      - 'tests/test_stream_bridge_sender_provider_input.cpp'
+      - 'tests/check_sender_continuity.py'
       - 'cmake/StreamBridge.cmake'
       - '.github/workflows/sender-stage-tests.yml'
   pull_request:
@@ -13,6 +15,8 @@ on:
       - 'pc/stream-bridge-sender-provider-coverage*'
       - 'pc/stream-bridge-sender-provider-core.*'
       - 'tests/test_stream_bridge_sender_stage_pipeline.cpp'
+      - 'tests/test_stream_bridge_sender_provider_input.cpp'
+      - 'tests/check_sender_continuity.py'
       - 'cmake/StreamBridge.cmake'
       - '.github/workflows/sender-stage-tests.yml'
   workflow_dispatch:
@@ -44,8 +48,9 @@ jobs:
         shell: bash
         run: |
           cmake -S . -B build/stages -DFRAME_STREAM_BRIDGE_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DSFNP_NVENC_SDK_DIRECTORY="$PWD/build/nvenc-sdk"
-          cmake --build build/stages --parallel 4 --target test_stream_bridge_sender_stage_pipeline
+          cmake --build build/stages --parallel 4 --target test_stream_bridge_sender_stage_pipeline test_stream_bridge_sender_provider_input
           build/stages/test_stream_bridge_sender_stage_pipeline | tee build/stage-pipeline.log
+          build/stages/test_stream_bridge_sender_provider_input | tee build/input-association.log
       - name: Build and run same production native source pipeline on Windows
         if: runner.os == 'Windows'
         shell: cmd
@@ -59,6 +64,12 @@ jobs:
           build\stage-pipeline.exe >build\stage-pipeline.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\stage-pipeline.log
+          if not "%SFNP_RESULT%"=="0" exit /b %SFNP_RESULT%
+          clang-cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /I. /imsvcbuild/nvenc-sdk tests/test_stream_bridge_sender_provider_input.cpp pc/stream-bridge-sender-provider-core.cpp pc/stream-bridge-sender.cpp bridge/stream_bridge_protocol.cpp bridge/stream_bridge_auth.cpp bridge/stream_bridge_frame.cpp bridge/stream_bridge_compression.cpp bridge/hevc_bridge_sei.cpp /Fe:build\input-association.exe /Fo:build\ /link
+          if errorlevel 1 exit /b 1
+          build\input-association.exe >build\input-association.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\input-association.log
           exit /b %SFNP_RESULT%
       - name: Require cross-stage reader coupling to fail the deterministic pipeline
         if: runner.os == 'Linux'
@@ -84,10 +95,17 @@ jobs:
           cat build/reader-coupled.log
           test "$result" -eq 1
           grep -F 'bounded native producer has an unowned exact stage' build/reader-coupled.log
+      - name: Require each former native availability barrier to fail exact-frame continuity
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 tests/check_sender_continuity.py --sdk build/nvenc-sdk --bridge-library build/stages/libsfnp_stream_bridge.a --output build/continuity-controls
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-stage-pipeline-${{ runner.os }}
           path: |
             build/stage-pipeline.log
+            build/input-association.log
+            build/continuity-controls/*.log
+            build/continuity-controls/results.json
             build/reader-coupled.log

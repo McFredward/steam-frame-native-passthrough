@@ -170,11 +170,12 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
             }else{generation=self.revoke(*s,hevc);count(self.reconfigureStats_.revoked);}
         }
     }
-    // Ordinary QoS adaptation does not replace the source session. While native
-    // code runs, refuse new reentrant input/mask claims. Already accepted
-    // asynchronous submissions retain their exact same-frame receipts through
-    // quality-only changes; their output/timestamp and native ownership remain
-    // unchanged. Keep the paired channel and borrowed Lock bytes alive.
+    // Only a fully compared bitrate/framerate change reaches this QoS path.
+    // It does not alter input resources, codec, extent or the paired source.
+    // Native Encode/Lock may overlap this original call on other threads. Keep
+    // their normal exact receipts available DURING it as well as after return;
+    // a temporary blanket barrier emitted an uncertified video frame. Changed,
+    // resetting, nested or unknown contracts already revoke before this call.
     const auto result=self.original_.nvEncReconfigureEncoder(encoder,params);
     std::lock_guard<std::mutex> guard(self.mutex_);self.reconfigureStats_.lastStatus=static_cast<int>(result);
     if(auto s=self.find(encoder);s&&generation&&s->generation==generation){
@@ -237,11 +238,12 @@ NVENCSTATUS NVENCAPI NvencBoundary::encode(void* encoder,NV_ENC_PIC_PARAMS* para
     auto& self=*instance_.load(std::memory_order_acquire);const bool typed=params&&params->version==NV_ENC_PIC_PARAMS_VER;
     std::uint64_t identity=0,generation=0;
     if(typed&&params->inputBuffer&&params->outputBitstream&&!(params->encodePicFlags&NV_ENC_PIC_FLAG_EOS)){
-        std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder);self.enabled_&&s&&s->initialized&&s->hevc&&!s->reconfiguring&&s->nextIdentity!=~std::uint64_t(0)){
+        std::lock_guard<std::mutex> guard(self.mutex_);if(auto s=self.find(encoder);self.enabled_&&s&&s->initialized&&s->hevc&&s->nextIdentity!=~std::uint64_t(0)){
             generation=s->generation;
             for(auto& m:s->maps)if(m.mapped==params->inputBuffer)for(auto& r:s->resources)if(r.registered==m.registered&&r.generation==m.resourceGeneration&&r.width==params->inputWidth&&r.height==params->inputHeight&&r.width==s->width&&r.height==s->height&&r.format==params->bufferFmt){
                 for(auto& p:s->submissions)if(!p.evidence.submission){identity=++s->nextIdentity;p.evidence={encoder,generation,identity,r.native,r.generation,m.generation,m.mapped,params->outputBitstream,params->inputTimeStamp,r.width,r.height,r.subresource,r.format,true};
                     if(self.inputObserver_.capture)try{self.inputObserver_.capture(p.evidence,self.inputObserver_.context);}catch(...){}
+                    if(s->reconfiguring)count(self.reconfigureStats_.overlappingInputs);
                     break;}
             }
         }
@@ -255,23 +257,33 @@ NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* pa
     const auto result=self.original_.nvEncLockBitstream(encoder,params);
     if(result!=NV_ENC_SUCCESS||!typed||params->version!=NV_ENC_LOCK_BITSTREAM_VER)return result;
     std::lock_guard<std::mutex> guard(self.mutex_);auto s=self.find(encoder);
-    if(!self.enabled_||!s||s->output||!s->initialized||!s->hevc||s->reconfiguring||
+    if(!self.enabled_||!s||s->output||!s->initialized||!s->hevc||
        !params->outputBitstream||!params->bitstreamBufferPtr||!params->bitstreamSizeInBytes||
        params->bitstreamSizeInBytes>MaximumAccessUnitBytes||params->sliceOffsets||params->alphaLayerSizeInBytes)return result;
+    count(self.outputStats_.locks);
     Session::Submission* matched=nullptr;bool ambiguous=false;
-    for(auto& submission:s->submissions)if(submission.accepted&&!submission.locked&&submission.evidence.output==params->outputBitstream&&submission.evidence.inputTimestamp==params->outputTimeStamp){
+    // The driver's completion thread may Lock/Unlock before the Encode caller
+    // returns and publishes its CPU status. A SUCCESSFUL original Lock with the
+    // unique live output/timestamp tuple is itself native completion evidence.
+    // Keep the real captured resource/map/generation receipt; never choose a
+    // latest input or admit a failed/busy original Lock. Failed Encode receipts
+    // are removed on return, and real source changes revoke before native work.
+    for(auto& submission:s->submissions)if(submission.evidence.submission&&!submission.locked&&submission.evidence.output==params->outputBitstream&&submission.evidence.inputTimestamp==params->outputTimeStamp){
         if(matched)ambiguous=true;
         matched=&submission;
     }
     NvencOutputEvidence evidence{};evidence.encoder=encoder;evidence.encoderGeneration=s->generation;evidence.output=params->outputBitstream;
     if(matched&&!ambiguous){
-        matched->locked=true;evidence=matched->evidence;
+        count(self.outputStats_.exact);
+        if(!matched->accepted)count(self.outputStats_.completedBeforeEncodeReturn);
+        matched->accepted=matched->locked=true;s->encoded=true;evidence=matched->evidence;
+        if(s->reconfiguring)count(self.reconfigureStats_.overlappingOutputs);
         evidence.coverageSessionAuthorized=evidence.encoderGeneration==s->generation
             &&s->adapter.mutualConfirmed()&&s->adapter.probeObserved()
             &&(s->adapter.handshake().negotiatedCapabilities()&CapExplicitCoverage)!=0;
         evidence.compressedCoverageAuthorized=evidence.coverageSessionAuthorized
             &&(s->adapter.handshake().negotiatedCapabilities()&CapRleLz4)!=0;
-    }
+    }else count(self.outputStats_.unmatched);
     const Bytes original{static_cast<const std::uint8_t*>(params->bitstreamBufferPtr),params->bitstreamSizeInBytes};
     std::uint64_t ticket=0;
     try {
@@ -344,6 +356,7 @@ void NvencBoundary::setDeviceObserver(DeviceObserver value){std::lock_guard<std:
 void NvencBoundary::setInputObserver(InputObserver value){std::lock_guard<std::mutex> guard(mutex_);inputObserver_=value;}
 void NvencBoundary::setOutputAugmenter(OutputAugmenter value){std::lock_guard<std::mutex> guard(mutex_);augmenter_=value;}
 ReconfigureStats NvencBoundary::reconfigureStats()const{std::lock_guard<std::mutex> guard(mutex_);return reconfigureStats_;}
+OutputStats NvencBoundary::outputStats()const{std::lock_guard<std::mutex> guard(mutex_);return outputStats_;}
 std::array<EncoderState,4> NvencBoundary::encoderStates()const{std::lock_guard<std::mutex> guard(mutex_);std::array<EncoderState,4> result{};for(unsigned i=0;i<sessions_.size();++i)result[i]={sessions_[i].encoder,sessions_[i].generation,sessions_[i].initialized&&sessions_[i].hevc,sessions_[i].adapter.mutualConfirmed(),sessions_[i].adapter.probeObserved(),sessions_[i].width,sessions_[i].height,sessions_[i].encoded};return result;}
 void NvencBoundary::revokeDiscovery(void* encoder,std::uint64_t generation){std::lock_guard<std::mutex> guard(mutex_);if(auto s=find(encoder);s&&s->generation==generation){s->adapter.stop();s->probeQueued=false;s->probeSequence=0;s->probeToken={};}}
 void NvencBoundary::stop(){std::lock_guard<std::mutex> guard(mutex_);enabled_=false;for(auto& s:sessions_)revoke(s);}

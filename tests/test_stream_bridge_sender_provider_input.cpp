@@ -2,6 +2,9 @@
 #include <cstring>
 #include <cstdio>
 #include <stdexcept>
+#include <thread>
+#include <exception>
+#include <functional>
 using namespace stream_bridge;using namespace stream_bridge::sender;
 namespace {
 unsigned checks=0,encodes=0,captures=0,retires=0,augments=0,event=0,captureEvent=0,encodeEvent=0;bool retirementValid=true;
@@ -10,10 +13,13 @@ void* encoder=reinterpret_cast<void*>(0x1010);void* resource=reinterpret_cast<vo
 std::vector<std::uint8_t> au{0,0,0,1,0x26,1,0x80,0x34,0x56};
 void* observedDevice=nullptr;std::uint64_t deviceGeneration=0;NV_ENC_DEVICE_TYPE observedDeviceType=NV_ENC_DEVICE_TYPE_CUDA;
 NvencOutputEvidence captured{},observed{};bool allowAugment=false,wrongTimestamp=false;
-std::uint64_t timestamp=0;NVENCSTATUS encodeResult=NV_ENC_SUCCESS,unlockResult=NV_ENC_SUCCESS,reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
+std::uint64_t timestamp=0;NVENCSTATUS encodeResult=NV_ENC_SUCCESS,lockResult=NV_ENC_SUCCESS,unlockResult=NV_ENC_SUCCESS,reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
 NvencBoundary* activeBoundary=nullptr;PNVENCUNREGISTERRESOURCE nestedUnregister=nullptr;bool unregisterInside=false,discoveryRevokedInside=false;
 unsigned localNonce=7;bool inspectDiscovery=true,inspectQos=false;
 PNVENCENCODEPICTURE nestedEncode=nullptr;PNVENCLOCKBITSTREAM nestedLock=nullptr;NV_ENC_PIC_PARAMS* nestedPic=nullptr;
+PNVENCUNLOCKBITSTREAM nestedUnlock=nullptr;bool inspectPendingQos=false;
+NvencOutputEvidence pendingQosInput{};
+std::function<void(void*)> duringEncode;
 unsigned qosBarriers=0;bool reconfigureInside=false;PNVENCRECONFIGUREENCODER nestedReconfigure=nullptr;
 LocalConfig localConfig(){LocalConfig c{};c.buildId=1;c.nonce[0]=static_cast<std::uint8_t>(localNonce);c.offered=c.required=KnownCapabilities;return c;}
 VerifiedChannel authority(){VerifiedChannel a{};a.authenticated=true;a.binding[0]=8;return a;}
@@ -21,11 +27,30 @@ NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void** e){*e=enc
 NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI reconfigure(void* handle,NV_ENC_RECONFIGURE_PARAMS*){
     if(inspectDiscovery)discoveryRevokedInside=!activeBoundary->requestDiscovery(handle,localConfig(),authority());
+    if(inspectPendingQos){
+        // The actual output thread completes a previously accepted native
+        // frame while the original same-contract Reconfigure is still running.
+        // No sleep, speculative output or copied association logic is involved.
+        std::exception_ptr failure;
+        std::thread completion([&]{try{
+            observed={};NV_ENC_LOCK_BITSTREAM value{};value.version=NV_ENC_LOCK_BITSTREAM_VER;value.outputBitstream=output;
+            check(nestedLock(handle,&value)==NV_ENC_SUCCESS,"pending QoS preserves native output status");
+            check(value.bitstreamBufferPtr!=au.data()&&observed.exactInput&&observed.coverageSessionAuthorized
+                &&observed.submission==pendingQosInput.submission&&observed.inputTimestamp==pendingQosInput.inputTimestamp
+                &&observed.resourceGeneration==pendingQosInput.resourceGeneration&&observed.mapGeneration==pendingQosInput.mapGeneration,
+                "accepted frame completed DURING same-contract QoS retains its exact coverage receipt");
+            check(nestedUnlock(handle,output)==NV_ENC_SUCCESS,"pending QoS completion releases only its real native output");
+        }catch(...){failure=std::current_exception();}});
+        completion.join();if(failure)std::rethrow_exception(failure);
+    }
     if(inspectQos){
         const auto beforeCaptures=captures,beforeAugments=augments;
         check(nestedEncode(handle,nestedPic)==NV_ENC_SUCCESS,"native nested Encode still called during QoS");
         NV_ENC_LOCK_BITSTREAM value{};value.version=NV_ENC_LOCK_BITSTREAM_VER;value.outputBitstream=output;
-        check(nestedLock(handle,&value)==NV_ENC_SUCCESS&&value.bitstreamBufferPtr==au.data()&&captures==beforeCaptures&&augments==beforeAugments,"pending QoS never captures or certifies native in-flight source");++qosBarriers;
+        check(nestedLock(handle,&value)==NV_ENC_SUCCESS&&value.bitstreamBufferPtr!=au.data()
+            &&captures==beforeCaptures+1&&augments==beforeAugments+1&&observed.exactInput&&observed.coverageSessionAuthorized,
+            "native input accepted DURING same-contract QoS keeps its exact mask completion");
+        check(nestedUnlock(handle,output)==NV_ENC_SUCCESS,"input completed during QoS retires its own exact native lease");++qosBarriers;
     }
     if(unregisterInside)nestedUnregister(handle,reg);
     if(reconfigureInside){reconfigureInside=false;NV_ENC_RECONFIGURE_PARAMS replacement{};replacement.version=NV_ENC_RECONFIGURE_PARAMS_VER;check(nestedReconfigure(handle,&replacement)==reconfigureResult,"nested actual source change forwarded during QoS");}
@@ -35,8 +60,8 @@ NVENCSTATUS NVENCAPI registration(void*,NV_ENC_REGISTER_RESOURCE* p){p->register
 NVENCSTATUS NVENCAPI unregistration(void*,NV_ENC_REGISTERED_PTR){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI map(void*,NV_ENC_MAP_INPUT_RESOURCE* p){p->mappedResource=mapped;p->mappedBufferFmt=NV_ENC_BUFFER_FORMAT_NV12;return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI unmap(void*,NV_ENC_INPUT_PTR){return NV_ENC_SUCCESS;}
-NVENCSTATUS NVENCAPI encode(void*,NV_ENC_PIC_PARAMS* p){++encodes;encodeEvent=++event;timestamp=p->inputTimeStamp;return encodeResult;}
-NVENCSTATUS NVENCAPI lock(void*,NV_ENC_LOCK_BITSTREAM* p){p->bitstreamBufferPtr=au.data();p->bitstreamSizeInBytes=au.size();p->outputTimeStamp=timestamp+(wrongTimestamp?1:0);p->pictureType=NV_ENC_PIC_TYPE_IDR;return NV_ENC_SUCCESS;}
+NVENCSTATUS NVENCAPI encode(void* handle,NV_ENC_PIC_PARAMS* p){++encodes;encodeEvent=++event;timestamp=p->inputTimeStamp;if(duringEncode)duringEncode(handle);return encodeResult;}
+NVENCSTATUS NVENCAPI lock(void*,NV_ENC_LOCK_BITSTREAM* p){p->bitstreamBufferPtr=au.data();p->bitstreamSizeInBytes=au.size();p->outputTimeStamp=timestamp+(wrongTimestamp?1:0);p->pictureType=NV_ENC_PIC_TYPE_IDR;return lockResult;}
 NVENCSTATUS NVENCAPI unlock(void*,NV_ENC_OUTPUT_PTR){return unlockResult;}
 NVENCSTATUS NVENCAPI destroy(void*){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI factory(NV_ENCODE_API_FUNCTION_LIST* p){p->nvEncOpenEncodeSessionEx=open;p->nvEncInitializeEncoder=init;p->nvEncReconfigureEncoder=reconfigure;p->nvEncRegisterResource=registration;p->nvEncUnregisterResource=unregistration;p->nvEncMapInputResource=map;p->nvEncUnmapInputResource=unmap;p->nvEncEncodePicture=encode;p->nvEncLockBitstream=lock;p->nvEncUnlockBitstream=unlock;p->nvEncDestroyEncoder=destroy;return NV_ENC_SUCCESS;}
@@ -106,6 +131,46 @@ void run(){
     const auto qosGeneration=bridge.generation(handle);const auto qosResources=before;
     NV_ENC_RECONFIGURE_PARAMS qos{};qos.version=NV_ENC_RECONFIGURE_PARAMS_VER;qos.reInitEncodeParams=ip;
     inspectDiscovery=false;
+    nestedLock=table.nvEncLockBitstream;nestedUnlock=table.nvEncUnlockBitstream;
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);pendingQosInput=captured;
+    inspectPendingQos=true;reconfigureResult=NV_ENC_SUCCESS;
+    table.nvEncReconfigureEncoder(handle,&qos);inspectPendingQos=false;
+    duringEncode=[&](void* nativeHandle){
+        const auto expected=captured;std::exception_ptr failure;
+        std::thread completion([&]{try{
+            observed={};NV_ENC_LOCK_BITSTREAM value{};value.version=NV_ENC_LOCK_BITSTREAM_VER;value.outputBitstream=output;
+            check(nestedLock(nativeHandle,&value)==NV_ENC_SUCCESS,"early native output completion preserves original status");
+            check(observed.exactInput&&observed.coverageSessionAuthorized&&observed.submission==expected.submission
+                &&observed.inputTimestamp==expected.inputTimestamp&&value.bitstreamBufferPtr!=au.data(),
+                "successful exact native output BEFORE Encode returns keeps its current captured mask");
+            check(nestedUnlock(nativeHandle,output)==NV_ENC_SUCCESS,"early completion unlock retires only its real captured input");
+        }catch(...){failure=std::current_exception();}});
+        completion.join();if(failure)std::rethrow_exception(failure);
+    };
+    ++pic.inputTimeStamp;const auto earlyRetirements=retires;
+    check(table.nvEncEncodePicture(handle,&pic)==NV_ENC_SUCCESS,"native successful Encode status remains original after early output release");
+    duringEncode={};
+    check(retires==earlyRetirements+1&&bridge.liveLeases()==0,"completed-and-unlocked receipt is not resurrected when Encode finally returns");
+    check(bridge.outputStats().completedBeforeEncodeReturn==1,"cold diagnostic records the exact early native completion without granting a different frame");
+    duringEncode=[&](void* nativeHandle){
+        const auto calls=augments;observed={};wrongTimestamp=true;
+        NV_ENC_LOCK_BITSTREAM value{};value.version=NV_ENC_LOCK_BITSTREAM_VER;value.outputBitstream=output;
+        check(nestedLock(nativeHandle,&value)==NV_ENC_SUCCESS&&value.bitstreamBufferPtr==au.data()
+            &&augments==calls+1&&!observed.exactInput,
+            "pending native Encode never makes a different successful output timestamp exact");
+        wrongTimestamp=false;
+    };
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);duringEncode={};
+    p=get();check(observed.exactInput&&p.bitstreamBufferPtr!=au.data(),"only the later matching completed output can acquire the still-current input");release();
+    duringEncode=[&](void* nativeHandle){
+        const auto calls=augments;lockResult=NV_ENC_ERR_LOCK_BUSY;
+        NV_ENC_LOCK_BITSTREAM value{};value.version=NV_ENC_LOCK_BITSTREAM_VER;value.outputBitstream=output;
+        check(nestedLock(nativeHandle,&value)==NV_ENC_ERR_LOCK_BUSY&&augments==calls&&bridge.liveLeases()==0,
+            "busy original native Lock cannot grant completion evidence while Encode is pending");
+        lockResult=NV_ENC_SUCCESS;
+    };
+    ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);duringEncode={};
+    p=get();check(observed.exactInput&&p.bitstreamBufferPtr!=au.data(),"successful retry matches only its current native receipt after a busy Lock");release();
     codecConfig.rcParams.averageBitRate=14000000;codecConfig.rcParams.maxBitRate=18000000;
     codecConfig.rcParams.vbvBufferSize=100000;codecConfig.rcParams.vbvInitialDelay=50000;qos.reInitEncodeParams.frameRateNum=120;
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);const auto asynchronousInput=captured;
@@ -125,7 +190,7 @@ void run(){
     check(qosBorrowed[au.size()]==0xab&&bridge.liveLeases()==1,"accepted/rejected QoS never frees borrowed Lock bytes");release();
     nestedEncode=table.nvEncEncodePicture;nestedLock=table.nvEncLockBitstream;nestedPic=&pic;inspectQos=true;
     reconfigureResult=NV_ENC_SUCCESS;table.nvEncReconfigureEncoder(handle,&qos);inspectQos=false;check(qosBarriers==1,"actual original-call QoS barrier exercised");
-    p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"nested Encode cannot survive QoS evidence barrier");release();
+    p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"already unlocked in-call input cannot be replayed after QoS returns");release();
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"fresh post-barrier Encode can resume exact coverage");release();
     qos.reInitEncodeParams.encodeConfig=nullptr;table.nvEncReconfigureEncoder(handle,&qos);
     check(bridge.generation(handle)==qosGeneration,"documented NULL config retains current deep-copied config with unchanged preset");
@@ -135,7 +200,8 @@ void run(){
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"QoS never resurrects a resource unregistered by the native callback");release();
     table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"native re-registration gets fresh valid input after QoS");release();
-    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==7&&qosStats.preservedRejected==1,"cold QoS counters distinguish successes from rejected attempts");
+    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==8&&qosStats.preservedRejected==1,"cold QoS counters distinguish successes from rejected attempts");
+    check(qosStats.overlappingInputs==1&&qosStats.overlappingOutputs==2,"cold counters identify exact completions across both QoS overlap schedules");
     const auto paddingStart=offsetof(NV_ENC_INITIALIZE_PARAMS,privDataSize)+sizeof qos.reInitEncodeParams.privDataSize;
     const auto paddingEnd=offsetof(NV_ENC_INITIALIZE_PARAMS,privData);
     if(paddingEnd>paddingStart){
