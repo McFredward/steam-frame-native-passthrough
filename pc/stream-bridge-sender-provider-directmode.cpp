@@ -35,6 +35,9 @@ DirectInventory DirectModeBoundary::inventory()const noexcept{
     result.epoch=registryEpoch_;result.valid=true;
     for(unsigned i=0;i<swaps_.size();++i){const auto& s=swaps_[i];result.swaps[i]={s.component,s.pid,s.generation,s.description,s.handles};}return result;
 }
+DirectCleanupStats DirectModeBoundary::cleanupStats()const noexcept{
+    return {destroyRequests_.load(),emptyDestroys_.load(),destroyChanges_.load(),destroyLockMisses_.load()};
+}
 const DirectFrame* DirectModeBoundary::currentFrame()noexcept{auto* self=instance_.load();return self&&self->enabled_&&current_&&current_->sourceKnown&&current_->registryEpoch==self->registryEpoch_?current_:nullptr;}
 DirectModeBoundary::Component* DirectModeBoundary::component(void* value){for(auto& c:components_)if(c.value==value&&value)return &c;for(auto& c:components_)if(!c.value){c.value=value;return &c;}return nullptr;}
 void DirectModeBoundary::create(void* object,std::uint32_t pid,const DirectMode::SwapTextureSetDesc_t* desc,DirectMode::SwapTextureSet_t* output){
@@ -49,11 +52,33 @@ void DirectModeBoundary::create(void* object,std::uint32_t pid,const DirectMode:
     self.tainted_=true;
 }
 void DirectModeBoundary::destroy(void* object,vr::SharedTextureHandle_t handle){
-    auto& self=*instance_.load();++self.registryEpoch_;{std::unique_lock<std::mutex> lock(self.mutex_,std::try_to_lock);if(lock){for(auto& s:self.swaps_)if(s.component==object)for(auto h:s.handles)if(h&&h==handle){s={};break;}}else self.enabled_=false;}
+    auto& self=*instance_.load();++self.destroyRequests_;
+    {
+        std::unique_lock<std::mutex> lock(self.mutex_,std::try_to_lock);
+        if(lock){
+            bool changed=false;
+            for(auto& s:self.swaps_)if(s.generation&&s.component==object)
+                for(auto h:s.handles)if(h&&h==handle){s={};changed=true;break;}
+            // Cleanup of a client with no owned swap is not a registry change.
+            // Publish a real removal before forwarding native destruction, so
+            // in-flight sources still lose authority before their allocation.
+            if(changed){++self.registryEpoch_;++self.destroyChanges_;}
+            else ++self.emptyDestroys_;
+        }else{++self.destroyLockMisses_;self.enabled_=false;++self.registryEpoch_;}
+    }
     self.original_.destroy(object,handle);
 }
 void DirectModeBoundary::destroyAll(void* object,std::uint32_t pid){
-    auto& self=*instance_.load();++self.registryEpoch_;{std::unique_lock<std::mutex> lock(self.mutex_,std::try_to_lock);if(lock){for(auto& s:self.swaps_)if(s.component==object&&s.pid==pid)s={};}else self.enabled_=false;}
+    auto& self=*instance_.load();++self.destroyRequests_;
+    {
+        std::unique_lock<std::mutex> lock(self.mutex_,std::try_to_lock);
+        if(lock){
+            bool changed=false;
+            for(auto& s:self.swaps_)if(s.generation&&s.component==object&&s.pid==pid){s={};changed=true;}
+            if(changed){++self.registryEpoch_;++self.destroyChanges_;}
+            else ++self.emptyDestroys_;
+        }else{++self.destroyLockMisses_;self.enabled_=false;++self.registryEpoch_;}
+    }
     self.original_.destroyAll(object,pid);
 }
 void DirectModeBoundary::next(void* object,vr::SharedTextureHandle_t handles[2],std::uint32_t(*indices)[2]){instance_.load()->original_.next(object,handles,indices);}

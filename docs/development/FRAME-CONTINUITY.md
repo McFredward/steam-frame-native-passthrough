@@ -410,3 +410,66 @@ headset result. No Frame files or services were changed during log collection.
 This candidate changes only the Frame component to0.2.12. PC patch0.2.11 and
 installer0.2.12 remain independently versioned. It is published on **dev only**;
 main and release authorization remain unchanged pending maintainer testing.
+
+
+## Allocation-free client cleanup (dev PC 0.2.13)
+
+The maintainer's Demeo1.4.11 test on October21 confirms correct opacity and
+matching eyes. Keep its scoped OpenVR Submit filter correction. The captured
+PC/Frame0.2.12 session still contains isolated mask-free frames during steady
+MR, plus one longer native video reset. GPU readback reports7,353 ready masks,
+zero busy/errors; the Frame uploads7,347 with zero upload/guard refusals. These
+end-of-run totals include asynchronous exit/reset and do not prove six corrupt
+frames. Copy-pair refusals rise from6 to30 while render-lock refusals remain3
+from startup. The game does not repeatedly withdraw its live source declaration.
+
+A source defect can create an isolated mask-free frame without changing any
+real game allocation. DirectMode's DestroySwapTextureSet and
+DestroyAllSwapTextureSets previously advanced the global registry epoch before
+checking whether the requested component/handle or component/PID owned a swap.
+An allocation-free Background client exit can therefore invalidate an in-flight
+exact game pair, and force the cold coverage importer to refresh an unchanged
+inventory. The Demeo capture has recurring isolated identity-reader lifetimes
+about2.5s apart and58 inventory refreshes, versus7 in the supplied working
+Gloomhaven capture. The old log has no cleanup cause counter: it does not prove
+that these exits account for every missing mask or reveal each native cleanup
+call. This is a reproduced availability defect, not a complete retrospective
+attribution of all observed flicker.
+
+Only a real owned removal now advances the epoch, still before forwarding the
+original native destructor exactly once. Missing ownership remains unchanged;
+lock failure still disables authority, and actual resource destruction, unknown
+handles at Submit, source changes, malformed geometry and incomplete pairs stay
+refused. No prior mask, approximate association, timeout extension, camera
+setting, video/shader/alpha transform or Frame binary changes. Bounded cold
+`direct cleanup` counters separate empty, changing and lock-refused requests.
+They count requests, not frames; reporting samples without the registry lock.
+
+The regression executes actual production DirectMode entry points and checks
+empty cleanup before/inside Present and before Post, repeated client exits,
+current per-eye handles/poses/projections, known individual/all destruction,
+revocation before original native destruction, duplicate cleanup and opaque
+refusals. The compiling causal control restores only unnecessary epoch changes
+and fails the unchanged-inventory assertion. A separate2,048-frame run uses the
+4040-square format27 shared-eye shape from the working Gloomhaven/OpenXR
+capture, checking both original eye arguments and every native presentation.
+This runs the public compositor boundary, not Gloomhaven or an OpenXR loader.
+The common exact source/input/certificate and ordinary opaque fallback suites
+remain regression requirements. Software validation cannot promise the hardware
+outcome; both Demeo flicker and the working Gloomhaven picture require a headset
+check after installation.
+
+The longer event begins on the Frame at11:21:29.666 with frames outside the
+FEC backtrack window, late metadata and unrecoverable FEC. The native decoder
+then requests I-frames and hard-resets at11:21:30.712. PC encoder reset requests
+and the auxiliary control connection rebuild span11:21:30.208–11:21:31.962;
+Frame passthrough cameras pause/resume during that interval. PC origin reset
+messages also occur there. This establishes a real decoder/transport recovery
+associated with the visible interruption, but not the caller of every origin
+reset or whether WLAN, native scheduling or mask/video payload pressure caused
+the initial packet problem. The measured full escaped payload is2,129,690,903
+bytes versus1,604,035,687 original video bytes (32.8% overhead); no bitrate,
+quality, tracking origin or native FEC policy is changed speculatively.
+This PC-only candidate does not claim the long reset fixed. Frame0.2.12 and
+installer0.2.13 retain their independent versions. Device work remains limited
+to the already secured read-only logs; no unattended installation or restart.

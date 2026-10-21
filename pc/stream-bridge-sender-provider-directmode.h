@@ -22,6 +22,8 @@ struct DirectFrame {
 };
 struct DirectSwap {void* component=nullptr;std::uint32_t processId=0;std::uint64_t generation=0;DirectMode::SwapTextureSetDesc_t description{};std::array<vr::SharedTextureHandle_t,3> handles{};};
 struct DirectInventory {std::array<DirectSwap,64> swaps{};std::uint64_t epoch=0;bool valid=false;};
+// Cold diagnostics only; counts requests rather than frames. No source proof.
+struct DirectCleanupStats{std::uint64_t requests=0,empty=0,changed=0,lockMisses=0;};
 struct DirectModeFunctions {
     void (*create)(void*,std::uint32_t,const DirectMode::SwapTextureSetDesc_t*,DirectMode::SwapTextureSet_t*)=nullptr;
     void (*destroy)(void*,vr::SharedTextureHandle_t)=nullptr;
@@ -45,6 +47,7 @@ public:
     // registry needs no repeated lock/copy that can contend with native Submit.
     std::uint64_t inventoryRevision()const noexcept;
     DirectInventory inventory()const noexcept;
+    DirectCleanupStats cleanupStats()const noexcept;
     static const DirectFrame* currentFrame()noexcept;
 private:
     struct Swap{void* component=nullptr;std::uint32_t pid=0;std::uint64_t generation=0;DirectMode::SwapTextureSetDesc_t description{};std::array<vr::SharedTextureHandle_t,3> handles{};};
@@ -60,6 +63,7 @@ private:
     Component* component(void*);
     DirectModeFunctions original_{};mutable std::mutex mutex_;
     std::array<Swap,64> swaps_{};std::array<Component,4> components_{};
+    std::atomic<std::uint64_t> destroyRequests_{0},emptyDestroys_{0},destroyChanges_{0},destroyLockMisses_{0};
     std::uint64_t nextSwap_=0,nextPresent_=0;bool prepared_=false;
     std::atomic<std::uint64_t> registryEpoch_{1};std::atomic<bool> enabled_{false},tainted_{false};
     static std::atomic<DirectModeBoundary*> instance_;

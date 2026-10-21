@@ -247,6 +247,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         bool alphaUnavailableReported=false;
         auto nextAlphaReport=std::chrono::steady_clock::now();
         auto nextGateReport=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        std::uint64_t lastCleanupRequests=0;
         const auto reportCoverage=[&](bool final){
             const auto now=std::chrono::steady_clock::now();if(!final&&now<nextGateReport)return;
             // Quiet reports must still advance the sampling deadline. Otherwise
@@ -254,6 +255,16 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             // on every 8 ms worker tick instead of this cold five-second cadence.
             nextGateReport=now+std::chrono::seconds(5);
             const auto stats=coverage_.gateStats();
+            // Sample without taking the render/registry mutex. Report cleanup
+            // causes before the older finite verbose gate budget can hide them.
+            const auto cleanup=directMode().cleanupStats();
+            if(final||cleanup.requests!=lastCleanupRequests){
+                char cleanupText[256]{};std::snprintf(cleanupText,sizeof cleanupText,
+                    "direct cleanup: requests=%llu, empty=%llu, changed=%llu, lock-miss=%llu; requests are not frames",
+                    static_cast<unsigned long long>(cleanup.requests),static_cast<unsigned long long>(cleanup.empty),
+                    static_cast<unsigned long long>(cleanup.changed),static_cast<unsigned long long>(cleanup.lockMisses));
+                report(cleanupText);lastCleanupRequests=cleanup.requests;
+            }
             // Sample source alpha at the actual native shared-texture input,
             // independently of the native shader's output alpha. A coherent
             // sample contains its own PID/present/eye/extent/CB metadata; it is

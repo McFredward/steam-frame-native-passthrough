@@ -40,6 +40,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  cleanup-continuity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare pinned public DirectMode declarations
+        run: |
+          mkdir -p build/cleanup-sdk
+          curl --fail --location --retry 3 --max-time 60 https://raw.githubusercontent.com/ValveSoftware/openvr/0924064316de3effbcd1acf1e309182a2deb1c05/headers/openvr_driver.h -o build/cleanup-sdk/openvr_driver.h
+          echo '1036efe998d63e82d1d3db2b32a2f58df4a8eeaf5280f50aaf28220ff60a40ab  build/cleanup-sdk/openvr_driver.h' | sha256sum --check --strict
+      - name: Check exact pairs through empty client cleanup and working Gloomhaven boundary
+        run: |
+          c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread -I. -isystem build/cleanup-sdk tests/test_stream_bridge_sender_provider_directmode.cpp pc/stream-bridge-sender-provider-directmode.cpp -o build/cleanup
+          build/cleanup
+          build/cleanup --gloomhaven
+          c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror -pthread -I. -isystem build/cleanup-sdk tests/test_stream_bridge_sender_provider_directmode.cpp pc/stream-bridge-sender-provider-directmode.cpp -o build/cleanup-sanitized
+          build/cleanup-sanitized
+          build/cleanup-sanitized --gloomhaven
+      - name: Restore only unnecessary epoch changes as a causal control
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('pc/stream-bridge-sender-provider-directmode.cpp').read_text()
+          needle = 'else ++self.emptyDestroys_;'
+          assert source.count(needle) == 2
+          Path('build/cleanup-old.cpp').write_text(source.replace(needle, 'else{++self.emptyDestroys_;++self.registryEpoch_;}'))
+          PY
+          c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread -I. -Ipc -isystem build/cleanup-sdk tests/test_stream_bridge_sender_provider_directmode.cpp build/cleanup-old.cpp -o build/cleanup-old
+          python3 - <<'PY'
+          import subprocess
+          result = subprocess.run(['build/cleanup-old'], capture_output=True, text=True)
+          print(result.stderr)
+          assert result.returncode == 1 and 'empty client cleanup cannot invalidate the unchanged shared inventory' in result.stderr
+          PY
   shared-resource:
     if: github.event_name == 'workflow_dispatch' && (inputs.focus == 'shared' || inputs.focus == 'all')
     runs-on: windows-2025
@@ -67,6 +101,10 @@ jobs:
           build\directmode.exe >build\directmode.log 2>&1
           set "SFNP_RESULT=%ERRORLEVEL%"
           type build\directmode.log
+          if not "%SFNP_RESULT%"=="0" exit /b %SFNP_RESULT%
+          build\directmode.exe --gloomhaven >build\directmode-gloomhaven.log 2>&1
+          set "SFNP_RESULT=%ERRORLEVEL%"
+          type build\directmode-gloomhaven.log
           exit /b %SFNP_RESULT%
       - name: Prepare causal control with the former raw sample-count admission
         shell: pwsh
