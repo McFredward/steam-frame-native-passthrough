@@ -207,11 +207,13 @@ class Tests(fixtures.Tests):
         self.assertTrue((self.local.root/b.PC_ONLY_RECORD).exists());self.assertNotIn('pc-stop',run.events)
 
     @unittest.skipIf(os.name=='nt','Actual Linux Frame inventory/transaction is exercised by the Linux job.')
-    def test_untested_unchanged_inactive_frame_stays_untouched(self):
+    def test_untested_unchanged_active_frame_stays_untouched(self):
+        self.mock_shader_pin()
         self.change_runtime('frame','vrlink')
-        self.version_bundle('0.2.12','0.2.12');self.assertEqual(self.checked_wizard(action='install').result,0)
+        self.version_bundle('0.2.12','0.2.12')
+        with self.fake_generation():self.assertEqual(self.checked_wizard(action='install').result,0)
         self.version_bundle('0.2.13','0.2.12');before=self.frame_snapshot()
-        self.assertEqual(self.unit.tx.state()['activation_mode'],'inactive')
+        self.assertEqual(self.unit.tx.state().get('activation_mode','active'),'active')
         run=self.checked_wizard()
         self.assertEqual(run.result,0);self.assert_frame_read_only(before,run)
         self.assertIn('bridge_untested_confirm',run.questions)
@@ -241,7 +243,7 @@ class Tests(fixtures.Tests):
         self.pc_candidate();inventory=self.unit.inventory(self.bundle);state=b.LocalInstall(s,self.local).state()
         for key,value in [('installed_version','0.2.11'),('component_files_current',False),('patch_payload_current',False),
                           ('owned_files_current',False),('runtime_configuration_current',False),('recovery_pending',True),
-                          ('legacy_installed',True),('runtime_admitted',False),('active_pair','34'*16)]:
+                          ('legacy_installed',True),('activation_mode','inactive'),('active_pair','34'*16)]:
             other={**inventory,key:value}
             with self.subTest(key=key),mock.patch.object(b,'local_address',return_value='192.168.1.4'):
                 self.assertFalse(b.pc_only_candidate(self.bundle,state,other,'192.168.1.25'))
@@ -262,6 +264,7 @@ class Tests(fixtures.Tests):
         spec=importlib.util.spec_from_file_location('pc_only_real_lifecycle_fixture',ROOT/'tests/test_setup_pc.py')
         fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
         adapter=fixture.ChildAdapter(self.runtime);self.addCleanup(adapter.close)
+        adapter.spawn('vrserver.exe')
         # Real lifecycle persistence/stop/restore/finish; canonical process
         # authority is supplied by the fixture over its own child processes.
         factory=lambda engine,local,runtime:fixture.pc.Lifecycle(engine,local,runtime,adapter=adapter)
@@ -269,6 +272,7 @@ class Tests(fixtures.Tests):
         first=self.checked_wizard(install_fault=cancel,runtime_factory=factory)
         self.assertEqual(first.result,130);self.assert_frame_read_only(before,first)
         self.assertEqual(s.parse((self.local.root/'lifecycle.json').read_bytes())['schema'],fixture.pc.SCHEMA)
+        self.assertIs(s.parse((self.local.root/'lifecycle.json').read_bytes())['running'],True)
         second=self.checked_wizard(action='rollback',runtime_factory=factory)
         self.assertEqual(second.result,0);self.assert_frame_read_only(before,second)
         self.assertEqual(b.LocalInstall(s,self.local).receipt.read_bytes(),old)
@@ -287,6 +291,22 @@ class Tests(fixtures.Tests):
             with self.subTest(command=command),self.assertRaisesRegex(s.SetupError,'cannot change or restart'):
                 ports.call(command)
         self.assertEqual(sent,[]);self.assertEqual(self.frame_snapshot(),before)
+
+    def test_real_failure_recovery_leaves_previously_running_pc_closed(self):
+        self.pc_candidate();before=self.frame_snapshot()
+        installed=b.LocalInstall(s,self.local);old=installed.receipt.read_bytes()
+        spec=importlib.util.spec_from_file_location('pc_only_failure_lifecycle_fixture',ROOT/'tests/test_setup_pc.py')
+        fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+        adapter=fixture.ChildAdapter(self.runtime);self.addCleanup(adapter.close)
+        adapter.spawn('vrserver.exe')
+        factory=lambda engine,local,runtime:fixture.pc.Lifecycle(engine,local,runtime,adapter=adapter)
+        def fail(unused):raise s.SetupError('fixture failure after actual PC write')
+        run=self.checked_wizard(install_fault=fail,runtime_factory=factory)
+        self.assertEqual(run.result,2);self.assert_frame_read_only(before,run)
+        self.assertEqual(installed.receipt.read_bytes(),old)
+        self.assertEqual(adapter.launches,0);self.assertEqual(adapter.inventory(),[])
+        self.assertIn('bridge_pc_rolled_back',run.messages)
+        self.assertFalse((self.local.root/'lifecycle.json').exists())
 
     def test_declining_pc_update_changes_neither_device(self):
         self.pc_candidate();before=self.frame_snapshot();receipt=b.LocalInstall(s,self.local).receipt.read_bytes()

@@ -2,9 +2,9 @@
 
 Call snapshot/stop/start only after the user's Apply confirmation. This module
 never kills by executable name, touches Steam/the game, edits registration, or
-claims a headset picture is correct. Restore retains the durable original
-running baseline across interrupted setup runs. Linux PC installation is not
-supported; the adapter port exists for isolated, portable lifecycle tests.
+claims a headset picture is correct. Recovery retains the durable original
+baseline across interrupted runs, but leaves PC SteamVR closed. Linux PC
+installation is not supported; the adapter port exists for portable tests.
 """
 from __future__ import annotations
 
@@ -45,6 +45,17 @@ class Lifecycle:
         self.root = engine.no_links(Path(steamvr).absolute())
         self.path = engine.no_links(local.root / 'lifecycle.json')
         self.adapter = adapter or WindowsAdapter(engine, self.root)
+        self._observed_images = None
+
+    def _images(self):
+        # Each new setup operation re-verifies the current signed Valve files.
+        # A historical receipt need not prevent stop-only recovery after a real
+        # SteamVR update, but changes during this operation must still abort.
+        images = self.adapter.images()
+        self.e.require(self._observed_images is None or images == self._observed_images,
+                       'SteamVR executables changed during lifecycle control.')
+        self._observed_images = images
+        return images
 
     def _inventory(self):
         result = self.adapter.inventory()
@@ -60,13 +71,22 @@ class Lifecycle:
             seen.add((item['pid'],item['created']))
         return result
 
-    def _baseline(self):
+    def _baseline(self, *, stopping=False):
         raw = self.e.read(self.path, 65536, private=True)
         value = self.e.parse(raw)
         self.e.require(set(value) == {'schema','steamvr','images','running','processes'} and value['schema'] == SCHEMA and
                        value['steamvr'] == str(self.root) and type(value['running']) is bool and
                        type(value['processes']) is list and len(value['processes']) <= MAX_PROCESSES and
-                       bool(value['processes']) == value['running'] and value['images'] == self.adapter.images(),
+                       bool(value['processes']) == value['running'],
+                       'PC lifecycle recovery belongs to a different or changed SteamVR installation; it was preserved.')
+        pins=value['images']
+        self.e.require(type(pins) is dict and set(pins)==set(NAMES) and all(
+            type(pin) is dict and set(pin)=={'bytes','sha256'} and type(pin['bytes']) is int and
+            0<pin['bytes']<=256*1024*1024 and type(pin['sha256']) is str and len(pin['sha256'])==64 and
+            all(c in '0123456789abcdef' for c in pin['sha256']) for pin in pins.values()),
+            'Unknown PC lifecycle recovery data was preserved.')
+        images=self._images()
+        self.e.require(stopping or pins==images,
                        'PC lifecycle recovery belongs to a different or changed SteamVR installation; it was preserved.')
         paths = {str(self.root / 'bin/win64' / name) for name in NAMES}
         for item in value['processes']:
@@ -79,8 +99,8 @@ class Lifecycle:
     def snapshot(self):
         """Persist before the first stop. Re-entry never replaces that baseline."""
         if os.path.lexists(self.path):
-            return self._baseline()[1]
-        images = self.adapter.images()
+            return self._baseline(stopping=True)[1]
+        images = self._images()
         processes = self._inventory()
         value = {'schema':SCHEMA,'steamvr':str(self.root),'images':images,
                  'running':bool(processes),'processes':processes}
@@ -90,7 +110,7 @@ class Lifecycle:
     def stop(self, *, grace=5, timeout=8):
         """Graceful close, then terminate only freshly reverified owned handles."""
         _duration(self.e,grace); _duration(self.e,timeout)
-        self._baseline()
+        self._baseline(stopping=True)
         start = self.adapter.clock(); forced = start + grace; end = forced + timeout
         notified = set()
         while True:
@@ -128,11 +148,12 @@ class Lifecycle:
             self.adapter.sleep(min(.1,max(0,end-self.adapter.clock())))
 
     def restore(self, *, grace=5, timeout=45):
-        """Call after restoring installation files; restore the ORIGINAL state."""
-        baseline = self._baseline()[1]
-        self.stop(grace=grace,timeout=timeout)
-        result = self.start(timeout=timeout) if baseline['running'] else {'running':False,'health_scope':'owned_process_presence'}
-        return {**result,'baseline_restored':True}
+        """Reconcile recovery without launching PC SteamVR, even if it ran before.
+
+        Keep the historical receipt unchanged until file recovery is verified.
+        The user/game owns the next runtime launch on every setup outcome.
+        """
+        return {**self.stop(grace=grace,timeout=timeout),'baseline_restored':True}
 
     def finish(self):
         """Forget our exact receipt; a reconciled finalization may repeat this.
@@ -141,7 +162,7 @@ class Lifecycle:
         changed receipt or changed runtime still goes through strict validation.
         """
         if not os.path.lexists(self.path):return
-        raw,_ = self._baseline()
+        raw,_ = self._baseline(stopping=True)
         self.e.remove_owned(self.path,raw)
 
 
@@ -309,6 +330,12 @@ class WindowsAdapter:
             self.e.require(stamp>0,'PC process creation identity was invalid.')
             result={'pid':pid,'created':stamp,'path':str(expected)}
             owned=handle;handle=None;return owned,result
+        except self.e.SetupError:
+            # Toolhelp may enumerate a process that exits during any identity
+            # query. Only this exact handle signaling termination proves that
+            # race; an unreadable live process must still fail without a kill.
+            if handle and self.wait(handle,0)==0:return None
+            raise
         finally:
             if handle:self.close(handle)
 
@@ -358,7 +385,8 @@ class WindowsAdapter:
         with self._owned(identity,0x101001) as handle:
             if not handle:return False
             if self.wait(handle,0)==0:return True
-            self.e.require(self.kill(handle,1),'An owned PC SteamVR process could not be stopped.')
+            if not self.kill(handle,1):
+                self.e.require(self.wait(handle,0)==0,'An owned PC SteamVR process could not be stopped.')
             return True
 
     def launch(self):

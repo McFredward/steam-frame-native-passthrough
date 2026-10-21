@@ -20,7 +20,7 @@
 >
 > **Tested with Steam Frame SteamVR 2.18.2 · build 1791331621**
 >
-> Untested SteamVR versions require an extra confirmation. Passthrough stays inactive if the required native components cannot be verified.
+> Untested SteamVR versions require an extra confirmation. Install anyway enables the patch for testing; compatibility is not guaranteed.
 
 Play supported PC VR games in your real room over Steam Link.
 
@@ -89,7 +89,9 @@ Demeo1.4.21 can request rate accounting for its additional lossless coverage
 traffic. The PC-only candidate reserves measured metadata inside the requested
 video bitrate; video compression may increase under load. Resolution/frame rate
 and mask precision are retained. Current GloomhavenVR v1 clients keep their
-original encoder behavior. Frame0.2.12 and installer0.2.14 are unchanged; matching
-Frame files/settings/services require no update or restart. This corrects a
+original encoder behavior. Installer0.2.15 leaves PC SteamVR closed even after recovery and enables the
+patch when an untested-build warning is accepted. PC0.2.15 and Frame0.2.12
+payloads are unchanged; matching Frame files/settings/services require no update
+or restart. This corrects a
 reproduced budget overrun, not a guarantee against all native packet-loss resets.
 See the [capture and validation limits](docs/development/FRAME-CONTINUITY.md#producer-metadata-rate-accounting-dev-pc0215).

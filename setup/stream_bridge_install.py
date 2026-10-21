@@ -184,11 +184,13 @@ def runtime_admission(engine,bundle,side,snapshot,consent):
     if consent is not None or not all(item['matches'] for item in snapshot.values()):
         engine.require(consent=={'bundle':bundle.pin,'snapshot':snapshot},
             'The untested runtime changed or was not explicitly confirmed. Check both devices and confirm again.')
-    return native_admitted(side,snapshot)
+    # The exact snapshot confirmation authorizes trying an untested build.
+    # File/version mismatches are warnings, never a silent disabled install.
+    return True
 
 
 def activation_status(admitted,state=None):
-    mode=state.get('activation_mode','active') if state else ('active' if admitted else 'inactive')
+    mode=state.get('activation_mode','active') if state else 'active'
     return {'runtime_admitted':admitted,'activation_mode':mode,
             'admission_reason':'known-native-bindings' if admitted else 'unknown-native-bindings'}
 
@@ -1956,7 +1958,7 @@ def frame_component_current(bundle,frame):
     return (type(frame)is dict and frame.get('installed')is True and not frame.get('recovery_pending') and not frame.get('legacy_installed') and
         frame.get('installed_version') is not None and frame.get('installed_version')==bundle.frame.get('version') and
         all(frame.get(key)is True for key in ('patch_payload_current','component_files_current','owned_files_current','runtime_configuration_current')) and
-        frame.get('runtime_admitted')==(frame.get('activation_mode')=='active'))
+        frame.get('activation_mode')=='active')
 
 
 def pc_only_candidate(bundle,state,frame,address):
@@ -1976,7 +1978,7 @@ class Automation:
         pc=local.inventory();self.pc=pc
         self.runtime=load_helper(engine,'steam_link_setup_pc').Lifecycle(engine,local,pc['steamvr'])
         self.error=engine.SetupError;self.baseline=None;self.restore_baseline=None
-        self.runtime_approval=None;self.approval_ready=False;self.inactive=False
+        self.runtime_approval=None;self.approval_ready=False
 
     def phase(self,stage):
         self.context['stage']=stage
@@ -2040,16 +2042,14 @@ class Automation:
               'key_hex':secrets.token_hex(32),'role':'producer','protocol_major':1}
         address=local_address(self.address)
         self.phase('frame_prepare')
-        prepared=self.call('bridge-prepare',pairing={**pair,'role':'receiver'},address=address,port=47631,automated=True,runtime_consent=self.consent('frame'))
+        self.call('bridge-prepare',pairing={**pair,'role':'receiver'},address=address,port=47631,automated=True,runtime_consent=self.consent('frame'))
         self.phase('pc_install')
         self.installed.install(self.bundle,self.local.inventory(),pair,address,47631,backup=True,runtime_consent=self.consent('pc'))
-        self.inactive=prepared.get('activation_mode')=='inactive' or self.installed.state().get('activation_mode')=='inactive'
         self.phase('frame_commit');self.call('bridge-commit')
 
     def restart_prepared(self):
         # The maintainer wants the PC runtime left closed after Apply. Steam
-        # Link/game launch owns its later startup. Only rollback restores the
-        # PC's original on/off state through runtime.restore().
+        # Link/game launch owns its later startup, including after rollback.
         self.phase('runtime_start');result=self.call('bridge-runtime-restart')
         if type(result.get('health_receipt'))is dict:self.baseline=result['health_receipt']
 
@@ -2193,7 +2193,6 @@ class PcOnlyAutomation(Automation):
         self.installed.install(self.bundle,self.local.inventory(),pair,
             settings['controlListenAddress']['installed'],settings['controlPort']['installed'],
             backup=True,runtime_consent=self.consent('pc'))
-        self.inactive=self.installed.state().get('activation_mode')=='inactive'
 
     def prepared_health(self):
         self.phase('pc_install')
@@ -2462,7 +2461,7 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
         else:actions.insert(0,'update')
     recommended='install' if 'install' in actions else 'update' if 'update' in actions else 'repair' if 'repair' in actions else 'rollback' if pending else 'check'
     if components_current and not pending and report['pc']['owned_files_current'] and frame.get('owned_files_current') is True and frame.get('runtime_configuration_current') is True and bool(pc.get('registered'))==(report['pc']['activation_mode']=='active') and all(
-            item['runtime_admitted']==(item['activation_mode']=='active') for item in (report['pc'],frame)):
+            item['activation_mode']=='active' for item in (report['pc'],frame)):
         recommended='check'
     if pc_finishing:actions=['retry','check','exit'];recommended='retry'
     resumed=context.pop('confirmed_apply',None)
@@ -2521,7 +2520,6 @@ def _run(args,engine,local,*,input_fn=input,discover_frame=None,remote_factory=N
     def completed(result):
         if result==0:
             refresh_inventory()
-            if ports.inactive:ui.say('bridge_untested_installed')
         return result
     if pending and action in ('install','update','repair','uninstall') and not (pc_scope is not None and not pc_plan):
         result=flow.run(action,reconcile=True)

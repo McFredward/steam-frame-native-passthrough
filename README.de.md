@@ -20,7 +20,7 @@
 >
 > **Getestet mit Steam Frame SteamVR 2.18.2 · Build 1791331621**
 >
-> Ungetestete SteamVR-Versionen erfordern eine zusätzliche Bestätigung. Passthrough bleibt inaktiv, wenn die benötigten nativen Komponenten nicht verifiziert werden können.
+> Ungetestete SteamVR-Versionen erfordern eine zusätzliche Bestätigung. „Trotzdem installieren“ aktiviert den Patch zum Ausprobieren; die Kompatibilität ist nicht garantiert.
 
 Spiele unterstützte PC-VR-Spiele über Steam Link in deinem echten Zimmer.
 
@@ -88,9 +88,11 @@ Inoffizielles Projekt, nicht mit Valve verbunden.
 Demeo1.4.21 kann die zusätzliche verlustfreie Maskenübertragung in das
 Videobudget einrechnen lassen. Unter Last kann die Videokompression steigen;
 Auflösung, Bildrate und Maskengenauigkeit bleiben erhalten. GloomhavenVR nutzt
-weiter seinen bisherigen v1-Pfad. Frame0.2.12 und Installer0.2.14 bleiben
-unverändert; bei passender Frame-Installation ist kein Update oder Neustart
-der Frame nötig. Ob dies auch den beobachteten Stream-Ausfall verhindert,
+weiter seinen bisherigen v1-Pfad. Installer0.2.15 lässt PC-SteamVR auch nach
+einer Wiederherstellung geschlossen und aktiviert den Patch nach bestätigter
+Warnung vor einem ungetesteten Build. Die Komponenten PC0.2.15 und Frame0.2.12
+bleiben unverändert; bei passender Frame-Installation ist kein Update oder
+Neustart der Frame nötig. Ob dies auch den beobachteten Stream-Ausfall verhindert,
 muss ein neuer Headset-Test zeigen. Die
 [Untersuchung](docs/development/FRAME-CONTINUITY.md#producer-metadata-rate-accounting-dev-pc0215)
 trennt Softwareprüfung und Hardware-Ergebnis.

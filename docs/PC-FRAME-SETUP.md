@@ -10,9 +10,8 @@ retired; archived downloads are not an alternative installation route.
 ## Before you begin
 
 - The tested Frame runtime is **SteamVR 2.18.2, build 1791331621**. Other runtime
-  versions can be installed after a separate warning and confirmation. Native
-  activation still requires verified bindings; otherwise the installed patch
-  remains explicitly inactive.
+  versions can be installed after a separate warning and confirmation. The patch
+  is enabled for testing after that confirmation; compatibility is not guaranteed.
 - The installable sender preview requires **Windows, NVIDIA and HEVC**. Other
   codecs are not admitted for paired passthrough. Linux can inspect the setup
   and maintain the Frame; installing a native Linux sender is not supported yet.
@@ -71,9 +70,12 @@ additional confirmation. Complete observed snapshots remain bound to consent.
 3. Choose the offered **Install**, **Update** or **Repair** action and review the
    concrete changes before confirming **Apply**. An untested runtime requires
    an additional **Install anyway** confirmation with the detected versions.
-   Unknown native bindings leave the installed patch inactive. A missing payload
+   Confirming enables the patch for testing even when native file pins differ;
+   compatibility is not guaranteed. A missing payload
    or an unknown changed user file is still preserved rather than overwritten.
-4. A **PC-only update** closes PC SteamVR, updates and verifies only the PC
+4. PC SteamVR stays closed on success, failure recovery and Undo; setup never
+   relaunches it.
+   A **PC-only update** closes PC SteamVR, updates and verifies only the PC
    files, and preserves the existing pairing. Frame patch files, settings,
    installation records and services remain unchanged. There is no Frame
    restart or picture-confirmation step. Frame status is checked read-only.
@@ -99,7 +101,7 @@ Run the same command again. The assistant inspects the current files and offers
 appropriate actions, including **Update**, **Repair**, **Uninstall** and
 **Restore previous setup** (Undo). A current installation needs no changes.
 
-Installer0.2.14 compares the complete Frame component independently of the
+Installer0.2.15 compares the complete Frame component independently of the
 whole download's hash. A different PC patch or installer version does not make
 unchanged Frame files stale. A changed Frame version/payload, damaged installed
 files, pending Frame recovery, changed runtime configuration, or a changed
@@ -185,3 +187,27 @@ action still requires interactive review; `--action` is not unattended consent.
 `--bundle` selects a complete checked bundle and `--steamvr` supplies a library
 path when automatic discovery cannot find it. Native protocol, provider and
 package details belong in the [developer guide](DEVELOPING.md).
+
+## Installer0.2.15 recovery behavior
+
+PC SteamVR stays closed after both successful Apply and failed-operation
+recovery, including Undo of a previously running installation. Setup no longer
+relaunches it from the saved running baseline. A process exiting during Windows
+identity inspection or termination is accepted only when that same owned handle
+signals termination; unreadable live processes still stop the operation.
+
+The October21 report's `check_bb3c91bd1a919545` identifies the failed executable
+path query during runtime stop. Concurrent user/runtime shutdown can produce
+that race. `check_6fffb72484bbb47f` identifies changed executable hashes during
+recovery; terminating a process alone does not establish why those bytes changed.
+A fresh setup session can reconcile a historical stop-only receipt after
+rechecking the current Valve-signed files. It preserves the historical receipt
+and still rejects file changes within the current operation.
+
+Accepting the untested-runtime warning now enables the patch for testing.
+It never disables the PC setting, unregisters the provider or withholds the
+Frame activation files merely because a runtime hash/version is untested.
+An explicit Repair also enables older inactive installations. Actual native
+compatibility and shader generation still need to work; confirmation is not a
+successful headset test. Existing removal and exact-file recovery remain available.
+PC0.2.15 and Frame0.2.12 payloads are unchanged in this installer-only update.

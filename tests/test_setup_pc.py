@@ -3,7 +3,9 @@
 from __future__ import annotations
 import argparse
 import copy
+import contextlib
 import ctypes
+from ctypes import wintypes
 import hashlib
 import importlib.util
 import json
@@ -121,11 +123,11 @@ class Tests(unittest.TestCase):
         result=self.life.restore(grace=.1,timeout=2)
         self.assertTrue(result['baseline_restored']);self.assertFalse(result['running']);self.assertEqual(self.adapter.inventory(),[])
 
-    def test_restore_original_running_starts_after_file_rollback_and_preserves_foreign(self):
+    def test_restore_original_running_stays_closed_and_preserves_foreign(self):
         self.adapter.spawn();foreign=self.adapter.spawn(foreign=True);original=self.life.snapshot();self.stopped()
         result=self.life.restore(grace=.1,timeout=4)
-        self.assertTrue(result['running']);self.assertTrue(result['baseline_restored'])
-        self.assertEqual(self.adapter.launches,1);self.assertIsNotNone(self.adapter._owned(foreign))
+        self.assertFalse(result['running']);self.assertTrue(result['baseline_restored'])
+        self.assertEqual(self.adapter.launches,0);self.assertIsNotNone(self.adapter._owned(foreign))
         self.assertEqual(self.life.snapshot(),original)
         self.life.finish();self.assertFalse(self.life.path.exists())
 
@@ -164,6 +166,34 @@ class Tests(unittest.TestCase):
         own=self.adapter.spawn();self.life.snapshot();path=self.root/'bin/win64/vrmonitor.exe';path.write_bytes(b'CHANGED FIXTURE')
         with self.assertRaises(e.SetupError):self.stopped()
         self.assertIsNotNone(self.adapter._owned(own));self.assertEqual(self.adapter.graceful_calls,[])
+
+    def test_fresh_stop_only_recovery_accepts_verified_updated_images_without_rewriting_history(self):
+        self.adapter.spawn();original=self.life.snapshot();raw=self.life.path.read_bytes()
+        (self.root/'bin/win64/vrmonitor.exe').write_bytes(b'UPDATED IMAGE FIXTURE')
+        # A change within the same operation still refuses, before any close.
+        with self.assertRaises(e.SetupError):self.stopped()
+        self.assertEqual(self.adapter.graceful_calls,[])
+        # Images() is the trusted-image port (the production implementation
+        # checks the Valve signer on fresh file handles). No cached-image bypass.
+        fresh=pc.Lifecycle(e,self.local,self.root,adapter=self.adapter)
+        self.assertEqual(fresh.snapshot(),original);self.assertEqual(fresh.path.read_bytes(),raw)
+        # Historical authority may close, but must never launch changed images.
+        with self.assertRaises(e.SetupError):fresh.start(timeout=1)
+        self.assertTrue(fresh.restore(grace=.1,timeout=2)['stopped'])
+        self.assertEqual(self.adapter.launches,0);self.assertEqual(fresh.path.read_bytes(),raw)
+        fresh.finish();self.assertFalse(fresh.path.exists())
+
+    def test_fresh_recovery_still_requires_trusted_images_and_well_formed_historical_pins(self):
+        self.life.snapshot()
+        fresh=pc.Lifecycle(e,self.local,self.root,adapter=self.adapter)
+        def untrusted():raise e.SetupError('SteamVR executable is not signed by the expected publisher.')
+        normal=self.adapter.images;self.adapter.images=untrusted
+        with self.assertRaisesRegex(e.SetupError,'publisher'):fresh.snapshot()
+        self.adapter.images=normal
+        value=e.parse(self.life.path.read_bytes());value['images']['vrserver.exe']['sha256']='unknown'
+        self.life.path.write_bytes(e.encoded(value))
+        with self.assertRaisesRegex(e.SetupError,'Unknown PC lifecycle'):fresh.snapshot()
+        self.assertTrue(self.life.path.exists());self.assertEqual(self.adapter.launches,0)
 
     def test_pid_reuse_creation_mismatch_is_not_authority(self):
         own=self.adapter.spawn(graceful=False);stale={**own,'created':own['created']-1}
@@ -228,8 +258,43 @@ class Tests(unittest.TestCase):
         adapter=self.path_adapter(lambda value:called.append(value) or value)
         with self.assertRaises(e.SetupError):adapter._normalize(linked/'vrmonitor.exe')
         self.assertEqual(called,[])
+
         adapter=self.path_adapter(lambda value:str(linked/'vrmonitor.exe'))
         with self.assertRaises(e.SetupError):adapter._normalize(real/'vrmonitor.exe')
+
+    def test_native_process_exit_during_path_query_is_not_a_shutdown_failure(self):
+        # Execute production handle inspection with only the Win32 API ports
+        # injected. A failed query is tolerated only after this exact handle
+        # signals termination; live unreadable processes must still fail.
+        for dead in (False,True):
+            with self.subTest(dead=dead):
+                adapter=object.__new__(pc.WindowsAdapter)
+                adapter.e=e;adapter.w=wintypes;adapter.user=b'fixture-owner'
+                adapter.open=lambda *a:123
+                state={'query':False};closed=[]
+                adapter.wait=lambda *a:0 if state['query'] and dead else 0x102
+                adapter._sid=lambda *a:adapter.user
+                def query(*a):state['query']=True;return False
+                adapter.query=query;adapter.close=closed.append
+                if dead:self.assertIsNone(adapter._process(42))
+                else:
+                    with self.assertRaisesRegex(e.SetupError,'executable path could not be checked'):
+                        adapter._process(42)
+                self.assertEqual(closed,[123])
+
+    def test_native_terminate_race_requires_the_owned_handle_to_have_exited(self):
+        for dead in (False,True):
+            with self.subTest(dead=dead):
+                adapter=object.__new__(pc.WindowsAdapter);adapter.e=e
+                # Ownership itself is covered by the native handle test below.
+                adapter._owned=lambda *a:contextlib.nullcontext(123)
+                state={'terminated':False}
+                adapter.wait=lambda *a:0 if state['terminated'] and dead else 0x102
+                def kill(*a):state['terminated']=True;return False
+                adapter.kill=kill
+                if dead:self.assertTrue(adapter.terminate({}))
+                else:
+                    with self.assertRaisesRegex(e.SetupError,'could not be stopped'):adapter.terminate({})
 
     @unittest.skipUnless(os.name=='nt','Windows ctypes process and Authenticode APIs only')
     def test_native_windows_owned_handles_sid_creation_time_and_foreign_pid_refusal(self):

@@ -67,8 +67,13 @@
 - The maintainer's 2026-10-19 installer request permits installation on untested
   SteamVR versions after an explicit additional warning and confirmation. Do not
   hide Install/Update/Repair solely because a runtime differs. Installation
-  consent is not native ABI, shader or frame authority: report inactive payloads
-  honestly, keep exact activation checks and preserve removal/recovery.
+  confirmation enables the patch for testing, including mismatching file pins;
+  never install it disabled solely because that build is untested (2026-10-21).
+  Keep native ABI/shader/frame correctness checks and preserve removal/recovery.
+- PC SteamVR must remain closed after Apply, failure recovery and Undo. Never
+  relaunch it to restore its historical running state (2026-10-21). A fresh run
+  may reconcile an old stop-only journal using freshly verified Valve images;
+  preserve its original receipt and reject image changes during an operation.
 - Clean completed temporary test artifacts after every run (maintainer request,
   2026-10-11). Retain small validation records and only the build outputs still
   needed for review/deployment. Protect active workers, hardware logs, source
