@@ -1,0 +1,30 @@
+name: Match package logging to branch
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'distribution/steam-link-native-passthrough.zip'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: logging-channel-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - name: Validate defaults and preserve exact native/setup payloads
+        run: python3 -B tests/test_logging_channel.py
+      - name: Publish branch default when an artifact crossed branches
+        env:
+          CHANNEL: ${{ github.ref_name }}
+        run: |
+          git config user.name McFredward
+          git config user.email frederik@lissek.info
+          python3 -B tools/publish_logging_channel.py --channel "$CHANNEL" --publish

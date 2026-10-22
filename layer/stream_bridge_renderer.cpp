@@ -5,6 +5,7 @@
 #include "native_presenter_pipeline.h"
 #include "pixel_ssbo_profile_transform.h"
 #include "submit_timeline_contract.h"
+#include "bridge/stream_bridge_log.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -30,7 +31,8 @@ template<class T,std::size_t N>T* find(std::array<T,N>& list,std::uint64_t value
 template<class T,std::size_t N>T* add(std::array<T,N>& list,std::uint64_t value){if(!value||find(list,value))return nullptr;for(auto& entry:list)if(!entry.id){entry.id=value;return &entry;}return nullptr;}
 bool current(const LocalPicture& picture){return picture.leases&&picture.connection&&picture.connection->load(std::memory_order_acquire)&&picture.leases->current(picture.metadata.lease);}
 bool same(const sb::FrameDescriptor&a,const sb::FrameDescriptor&b){return a.sourceFrame==b.sourceFrame&&a.encoderGeneration==b.encoderGeneration&&a.codedWidth==b.codedWidth&&a.codedHeight==b.codedHeight;}
-void coldNote(const char* message) noexcept{
+void coldNote(const char* message,sb::logging::Level level=sb::logging::Level::Warning) noexcept{
+    if(!sb::logging::enabled(level))return;
     // Cold creation callbacks only. Repeated unrelated startup pipelines must
     // not consume the later shader/companion admission messages' entire budget.
     try{static std::mutex gate;static std::array<const char*,32> seen{};
@@ -100,6 +102,7 @@ struct Renderer::Impl {
         std::atomic<std::uint32_t> firstNextType{0},firstRefusedNextType{0};
     } counts;
     ColdReportPolicy reportPolicy;
+    std::uint64_t importantFaults=0;
     void refused(DrawRefusal reason) noexcept {counts.refusals[static_cast<std::size_t>(reason)].fetch_add(1,std::memory_order_relaxed);}
     void submitRefused(SubmitRefusal reason,std::uint32_t next=0) noexcept {
         ++counts.submitRefusals[static_cast<std::size_t>(reason)];
@@ -129,6 +132,16 @@ struct Renderer::Impl {
         const auto now=std::chrono::steady_clock::now();
         RendererStats s;
         if(!reportPolicy.inspect(now,[this]{return stats();},s))return;
+        if(!sb::logging::debug()){
+            const auto faults=s.maskRejected+s.uploadRefused+s.guardRefused+s.poolRefused+std::uint64_t(s.lost);
+            if(faults>importantFaults&&sb::logging::enabled(s.lost?sb::logging::Level::Error:sb::logging::Level::Warning)){
+                importantFaults=faults;
+                std::fprintf(stderr,"[Steam Link Native Passthrough] renderer warning: rejected masks/uploads/submits=%llu/%llu/%llu; pool-refused=%llu; pipeline-lost=%u\n",
+                    static_cast<unsigned long long>(s.maskRejected),static_cast<unsigned long long>(s.uploadRefused),
+                    static_cast<unsigned long long>(s.guardRefused),static_cast<unsigned long long>(s.poolRefused),unsigned(s.lost));
+            }
+            return;
+        }
         const auto miss=[&](DrawRefusal r){return static_cast<unsigned long long>(s.drawRefusals[static_cast<std::size_t>(r)]);};
         std::fprintf(stderr,"[Steam Link Native Passthrough] renderer flow: metadata=%llu; mask decoded/none/rejected=%llu/%llu/%llu; upload accepted/refused=%llu/%llu, actual=%llu; pool pending/copying/ready/quarantined=%u/%u/%u/%u; pictures=%llu; record selected/attempts=%llu/%llu, begins=%llu; miss unavailable/busy/cb/epoch/pipeline/ineligible/descriptor/image/exact/mask/capacity=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu; submit guarded-accepted/attempts/refused=%llu/%llu/%llu, opaque=%llu; pipelines=%u, lost=%u\n",
             static_cast<unsigned long long>(s.metadata),static_cast<unsigned long long>(s.maskDecoded),static_cast<unsigned long long>(s.maskNone),static_cast<unsigned long long>(s.maskRejected),
@@ -325,7 +338,7 @@ void Renderer::shaderCreated(VkShaderModule value,const VkShaderModuleCreateInfo
         if(frame_pixel_ssbo_clone::captureShader(info,frame_pixel_ssbo_clone::ShaderRole::Fragment,*original,why)&&
            frame_pixel_ssbo_profile::transform(*original,false,*proof,why)&&
            p.definitions.authorizeProbeInterface(proof->profile)){
-            p.count1Authorized=true;coldNote("native count1 image interface verified");
+            p.count1Authorized=true;coldNote("native count1 image interface verified",sb::logging::Level::Debug);
         }else coldNote("native count1 image interface refused; native pipeline retained");
     }catch(...){coldNote("native shader admission unavailable; native pipeline retained");}
 }
@@ -357,7 +370,7 @@ bool Renderer::prepareCold(VkDevice device,VkPhysicalDeviceMemoryProperties memo
         if(queues!=1){coldNote("exact coverage unavailable: graphics family does not request exactly one queue; ordinary native video retained");return false;}
         if(!p.makeControls()){coldNote("exact coverage unavailable: immutable control preparation failed; ordinary native video retained");return false;}
         p.GetDeviceQueue(device,family,0,&p.queue);if(!p.queue){coldNote("exact coverage unavailable: native graphics queue missing; ordinary native video retained");return false;}
-        p.prepared=p.coveragePrepared=true;coldNote("native full-colour exact-coverage resources verified");return true;
+        p.prepared=p.coveragePrepared=true;coldNote("native full-colour exact-coverage resources verified",sb::logging::Level::Debug);return true;
     }catch(...){coldNote("renderer preparation failed; exact coverage disabled");return p.coveragePrepared;}
 }
 void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCreateInfo& info,const VkAllocationCallbacks* allocator,VkPipeline& original) noexcept{
@@ -365,7 +378,7 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
     // Native profile uses the default allocator. A caller-owned allocation
     // context has no retained lifetime here, so keep that unsupported object
     // entirely native instead of borrowing callbacks after this cold call.
-    if(allocator){coldNote("custom pipeline allocator retained without replacement");return;}
+    if(allocator){coldNote("custom pipeline allocator retained without replacement",sb::logging::Level::Debug);return;}
     try{journal::Event event;if(!p.definitions.createPipeline(original,info,VK_SUCCESS,&event)){
             if(event.contract.reason==frame_pixel_ssbo_clone::Reason::Image9Extent)coldNote("native pipeline refused: image interface not verified");
             return;
@@ -388,7 +401,7 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
         if(entry->coverage){
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
             if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted,Impl::published,Impl::decodedCoverage});
-            coldNote("native exact-coverage pipeline prepared; original picture preserved");
+            coldNote("native exact-coverage pipeline prepared; original picture preserved",sb::logging::Level::Important);
         }else{if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);*entry={};coldNote("exact-coverage pipeline unavailable; ordinary native video retained");}
     }catch(...){/* The successfully created native pipeline remains unchanged. */}
 }

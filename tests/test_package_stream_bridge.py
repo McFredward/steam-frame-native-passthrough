@@ -101,6 +101,16 @@ class Tests(unittest.TestCase):
             self.assertEqual(marker['packages']['textual']['version'],'8.2.8')
             self.assertIn(b'../vendor\n',z.read('setup/runtime/python/python314._pth'))
 
+    def test_branch_logging_defaults_are_owned_data_without_native_changes(self):
+        dev,_=self.build(channel='dev');main,_=self.build(channel='main')
+        with zipfile.ZipFile(io.BytesIO(dev)) as a,zipfile.ZipFile(io.BytesIO(main)) as b:
+            for name in ('pc-provider/logging-default.conf','frame/logging-default.conf'):
+                self.assertEqual(a.read(name),b'Debug\n');self.assertEqual(b.read(name),b'Important\n')
+            for name in a.namelist():
+                if name.endswith(('.dll','.so','.exe','.py')):self.assertEqual(a.read(name),b.read(name),name)
+            self.assertEqual(json.loads(a.read('stream-bridge-bundle.json'))['logging'],{'channel':'dev','level':'Debug'})
+            self.assertEqual(json.loads(b.read('stream-bridge-bundle.json'))['logging'],{'channel':'main','level':'Important'})
+
     def test_reproducible_archive(self):
         first,r1=self.build();second,r2=self.build();self.assertEqual(first,second);self.assertEqual(r1,r2)
 

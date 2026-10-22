@@ -275,6 +275,7 @@ class SessionLog:
     Recovery accepts only known receipt-path shapes, never arbitrary file names.
     """
     def __init__(self):
+        self.level = 'Debug'
         self.path = None
         self.available = False
         self.failure_code = None
@@ -288,8 +289,16 @@ class SessionLog:
         self._lock = threading.Lock()
 
     @classmethod
-    def open(cls, local_root=None, system=None):
+    def open(cls, local_root=None, system=None, *, level=None):
         result = cls()
+        if level is None:
+            try:
+                package=Path(__file__).resolve().parents[1]/'stream-bridge-bundle.json'
+                with package.open('rb') as stream:raw=stream.read(128*1024+1)
+                if len(raw)<=128*1024:level=json.loads(raw).get('logging',{}).get('level')
+            except (OSError,ValueError,TypeError,AttributeError):pass
+        candidate=os.environ.get('SFNP_LOG_LEVEL') or level or 'Debug'
+        result.level=next((n for n in ('Debug','Important','Warning','Error') if n.lower()==str(candidate).lower()),'Important')
         try:
             root = Path(_plain_absolute(local_root if local_root is not None else default_root(system)))
             _require(root.is_absolute(), 'invalid_path')
@@ -374,6 +383,13 @@ class SessionLog:
                 if versions is not None:value['versions']=_versions(versions)
                 if runtime_checks is not None:
                     value['runtime_checks'] = _runtime_checks(runtime_checks)
+                # Validate/redact before filtering. Quiet logs retain failures,
+                # cancellation and recovery; routine polling/stages are Debug.
+                severity=('Error' if kind=='failure' else 'Warning' if kind=='recovery' or
+                          status in ('failed','refused','partial','cancelled','unavailable') else
+                          'Important' if kind in ('start','complete') or status=='pending' or versions is not None else 'Debug')
+                if ('Error','Warning','Important','Debug').index(severity) > ('Error','Warning','Important','Debug').index(self.level):
+                    return True
                 # Reserve one final, guaranteed limit marker instead of silently
                 # growing or overwriting old evidence. No feature timer is used.
                 if self._bytes + MAX_EVENT_BYTES > MAX_BYTES - _LIMIT_RESERVE:

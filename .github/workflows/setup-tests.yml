@@ -1,7 +1,7 @@
 name: PC and Frame setup checks
 on:
   push:
-    branches: [dev]
+    branches: [dev, main]
     paths:
       - 'VERSION'
       - 'get.ps1'
@@ -31,6 +31,8 @@ on:
       - 'tests/test_setup_workflow.py'
       - 'tests/test_pc_only_setup.py'
       - 'tests/test_package_stream_bridge.py'
+      - 'tests/test_logging_channel.py'
+      - 'tools/publish_logging_channel.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
       - 'tests/test_setup_ui.py'
@@ -73,6 +75,8 @@ on:
       - 'tests/test_setup_workflow.py'
       - 'tests/test_pc_only_setup.py'
       - 'tests/test_package_stream_bridge.py'
+      - 'tests/test_logging_channel.py'
+      - 'tools/publish_logging_channel.py'
       - 'tests/test_steam_link_setup.py'
       - 'tests/test_setup_bootstrap.py'
       - 'tests/test_setup_ui.py'
@@ -146,6 +150,7 @@ jobs:
           python -B tests/test_setup_workflow.py
           python -B tests/test_pc_only_setup.py
           python -B tests/test_package_stream_bridge.py
+          python -B tests/test_logging_channel.py
           python -B tests/test_setup_bootstrap.py
           python -B tests/test_setup_ui.py
           python -B tests/test_setup_dependencies.py

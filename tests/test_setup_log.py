@@ -94,6 +94,20 @@ class SessionLogs(unittest.TestCase):
     def entries(self, session):
         return [json.loads(line) for line in session.path.read_text(encoding='ascii').splitlines()]
 
+    def test_important_filters_polling_but_preserves_failure_recovery_and_completion(self):
+        session=log.SessionLog.open(self.root,level='Important');self.addCleanup(session.close)
+        initial=session.path.read_bytes()
+        for _ in range(200):self.assertTrue(session.event('frame_inventory','result',status='ok',command='bridge-inventory'))
+        self.assertEqual(session.path.read_bytes(),initial)
+        self.assertTrue(session.record_failure('pc_install',TimeoutError()))
+        self.assertTrue(session.event('rollback','recovery',reason='recovery_retained'))
+        self.assertTrue(session.event('complete','complete',status='ok'))
+        entries=self.entries(session)
+        self.assertEqual([e['kind'] for e in entries],['start','failure','recovery','complete'])
+        self.assertEqual([e['sequence'] for e in entries],list(range(4)))
+        self.assertFalse(session.event('frame_inventory','result',command='SECRET'))
+        self.assertNotIn(b'SECRET',session.path.read_bytes())
+
     def test_real_unique_persistent_private_file(self):
         first = self.open()
         second = self.open()

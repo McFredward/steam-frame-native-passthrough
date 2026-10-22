@@ -82,6 +82,8 @@ TOOLS = frozenset('frame/tools/'+name+'.py' for name in (
     'app_payload_probe','compositor_startup_health','native_fragment_count1_interface',
     'native_fragment_ssa_probe','native_fragment_stream_coverage','native_shader_contract','pixel_payload_recovery','stream_bridge_camera'))
 PROFILES = frozenset({'frame/tools/native_shader_contract.json'})
+LOG_DEFAULT = 'logging-default.conf'
+FRAME_DEFAULTS = frozenset({'frame/'+LOG_DEFAULT})
 GENERATED = {'coverage.spv': {'bytes':7188,'sha256':'316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e'}}
 # Removal/recovery allowlist only. These files are never generated, installed or
 # selected by this version. An owned update removes them while retaining their
@@ -204,10 +206,18 @@ class Bundle:
         self.value = engine.parse(raw)
         self.pin = engine.sha(engine.encoded(self.value))
         v = self.value
-        engine.require(set(v)-{'version'}=={'schema','readiness','bridge_protocol','pc','frame','files'} and
+        engine.require(set(v)-{'version','logging'}=={'schema','readiness','bridge_protocol','pc','frame','files'} and
                        v['schema']==SCHEMA and v['readiness'] in ('prototype','release'),
                        'Unknown full-resolution setup package.')
         version_fields(v)
+        self.logging=v.get('logging')
+        if self.logging is not None:
+            engine.require(type(self.logging)is dict and set(self.logging)=={'channel','level'} and
+                           self.logging['channel'] in ('dev','main') and
+                           self.logging['level']==('Debug' if self.logging['channel']=='dev' else 'Important'),
+                           'Unknown package logging default.')
+        pc_files=PC_FILES|({'pc-provider/'+LOG_DEFAULT} if self.logging else set())
+        frame_defaults=FRAME_DEFAULTS if self.logging else frozenset()
         self.protocol = engine.protocol(v['bridge_protocol'])
         engine.records(v['files'])
         self.files = {}
@@ -220,20 +230,24 @@ class Bundle:
         self.pc, self.frame = v['pc'], v['frame']
         engine.require(type(self.pc)is dict and set(self.pc)-{'version'}=={'reviewed','platform','files','runtime_files'} and
                        self.pc['platform']=='windows-x86_64' and type(self.pc['reviewed'])is bool and
-                       type(self.pc['files'])is list and set(self.pc['files'])==PC_FILES,
+                       type(self.pc['files'])is list and set(self.pc['files'])==pc_files,
                        'Unsupported PC connection package.')
         engine.require(type(self.frame)is dict and set(self.frame)-{'version'}=={'reviewed','files','runtime_files','generated'} and
                        type(self.frame['reviewed'])is bool and type(self.frame['files'])is list and
                        len(self.frame['files'])==len(set(self.frame['files'])) and
-                       set(self.frame['files'])==TOOLS|PROFILES|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} and
+                       set(self.frame['files'])==TOOLS|PROFILES|frame_defaults|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} and
                        self.frame['generated']==GENERATED and
                        {'frame/'+LIBRARY,'frame/tools/native_fragment_stream_coverage.py',
                         'frame/tools/native_fragment_count1_interface.py','frame/libsfnp_stream_launch.so',
                         'frame/tools/compositor_startup_health.py'}<=set(self.frame['files']) and
-                       all(n in PROFILES|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} or re.fullmatch(r'frame/tools/[a-z0-9_]+[.]py',n)
+                       all(n in PROFILES|frame_defaults|{'frame/'+LIBRARY,'frame/libsfnp_stream_launch.so'} or re.fullmatch(r'frame/tools/[a-z0-9_]+[.]py',n)
                            for n in self.frame['files']), 'Unsupported Frame connection package.')
         engine.require(set(self.files)==set(self.pc['files'])|set(self.frame['files']),
                        'Unknown executable or shader payload in package.')
+        if self.logging:
+            expected=(self.logging['level']+'\n').encode('ascii')
+            engine.require(self.files['pc-provider/'+LOG_DEFAULT]==expected and
+                           self.files['frame/'+LOG_DEFAULT]==expected,'Package logging defaults differ from their declared channel.')
         provider=engine.parse(self.files['pc-provider/driver.vrdrivermanifest'])
         engine.require(provider.get('name')==NAME and provider.get('alwaysActivate') is True,
                        'Unsupported owned OpenVR provider manifest.')
@@ -361,7 +375,7 @@ class LocalInstall:
         e=self.e
         e.require(set(v)-{'version','activation_mode'}=={'schema','bundle','files','settings','registered_before','pair','vrpathreg'} and
                   v['schema']==RECEIPT and re.fullmatch('[0-9a-f]{64}',v['bundle']) and
-                  set(v['files'])==PC_FILES,'Unknown PC connection receipt preserved.')
+                  set(v['files']) in (PC_FILES,PC_FILES|{'pc-provider/'+LOG_DEFAULT}),'Unknown PC connection receipt preserved.')
         version_fields(v)
         e.require(v.get('activation_mode','active') in ('active','inactive'),'Unknown PC activation state preserved.')
         e.records(v['files'])
@@ -392,7 +406,7 @@ class LocalInstall:
             side='pc',versions=pc.get('runtime_versions') or self.e.runtime_versions(pc.get('steamvr')))
 
     def payload_status(self,bundle,state):
-        matches=state is not None and state['files']=={name:bundle.value['files'][name] for name in PC_FILES}
+        matches=state is not None and state['files']=={name:bundle.value['files'][name] for name in bundle.pc['files']}
         intact=state is not None
         if intact:
             try:
@@ -422,7 +436,7 @@ class LocalInstall:
 
     def checkpoint(self,pair_id=None):
         helper=load_helper(self.e,'steam_link_setup_checkpoint')
-        paths={self.local.root/name for name in PC_FILES}|{self.receipt,self.settings_path(),self.local.root/'pairings/active.json'}
+        paths={self.local.root/name for name in PC_FILES|{'pc-provider/'+LOG_DEFAULT}}|{self.receipt,self.settings_path(),self.local.root/'pairings/active.json'}
         def allowed(path):
             return path in paths or path.parent==self.local.root/'pairings' and re.fullmatch('[0-9a-f]{32}[.]json',path.name) is not None
         return helper.Checkpoint(self.e,self.local.root/'setup-restore.json',allowed,
@@ -433,7 +447,7 @@ class LocalInstall:
         snapshot=self.snapshot(bundle,pc);runtime_active=runtime_admission(e,bundle,'pc',snapshot,runtime_consent)
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before installing or updating the connection.')
         e.require(type(port)is int and 1024<=port<=65535,'Invalid connection port.')
-        old=self.state();planned={name:bundle.files[name] for name in PC_FILES}
+        old=self.state();planned={name:bundle.files[name] for name in bundle.pc['files']}
         e.require(not blocked_version_update(bundle.pc.get('version'),old.get('version') if old else None),
                   'The installed PC patch is newer or the package is unversioned; downgrade was not applied.')
         tool_pin=bundle.pc['runtime_files']['vrpathreg'];tool=None
@@ -477,7 +491,7 @@ class LocalInstall:
             # The receipt is deterministic and can be in either absent or fully
             # published state if a response is lost during installation.
             _,_,baseline=edits.planned()
-            receipt={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
+            receipt={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in bundle.pc['files']},
                      'settings':{'path':str(self.settings_path()),'baseline':baseline},'registered_before':bool(pc.get('registered')),
                      'pair':pair['pair_id'],'vrpathreg':tool_pin,**({'activation_mode':'inactive'} if not runtime_active else {})}
             planned_ops.append(checkpoint.operation(self.receipt,[helper.file_value(e.encoded(receipt))]))
@@ -491,7 +505,7 @@ class LocalInstall:
             if runtime_active and not pc.get('registered'):
                 self.local.register(self.local.verify_tool(pc,tool_pin),'adddriver');registered=True
                 e.require(self.local.inventory()['registered'],'The PC provider registration could not be confirmed.')
-            value={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in PC_FILES},
+            value={**version_fields(bundle.pc),'schema':RECEIPT,'bundle':bundle.pin,'files':{n:bundle.value['files'][n] for n in bundle.pc['files']},
                    'settings':settings,'registered_before':bool(pc.get('registered')),'pair':pair['pair_id'],'vrpathreg':tool_pin,
                    **({'activation_mode':'inactive'} if not runtime_active else {})}
             if not runtime_active and pc.get('registered'):self.registration(pc,False,tool_pin)
@@ -519,6 +533,10 @@ class LocalInstall:
                       'Changed provider files preserved.')
             desired=bundle.files[name]
             if raw!=desired:changes.append((path,raw,desired))
+        for name in set(bundle.pc['files'])-set(old['files']):
+            path=self.local.root/e.relative(name)
+            e.require(not os.path.lexists(path),'Unknown provider file preserved; update stopped.')
+            changes.append((path,None,bundle.files[name]))
         settings_path=self.settings_path();before=e.read(settings_path,2*1024*1024)
         preferences=e.parse(before)
         replacement=e.parse(e.encoded(old))
@@ -530,7 +548,7 @@ class LocalInstall:
             for key in spec['keys']:
                 current[key]=desired[section][key]
                 replacement['settings']['baseline'][section]['keys'][key]['installed']=current[key]
-        replacement.update(bundle=bundle.pin,files={n:bundle.value['files'][n] for n in PC_FILES},
+        replacement.update(bundle=bundle.pin,files={n:bundle.value['files'][n] for n in bundle.pc['files']},
                            vrpathreg=tool_pin or bundle.pc['runtime_files']['vrpathreg'])
         replacement.pop('activation_mode',None)
         if not runtime_active:replacement['activation_mode']='inactive'
@@ -563,7 +581,7 @@ class LocalInstall:
                         state=self.validate_state(e.parse(base64.b64decode(item['bytes'],validate=True)));break
                 if state:break
         if state is None:
-            e.require(not pc.get('registered') and not any(os.path.lexists(self.local.root/name) for name in PC_FILES),
+            e.require(not pc.get('registered') and not any(os.path.lexists(self.local.root/name) for name in PC_FILES|{'pc-provider/'+LOG_DEFAULT}),
                       'The PC removal receipt is missing; existing provider files or registration were preserved.')
             return {'reason':'not_installed','automatic_restart':False}
         e.require(not self.local.runner.runtime_running(),'Close SteamVR on this PC before removing the connection.')
@@ -878,7 +896,7 @@ class FrameInstall:
                   self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf',
                   self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK}
         names={LIBRARY,'libsfnp_stream_launch.so','coverage.spv','receiver.conf','launch.conf',
-               'receiver.enable','pairings/active.json','install.json',CAMERA_CONFIG,'camera-session.pause'}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}|RETIRED_FRAME_FILES
+               'receiver.enable','pairings/active.json','install.json',CAMERA_CONFIG,'camera-session.pause',LOG_DEFAULT}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}|RETIRED_FRAME_FILES
         def allowed(path):
             if path in external:return True
             if legacy_helper.allowed(self.home,path):return True
@@ -1272,7 +1290,7 @@ class FrameInstall:
             self.root/'receiver.conf':MARKER+private_ipv4(address).encode()+b'\n'+str(port).encode()+b'\n',
             self.root/'pairings'/ (pair['pair_id']+'.json'):self.e.encoded(pair),
             self.root/'pairings/active.json':self.e.encoded({'schema':self.e.ACTIVE,'pair_id':pair['pair_id']}),
-            **{self.root/Path(name).relative_to('frame'):bundle.files[name] for name in TOOLS|PROFILES}}
+            **{self.root/Path(name).relative_to('frame'):bundle.files[name] for name in TOOLS|PROFILES|FRAME_DEFAULTS if name in bundle.files}}
 
     def activation_paths(self):
         return {self.root/name for name in ('receiver.enable','launch.conf','coverage.spv',CAMERA_CONFIG)}|{
@@ -1463,7 +1481,7 @@ class FrameInstall:
                # Publish opt-in after all code/configuration/pairing writes.
                'receiver.enable':MARKER}
         for name in bundle.frame['files']:
-            if name in TOOLS|PROFILES:files[str(Path(name).relative_to('frame'))]=bundle.files[name]
+            if name in TOOLS|PROFILES|FRAME_DEFAULTS:files[str(Path(name).relative_to('frame'))]=bundle.files[name]
         operations=self.legacy_operations()
         for name,raw in files.items():operations.append(self.tx.operation(self.root/name,raw))
         manifest=self.config/'vulkan/implicit_layer.d'/MANIFEST
@@ -1585,7 +1603,7 @@ class FrameInstall:
                 self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK:self.camera_dropin()}
         wanted.update({self.root/name:raw for name,raw in outputs.items()})
         wanted.update({self.root/Path(name).relative_to('frame'):bundle.files[name]
-                       for name in TOOLS|PROFILES})
+                       for name in TOOLS|PROFILES|FRAME_DEFAULTS if name in bundle.files})
         if current.get('activation_mode')=='inactive':
             wanted.update({self.root/'receiver.enable':MARKER,
                 self.root/'launch.conf':b'SFNP_STREAM_LAUNCH/1\n'+str(self.steamvr/bundle.frame['runtime_files']['vrlink']['path']).encode()+b'\n'+str(self.root/'libsfnp_stream_launch.so').encode()+b'\n'+str(self.root/LIBRARY).encode()+b'\n',
@@ -1746,7 +1764,7 @@ def load_module(raw,name):
 
 class ReadOnlyView:
     def __init__(self,engine,value):
-        e=engine;e.require(type(value)is dict and set(value)-{'version'}=={'schema','readiness','bridge_protocol','pc','frame','files'} and value['schema']==SCHEMA,'Unknown inventory manifest.')
+        e=engine;e.require(type(value)is dict and set(value)-{'version','logging'}=={'schema','readiness','bridge_protocol','pc','frame','files'} and value['schema']==SCHEMA,'Unknown inventory manifest.')
         version_fields(value)
         e.protocol(value['bridge_protocol']);e.records(value['files'])
         self.pin=e.sha(e.encoded(value));self.frame=value['frame'];self.value=value

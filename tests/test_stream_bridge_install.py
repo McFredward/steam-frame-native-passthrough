@@ -536,6 +536,28 @@ class Tests(unittest.TestCase):
         result,ui=self.wizard(change_after_confirm=lambda:path.write_bytes(path.read_bytes()+b'changed-again'))
         self.assertEqual(result,2);self.assertFalse(self.unit.tx.path.exists());self.assertEqual(self.system.calls,[])
 
+    def test_logging_defaults_upgrade_old_receipts_and_restore_exactly(self):
+        installer=b.LocalInstall(s,self.local)
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)
+        self.unit.tx.commit();old_pc=installer.receipt.read_bytes();old_frame=self.unit.tx.path.read_bytes()
+        self.manifest['logging']={'channel':'dev','level':'Debug'}
+        for name in ('pc-provider/'+b.LOG_DEFAULT,'frame/'+b.LOG_DEFAULT):
+            raw=b'Debug\n';s.put(self.bundle_root/name,raw)
+            self.manifest['files'][name]={'bytes':len(raw),'sha256':s.sha(raw)}
+            self.manifest['pc' if name.startswith('pc-') else 'frame']['files'].append(name)
+        self.version_bundle(pc='0.2.18',frame='0.2.14')
+        installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631,backup=True)
+        with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,backup=True,live=True)
+        self.unit.tx.commit()
+        self.assertEqual((self.local.root/'pc-provider'/b.LOG_DEFAULT).read_bytes(),b'Debug\n')
+        self.assertEqual((self.froot/b.LOG_DEFAULT).read_bytes(),b'Debug\n')
+        self.assertTrue(installer.payload_status(self.bundle,installer.state())['patch_payload_current'])
+        self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
+        self.unit.checkpoint().restore();installer.checkpoint().restore()
+        self.assertEqual(installer.receipt.read_bytes(),old_pc);self.assertEqual(self.unit.tx.path.read_bytes(),old_frame)
+        self.assertFalse((self.local.root/'pc-provider'/b.LOG_DEFAULT).exists());self.assertFalse((self.froot/b.LOG_DEFAULT).exists())
+
     def test_active_passive_and_back_updates_keep_pair_and_exact_undo(self):
         installer=b.LocalInstall(s,self.local);installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
         with self.fake_generation():self.unit.install(self.bundle,{**self.pair,'role':'receiver'},'192.168.1.4',47631,live=True)

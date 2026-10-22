@@ -33,8 +33,8 @@ partial transparency; the camera image stays on the headset.
 | Game | Required mod | Minimum version |
 |---|---|---|
 | Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** |
-| Demeo | [Demeo GreenScreen](https://github.com/McFredward/Demeo_GreenScreen) | **1.4.0** |
-| Demeo Battles | [Demeo GreenScreen](https://github.com/McFredward/Demeo_GreenScreen) | **1.4.0** |
+| Demeo | [Demeo Mixed Reality](https://github.com/McFredward/Demeo_GreenScreen) | **2.0.0** |
+| Demeo Battles | [Demeo Mixed Reality](https://github.com/McFredward/Demeo_GreenScreen) | **2.0.0** |
 
 Other games need an integration; installing the patch alone is not enough.
 
@@ -43,11 +43,10 @@ Steam Link can use **Auto or a fixed bitrate**.
 
 ## Successfully tested SteamVR versions
 
-| Component | Version | Build |
-|---|---|---|
-| PC SteamVR | **2.18.4** | 1792185270 |
-| Steam Frame SteamVR | **2.18.2** | 1791331621 |
-| PC SteamVR (earlier test) | 2.17.10 | 1789498647 |
+| Component | Successfully tested versions |
+|---|---|
+| PC SteamVR | **2.18.4**, 2.17.10 |
+| Steam Frame SteamVR | **2.18.2** |
 
 ## Installation
 
@@ -80,11 +79,6 @@ until setup finishes.
 
 Start your Steam Link stream and enable native Steam Link passthrough in the game.
 Run the same command again to **update, uninstall or restore the previous setup**.
-
-## For developers
-
-[Integrate your game](docs/DEVELOPING.md) · [Tested versions and evidence](docs/COMPATIBILITY.md) ·
-[Setup and recovery reference](docs/PC-FRAME-SETUP.md)
 
 ## Credits
 

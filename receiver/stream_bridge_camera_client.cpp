@@ -1,3 +1,4 @@
+#include "bridge/stream_bridge_log.h"
 #include "stream_bridge_camera_client.h"
 #include "../layer/pixel_snapshot_io.h"
 #include <array>
@@ -55,7 +56,7 @@ struct Client::Impl {
     std::array<char,64> input{},output{};std::size_t inputBytes=0,outputBytes=0,outputAt=0;
     std::uint64_t outputSequence=0;
     std::chrono::steady_clock::time_point retry{};unsigned notes=0;
-    void note(const char* text){if(notes++<8)std::fprintf(stderr,"[Steam Link Native Passthrough] camera session: %s\n",text);}
+    void note(const char* text){if(stream_bridge::logging::enabled(stream_bridge::logging::Level::Warning)&&notes++<8)std::fprintf(stderr,"[Steam Link Native Passthrough] camera session: %s\n",text);}
     bool next(){
         grant.store(0,std::memory_order_release);
         if(sequence==~std::uint64_t(0)){terminal=true;return false;}

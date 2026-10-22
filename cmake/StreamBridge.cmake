@@ -17,6 +17,12 @@ else()
     target_compile_options(sfnp_stream_bridge PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
+if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(test_stream_bridge_logging tests/stream_bridge_logging_test.cpp)
+    target_include_directories(test_stream_bridge_logging PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME stream_bridge_logging COMMAND test_stream_bridge_logging)
+endif()
+
 # Cold explicit preparation and bounded control I/O; not installed or autostarted.
 find_package(Threads REQUIRED)
 add_library(sfnp_stream_bridge_control STATIC

@@ -105,7 +105,7 @@ def validation(engine,profile,profile_raw,artifacts,receipts):
 
 
 def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,openssh_zip,
-          *,release=False,validation_receipts=(),textual_wheels=None,askpass_exe=None,root=ROOT):
+          *,release=False,validation_receipts=(),textual_wheels=None,askpass_exe=None,root=ROOT,channel=None):
     engine=load('sfnp_bridge_package_engine',root/'setup/steam_link_setup.py')
     bridge=load('sfnp_bridge_package_install',root/'setup/stream_bridge_install.py')
     shared=load('sfnp_bridge_package_runtime',root/'tools/package_stream_link_setup.py')
@@ -138,9 +138,21 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
              'frame/'+bridge.LIBRARY:artifacts['frame_layer'],
              'frame/libsfnp_stream_launch.so':artifacts['frame_selector']}
     payload.update({name:source_bytes[name.removeprefix('frame/')] for name in bridge.TOOLS|bridge.PROFILES})
-    bundle={'schema':bridge.SCHEMA,'version':version,'readiness':'release' if release else 'prototype',
+    if channel is None:
+        import subprocess
+        channel=os.environ.get('GITHUB_REF_NAME')
+        if not channel:
+            try:channel=subprocess.check_output(['git','branch','--show-current'],cwd=root,text=True,stderr=subprocess.DEVNULL).strip()
+            except (OSError,subprocess.CalledProcessError):channel='main'
+        if channel!='dev':channel='main'
+    engine.require(channel in ('dev','main'),'The package channel must be dev or main.')
+    logging={'channel':channel,'level':'Debug' if channel=='dev' else 'Important'}
+    defaults=(logging['level']+'\n').encode('ascii')
+    payload['pc-provider/'+bridge.LOG_DEFAULT]=defaults
+    payload['frame/'+bridge.LOG_DEFAULT]=defaults
+    bundle={'schema':bridge.SCHEMA,'logging':logging,'version':version,'readiness':'release' if release else 'prototype',
             'bridge_protocol':profile['bridge_protocol'],'files':{name:pin(raw) for name,raw in sorted(payload.items())},
-            'pc':{**pc,'version':components['pc'],'files':sorted(bridge.PC_FILES)},'frame':{**frame,'version':components['frame'],'files':sorted(name for name in payload if name.startswith('frame/'))}}
+            'pc':{**pc,'version':components['pc'],'files':sorted(bridge.PC_FILES|{'pc-provider/'+bridge.LOG_DEFAULT})},'frame':{**frame,'version':components['frame'],'files':sorted(name for name in payload if name.startswith('frame/'))}}
     # Exercise the actual installed-engine manifest parser. This publishes no
     # native shader, changes no provider registration and never calls dlopen.
     with tempfile.TemporaryDirectory(prefix='sfnp-package-contract-') as temporary:
@@ -180,13 +192,14 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
     files.update(deps.windows_openssh(engine.read(openssh_zip),ssh_pin))
     textual=load('sfnp_bridge_textual_packaging',root/'tools/package_setup_textual.py')
     files.update(textual.vendor(textual_wheels,engine.parse(source_bytes['packaging/setup-textual.json'])))
-    source_manifest={'schema':'sfnp-stream-bridge-package-source-v1','version':version,'component_versions':components,'source_revision':profile['source_revision'],
+    source_manifest={'logging':logging,'schema':'sfnp-stream-bridge-package-source-v1','version':version,'component_versions':components,'source_revision':profile['source_revision'],
                      'runtime_profile':pin(raw_profile),'source_pins':profile['source_pins'],
                      'native_artifacts':profile['artifacts'],'validation_receipts':receipts,
                      'hardware_verified':False,'automatic_restart':bool(release)}
     files['stream-bridge-package-source.json']=engine.encoded(source_manifest)
     files['README.txt']=('Steam Link Native Passthrough installer '+version+' - '+('reviewed setup' if release else 'prototype setup')+'\n'+
-        'PC patch '+components['pc']+'; Frame patch '+components['frame']+'.\n\n'+
+        'PC patch '+components['pc']+'; Frame patch '+components['frame']+'.\n'+
+        'Logging default: '+logging['level']+' ('+channel+').\n\n'+
         ('Run patch-steam-link.cmd on Windows. Confirmed setup prepares Frame files while its interface stays running, then coordinates and monitors the required restart.\n'
          if release else 'Checks only: installation and pairing are deliberately blocked in this prototype.\n')+
         'The Linux PC sender is not included. Native-derived shaders are generated locally, never shipped.\n'+

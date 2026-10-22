@@ -1,3 +1,4 @@
+#include "bridge/stream_bridge_log.h"
 #include "stream_bridge_process.h"
 #include "../receiver/stream_bridge_native_image_runtime.h"
 #include "stream_bridge_artifacts.h"
@@ -57,6 +58,7 @@ void requestCamera(Process& p,bool wanted,Flow reason){
     p.camera.request(wanted);
 }
 void reportFlowCold(Process& p){
+    if(!sb::logging::debug())return;
     if(p.flowLines>=48)return;
     std::array<std::uint64_t,static_cast<unsigned>(Flow::Count)> values{};std::uint64_t milestones=0,progress=0;
     for(unsigned n=0;n<values.size();++n){values[n]=p.flow[n].load(std::memory_order_relaxed);if(values[n])milestones|=std::uint64_t(1)<<n;progress=std::max(progress,values[n]);}
@@ -96,7 +98,7 @@ bool ownedRead(int directory,const char* name,void* output,std::size_t size){
     std::size_t n=0;while(good&&n<size){const auto got=read(fd,static_cast<char*>(output)+n,size-n);if(got<0&&errno==EINTR)continue;if(got<=0){good=false;break;}n+=std::size_t(got);}
     good=good&&!fstat(fd,&after)&&before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&before.st_size==after.st_size&&before.st_mtim.tv_sec==after.st_mtim.tv_sec&&before.st_mtim.tv_nsec==after.st_mtim.tv_nsec;close(fd);return good&&n==size;
 }
-void note(Process&p,const char* event){if(p.notes++<32)std::fprintf(stderr,"[Steam Link Native Passthrough] %s\n",event);}
+void note(Process&p,const char* event,sb::logging::Level level=sb::logging::Level::Important){if(sb::logging::enabled(level)&&p.notes++<32)std::fprintf(stderr,"[Steam Link Native Passthrough] %s\n",event);}
 void notify(Process& p) noexcept {if(p.wake>=0){const std::uint64_t one=1;const auto ignored=write(p.wake,&one,sizeof one);(void)ignored;}}
 bool sameCapture(const native::CaptureObservation&a,const native::CaptureObservation&b) noexcept {
     return a.kind==b.kind&&a.fd==b.fd&&a.dmabufFd==b.dmabufFd&&a.index==b.index&&a.nativeTimestampToken==b.nativeTimestampToken
@@ -187,6 +189,7 @@ void sourceNotice(const native::RuntimeNotice& notice,void* context) noexcept{
     // journal growth proportional to frames or repeated connection attempts.
     const auto state=static_cast<unsigned>(notice.state),control=static_cast<unsigned>(notice.control),reason=static_cast<unsigned>(notice.reason);
     if(state>=p.sourceNotices.size()||control>=32||reason>=p.sourceNotices[state].size()||p.sourceNoticeLines>=64)return;
+    if(!sb::logging::enabled(state>=5?sb::logging::Level::Warning:sb::logging::Level::Important))return;
     const auto bit=std::uint32_t(1)<<control;if(p.sourceNotices[state][reason]&bit)return;
     p.sourceNotices[state][reason]|=bit;++p.sourceNoticeLines;
     constexpr const char* names[]{"disabled","waiting-native-source","waiting-local-image-route","negotiating",
@@ -280,9 +283,9 @@ void workCycle(Process& p,local::State& previous) noexcept{
                     case local::State::Connected:note(p,"local image bridge connected");break;
                     case local::State::Listening:note(p,"local image bridge listening; waiting for the video receiver");break;
                     case local::State::Connecting:note(p,"local image bridge connecting; ordinary video retained");break;
-                    case local::State::Refused:note(p,"local image bridge refused; endpoint ownership or peer verification failed");break;
-                    case local::State::Lost:note(p,"local image bridge lost; obsolete picture leases revoked");break;
-                    case local::State::Capacity:note(p,"local image bridge capacity refused; ordinary video retained");break;
+                    case local::State::Refused:note(p,"local image bridge refused; endpoint ownership or peer verification failed",sb::logging::Level::Warning);break;
+                    case local::State::Lost:note(p,"local image bridge lost; obsolete picture leases revoked",sb::logging::Level::Warning);break;
+                    case local::State::Capacity:note(p,"local image bridge capacity refused; ordinary video retained",sb::logging::Level::Warning);break;
                     default:note(p,"local image bridge waiting; ordinary video retained");break;
                 }
             }
@@ -383,13 +386,14 @@ bool prepareProcessCold() noexcept{
             const auto role=native::nativeImageRole(native::processImagePath(getpid()));
             if(role==native::NativeRole::None||!native::currentNativeImage(role,observed))return;
             kind=role==native::NativeRole::Vrlink?ProcessKind::Vrlink:ProcessKind::Compositor;
-            note(p,"native runtime capabilities verified; version and executable digest are observations");
+            note(p,"native runtime capabilities verified; version and executable digest are observations",sb::logging::Level::Debug);
         }
         cleanPayloadEnvironment();
         const auto* xdg=std::getenv("XDG_DATA_HOME");const auto* home=std::getenv("HOME");
         if(xdg&&xdg[0]=='/'&&strnlen(xdg,1025)<900)p.root=std::filesystem::path(xdg)/"SteamLinkNativePassthrough"/"stream-bridge";
         else if(home&&home[0]=='/'&&strnlen(home,1025)<850)p.root=std::filesystem::path(home)/".local/share/SteamLinkNativePassthrough/stream-bridge";
         else return;
+        sb::logging::configureCold(p.root/"logging-default.conf",p.root/"logging.conf");
         p.directory=frame_pixel_io::privateDirectory(p.root.string());if(p.directory<0)return;
         constexpr char magic[]="SFNP_STREAM_RECEIVER/1\n";std::array<char,sizeof(magic)-1> marker{};
         if(!ownedRead(p.directory,"receiver.enable",marker.data(),marker.size())||std::memcmp(marker.data(),magic,marker.size()))return;

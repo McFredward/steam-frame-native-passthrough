@@ -15,6 +15,7 @@
 #include "stream-bridge-sender-provider-runtime.h"
 #include "stream-bridge-sender-provider-coverage.h"
 #include "stream-bridge-sender-provider-sourceipc.h"
+#include "bridge/stream_bridge_log.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -165,7 +166,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
     stream_bridge::sender::SourceIpcServer sourceIpc_{[](std::uint32_t pid,void* context){return static_cast<Provider*>(context)->coverage_.ready(pid);},this,
         [](std::uint32_t pid,bool budget,void* context)noexcept{static_cast<Provider*>(context)->coverage_.sourceProcess(pid,budget);}};
     void** directSlots_=nullptr;std::array<void*,8> directOriginal_{},directWrapped_{};
-    void report(const char* status){if(log_){char text[384]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
+    void report(const char* status,stream_bridge::logging::Level level=stream_bridge::logging::Level::Important){if(log_&&stream_bridge::logging::enabled(level)){char text[768]{};std::snprintf(text,sizeof text,"Steam Link Native Passthrough: %s",status);log_->Log(text);}}
     bool configure(){
         vr::EVRInitError error=vr::VRInitError_None;
         auto* settings=static_cast<vr::IVRSettings*>(context_->GetGenericInterface(vr::IVRSettings_Version,&error));
@@ -175,12 +176,14 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         if(!settings->GetBool(section,"enableStreamBridge",&e)||e!=vr::VRSettingsError_None){report("bridge disabled; ordinary video");return true;}
         request_.role=stream_bridge::Role::Producer;request_.buildId=712;request_.offered=request_.required=stream_bridge::KnownCapabilities;
         settings->GetString(section,"controlListenAddress",request_.address.data(),static_cast<std::uint32_t>(request_.address.size()),&e);
-        if(e!=vr::VRSettingsError_None){report("explicit listen address missing; ordinary video");return false;}
+        if(e!=vr::VRSettingsError_None){report("explicit listen address missing; ordinary video",stream_bridge::logging::Level::Warning);return false;}
         const auto port=settings->GetInt32(section,"controlPort",&e);
-        if(e!=vr::VRSettingsError_None||port<1||port>65535){report("explicit control port invalid; ordinary video");return false;}
+        if(e!=vr::VRSettingsError_None||port<1||port>65535){report("explicit control port invalid; ordinary video",stream_bridge::logging::Level::Warning);return false;}
         PWSTR appData=nullptr;const HRESULT found=SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DONT_VERIFY,nullptr,&appData);
-        if(FAILED(found)||!appData){report("private user data unavailable; ordinary video");return false;}
-        try {request_.pairingsDirectory=std::filesystem::path(appData)/L"steam-link-native-passthrough"/L"pairings";}
+        if(FAILED(found)||!appData){report("private user data unavailable; ordinary video",stream_bridge::logging::Level::Warning);return false;}
+        try {const auto root=std::filesystem::path(appData)/L"steam-link-native-passthrough";
+            stream_bridge::logging::configureCold(root/L"pc-provider/logging-default.conf",root/L"logging.conf");
+            request_.pairingsDirectory=root/L"pairings";}
         catch(...){CoTaskMemFree(appData);return false;}
         CoTaskMemFree(appData);request_.port=static_cast<std::uint16_t>(port);request_.explicitlyEnabled=true;runtime_.configure(request_);return true;
     }
@@ -223,10 +226,10 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         stream_bridge::sender::NativeImageLayout layout;
         if(legacy){if(!imageProof(candidate,&slot_))return false;}
         else {
-            if(!valvePublisher(path,file_)){report("capability refused: native module Valve publisher could not be verified");return false;}
+            if(!valvePublisher(path,file_)){report("capability refused: native module Valve publisher could not be verified",stream_bridge::logging::Level::Warning);return false;}
             stream_bridge::sender::NativePeImage image;const char* why="invalid bounded x64 PE image";
             if(!image.open(raw.data(),raw.size())||!image.discover(layout,why)){report(why);return false;}
-            if(!loadedCodeMatches(candidate,image,layout)){report("capability refused: mapped native executable differs from its verified file");return false;}
+            if(!loadedCodeMatches(candidate,image,layout)){report("capability refused: mapped native executable differs from its verified file",stream_bridge::logging::Level::Warning);return false;}
             auto* address=reinterpret_cast<std::uint8_t*>(candidate)+layout.getProcAddress;
             MEMORY_BASIC_INFORMATION memory{};
             if(!VirtualQuery(address,&memory,sizeof(memory))||memory.AllocationBase!=candidate||memory.State!=MEM_COMMIT||
@@ -271,8 +274,8 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             HMODULE candidate=nullptr;
             if(GetModuleHandleExW(0,L"driver_vrlink.dll",&candidate)){
                 source_=candidate;
-                try {attached=attach(candidate);if(!attached){bootstrapStatus.store(3);report("native sender attachment refused; ordinary video");}}
-                catch(...){bootstrapStatus.store(3);report("native sender attachment failed; ordinary video");}
+                try {attached=attach(candidate);if(!attached){bootstrapStatus.store(3);report("native sender attachment refused; ordinary video",stream_bridge::logging::Level::Warning);}}
+                catch(...){bootstrapStatus.store(3);report("native sender attachment failed; ordinary video",stream_bridge::logging::Level::Error);}
                 break; // One actual module attempt per provider epoch, no automatic retry.
             }
             std::unique_lock<std::mutex> guard(mutex_);changed_.wait_for(guard,std::chrono::milliseconds(250),[this]{return stopped_;});
@@ -302,7 +305,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 static_cast<unsigned long long>(stats.overlappingInputs),static_cast<unsigned long long>(stats.overlappingOutputs),
                 static_cast<unsigned long long>(outputs.exact),static_cast<unsigned long long>(outputs.unmatched),
                 static_cast<unsigned long long>(outputs.completedBeforeEncodeReturn));
-            report(text);++reconfigureReports;
+            report(text,stats.preservedRejected?stream_bridge::logging::Level::Warning:stream_bridge::logging::Level::Debug);++reconfigureReports;
             reportedSuccess=stats.preservedSuccessful!=0;reportedRejection=stats.preservedRejected!=0;reportedRevoke=stats.revoked!=0;
             nextReconfigureReport=stats.total>~std::uint64_t(0)/8?~std::uint64_t(0):stats.total*8;
         };
@@ -316,7 +319,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 static_cast<unsigned long long>(stats.budgeted),static_cast<unsigned long long>(stats.budgetAccepted),static_cast<unsigned long long>(stats.budgetRejected),
                 stats.requestedVideoRate,stats.appliedVideoRate,stats.metadataRate,stats.meanMetadataRate,
                 stats.requestedVbv,stats.appliedVbv,stats.requestedDelay,stats.appliedDelay,
-                unsigned(std::uint64_t(stats.appliedVideoRate)+stats.metadataRate>stats.requestedVideoRate));report(text);
+                unsigned(std::uint64_t(stats.appliedVideoRate)+stats.metadataRate>stats.requestedVideoRate));report(text,(stats.budgetRejected||std::uint64_t(stats.appliedVideoRate)+stats.metadataRate>stats.requestedVideoRate)?stream_bridge::logging::Level::Warning:stream_bridge::logging::Level::Debug);
         };
         // Atomic metadata is sampled/formatted only here, never inside a D3D
         // callback. Refusal populations distinguish the actual first gate from
@@ -345,7 +348,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                     "direct cleanup: requests=%llu, empty=%llu, changed=%llu, lock-miss=%llu; requests are not frames",
                     static_cast<unsigned long long>(cleanup.requests),static_cast<unsigned long long>(cleanup.empty),
                     static_cast<unsigned long long>(cleanup.changed),static_cast<unsigned long long>(cleanup.lockMisses));
-                report(cleanupText);lastCleanupRequests=cleanup.requests;
+                report(cleanupText,stream_bridge::logging::Level::Debug);lastCleanupRequests=cleanup.requests;
             }
             // Sample source alpha at the actual native shared-texture input,
             // independently of the native shader's output alpha. A coherent
@@ -358,7 +361,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             if(alphaError&&!observedPid&&!alphaUnavailableReported){
                 char alphaText[160]{};std::snprintf(alphaText,sizeof alphaText,
                     "native source alpha: diagnostic unavailable, readback-hr=0x%08x; coverage admission and rendering unchanged",alphaError);
-                report(alphaText);alphaUnavailableReported=true;
+                report(alphaText,stream_bridge::logging::Level::Debug);alphaUnavailableReported=true;
             }
             if(observedPid&&observedPid!=alphaPid&&alphaSources<8){alphaPid=observedPid;++alphaSources;alphaReports=0;nextAlphaReport=now;}
             if(observedPid&&(final||(alphaReports<14&&now>=nextAlphaReport))){
@@ -376,7 +379,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                         if(n<0)break;
                         used+=n;
                     }
-                    report(alphaText);
+                    report(alphaText,stream_bridge::logging::Level::Debug);
                 }
             }
             if(sourceReports.observe(stats,final)){
@@ -390,7 +393,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                     count(Source::NoDeclaration),native(Source::NoDeclaration),
                     count(Source::DifferentProcess),declared(Source::DifferentProcess),native(Source::DifferentProcess),
                     count(Source::RevokedGeneration),declared(Source::RevokedGeneration),native(Source::RevokedGeneration),stats.sourceCauses);
-                report(sourceText);
+                report(sourceText,stream_bridge::logging::Level::Debug);
             }
             const std::uint64_t signals[]{stats.deviceOpened,stats.contextsReady,stats.hookDraws,stats.nativeDraws,
                 stats.sourceFrames,stats.constantMaps,stats.constantCaptures,stats.eyeDraws,stats.completePairs,
@@ -418,42 +421,42 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 static_cast<unsigned long long>(stats.eyeDraws),static_cast<unsigned long long>(stats.completePairs),
                 static_cast<unsigned long long>(stats.capturedCopies),static_cast<unsigned long long>(stats.nativeCopies),
                 static_cast<unsigned long long>(stats.matchedInputs),static_cast<unsigned long long>(stats.certifiedMasks),
-                stream_bridge::sender::coverageGateName(stats.lastRefusal));report(text);
+                stream_bridge::sender::coverageGateName(stats.lastRefusal));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
                 "coverage gate detail: %s=%llu, %s=%llu, %s=%llu; constant-bytes=%u; source=%ux%u/f%u, output=%ux%u/f%u; maps=%llu, inventory=%llu",
                 stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[0])),static_cast<unsigned long long>(stats.refusals[top[0]]),
                 stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[1])),static_cast<unsigned long long>(stats.refusals[top[1]]),
                 stream_bridge::sender::coverageGateName(static_cast<stream_bridge::sender::CoverageGate>(top[2])),static_cast<unsigned long long>(stats.refusals[top[2]]),
                 stats.lastConstantBytes,stats.lastSourceWidth,stats.lastSourceHeight,stats.lastSourceFormat,stats.lastOutputWidth,stats.lastOutputHeight,stats.lastOutputFormat,
-                static_cast<unsigned long long>(stats.nativeMaps),static_cast<unsigned long long>(stats.inventoryRefreshes));report(text);
+                static_cast<unsigned long long>(stats.nativeMaps),static_cast<unsigned long long>(stats.inventoryRefreshes));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
                 "coverage readback: ready=%llu, busy=%llu, errors=%llu, last-hr=0x%08x; copy-age-us=%llu/max%llu, submit-age-us=%llu, read-us=%llu/max%llu",
                 static_cast<unsigned long long>(stats.readbackReady),static_cast<unsigned long long>(stats.readbackBusy),static_cast<unsigned long long>(stats.readbackErrors),stats.lastReadbackResult,
                 static_cast<unsigned long long>(stats.lastCopyAgeUs),static_cast<unsigned long long>(stats.maxCopyAgeUs),static_cast<unsigned long long>(stats.lastSubmissionAgeUs),
-                static_cast<unsigned long long>(stats.lastReadbackUs),static_cast<unsigned long long>(stats.maxReadbackUs));report(text);
+                static_cast<unsigned long long>(stats.lastReadbackUs),static_cast<unsigned long long>(stats.maxReadbackUs));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
                 "coverage completion: submitted=%llu, ready=%llu, pending=%llu, errors=%llu, last-hr=0x%08x; copy-age-us=%llu/max%llu",
-                static_cast<unsigned long long>(stats.submittedReadbacks),static_cast<unsigned long long>(stats.queryReady),static_cast<unsigned long long>(stats.queryPending),static_cast<unsigned long long>(stats.queryErrors),stats.lastQueryResult,static_cast<unsigned long long>(stats.lastQueryAgeUs),static_cast<unsigned long long>(stats.maxQueryAgeUs));report(text);
+                static_cast<unsigned long long>(stats.submittedReadbacks),static_cast<unsigned long long>(stats.queryReady),static_cast<unsigned long long>(stats.queryPending),static_cast<unsigned long long>(stats.queryErrors),stats.lastQueryResult,static_cast<unsigned long long>(stats.lastQueryAgeUs),static_cast<unsigned long long>(stats.maxQueryAgeUs));report(text,stream_bridge::logging::Level::Debug);
             const auto refused=[&](stream_bridge::sender::CoverageGate gate){return static_cast<unsigned long long>(stats.refusals[static_cast<unsigned>(gate)]);};
             std::snprintf(text,sizeof text,
                 "coverage payload: masked-frames=%llu; original-video-bytes=%llu, rle-coverage-bytes=%llu, complete-au-bytes=%llu, max-complete-au-bytes=%llu; approximate counters, not frame identity",
                 static_cast<unsigned long long>(stats.certifiedMasks),static_cast<unsigned long long>(stats.maskedVideoBytes),
-                static_cast<unsigned long long>(stats.maskRleBytes),static_cast<unsigned long long>(stats.maskedWireBytes),static_cast<unsigned long long>(stats.maxMaskedWireBytes));report(text);
+                static_cast<unsigned long long>(stats.maskRleBytes),static_cast<unsigned long long>(stats.maskedWireBytes),static_cast<unsigned long long>(stats.maxMaskedWireBytes));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
                 "coverage encoding: raw-mask-bytes=%llu, encoded-coverage-bytes=%llu; frames raw/rle/lz4=%llu/%llu/%llu; encode-us=%llu/max%llu; lossless, approximate counters",
                 static_cast<unsigned long long>(stats.maskRawBytes),static_cast<unsigned long long>(stats.maskEncodedBytes),
                 static_cast<unsigned long long>(stats.maskEncodingFrames[1]),static_cast<unsigned long long>(stats.maskEncodingFrames[2]),static_cast<unsigned long long>(stats.maskEncodingFrames[3]),
-                static_cast<unsigned long long>(stats.lastEncodeUs),static_cast<unsigned long long>(stats.maxEncodeUs));report(text);
+                static_cast<unsigned long long>(stats.lastEncodeUs),static_cast<unsigned long long>(stats.maxEncodeUs));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
                 "coverage lifecycle refusals: render-lock=%llu, copy-pair=%llu, stage-full=%llu, input=%llu, stage=%llu, session=%llu, source=%llu/%llu, rle=%llu, certificate=%llu",
                 refused(stream_bridge::sender::CoverageGate::Lock),refused(stream_bridge::sender::CoverageGate::CopyPair),refused(stream_bridge::sender::CoverageGate::StageFull),
                 refused(stream_bridge::sender::CoverageGate::InputReceipt),refused(stream_bridge::sender::CoverageGate::StageReceipt),refused(stream_bridge::sender::CoverageGate::CoverageSession),
-                refused(stream_bridge::sender::CoverageGate::SourceContract),refused(stream_bridge::sender::CoverageGate::SourceRevoked),refused(stream_bridge::sender::CoverageGate::RleEncode),refused(stream_bridge::sender::CoverageGate::FrameCertificate));report(text);
+                refused(stream_bridge::sender::CoverageGate::SourceContract),refused(stream_bridge::sender::CoverageGate::SourceRevoked),refused(stream_bridge::sender::CoverageGate::RleEncode),refused(stream_bridge::sender::CoverageGate::FrameCertificate));report(text,stream_bridge::logging::Level::Debug);
             // Public COM table metadata only; never query a new immediate
             // context here, since even a diagnostic getter may change dispatch.
             std::snprintf(text,sizeof text,
                 "coverage context: hook-slots=0x%x, table-readable=%u, table-stable=%u, native-device-pointer=%u, facade-slots=%u, native-dispatch-mutations=%u",
-                stats.contextHookSlots,unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextFacadeSlots,stats.nativeDispatchMutations);report(text);
+                stats.contextHookSlots,unsigned(stats.contextTableReadable),unsigned(stats.contextTableStable),unsigned(stats.nativeDeviceSame),stats.contextFacadeSlots,stats.nativeDispatchMutations);report(text,stream_bridge::logging::Level::Debug);
         };
         std::uint32_t reportedFailures=0;
         unsigned recoveryReports=0;bool recoveringTransport=false;
@@ -469,7 +472,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 unsigned(failure.hasProtocolStatus),static_cast<unsigned>(failure.protocol),
                 static_cast<unsigned long long>(failure.encoder.generation),failure.encoder.width,failure.encoder.height,
                 unsigned(failure.encoder.encoded),unsigned(failure.encoder.peerConfirmed),unsigned(failure.encoder.probeObserved),failure.liveOutputLeases);
-            report(text);
+            report(text,stream_bridge::logging::Level::Debug);
         };
         for(;;){
             {std::lock_guard<std::mutex> guard(mutex_);if(stopped_)break;}
@@ -479,7 +482,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                     if(encoder.peerConfirmed&&encoder.probeObserved&&runtime_.control().peerVerified()&&runtime_.control().localConfig(config,authority)){state.binding=authority.channel.binding;state.generation=encoder.generation;state.compatible=true;}
                     sourceIpc_.tick(state);
                 }
-            }catch(...){sourceIpc_.stop();coverage_.stop();runtime_.stop();report("worker refused; ordinary video");break;}
+            }catch(...){sourceIpc_.stop();coverage_.stop();runtime_.stop();report("worker refused; ordinary video",stream_bridge::logging::Level::Warning);break;}
             const auto* coverageState=coverage_.stateName();if(request_.explicitlyEnabled&&coverageState!=lastCoverage){lastCoverage=coverageState;reportState(coverageState);}
             if(runtime_.state()!=last){
                 using State=stream_bridge::sender::RuntimeState;
