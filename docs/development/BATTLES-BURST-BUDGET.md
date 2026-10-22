@@ -71,7 +71,7 @@ The25% video-rate floor remains. A mask load that alone exceeds the remaining
 budget cannot be made to fit by this policy; pressure is reported rather than
 removing masks or claiming success. Video quality may decrease under peak load.
 No software bitrate policy can guarantee against arbitrary network packet loss.
-The candidate needs an extended headset test at the same automatic bitrate.
+The follow-up below records the subsequent headset test at automatic bitrate.
 
 ## Software witnesses and scope
 
@@ -95,3 +95,62 @@ installer0.2.16. Every Frame payload/helper/settings target remains byte-identic
 in the new archive. Matching Frame installations require no writes or restart.
 Game mod1.4.21, native update recognition, lossless mask encoding, public wire
 protocol, shader output and Gloomhaven's v1 policy are unchanged.
+
+## Confirmed follow-up, October 22
+
+The maintainer reports no visible problems in the follow-up with PC 0.2.17,
+Frame 0.2.13 and Battles 1.4.21. PC SteamVR is **2.18.4, native build
+1792185270**; Frame SteamVR is **2.18.2, native build 1791331621**. These versions
+are now officially supported, successfully tested observations, not an activation
+allowlist for future updates. PC 2.17.10 remains a historical successful test.
+
+The private read-only capture `frame-battles-verified-20261022-072002` preserves
+all twelve hashed log files. Frame runtime fingerprints were re-read separately;
+all eleven match the previous reviewed Frame references. No device was changed.
+
+- The game enables native RGBA at 09:16:58.362. Scenario setup at 09:17:21
+  suppresses three automatic avatar teleports; the earlier avatar reset is also
+  suppressed. Last game diagnostics show equal eye submit counts, zero submit
+  errors, zero origin notifications and zero discontinuous pairs.
+- The sender finishes with 10,330 exact outputs and zero unmatched outputs;
+  8,719 masks are emitted. Frame decoded masks rise from 5,368 before this run
+  to 14,087 after it: exactly 8,719 additional masks, with zero rejected masks
+  or uploads. These are counter deltas, not claims about historical cumulative
+  totals. All 8,790 budgeted reconfigurations are accepted; zero refusals or
+  over-budget reports occur. Encoder-generation revocations stay at the four
+  startup events rather than growing during the game.
+- No new native reset, unrecoverable FEC error or backtrack-window failure occurs
+  after native passthrough starts. The decoder hard reset at 09:16:41 is initial
+  stream setup, before the game starts. Shutdown at 09:18:37 is explicit server
+  shutdown. Neither is counted as a gameplay outage.
+- Recoverable packet retries persist. At 09:18:31.451 native Steam Link logs one
+  submitted frame without metadata followed by late metadata for frame 9858.
+  No stream reset follows. The compositor's opaque-submit counter stays at
+  39,117 from 09:17:06 through 09:18:36, with no new mask/submit refusals or
+  pipeline loss. The maintainer did not see a flash. This is a residual transport
+  warning, not evidence that the network is lossless or every future run is safe.
+- The supplied game ErrorLog contains only Steam minidump initialization lines,
+  not a game exception or crash. Existing loader/driver startup warnings are
+  distinct from the previous paired transport failures.
+
+Installer 0.2.17 records the current PC driver fingerprint and recognizes the
+confirmed semantic/native version pair, while retaining the prior version label
+and the warning-and-enable path for untested updates. PC patch 0.2.17 and Frame
+patch 0.2.13 are byte-identical to the headset-tested package. This is installer
+metadata only; an already-current installation needs no native update or Frame
+restart. Other games and long-duration/network conditions retain their own test
+scope; this Battles result is not a new Gloomhaven or Battlemarked headset test.
+
+### Fixed-bitrate software witness
+
+The production callback fixture also holds both requested CBR average and
+maximum at 100 Mbit/s while the exact added mask payload changes through
+3,000, 20,000, 60,000 and 3,000 bytes. With the first current-source 7,000-byte
+sample still in history, the forwarded video rates are 93.28, 80.8, 42.4 and
+42.4 Mbit/s. No Auto target change is needed. Each step checks both the combined
+rate and one-frame VBV budget, unchanged caller config and retained exact
+source/coverage authority. No production change is needed for this case; the
+headset-tested native DLL is retained byte-for-byte. Actual NVENC callback
+availability and physical link behavior at a fixed setting still need their
+own headset run; this software witness does not simulate Valve's full rate
+controller or every possible network load.

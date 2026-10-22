@@ -18,7 +18,7 @@
 > [!IMPORTANT]
 > **Aktuell nur für <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows-PCs mit <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA-GPU.**
 >
-> **Erfolgreich getestet: PC SteamVR 2.17.10 · Steam Frame SteamVR 2.18.2 (Build 1791331621).**
+> **Offiziell unterstützt und erfolgreich getestet: PC SteamVR 2.18.4 (Build 1792185270) · Steam Frame SteamVR 2.18.2 (Build 1791331621).**
 >
 > Das sind Testergebnisse, keine Versionsgrenzen. Der Patch erkennt die benötigten Schnittstellen nach Updates und arbeitet weiter, solange deren Eigenschaften erhalten bleiben. Bei ungetesteten Versionen erscheint eine Warnung; **„Trotzdem installieren“** aktiviert den Patch zum Ausprobieren.
 
@@ -83,23 +83,49 @@ wird hier von McFredward und Mitwirkenden entwickelt.
 
 Inoffizielles Projekt, nicht mit Valve verbunden.
 
-## Kandidat gegen Übertragungsspitzen (PC0.2.17)
+## Bestätigte Battles-Stabilität (PC 0.2.17)
 
-Im jüngsten Battles-Test läuft Passthrough unter PC-SteamVR2.18.4. Nach dem
-Szenariowechsel verursachen allerdings zwei nicht behebbare Paketverluste kurze
-Videostream-Resets. PC0.2.17 reserviert gemessene Metadatenspitzen und begrenzt
-auch den Encoder-Puffer für einzelne große Videobilder. Die Videokompression
-kann unter Last stärker ausfallen; Maskengenauigkeit, Auflösung und Bildrate
-bleiben erhalten. Gloomhavens v1-Regelung und Frame0.2.13 sind unverändert.
-Ist diese Frame-Version bereits installiert, betrifft das Update ausschließlich
-den PC und verändert oder startet die Frame nicht. **Der längere Headset-Test
-steht noch aus**; beliebige Netzwerkverluste lassen sich damit nicht ausschließen.
-[Nachweise und Softwaretests](docs/development/BATTLES-BURST-BUDGET.md).
+Beim Headset-Test vom 22. Oktober traten nach dem Szenariowechsel keine
+Schwarzblitze, Glitches oder ungewollten Recenter mehr auf. Die Logs bestätigen
+8.719 empfangene Masken, keine abgelehnten Masken/Uploads, 10.330 exakt
+zugeordnete Encoder-Ausgaben und keine nicht zugeordneten Ausgaben. Während des
+Spiels gab es keinen neuen Stream- oder Decoder-Reset. Paketwiederholungen und
+eine verspätete Metadatenmeldung bleiben, ohne die bisherigen nicht behebbaren
+Übertragungsabbrüche. Das bestätigt diesen Testlauf; zukünftige Netzwerkverluste
+lassen sich damit nicht ausschließen.
+
+PC 0.2.17 berücksichtigt Metadatenspitzen und begrenzt den Encoder-Puffer für
+einzelne Videobilder. Frame 0.2.13 und Gloomhavens v1-Regelung sind unverändert.
+Installer 0.2.17 erkennt die bestätigten aktuellen SteamVR-Versionen und die
+PC-Laufzeitdatei. **Bereits installierte native Patches benötigen kein Update.**
+Die Frame wird nicht verändert oder neu gestartet.
+[Nachweise](docs/development/BATTLES-BURST-BUDGET.md#confirmed-follow-up-october-22).
+
+## Steam-Link-Bitrate und OVR Advanced Settings
+
+**Auto und eine feste Steam-Link-Bitrate** verwenden dieselbe v2-Budgetregel.
+Der Patch reserviert innerhalb der angeforderten Encoder-Bitrate Platz für
+Maskendaten und begrenzt Videospitzen. Er benötigt keine automatische Senkung
+des Zielwerts. Bei fester Bitrate kann die Videokompression mit komplexeren
+Masken stärker ausfallen. Ein Softwaretest mit konstanten 100 Mbit/s CBR und
+wechselnden Maskengrößen prüft das gemeinsame Video-/Metadatenbudget. Der
+bestätigte Headset-Test oben lief mit **Auto**; ein Headset-Test mit fester
+Bitrate steht noch aus. Reicht eine sehr niedrige Vorgabe selbst für Maskendaten
+und die verbleibende Video-Mindestbitrate nicht aus, wird die Überschreitung
+protokolliert. Masken werden nicht weggelassen; zusätzliche Encoder-Aufrufe oder
+Resets werden nicht ausgelöst.
+
+**Bekannte Inkompatibilität: OVR Advanced Settings.** In den Demeo-Tests führte
+es zu ungewollten Änderungen des Tracking-Ursprungs bzw. Recenter-Aktionen.
+Bei geschlossenem OVR Advanced Settings traten diese nicht mehr auf.
+OVR Advanced Settings daher beim Verwenden des Mods und nativen Passthrough
+schließen. Gloomhavens separate Testergebnisse bestätigen diese Kombination
+für Demeo nicht.
 
 ## Update-Erkennung (eingeführt mit Installer/PC0.2.16, Frame0.2.13)
 
-SteamVR 2.18.4 hat die internen Positionen des PC-Senders verändert. Dieser
-Kandidat findet dessen öffentliche Imports und DirectMode-Schnittstelle in der
+SteamVR 2.18.4 hat die internen Positionen des PC-Senders verändert. Der
+Patch findet dessen öffentliche Imports und DirectMode-Schnittstelle in der
 aktuellen Datei und verwendet weiterhin die tatsächlichen nativen Shader und
 Ressourcen. Die Frame erkennt ihre öffentlichen ELF-, V4L2- und OpenVR-Verträge.
 Geänderte Shader-IDs und Debug-Metadaten werden akzeptiert, wenn nach der
@@ -107,10 +133,9 @@ Normalisierung die ausführbare Berechnung und ihre Bindungen unverändert sind.
 Eine unbekannte Versionsnummer oder Dateiprüfsumme allein deaktiviert Passthrough
 nicht mehr.
 
-Die bereitgestellte PC-Datei aus 2.18.4 besteht die Erkennungsprüfung und liefert
-im ersten Battles-Test Passthrough. Die Übertragungs-Resets werden wie oben
-beschrieben weiter geprüft; deshalb zählt diese Version noch nicht zu den
-erfolgreich getesteten. Gloomhavens bisheriges
+PC-SteamVR 2.18.4 wird nach dem erfolgreichen Battles-Headset-Test oben jetzt
+offiziell unterstützt. Frühere Tests mit PC 2.17.10 bleiben in der
+[Testhistorie](docs/COMPATIBILITY.md) dokumentiert. Gloomhavens bisheriges
 Producer-Protokoll und dessen Encoder-Verhalten bleiben erhalten. Das damalige
 Update aktualisierte auch die Frame-Komponente. Bei späteren Updates mit
 unveränderten Frame-Dateien, Einstellungen und Komponenten bleibt die Frame

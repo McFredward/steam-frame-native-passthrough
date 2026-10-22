@@ -1,16 +1,16 @@
 # Tested versions and evidence
 
-## Successfully tested runtimes
+## Officially supported, successfully tested runtimes
 
 | Component | Current paired route |
 |---|---|
 | Headset and transport | Steam Frame over Steam Link |
-| PC SteamVR | **2.17.10**, user-confirmed Demeo/Battles and Gloomhaven picture |
+| PC SteamVR | **2.18.4 · build 1792185270**, user-confirmed Battles picture and scenario transition with PC 0.2.17 |
 | Frame SteamVR | **2.18.2 · build 1791331621**, user-confirmed paired picture |
 | PC sender | Windows x86_64, supported NVIDIA encoder, HEVC |
 | Game source | Explicit integration; Gamma SDR UNorm, MultiPass, real RGB contribution and alpha |
 | Installation | Matching PC and Frame companions, [guided setup](PC-FRAME-SETUP.md) |
-| Hardware status | User-confirmed native room pictures; continuity and simultaneous local menu/game are not fully certified |
+| Hardware status | User-confirmed Battles continuity in the October 22 follow-up; simultaneous local menu/game remains unconfirmed |
 
 The supported game and minimum version have their own [table](../README.md#supported-games).
 A matching development build is needed before an upcoming game release is available.
@@ -19,12 +19,27 @@ Steam Frame standalone passthrough is separate and requires neither streamed com
 These are recorded successful tests, not a runtime version allowlist. The PC
 and Frame independently recognize the interfaces and rendering properties they
 need after an update. Whole-file hashes record provenance and preserve the known
-path; a changed hash alone does not disable the patch. PC SteamVR2.18.4
-build1792185270 is the current software-checked candidate, awaiting a headset
-test. The Frame version does not imply a PC SteamVR version. Native Linux PC sender installation is not yet supported; running the
+path; a changed hash alone does not disable the patch. PC SteamVR 2.18.4 and
+Frame SteamVR 2.18.2 are officially supported following the
+[October 22 successful Battles follow-up](development/BATTLES-BURST-BUDGET.md#confirmed-follow-up-october-22).
+Earlier PC 2.17.10 tests confirmed Demeo, Battles and Gloomhaven pictures; the
+new PC version has been retested with Battles, not all games. The Frame version
+does not imply a PC SteamVR version. Native Linux PC sender installation is not yet supported; running the
 Windows game through Proton still uses Linux SteamVR as the driver host. Other
 headsets, Virtual Desktop, ALVR, HDR and unknown stereo/source formats are outside
 this route's current validated combination.
+
+## Bitrate and overlay compatibility
+
+The v2 rate policy supports Auto and fixed Steam Link bitrate settings. The
+confirmed October 22 headset run used Auto; constant-target CBR software tests
+cover fixed bitrate with changing mask load. Fixed-bitrate headset validation
+remains separate. See [bitrate behavior](../README.md#steam-link-bitrate-and-ovr-advanced-settings).
+
+**OVR Advanced Settings is a known incompatibility in Demeo:** unwanted tracking
+origin changes/recenters occurred with it running and were no longer observed
+with it closed. Close it while using the Demeo native passthrough mods. This
+records a conflict observed in these tests, not a claim about every overlay.
 
 ## Picture and transparency
 

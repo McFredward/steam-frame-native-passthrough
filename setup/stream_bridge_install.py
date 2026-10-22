@@ -160,14 +160,15 @@ def runtime_snapshot(engine,pins,bases,*,side,versions):
         result[role]={'base':pin['base'],'path':pin['path'],**observed,
                       'matches':match,'format_valid':valid}
     label=versions.get('steamvr',{});version,build=label.get('version'),label.get('build')
-    tested='2.17.10' if side=='pc' else '2.18.2'
-    native_build='1789498647' if side=='pc' else '1791331621'
+    tested=({'2.17.10':'1789498647','2.18.4':'1792185270'} if side=='pc' else
+            {'2.18.2':'1791331621'})
     # Steam package buildids and native timestamp builds are separate namespaces.
     # A package label alone is not evidence of untested native code: the exact
     # file pins above and known semantic/native labels still decide the warning.
     # Retain every observed label in the consent snapshot to detect later changes.
-    result['_runtime_versions']={'value':versions,'matches':(version is None or version==tested) and
-        (label.get('build_source')!='bin/version.txt' or build is None or build==native_build)}
+    native_builds={tested[version]} if version in tested else set(tested.values())
+    result['_runtime_versions']={'value':versions,'matches':(version is None or version in tested) and
+        (label.get('build_source')!='bin/version.txt' or build is None or build in native_builds)}
     return result
 
 

@@ -251,6 +251,26 @@ void run(){
     rateAuthority=0x223400000049;
     augmentBytes=7000;p=sendFrame();release();table.nvEncReconfigureEncoder(handle,&qos);
     check(receivedRateParams!=&qos&&receivedRate==93280000,"a new source epoch uses only its first current sample rather than the previous metadata peak");
+    // A fixed CBR ceiling does not change as scene coverage grows or shrinks.
+    // Exercise the real callback without an automatic target-rate reduction.
+    codecConfig.rcParams.maxBitRate=100000000;
+    const auto fixedConfig=codecConfig;
+    const std::uint32_t fixedCases[][2]={{3000,93280000},{20000,80800000},{60000,42400000},{3000,42400000}};
+    for(const auto& sample:fixedCases){
+        augmentBytes=sample[0];p=sendFrame();release();
+        check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_SUCCESS
+            &&receivedRate==sample[1]&&receivedMaximum==sample[1],
+            "fixed 100Mbit/s CBR reserves changing coverage and retained peaks without an Auto target change");
+        const auto fixedRates=bridge.reconfigureStats();
+        check(fixedRates.requestedVideoRate==100000000
+            &&std::uint64_t(receivedRate)+fixedRates.metadataRate==100000000
+            &&std::uint64_t(receivedBuffer)+fixedRates.metadataRate/120<=100000000/120,
+            "fixed CBR total rate and video-plus-metadata burst stay within the original constant budget");
+        check(!std::memcmp(&codecConfig,&fixedConfig,sizeof codecConfig)
+            &&bridge.generation(handle)==qosGeneration&&observed.coverageSessionAuthorized,
+            "fixed CBR accounting preserves caller settings, exact current coverage and the live paired source");
+    }
+    codecConfig.rcParams.maxBitRate=120000000;
     observeRateParams=false;rateAuthority=0;augmentBytes=1;bridge.setOutputAugmenter({augment,nullptr});
     qos.reInitEncodeParams.encodeConfig=nullptr;table.nvEncReconfigureEncoder(handle,&qos);
     check(bridge.generation(handle)==qosGeneration,"documented NULL config retains current deep-copied config with unchanged preset");
@@ -260,7 +280,7 @@ void run(){
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"QoS never resurrects a resource unregistered by the native callback");release();
     table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"native re-registration gets fresh valid input after QoS");release();
-    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==17&&qosStats.preservedRejected==3,"cold QoS counters distinguish successes from rejected attempts");
+    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==21&&qosStats.preservedRejected==3,"cold QoS counters distinguish successes from rejected attempts");
     check(qosStats.overlappingInputs==1&&qosStats.overlappingOutputs==2,"cold counters identify exact completions across both QoS overlap schedules");
     const auto paddingStart=offsetof(NV_ENC_INITIALIZE_PARAMS,privDataSize)+sizeof qos.reInitEncodeParams.privDataSize;
     const auto paddingEnd=offsetof(NV_ENC_INITIALIZE_PARAMS,privData);

@@ -363,7 +363,8 @@ class Tests(unittest.TestCase):
         self.assertNotIn('bridge_untested_installed',ui.messages)
 
     def test_native_build_labels_use_reviewed_source_namespace(self):
-        for side,version,build in (('pc','2.17.10','1789498647'),('frame','2.18.2','1791331621')):
+        for side,version,build in (('pc','2.17.10','1789498647'),('pc','2.18.4','1792185270'),
+                                   ('frame','2.18.2','1791331621')):
             pins=self.bundle.pc['runtime_files'] if side=='pc' else self.bundle.frame['runtime_files']
             bases={'steamvr':self.runtime if side=='pc' else self.fsvr}
             for source,number,known in (('bin/version.txt',build,True),('bin/version.txt','1999999999',False),
@@ -372,6 +373,21 @@ class Tests(unittest.TestCase):
                 snapshot=b.runtime_snapshot(s,pins,bases,side=side,versions=versions)
                 self.assertEqual(snapshot['_runtime_versions']['matches'],known)
                 self.assertEqual(snapshot['_runtime_versions']['value'],versions)
+
+    def test_confirmed_2184_pair_needs_no_untested_warning(self):
+        def versions(path):
+            return {'steamvr':{'version':'2.18.4' if path==self.runtime else '2.18.2',
+                'build':'1792185270' if path==self.runtime else '1791331621','build_source':'bin/version.txt'}}
+        with mock.patch.object(s,'runtime_versions',side_effect=versions),self.fake_generation():result,ui=self.wizard()
+        self.assertEqual(result,0);self.assertNotIn('bridge_untested_confirm',ui.questions)
+        self.assertEqual(ui.warnings,[])
+        self.assertTrue(self.local.inventory()['registered']);self.assertTrue((self.froot/'receiver.enable').exists())
+        # A familiar semantic version does not certify a different native build.
+        pins=self.bundle.pc['runtime_files'];bases={'steamvr':self.runtime}
+        changed={'steamvr':{'version':'2.18.4','build':'1789498647','build_source':'bin/version.txt'}}
+        snapshot=b.runtime_snapshot(s,pins,bases,side='pc',versions=changed)
+        self.assertFalse(snapshot['_runtime_versions']['matches'])
+        with self.assertRaises(s.SetupError):b.runtime_admission(s,self.bundle,'pc',snapshot,None)
 
     def test_package_build_is_informational_with_known_version_and_exact_native_files(self):
         def versions(path):
