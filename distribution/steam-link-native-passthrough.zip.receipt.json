@@ -1,25 +1,25 @@
 {
   "archive": {
-    "bytes": 18328529,
-    "sha256": "b32fc207aaf79797b3f5a7d699bb06cd2e59f8a1f5e72bf295e6a77a702adfda"
+    "bytes": 18336517,
+    "sha256": "cd66ebf1ef36e50a9897ce4184d0180a4148a7e818f5842f41200683e681fee4"
   },
   "artifacts": {
     "frame_layer": {
-      "bytes": 2999328,
-      "sha256": "fed771ef8db0c0b2f17f7c4b428c2d2fab5daa903629b24dfe490f781a0d02a8"
+      "bytes": 2896280,
+      "sha256": "2fa595b5c44c9a53afdf704400328e7a54af3a561ac4cd2b54e7a1455a7cf980"
     },
     "frame_selector": {
       "bytes": 73360,
       "sha256": "3ee160069c02826cf6312e8644a98d5dd148d3afac58a67bfee0987bae79e2ec"
     },
     "pc_provider": {
-      "bytes": 1289728,
-      "sha256": "c448a44c929b2eadf49612180176882d8990bb607cb4c6989c25ca2dfbe3873b"
+      "bytes": 1308672,
+      "sha256": "895e249abf609ce3e680a3333dafc2d20f17f753121c73fc876acd3ae6349d12"
     }
   },
   "component_versions": {
-    "frame": "0.2.12",
-    "pc": "0.2.14"
+    "frame": "0.2.15",
+    "pc": "0.2.18"
   },
   "device_actions": false,
   "hardware_verified": false,
@@ -28,8 +28,8 @@
   "readiness": "release",
   "result": "PASS",
   "runtime_profile": {
-    "bytes": 9587,
-    "sha256": "a8add0a6eb88a53846d9e2b55fe9b3b220d8c16c1391aad0bae498aee01efbc9"
+    "bytes": 9894,
+    "sha256": "55c093e0350bd55791cd600fd8ef2c3dd582dae17b5283207b404e4dae53cce1"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -39,11 +39,11 @@
     },
     "PATCH_VERSIONS.json": {
       "bytes": 80,
-      "sha256": "56a0b47d498bf6b4a83077eabaa1e28ac75a68f51d67b358a1fe5092fcbdf161"
+      "sha256": "a4abd607027d095d12e7a6fe5337a57d5605450072151093640b5e1f3a28e7ce"
     },
     "VERSION": {
       "bytes": 7,
-      "sha256": "26e6ebd4b069ddb03df79ec9a299ee4a39c60bf8d34a2b6a3ff059d4f2e21b88"
+      "sha256": "3fa69719d0146f620eac46461ac7f66c9113fcab8daf858dc7ac4a6dcc5f599d"
     },
     "packaging/setup-openssh.json": {
       "bytes": 1029,
@@ -102,12 +102,12 @@
       "sha256": "73757c85571f8c4b0fa886a8ad3b4da82b824add3bd0de68d729d5ad009e35cc"
     },
     "setup/steam_link_setup_log.py": {
-      "bytes": 19509,
-      "sha256": "26591f9a6a5d5523dc50c1463c99599d6a9d97c3843a0daf187756e46d02fee5"
+      "bytes": 20768,
+      "sha256": "46f2efee468b5c829645a5d4c8edfa571501e397edfbb5c7fac9193fe0711933"
     },
     "setup/steam_link_setup_pc.py": {
-      "bytes": 22321,
-      "sha256": "a88cf24204459bedf057fbb58c210624b531614035484060b1ffffe4500819da"
+      "bytes": 23932,
+      "sha256": "0138c8788920482cab1fd6d5ffeea1e921c32ff8c7dcafefa85043e7e7af5ee6"
     },
     "setup/steam_link_setup_session.py": {
       "bytes": 18278,
@@ -118,8 +118,8 @@
       "sha256": "3298d94454b63f1067a6add2496ed8754135751dd19d6e5c8f4ebbcab409173d"
     },
     "setup/steam_link_setup_ui.py": {
-      "bytes": 81965,
-      "sha256": "a09b4a8294fc149ecd09e430728ffcaeb312ebbcfcee29c3ebdd1e80e5129a15"
+      "bytes": 82058,
+      "sha256": "49214d8704e5e0dda007ef13c176daad54d4065a049dda3f39182d55bfff9fc7"
     },
     "setup/steam_link_setup_vendor.py": {
       "bytes": 2108,
@@ -130,8 +130,8 @@
       "sha256": "06dcc953d97bdea5aad9740e2513514ab7ee6cf514ff336fd3bd72f81db45208"
     },
     "setup/stream_bridge_install.py": {
-      "bytes": 168174,
-      "sha256": "9cb87c5a6cb163c63fe2e0a6dbe3ef8d572ab59f85c64ba0e7badcdbaaaebd81"
+      "bytes": 170037,
+      "sha256": "3c9ec95053cd50cd7695bd9ab3f120c10562c81f57f87efc52d9a26f69244512"
     },
     "third_party/lz4/LICENSE": {
       "bytes": 1311,
@@ -158,8 +158,16 @@
       "sha256": "a375a068bc68f0c8e34fa2051bb7371d816aa737cbf527bcfaaac0e5dcb06a93"
     },
     "tools/native_fragment_stream_coverage.py": {
-      "bytes": 6659,
-      "sha256": "c47ee7928af38a6dcdffc42e48d6b195a3f2e616837ab433bf3a4367afc7bc30"
+      "bytes": 6771,
+      "sha256": "4a556427f008295b6aa8ef20ada29951334b798cf624fe4485570c221370943e"
+    },
+    "tools/native_shader_contract.json": {
+      "bytes": 13764,
+      "sha256": "fa56730966a22ee374c4b77a7b5303c75788e1dc4fc604793d266fcc8e4093b5"
+    },
+    "tools/native_shader_contract.py": {
+      "bytes": 3006,
+      "sha256": "8c1925915b587ba330bcdcaf7be592532e5fd64d67465417e87bec67b84cef94"
     },
     "tools/package_setup_dependencies.py": {
       "bytes": 7369,
@@ -170,8 +178,8 @@
       "sha256": "fe07748a2ba42932aa98e2526cd477f73b75860d0b962878aca5940768f1d2a7"
     },
     "tools/package_stream_bridge.py": {
-      "bytes": 18029,
-      "sha256": "126426e8f026c88920bd6d075cd04aacf6ce65b4c0a355f1752a205d37342484"
+      "bytes": 18886,
+      "sha256": "226a34d87afea0da2d8c7937c1d0b8793b011dd5ae23e71c16da39fa01925fbc"
     },
     "tools/package_stream_link_setup.py": {
       "bytes": 7826,
@@ -182,11 +190,11 @@
       "sha256": "cf18f0f5432acc38f1ab4c299310f29e79dbd26b19957ffc16fcc0edb024df9d"
     },
     "tools/stream_bridge_camera.py": {
-      "bytes": 44937,
-      "sha256": "1cd6c79752e2cdc87dd74e02b2f75ac75aba2d3e3c852653c4bacb3ad8e6b734"
+      "bytes": 46343,
+      "sha256": "8eec889523a0b0e203ae5ec3ccbaca560860ca6601f29774a3cbda8ec942b8e4"
     }
   },
-  "source_revision": "29c5c5d0b60a8627f8ece35d3d466c8dc9ad30a4",
+  "source_revision": "917f5a408a04f5ec6dde0df89ac366c69552ccc6",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -203,10 +211,10 @@
       ],
       "hardware_verified": false,
       "pin": {
-        "bytes": 6767,
-        "sha256": "e5fbd2d286f398e8ada98cc7f0a8c87d4a0f5aa2fb1a27f180e8bb553f649678"
+        "bytes": 7074,
+        "sha256": "3cd815d9153afd2c6e8b9e2a90df9288916fefaba9f84812264fe257b9e6ff16"
       }
     }
   ],
-  "version": "0.2.14"
+  "version": "0.2.18"
 }
