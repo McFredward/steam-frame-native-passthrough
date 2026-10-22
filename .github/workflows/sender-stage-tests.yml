@@ -88,7 +88,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           source = Path('pc/stream-bridge-sender-provider-coverage-stages.h').read_text()
-          needle = '        if(!input)return {};'
+          needle = '    Claim capture(std::uintptr_t input)noexcept{\n        if(!input)return {};'
           assert source.count(needle) == 1
           # Model the forbidden old metadata ownership: any CPU reader blocks
           # otherwise independent source copies. Real callbacks, accepted native
