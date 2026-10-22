@@ -103,3 +103,26 @@ components in later PC-only updates continue to bypass Frame file/settings/servi
 work. PC SteamVR stays closed after setup. An accepted untested-build warning
 enables both intended components; runtime-version/file-hash mismatch alone does
 not install an inactive patch. Removal and exact ownership recovery are retained.
+
+
+## Tested renderer and registration-tool inventory (2026-10-22)
+
+Installer 0.2.19 separates the tested renderer decision from the PC registration
+tool's complete-file hash. `vrpathreg.exe` is a public command-line utility, not
+code injected into the encoder or compositor. An otherwise tested renderer with
+a changed, valid x64 PE registration tool no longer receives an untested-renderer
+warning or a partial-runtime label. Inventory still records its actual hash
+mismatch. Every operation pins and verifies the observed tool and rejects changes
+during the transaction; missing/damaged tools, changed native driver bytes and
+unknown renderer version/build labels retain their checks and consent flow.
+The preflight log retains raw native/tool matches and records the tested-runtime
+decision through its status. Additional Frame OS library pins are filtered to
+the fixed log schema so a real eleven-pin inventory is not silently discarded.
+
+This installer-only change preserves PC 0.2.19 and Frame 0.2.15 payloads. The
+maintainer's Frame was read-only inventoried on October 22: SteamVR 2.18.2 native
+build 1791331621 and all eleven runtime pins match the packaged observations.
+A new PC setup capture is still needed to identify which observation triggered
+the maintainer's most recent warning; do not infer that every warning is caused
+by vrpathreg. Truly untested runtimes continue to offer install-and-enable after
+warning, never installation disabled merely by a version/hash mismatch.

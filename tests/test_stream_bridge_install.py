@@ -439,6 +439,43 @@ class Tests(unittest.TestCase):
         installer.uninstall(self.local.inventory());self.assertFalse(self.local.inventory()['registered'])
         self.assertEqual([call[1] for call in self.system.calls],['adddriver','removedriver'])
 
+    def test_public_registration_tool_change_does_not_warn_for_tested_renderer(self):
+        path,old=self.change_runtime('pc','vrpathreg')
+        installer=b.LocalInstall(s,self.local);snapshot=installer.snapshot(self.bundle,self.local.inventory())
+        self.assertFalse(snapshot['vrpathreg']['matches'])
+        self.assertTrue(snapshot['vrpathreg']['format_valid'])
+        self.assertTrue(b.tested_runtime('pc',snapshot));self.assertTrue(installer.check(self.bundle,self.local.inventory()))
+        with self.fake_generation():result,ui=self.wizard()
+        self.assertEqual(result,0);self.assertNotIn('bridge_untested_confirm',ui.questions)
+        self.assertEqual(installer.state()['vrpathreg']['sha256'],s.sha(path.read_bytes()))
+        self.assertTrue(self.local.inventory()['registered']);self.assertTrue((self.froot/'receiver.enable').exists())
+
+    def test_real_frame_library_inventory_keeps_bounded_preflight_diagnostics(self):
+        for role in ('driver','ld_linux','libc','libgcc','libm','libstdcxx','vulkan_loader'):
+            raw=('public library '+role).encode();name='bin/linuxarm64/'+role
+            s.put(self.fsvr/name,raw)
+            self.manifest['frame']['runtime_files'][role]={'base':'steamvr','path':name,'bytes':len(raw),'sha256':s.sha(raw)}
+        s.put(self.bundle_root/'stream-bridge-bundle.json',s.encoded(self.manifest),s.read(self.bundle_root/'stream-bridge-bundle.json'))
+        self.bundle=b.Bundle(self.bundle_root,s)
+        with self.fake_generation():result,ui=self.wizard()
+        self.assertEqual(result,0);self.assertNotIn('bridge_untested_confirm',ui.questions)
+        events=[json.loads(line) for path in (self.local.root/'logs').glob('*.jsonl') for line in path.read_text().splitlines()]
+        checks=[event['runtime_checks'] for event in events if 'runtime_checks' in event]
+        self.assertTrue(checks)
+        self.assertEqual(set(checks[-1]['frame']),{'vrlink','compositor','fragment','openvr','_runtime_versions'})
+
+    def test_registration_tool_exception_does_not_hide_damage_or_native_changes(self):
+        path,old=self.change_runtime('pc','vrpathreg')
+        installer=b.LocalInstall(s,self.local)
+        path.write_bytes(b'not a Windows PE')
+        snapshot=installer.snapshot(self.bundle,self.local.inventory())
+        self.assertFalse(b.tested_runtime('pc',snapshot))
+        with self.assertRaises(s.SetupError):b.runtime_admission(s,self.bundle,'pc',snapshot,None)
+        path.write_bytes(old);native,original=self.change_runtime('pc','vrlink')
+        snapshot=installer.snapshot(self.bundle,self.local.inventory())
+        self.assertFalse(b.tested_runtime('pc',snapshot))
+        with self.assertRaises(s.SetupError):b.runtime_admission(s,self.bundle,'pc',snapshot,None)
+
     def test_public_openvr_change_uses_observed_pin_but_private_contracts_stay_active(self):
         path,_=self.change_runtime('frame','openvr')
         with self.fake_generation():

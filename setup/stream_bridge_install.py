@@ -174,6 +174,18 @@ def runtime_snapshot(engine,pins,bases,*,side,versions):
     return result
 
 
+def tested_runtime(side,snapshot):
+    """Tested renderer observations, independent of the public registration tool.
+
+    vrpathreg is not loaded into the rendering/encoding path. A changed x64 PE
+    is still re-read and pinned before its bounded adddriver/removedriver calls;
+    it must not turn an otherwise exact tested renderer into an untested one.
+    Keep the actual hash mismatch in inventory and consent snapshots.
+    """
+    return bool(snapshot) and all(item['format_valid'] if side=='pc' and role=='vrpathreg'
+        else item['matches'] for role,item in snapshot.items())
+
+
 def native_admitted(side,snapshot):
     required=('vrlink',) if side=='pc' else ('vrlink','compositor','fragment')
     return all(snapshot[role]['matches'] for role in required) and (side=='pc' or
@@ -184,7 +196,7 @@ def runtime_admission(engine,bundle,side,snapshot,consent):
     required=('vrlink',) if side=='pc' else ('vrlink','compositor','fragment')
     engine.require(all(snapshot[role]['format_valid'] for role in required),
         'The SteamVR runtime is missing or damaged. Its native executable and shader paths must be valid before installation.')
-    if consent is not None or not all(item['matches'] for item in snapshot.values()):
+    if consent is not None or not tested_runtime(side,snapshot):
         engine.require(consent=={'bundle':bundle.pin,'snapshot':snapshot},
             'The untested runtime changed or was not explicitly confirmed. Check both devices and confirm again.')
     # The exact snapshot confirmation authorizes trying an untested build.
@@ -393,13 +405,7 @@ class LocalInstall:
         return path/'steamvr.vrsettings'
 
     def check(self,bundle,pc):
-        matches={};e=self.e
-        for role,pin in bundle.pc['runtime_files'].items():
-            try:
-                raw=e.read(Path(pc['steamvr'])/e.relative(pin['path']),pin['bytes'])
-                matches[role]=len(raw)==pin['bytes'] and e.sha(raw)==pin['sha256']
-            except (OSError,ValueError,TypeError):matches[role]=False
-        return bool(matches) and all(matches.values())
+        return tested_runtime('pc',self.snapshot(bundle,pc))
 
     def snapshot(self,bundle,pc):
         return runtime_snapshot(self.e,bundle.pc['runtime_files'],{'steamvr':Path(pc['steamvr']) if pc.get('steamvr') else Path('/sfnp-missing')},
@@ -993,7 +999,7 @@ class FrameInstall:
             side='frame',versions=self.e.runtime_versions(self.steamvr))
 
     def inventory(self,bundle):
-        state=self.tx.state();snapshot=self.snapshot(bundle);compatible=all(item['matches'] for item in snapshot.values())
+        state=self.tx.state();snapshot=self.snapshot(bundle);compatible=tested_runtime('frame',snapshot)
         admitted=native_admitted('frame',snapshot)
         intact=state is not None and state['phase']=='installed'
         if intact:
@@ -2028,11 +2034,13 @@ class Automation:
 
     def confirm_runtime(self):
         observed,pc,frame=self.runtime_view()
-        matched=all(item['matches'] for side in ('pc','frame') for item in observed[side].values())
+        matched=all(tested_runtime(side,observed[side]) for side in ('pc','frame'))
         log=self.context.get('log')
         if log:
             log.event('preflight','result',status='ok' if matched else 'pending',runtime_checks={
-                side:{role:item['matches'] is True for role,item in observed[side].items()} for side in ('pc','frame')})
+                side:{role:item['matches'] is True for role,item in observed[side].items()
+                    if role in ('vrlink','vrpathreg','compositor','fragment','openvr','_runtime_versions')}
+                for side in ('pc','frame')})
         if not matched:
             show=getattr(self.ui,'untested_runtime',None)
             if show:show(pc=pc.get('runtime_versions'),frame=frame.get('runtime_versions'))
