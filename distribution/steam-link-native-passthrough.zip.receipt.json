@@ -1,12 +1,12 @@
 {
   "archive": {
-    "bytes": 19024367,
-    "sha256": "83488bb228a646d1e09262740ddaf43cf7fe433dfe15b76dc8b70dffc4f6f521"
+    "bytes": 19022370,
+    "sha256": "9fe6b95f03d1386b86b354aa5e6e5a816caf6242697aff0ed062739e30970faa"
   },
   "artifacts": {
     "frame_layer": {
-      "bytes": 3650648,
-      "sha256": "93b2c3fdf8b6b0b13ed0c9b761efcffc8720b75fb4cc33cdcb4cfcd9cf43e01c"
+      "bytes": 3650368,
+      "sha256": "50bb8d9961e208f992054af1f2dc8e4e5a35c0f1f9035526ece2acc9887c8bdd"
     },
     "frame_selector": {
       "bytes": 73360,
@@ -18,7 +18,7 @@
     }
   },
   "component_versions": {
-    "frame": "0.2.16",
+    "frame": "0.2.17",
     "pc": "0.2.20"
   },
   "device_actions": false,
@@ -29,7 +29,7 @@
   "result": "PASS",
   "runtime_profile": {
     "bytes": 10183,
-    "sha256": "019a045d3a26fcef1d0e46fda10e130b0821fb5c508a427e8636acc50aa61aa8"
+    "sha256": "b34094dd360c27d56187daba10847199b09864e60ccbd7aea0bdeec201722f4d"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -39,11 +39,11 @@
     },
     "PATCH_VERSIONS.json": {
       "bytes": 80,
-      "sha256": "ed90f0ffb01cc04f94fa108f1862c6196c74235e0e7d8cbdbbe34122ee34b1f2"
+      "sha256": "94c7c7f38c91f58ff07017bbc4fbd21cf62206dae0d1fba1b958b713b76b1328"
     },
     "VERSION": {
       "bytes": 7,
-      "sha256": "f2b441d0c9b7b81e8d9385e7e89ede33d7521583579dcb7b42fa366fd49758ab"
+      "sha256": "d612e32bad3e982c0bff1240bd4d9f08fced471fe070dc54d15a669eb636909e"
     },
     "packaging/setup-openssh.json": {
       "bytes": 1029,
@@ -198,7 +198,7 @@
       "sha256": "8eec889523a0b0e203ae5ec3ccbaca560860ca6601f29774a3cbda8ec942b8e4"
     }
   },
-  "source_revision": "a4ad13f75493e4c45409da2deb0a9f35e9ccf389",
+  "source_revision": "25572b77996c623ef1e5a5a1bd727d177636bcdf",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -216,9 +216,9 @@
       "hardware_verified": false,
       "pin": {
         "bytes": 7219,
-        "sha256": "8b7ded83cc9adec7d4c186019c3d0bce437fd08b3e71c360f761ac40063cbbf8"
+        "sha256": "d9ad7510496b27821fa6c17dcce8b7f1d6349abaf8c6ae4a99e6ac08cd160fb9"
       }
     }
   ],
-  "version": "0.2.20"
+  "version": "0.2.21"
 }
