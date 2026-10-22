@@ -71,7 +71,7 @@ std::vector<std::uint8_t> encodeNal(Bytes payload,unsigned layer,unsigned tempor
     std::vector<std::uint8_t> out{0,0,0,1,std::uint8_t((39<<1)|(layer>>5)),std::uint8_t((layer<<3)|temporal)};unsigned zeros=0;
     for(auto c:rbsp){if(zeros==2&&c<=3){out.push_back(3);zeros=0;}out.push_back(c);zeros=c==0?std::min(2u,zeros+1):0;}return out;
 }
-bool descriptorValid(const FrameDescriptor& d){return d.sourceFrame&&d.encoderGeneration&&d.codedWidth&&d.codedHeight&&
+bool descriptorValid(const FrameDescriptor& d){return d.cameraRecovery<=2&&d.sourceFrame&&d.encoderGeneration&&d.codedWidth&&d.codedHeight&&
     d.codedWidth<=8192&&d.codedHeight<=8192&&std::size_t(d.codedWidth)*d.codedHeight<=MaximumCoverageBytes;}
 bool coverageValid(const FrameDescriptor& d,CoverageEncoding encoding,Bytes b){
     if(encoding==CoverageEncoding::None)return !b.size;
@@ -80,6 +80,7 @@ bool coverageValid(const FrameDescriptor& d,CoverageEncoding encoding,Bytes b){
     if(encoding==CoverageEncoding::Raw)return b.size==size;
     if(encoding==CoverageEncoding::RleLz4){std::vector<std::uint8_t> rle;return decompressCoverageRle(b,size,rle);}
     if(encoding==CoverageEncoding::RleZstd){std::vector<std::uint8_t> rle;return decompressCoverageRleZstd(b,size,rle);}
+    if(encoding==CoverageEncoding::RawZstd){std::vector<std::uint8_t> raw;return decompressCoverageRawZstd(b,size,raw);}
     if(encoding!=CoverageEncoding::Rle||b.size%2)return false;
     std::size_t decoded=0;for(std::size_t i=0;i<b.size;i+=2){if(!b.data[i]||b.data[i]>size-decoded)return false;decoded+=b.data[i];}return decoded==size;
 }
@@ -96,6 +97,7 @@ FrameStatus appendCertifiedFrame(Bytes original,const FrameDescriptor& d,Coverag
     std::memcpy(h,"SFV1",4);h[4]=1;h[5]=std::uint8_t(encoding);put(h+6,FrameCertificateBytes,2);
     const auto pair=auth.pairId(),binding=auth.binding();std::copy(pair.begin(),pair.end(),h+8);std::copy(binding.begin(),binding.end(),h+24);
     put(h+40,d.sourceFrame,8);put(h+48,d.encoderGeneration,8);put(h+56,original.size,4);put(h+60,coverage.size,4);
+    h[72]=d.cameraRecovery;
     put(h+64,d.codedWidth,2);put(h+66,d.codedHeight,2);put(h+68,encoding==CoverageEncoding::None?0:std::size_t(d.codedWidth)*d.codedHeight,4);
     const auto videoHash=hash(original),coverageHash=hash(coverage);std::copy(videoHash.begin(),videoHash.end(),h+80);std::copy(coverageHash.begin(),coverageHash.end(),h+112);
     AuthTag tag{};if(auth.signFrameHeader({h,FrameSignedHeaderBytes},tag)!=AuthStatus::Ok)return FrameStatus::AuthenticationRefused;
@@ -136,9 +138,10 @@ FrameStatus inspectMetadata(Bytes payload,AuthSession& auth,CertifiedAccessUnit&
     if(!payload.data||payload.size>MaximumAccessUnitBytes)return FrameStatus::InvalidArgument;
     if(payload.size<FrameCertificateBytes)return FrameStatus::Malformed;
     const auto* h=payload.data;
-    if(std::memcmp(h,"SFV1",4)||h[4]!=1||h[5]>std::uint8_t(CoverageEncoding::RleZstd)||get(h+6,2)!=FrameCertificateBytes)return FrameStatus::Malformed;
-    for(unsigned i=72;i<80;++i)if(h[i])return FrameStatus::Malformed;
-    CertifiedAccessUnit result;result.descriptor={get(h+40,8),get(h+48,8),std::uint16_t(get(h+64,2)),std::uint16_t(get(h+66,2))};
+    if(std::memcmp(h,"SFV1",4)||h[4]!=1||h[5]>std::uint8_t(CoverageEncoding::RawZstd)||get(h+6,2)!=FrameCertificateBytes)return FrameStatus::Malformed;
+    if(h[72]>2)return FrameStatus::Malformed;
+    for(unsigned i=73;i<80;++i)if(h[i])return FrameStatus::Malformed;
+    CertifiedAccessUnit result;result.descriptor={get(h+40,8),get(h+48,8),std::uint16_t(get(h+64,2)),std::uint16_t(get(h+66,2)),h[72]};
     const auto& d=result.descriptor;result.coverageEncoding=CoverageEncoding(h[5]);
     if(!descriptorValid(d)||get(h+60,4)!=payload.size-FrameCertificateBytes)return FrameStatus::Malformed;
     const auto rawSize=result.coverageEncoding==CoverageEncoding::None?0:std::size_t(d.codedWidth)*d.codedHeight;
@@ -178,9 +181,9 @@ bool encodeCoverageRle(Bytes raw,std::vector<std::uint8_t>& output){
         result.push_back(std::uint8_t(count));result.push_back(raw.data[at]);at+=count;}
     output.swap(result);return true;
 }
-bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,std::vector<std::uint8_t>& output,bool allowRleZstd){
+bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,std::vector<std::uint8_t>& output,bool allowRleZstd,bool allowRawZstd){
     if(!raw.data||!raw.size||raw.size>MaximumCoverageBytes)return false;
-    std::vector<std::uint8_t> rle,compressed,zstd;
+    std::vector<std::uint8_t> rle,compressed,zstd,rawZstd;
     const bool haveRle=encodeCoverageRle(raw,rle);
     CoverageEncoding selected=CoverageEncoding::Raw;Bytes best=raw;
     if(haveRle&&rle.size()<best.size){best={rle.data(),rle.size()};selected=CoverageEncoding::Rle;}
@@ -189,7 +192,11 @@ bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,st
     // existing winner; otherwise retain its exact legacy bytes.
     if(allowRleZstd&&haveRle&&rle.size()<=MaximumEntropyRleBytes&&best.size>=4096&&compressCoverageRleZstd({rle.data(),rle.size()},best.size-1,zstd)
         &&zstd.size()<best.size){best={zstd.data(),zstd.size()};selected=CoverageEncoding::RleZstd;}
-    if(selected==CoverageEncoding::RleZstd)output.swap(zstd);
+    if(allowRawZstd&&haveRle&&rle.size()>MaximumEntropyRleBytes&&raw.size<=MaximumEntropyRawBytes
+        &&selected==CoverageEncoding::RleLz4&&best.size>=65536
+        &&compressCoverageRawZstd(raw,best.size-1,rawZstd)&&rawZstd.size()<best.size){best={rawZstd.data(),rawZstd.size()};selected=CoverageEncoding::RawZstd;}
+    if(selected==CoverageEncoding::RawZstd)output.swap(rawZstd);
+    else if(selected==CoverageEncoding::RleZstd)output.swap(zstd);
     else if(selected==CoverageEncoding::RleLz4)output.swap(compressed);
     else if(selected==CoverageEncoding::Rle)output.swap(rle);
     else {std::vector<std::uint8_t> result(raw.data,raw.data+raw.size);output.swap(result);}
@@ -202,6 +209,10 @@ bool decodeCertifiedCoverage(const CertifiedAccessUnit& frame,std::vector<std::u
     const auto& d=frame.descriptor;Bytes b{frame.coverage.data(),frame.coverage.size()};
     if(!descriptorValid(d)||frame.coverageEncoding==CoverageEncoding::None)return false;
     std::vector<std::uint8_t> rle;
+    if(frame.coverageEncoding==CoverageEncoding::RawZstd){
+        std::vector<std::uint8_t> raw;if(!decompressCoverageRawZstd(b,std::size_t(d.codedWidth)*d.codedHeight,raw))return false;
+        const auto bounds=std::minmax_element(raw.begin(),raw.end());range={*bounds.first,*bounds.second};output.swap(raw);return true;
+    }
     if(frame.coverageEncoding==CoverageEncoding::RleLz4){
         if(!decompressCoverageRle(b,std::size_t(d.codedWidth)*d.codedHeight,rle))return false;
         b={rle.data(),rle.size()};

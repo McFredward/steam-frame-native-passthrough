@@ -53,9 +53,9 @@ class CoverageTests(unittest.TestCase):
         after = [args for op, args in parsed if op == 65 and args[2] == 289]
         self.assertEqual(after, before)
         self.assertEqual(len(after), 2)
-        self.assertEqual(len(scalar), 7188)
+        self.assertEqual(len(scalar), 7420)
         self.assertEqual(hashlib.sha256(scalar).hexdigest(),
-                         '316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e')
+                         '37602d15087deefbe8acc8bd7f53fea80f8b740bb726a25b2fe160f3ab175db3')
 
     def test_native_picture_and_both_reconstruction_coordinates_are_unchanged(self):
         binary, record = coverage.transform(self.original)
@@ -75,33 +75,37 @@ class CoverageTests(unittest.TestCase):
         self.assertNotIn('atlas', {node.name for node in ast.walk(ast.parse(
             Path(coverage.__file__).read_text())) if isinstance(node, ast.alias)})
 
-    def test_generated_fallback_is_opaque_and_keeps_native_rgb(self):
-        binary, _ = coverage.transform(self.original)
+    def test_generated_exact_ordinary_and_camera_only_modes(self):
         first_new = struct.unpack('<5I', self.original[:20])[3]
-        for control in (0., 1.):
-            for weight in (0., .25, 1.):
-                values = {185: 1., 1008: weight, 899: .75,
-                          994: (.125, .5, .875, .9)}
-                output = None
-                for op, args in instructions(binary):
-                    if op not in (61, 88, 81, 131, 133, 129, 82) or args[1] < first_new:
-                        continue
-                    if op == 61 and args[0] == 8:
-                        values[args[1]] = control
-                    elif op == 88:
-                        values[args[1]] = (.2 if args[3] == 538 else .6, 0., 0., 1.)
-                    elif op == 81 and args[2] in values:
-                        values[args[1]] = values[args[2]][args[3]]
-                    elif op in (131, 133, 129) and args[2] in values and args[3] in values:
-                        a, b = values[args[2]], values[args[3]]
-                        values[args[1]] = a - b if op == 131 else a * b if op == 133 else a + b
-                    elif op == 82 and args[2] in values and args[3] == 994:
-                        self.assertEqual(args[4], 3)
-                        output = (*values[994][:3], values[args[2]])
-                self.assertIsNotNone(output)
-                self.assertEqual(output[:3], values[994][:3])
-                self.assertAlmostEqual(output[3], 1. if control == 0. else
-                                       (.2 * (1. - weight) + .6 * weight) * .75)
+        for camera_only in (False, True):
+            binary, _ = coverage.transform(self.original,camera_only=camera_only)
+            for control in (0.,1.):
+                for recovery in (0.,1.):
+                    for weight in (0.,.25,1.):
+                        values={185:1.,210:0.,1008:weight,899:.75,994:(.125,.5,.875,.9)}
+                        addresses={};output=None
+                        for op,args in instructions(binary):
+                            if op==43 and args[1] not in values:values[args[1]]=args[2]
+                            elif op==44 and args[1]>=first_new:values[args[1]]=tuple(values[n] for n in args[2:])
+                            elif op==65 and args[1]>=first_new:addresses[args[1]]=args[3]
+                            elif op==61 and args[1]>=first_new and args[0]==8:
+                                values[args[1]]=control if values.get(addresses.get(args[2]),0)==0 else recovery
+                            elif op==88 and args[1]>=first_new:values[args[1]]=(.2 if args[3]==538 else .6,0.,0.,1.)
+                            elif op==81 and args[1]>=first_new and args[2] in values:values[args[1]]=values[args[2]][args[3]]
+                            elif op in (131,133,129,180,167) and args[1]>=first_new and args[2] in values and args[3] in values:
+                                a,b=values[args[2]],values[args[3]]
+                                values[args[1]]={131:lambda:a-b,133:lambda:a*b,129:lambda:a+b,180:lambda:a==b,167:lambda:a and b}[op]()
+                            elif op==82 and args[1]>=first_new and args[2] in values and args[3] in values:
+                                vector=list(values[args[3]]);vector[args[4]]=values[args[2]];values[args[1]]=tuple(vector)
+                            elif op==80 and args[1]>=first_new:values[args[1]]=tuple(values[n] for n in args[2:])
+                            elif op==169 and args[1]>=first_new:
+                                values[args[1]]=tuple(a if c else b for c,a,b in zip(values[args[2]],values[args[3]],values[args[4]]))
+                            elif op==62 and args[0]==504:output=values.get(args[1])
+                        self.assertIsNotNone(output)
+                        if recovery and (camera_only or not control):self.assertEqual(output,(0.,0.,0.,0.))
+                        else:
+                            self.assertEqual(output[:3],values[994][:3])
+                            self.assertAlmostEqual(output[3],1. if camera_only or not control else (.2*(1-weight)+.6*weight)*.75)
 
     def test_both_generated_interfaces_validate(self):
         with tempfile.TemporaryDirectory(prefix='sfnp-coverage-count1-') as directory:
@@ -114,7 +118,7 @@ class CoverageTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr.decode('utf8', errors='replace'))
         old, _ = coverage.transform(self.original, 3)
         self.assertEqual(hashlib.sha256(old).hexdigest(),
-                         '54760d17ec2933ca667923ca713f64d6810914f9b2b53503d9a6ebb68ee2bdc0')
+                         '62ec34e7a7d4f57d8fba87a4ef30b7961723e0041c7009efd9c80be8b508280d')
 
     def test_unpinned_input_and_unknown_interfaces_refuse(self):
         wrong = bytearray(self.original)
@@ -127,7 +131,7 @@ class CoverageTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         header = (root / 'layer/stream_bridge_artifacts.h').read_text()
         runtime = {}
-        for name, filename in (('Coverage', 'coverage.spv'),):
+        for name, filename in (('Coverage', 'coverage.spv'),('CameraOnly','camera-only.spv')):
             size = re.search(r'\b' + name + r'Bytes=(\d+);', header)
             digest = re.search(r'\b' + name + r'Sha256="([a-f0-9]{64})";', header)
             self.assertIsNotNone(size)

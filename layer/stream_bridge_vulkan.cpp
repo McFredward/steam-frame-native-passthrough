@@ -225,7 +225,7 @@ bool bindDraw(Device& d,VkCommandBuffer command,const sbg::Draw& draw){
     if(!draw.original||!draw.replacement||(coverage&&(!draw.layout||!draw.coverage||!draw.control))){lost(d);return false;}
     d.CmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.replacement);
     if(coverage){
-        d.CmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.layout,1,1,&draw.coverage,0,nullptr);
+        if(draw.coverage)d.CmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.layout,1,1,&draw.coverage,0,nullptr);
         d.CmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.layout,2,1,&draw.control,0,nullptr);
     }return true;
 }

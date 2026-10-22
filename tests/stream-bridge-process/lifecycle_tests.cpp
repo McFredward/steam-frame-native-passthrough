@@ -156,17 +156,17 @@ struct HandoffFixture {
         decoded.dmabuf=decoded.lease.capture.dmabufFd;decoded.readOnlyLeases=source.writer.duplicateReadOnly();
         check(decoded.readOnlyLeases>=0&&source.channel.enqueue(decoded),"exact decoded capture queued separately after its certificate");close(decoded.readOnlyLeases);source.channel.tick();
     }
-    local::Message queue(bool active=true,unsigned index=0,bool includeDecoded=true){
+    local::Message queue(bool active=true,unsigned index=0,bool includeDecoded=true,std::uint8_t recovery=0,unsigned pool=7){
         const int image=index?secondFile.fd:file.fd;
         const auto frame=nextFrame++;
-        native::CaptureObservation capture{native::CaptureKind::Decoded,23,image,2+index,71+index,7,21,frame};
+        native::CaptureObservation capture{native::CaptureKind::Decoded,23,image,2+index,71+index,pool,21,frame};
         source.writer.captureEvent(capture);local::LeaseReference lease;
         check(source.writer.reference(capture,lease),"decoded source has exact current kernel lease before DQ handoff");
         const std::vector<std::uint8_t> nativeVideo{0,0,0,1,0x40,1,0x91,0x80,0,0,1,0x02,1,0x80,0x42,0x80,0,0};
-        std::vector<std::uint8_t> raw(active?32:0,127),coded;const sb::FrameDescriptor descriptor{frame,41,16,2};
+        std::vector<std::uint8_t> raw(active?32:0,127),coded;const sb::FrameDescriptor descriptor{frame,41,16,2,recovery};
         check(sb::appendCertifiedFrame({nativeVideo.data(),nativeVideo.size()},descriptor,active?sb::CoverageEncoding::Raw:sb::CoverageEncoding::None,{raw.data(),raw.size()},sender,coded)==sb::FrameStatus::Ok,"owned native AU receives actual authenticated coverage certificate");
         sb::CertifiedAccessUnit certificate;check(sb::inspectCertifiedFrame({coded.data(),coded.size()},observer,certificate)==sb::FrameStatus::Ok&&certificate.original==nativeVideo,"complete original AU verified before detached local metadata publication");
-        local::Message certified;certified.kind=local::Kind::Certified;certified.source.stream={connection,7};certified.source.outputPoolGeneration=7;certified.descriptor=descriptor;certified.binding=binding;certified.nativeTimestampToken=capture.nativeTimestampToken;certified.submittedContent=6;certified.peerConfirmed=true;
+        local::Message certified;certified.kind=local::Kind::Certified;certified.source.stream={connection,pool};certified.source.outputPoolGeneration=pool;certified.descriptor=descriptor;certified.binding=binding;certified.nativeTimestampToken=capture.nativeTimestampToken;certified.submittedContent=6;certified.peerConfirmed=true;
         check(sb::serializeCoverageMetadata(certificate,certified.certifiedMetadata),"real verified AU exports exact signed detached metadata");
         auto decoded=certified;decoded.kind=local::Kind::Decoded;decoded.certifiedMetadata.clear();decoded.lease=lease;decoded.dmabuf=image;decoded.readOnlyLeases=source.writer.duplicateReadOnly();
         check(decoded.readOnlyLeases>=0&&source.channel.enqueue(certified)&&(!includeDecoded||source.channel.enqueue(decoded)),"certificate and optional exact decoded capture queued on real socket");close(decoded.readOnlyLeases);
@@ -309,5 +309,28 @@ void cameraPictureDemand(){
     f.display.channel.stop();f.cycle();
     check(!f.display.camera.ready(),"real local channel loss still revokes camera authority immediately");
 }
+void cameraRecoveryPolicy(){
+    HandoffFixture f;f.publication.ready=true;
+    const auto directory=f.directory.path/"pairings";
+    check(mkdir(directory.c_str(),0700)==0,"owned selected pairing directory prepared for source renewal");
+    auto writePrivate=[&](const char* name,const std::string& data){const int fd=open((directory/name).c_str(),O_WRONLY|O_CREAT|O_EXCL,0600);check(fd>=0,"owned private pairing file opened");const auto n=write(fd,data.data(),data.size());close(fd);check(n==static_cast<ssize_t>(data.size()),"owned private pairing file complete");};
+    const std::string pairId="0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+    std::string key;for(unsigned i=0;i<32;++i)key+="65";
+    writePrivate("active.json","{\"schema\":\"sfnp-active-pairing-v1\",\"pair_id\":\""+pairId+"\"}");
+    writePrivate((pairId+".json").c_str(),"{\"schema\":\"sfnp-pairing-v1\",\"pair_id\":\""+pairId+"\",\"key_hex\":\""+key+"\",\"role\":\"receiver\",\"protocol_major\":1}");
+    auto active=f.queue(true,0,true,1);f.cycle();
+    check(f.display.camera.ready()&&f.display.cameraRecovery.load(),"authenticated explicit-RGBA source opts into general camera-only recovery");
+    const auto before=sfnp_camera_fixture::events(f.directory.path);
+    f.source.writer.invalidateCurrentEpoch();f.cycle();
+    check(f.display.camera.ready()&&!f.display.pictures[active.lease.slot].leases->current(active.lease),"decoder pool retirement retains physical camera while revoking exact game-image authority");
+    ++f.binding[0];auto producer=f.pair;producer.role=sb::Role::Producer;
+    check(f.sender.prepareProducer(producer,f.binding)==sb::AuthStatus::Ok&&f.observer.prepareReceiver(f.pair,{f.connection,8})==sb::AuthStatus::Ok,"decoder source renewal authenticates a fresh producer binding without replaying the retired generation");
+    f.queue(false,0,true,0,8);f.cycle();
+    check(f.display.camera.ready()&&f.display.cameraRecovery.load(),"new decoder source discovery cannot briefly withdraw an already acknowledged recovery camera");
+    check(sfnp_camera_fixture::events(f.directory.path)==before,"decoder recovery sends no disable/enable cycle to the camera helper");
+    f.queue(false,1,true,2,8);f.cycle();
+    check(!f.display.cameraRecovery.load()&&!f.display.camera.ready(),"signed explicit source withdrawal restores ordinary video instead of latching passthrough forever");
 }
-int main(int argc,char** argv){try{stream_bridge::logging::current.store(stream_bridge::logging::Level::Debug);const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();decodedDispatch();}exactHandoff();noneAndBurst();interruptedHandoff();unavailableHandoff();cameraHandoff();cameraPictureDemand();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+
+}
+int main(int argc,char** argv){try{stream_bridge::logging::current.store(stream_bridge::logging::Level::Debug);const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();decodedDispatch();}exactHandoff();noneAndBurst();interruptedHandoff();unavailableHandoff();cameraHandoff();cameraPictureDemand();cameraRecoveryPolicy();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

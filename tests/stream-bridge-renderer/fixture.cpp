@@ -29,7 +29,7 @@
 namespace sr=stream_bridge_renderer;namespace sb=stream_bridge;namespace local=stream_bridge_local;
 namespace {
 std::vector<std::uint32_t> words(const char* path){std::ifstream f(path,std::ios::binary|std::ios::ate);check(bool(f),"private source opens");const auto n=f.tellg();check(n>0&&n<65536&&n%4==0,"bounded private words");std::vector<std::uint32_t> out(std::size_t(n)/4);f.seekg(0);f.read(reinterpret_cast<char*>(out.data()),n);check(bool(f),"private source fully read");return out;}
-sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords;std::atomic<bool> leaseCurrent{true};std::atomic<std::uint64_t> leaseSequence{71};bool coverageReadable=true;std::atomic<bool> cameraReady{true};std::atomic<std::uint64_t> cameraGrant{1};
+sr::ProcessConsumer consumer{};std::vector<std::uint32_t> coverageWords;std::atomic<bool> leaseCurrent{true};std::atomic<std::uint64_t> leaseSequence{71};bool coverageReadable=true;std::atomic<bool> cameraRecovery{false};std::atomic<bool> cameraReady{true};std::atomic<std::uint64_t> cameraGrant{1};
 struct Driver:Fake {
  struct Update{std::uint64_t buffer;VkDeviceSize offset;float value;bool fill=false;};
  std::map<std::uint64_t,std::vector<Update>> commands;
@@ -40,7 +40,7 @@ struct Driver:Fake {
  std::map<std::uint64_t,std::vector<std::uint8_t>> imageBytes;
  std::map<std::uint64_t,std::vector<VkDescriptorSet>> appMasks;
  std::vector<std::vector<std::uint8_t>> sampledMasks;std::vector<VkCommandBuffer> executedCommands;
- std::vector<float> reads;std::vector<VkFence> originalFences;std::vector<std::size_t> nativeSubmitCounts;std::vector<const void*> originalNexts,allForwardedExtensions;std::vector<VkFence> allSubmitFences;
+ std::vector<float> reads,recoveryReads;std::vector<VkFence> originalFences;std::vector<std::size_t> nativeSubmitCounts;std::vector<const void*> originalNexts,allForwardedExtensions;std::vector<VkFence> allSubmitFences;
  struct Forward{VkQueue queue;std::uint32_t count;const void* infos;VkFence fence;bool sync2;};
  std::vector<Forward> forwarded;std::map<std::uint64_t,unsigned> ordinaryMarks;std::vector<unsigned> ordinaryExecuted;
  std::vector<VkSubmitInfo> lastSubmitInfos;std::vector<VkCommandBuffer> lastSubmitCommands;
@@ -52,7 +52,9 @@ struct Driver:Fake {
  std::function<void()> afterOriginal;
  static Driver* self;Driver(){self=this;Fake::active=this;}
  static VkResult VKAPI_CALL beginCommand(VkCommandBuffer cb,const VkCommandBufferBeginInfo* i){++self->calls;check(i->flags==VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT||i->flags==VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,"owned guard immutable-SIMULT or upload one-time");self->commands[number(cb)].clear();return VK_SUCCESS;}
- static void VKAPI_CALL bufferUpdate(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,VkDeviceSize size,const void* bytes){check(offset%256==0&&size==4,"one immutable aligned guard float");float v;std::memcpy(&v,bytes,4);check(v==0||v==1,"guard only boolean");self->commands[number(cb)].push_back({number(buffer),offset,v,false});}
+ static void VKAPI_CALL bufferUpdate(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,VkDeviceSize size,const void* bytes){check(offset%256==0&&(size==4||size==16||size==32768),"immutable aligned control or complete recovery state");
+  for(unsigned n=0;n<size/4;++n){float v;std::memcpy(&v,static_cast<const char*>(bytes)+n*4,4);check(v==0||v==1,"control values are boolean");self->commands[number(cb)].push_back({number(buffer),offset+n*4,v,false});}}
+
  static void VKAPI_CALL fillBuffer(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,VkDeviceSize size,std::uint32_t value){check(offset==0&&size==VK_WHOLE_SIZE&&value==0,"one immutable full-buffer zero fill");self->commands[number(cb)].push_back({number(buffer),0,0,true});}
  static VkResult VKAPI_CALL createBuffer(VkDevice,const VkBufferCreateInfo* info,const VkAllocationCallbacks*,VkBuffer* output){*output=self->make<VkBuffer>();self->bufferSizes[number(*output)]=info->size;return VK_SUCCESS;}
  static void VKAPI_CALL bufferReq(VkDevice,VkBuffer buffer,VkMemoryRequirements* output){*output={std::max<VkDeviceSize>(16384,self->bufferSizes.at(number(buffer))),1,1};}
@@ -77,7 +79,7 @@ struct Driver:Fake {
  static VkResult VKAPI_CALL freeSets(VkDevice,VkDescriptorPool,std::uint32_t,const VkDescriptorSet*){return VK_SUCCESS;}
  static VkResult VKAPI_CALL idle(VkDevice){return VK_SUCCESS;}
  static VkResult VKAPI_CALL fenceStatus(VkDevice device,VkFence fence){self->insideFenceStatus=true;while(self->blockFenceStatus.load())std::this_thread::yield();self->insideFenceStatus=false;return Fake::fenceStatus(device,fence);}
- static void execute(VkCommandBuffer cb){self->executedCommands.push_back(cb);if(self->ordinaryMarks.count(number(cb)))self->ordinaryExecuted.push_back(self->ordinaryMarks.at(number(cb)));for(const auto& copy:self->imageCopies[number(cb)]){const auto& bytes=self->memory.at(self->boundMemory.at(number(copy.buffer)));check(copy.offset+copy.bytes<=bytes.size(),"actual R8 copy is within its mapped staging allocation");self->imageBytes[number(copy.image)]={bytes.begin()+copy.offset,bytes.begin()+copy.offset+copy.bytes};}for(const auto& update:self->commands[number(cb)]){auto& bytes=self->memory.at(self->boundMemory.at(update.buffer));if(update.fill){check(self->bufferSizes.at(update.buffer)<=bytes.size(),"actual shared UBO fits queried allocation");std::memset(bytes.data(),0,std::size_t(self->bufferSizes.at(update.buffer)));}else{check(update.offset+4<=bytes.size(),"guard update inside allocation");std::memcpy(bytes.data()+update.offset,&update.value,4);}}auto app=self->appControl.find(number(cb));if(app!=self->appControl.end()){float v=0;auto& bytes=self->memory.at(self->boundMemory.at(app->second));std::memcpy(&v,bytes.data()+self->appOffset.at(number(cb)),4);self->reads.push_back(v);if(v==1)for(auto set:self->appMasks[number(cb)])self->sampledMasks.push_back(self->imageBytes.at(self->viewImage.at(self->coverageView.at(number(set)))));}}
+ static void execute(VkCommandBuffer cb){self->executedCommands.push_back(cb);if(self->ordinaryMarks.count(number(cb)))self->ordinaryExecuted.push_back(self->ordinaryMarks.at(number(cb)));for(const auto& copy:self->imageCopies[number(cb)]){const auto& bytes=self->memory.at(self->boundMemory.at(number(copy.buffer)));check(copy.offset+copy.bytes<=bytes.size(),"actual R8 copy is within its mapped staging allocation");self->imageBytes[number(copy.image)]={bytes.begin()+copy.offset,bytes.begin()+copy.offset+copy.bytes};}for(const auto& update:self->commands[number(cb)]){auto& bytes=self->memory.at(self->boundMemory.at(update.buffer));if(update.fill){check(self->bufferSizes.at(update.buffer)<=bytes.size(),"actual shared UBO fits queried allocation");std::memset(bytes.data(),0,std::size_t(self->bufferSizes.at(update.buffer)));}else{check(update.offset+4<=bytes.size(),"guard update inside allocation");std::memcpy(bytes.data()+update.offset,&update.value,4);}}auto app=self->appControl.find(number(cb));if(app!=self->appControl.end()){float v=0;auto& bytes=self->memory.at(self->boundMemory.at(app->second));std::memcpy(&v,bytes.data()+self->appOffset.at(number(cb)),4);self->reads.push_back(v);float recovery=0;std::memcpy(&recovery,bytes.data()+self->appOffset.at(number(cb))+4,4);self->recoveryReads.push_back(recovery);if(v==1)for(auto set:self->appMasks[number(cb)])self->sampledMasks.push_back(self->imageBytes.at(self->viewImage.at(self->coverageView.at(number(set)))));}}
  static VkResult VKAPI_CALL submit(VkQueue queue,std::uint32_t n,const VkSubmitInfo* ci,VkFence fence){auto& s=*self;s.forwarded.push_back({queue,n,ci,fence,false});++s.calls;++s.submits;check(queue==s.queue,"admitted original queue");s.allSubmitFences.push_back(fence);bool original=false;
   for(unsigned i=0;i<n;++i){if(ci[i].pNext)s.allForwardedExtensions.push_back(ci[i].pNext);if(ci[i].waitSemaphoreCount){check(ci[i].pWaitSemaphores&&*ci[i].pWaitSemaphores==s.wait&&ci[i].pWaitDstStageMask&&*ci[i].pWaitDstStageMask==VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,"original wait semaphore/stage retained");++s.waitPreserved;}
    if(ci[i].signalSemaphoreCount){check(ci[i].pSignalSemaphores&&*ci[i].pSignalSemaphores==s.signalSemaphore,"original signal retained");++s.signalPreserved;}
@@ -99,9 +101,11 @@ struct Driver:Fake {
 namespace stream_bridge_renderer {
 std::uint64_t cameraAlphaEpoch()noexcept{return cameraReady.load(std::memory_order_acquire)?cameraGrant.load(std::memory_order_acquire):0;}
 bool cameraAlphaReady()noexcept{return cameraAlphaEpoch()!=0;}
+bool cameraOnlyRecoveryReady()noexcept{return cameraRecovery.load()&&cameraAlphaReady();}
 bool prepareProcessCold()noexcept{return true;}bool enabled()noexcept{return true;}ProcessKind processKind()noexcept{return ProcessKind::Compositor;}
 stream_bridge_native::NativeImages* sourceImages()noexcept{return nullptr;}void sourceExportedFd(int)noexcept{}
 bool registerConsumerCold(ProcessConsumer c)noexcept{consumer=c;return true;}void unregisterConsumerCold(void*)noexcept{consumer={};}
+bool readCameraOnlyFragmentCold(std::vector<std::uint32_t>& out)noexcept{if(!coverageReadable)return false;out=coverageWords;return true;}
 bool readCoverageFragmentCold(std::vector<std::uint32_t>& out)noexcept{if(!coverageReadable)return false;out=coverageWords;return true;}
 }
 namespace stream_bridge_local {
@@ -586,7 +590,7 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
  {Integration f(vs,ps);auto draw=f.record();check(draw.ready&&draw.coverage&&draw.control&&draw.original==f.publicPipeline&&f.publicPipeline==handle<VkPipeline>(0x60)&&draw.replacement!=draw.original,"actual source import selects coverage without changing original public pipeline");check(f.submit()==VK_SUCCESS&&f.vk.reads.back()==1,"zero then exact one guard reaches original native CB");check(f.vk.originalFences.back()==f.vk.appFence&&f.vk.waitPreserved==1&&f.vk.signalPreserved==1,"original fence and semaphore contract forwarded");
   check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"legal flags0 re-submit gets fresh immutable GPU guard without host UBO writes");leaseCurrent=false;check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0,"previously successful reused recording turns opaque once actual selected lease expires");
  }
- {Integration f(vs,ps,1);const auto baseline=f.publicPipeline;check(baseline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.size()==1&&f.vk.createdPipelines.front()!=baseline,"ordinary native handle unchanged; only separate coverage companion is created");f.record();f.renderer.commandUnknown(f.cb);check(!f.renderer.beforeDraw(f.cb).ready&&f.publicPipeline==baseline,"unknown recording retains ordinary native pipeline");f.renderer.trackingLost();check(!f.record().ready&&f.publicPipeline==baseline,"lost observer leaves caller bound to ordinary native pipeline");}
+ {Integration f(vs,ps,1);const auto baseline=f.publicPipeline;check(baseline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.size()==2&&f.vk.createdPipelines.front()!=baseline,"ordinary native handle unchanged; coverage and camera-only companions are separately created");f.record();f.renderer.commandUnknown(f.cb);check(!f.renderer.beforeDraw(f.cb).ready&&f.publicPipeline==baseline,"unknown recording retains ordinary native pipeline");f.renderer.trackingLost();check(!f.record().ready&&f.publicPipeline==baseline,"lost observer leaves caller bound to ordinary native pipeline");}
  {Integration f(vs,ps,1,true,false,true);check(f.publicPipeline==handle<VkPipeline>(0x60)&&!f.record().ready,"coverage creation failure preserves ordinary native pipeline");}
  {Integration f(vs,ps,1,true,false,false,true);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unsupported custom allocator leaves original native handle untouched");}
  {Integration f(vs,ps,1);const auto baseline=f.publicPipeline,coverage=f.vk.createdPipelines.back();f.renderer.pipelineDestroyed(baseline);check(std::count(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),handle<VkPipeline>(0x60))==0&&std::count(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),coverage)==1,"public pipeline retirement releases only private coverage once");check(std::find(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),baseline)==f.vk.destroyedPipelines.end(),"renderer never double-destroys caller-owned native pipeline");Driver::destroyPipeline(f.device,baseline,nullptr);f.renderer.stopCold();check(std::count(f.vk.destroyedPipelines.begin(),f.vk.destroyedPipelines.end(),baseline)==1,"downstream original destroy owns native pipeline exactly once");}
@@ -607,8 +611,40 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
  {Integration f(vs,ps);f.record();for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSubmissionFences;++n)check(f.submit(false)==VK_SUCCESS,"bounded unsignaled retirement reservation");f.submit(false);check(f.vk.reads.back()==0,"retirement capacity refusal must disable image guard before original submit");}
 }
 }
+void cameraOnlyRecovery(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ cameraRecovery=true;
+ {Integration f(vs,ps,1);auto exact=f.record();check(exact.coverage!=VK_NULL_HANDLE,"normal active source retains its exact mask");
+  leaseCurrent=false;const auto before=f.vk.reads.size();check(f.submit(false)==VK_SUCCESS,"source loss preserves native queue submission");
+  check(f.vk.reads.size()==before+1&&f.vk.reads.back()==0&&f.vk.recoveryReads.back()==1,"retired exact recording becomes camera-only on the GPU instead of opaque");
+  auto fallback=f.record();check(fallback.ready&&fallback.coverage==VK_NULL_HANDLE&&fallback.control!=VK_NULL_HANDLE,"missing exact image records recovery without a guessed spatial mask");
+  check(f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==0&&f.vk.recoveryReads.back()==1,"recovery-only native draw contains no active exact guard");
+  cameraRecovery=false;check(f.submit(false)==VK_SUCCESS&&f.vk.recoveryReads.back()==0,"withdrawal restores ordinary native RGB even for an already-recorded recovery shader");
+  leaseCurrent=true;cameraRecovery=true;check(f.record().coverage!=VK_NULL_HANDLE&&f.submit(false)==VK_SUCCESS&&f.vk.reads.back()==1,"a fresh exact picture resumes game rendering automatically");
+  VkCommandBufferSubmitInfo command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};command.commandBuffer=f.cb;command.deviceMask=1;
+  VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.commandBufferInfoCount=1;info.pCommandBufferInfos=&command;
+  leaseCurrent=false;check(f.renderer.submit2(f.vk.queue,1,&info,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.reads.back()==0&&f.vk.recoveryReads.back()==1,"Submit2 loss also selects camera-only without a stale mask");
+  leaseCurrent=true;
+ }
+ for(unsigned mode=0;mode<2;++mode){Integration f(vs,ps,1);auto left=f.record();check(left.coverage!=VK_NULL_HANDLE,"stereo control begins with exact left eye");
+  const auto leftCb=f.cb;f.cb=handle<VkCommandBuffer>(0x71001);f.renderer.commandAllocated(f.cb,VK_COMMAND_BUFFER_LEVEL_PRIMARY,0);
+  f.writeView(handle<VkImageView>(0xdeadc0de));auto right=f.record();check(right.ready&&!right.coverage,"missing right image uses only camera recovery");
+  const auto before=f.vk.reads.size();
+  if(!mode){std::array<VkCommandBuffer,2> cb{{leftCb,f.cb}};VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=cb.size();info.pCommandBuffers=cb.data();check(f.renderer.submit(f.vk.queue,1,&info,VK_NULL_HANDLE)==VK_SUCCESS,"mixed-eye core submission succeeds");}
+  else{std::array<VkCommandBufferSubmitInfo,2> cb{};for(auto& value:cb){value.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;value.deviceMask=1;}cb[0].commandBuffer=leftCb;cb[1].commandBuffer=f.cb;VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.commandBufferInfoCount=cb.size();info.pCommandBufferInfos=cb.data();check(f.renderer.submit2(f.vk.queue,1,&info,VK_NULL_HANDLE)==VK_SUCCESS,"mixed-eye Submit2 succeeds");}
+  check(f.vk.reads.size()==before+2&&f.vk.reads[before]==0&&f.vk.reads[before+1]==0&&f.vk.recoveryReads[before]==1&&f.vk.recoveryReads[before+1]==1,"one missing stereo eye makes both video commands camera-only in the same submission");
+ }
+ {Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"busy control starts with known native video pipeline");
+  f.vk.blockPipeline=true;VkPipeline other=handle<VkPipeline>(0x61);std::thread cold([&]{f.renderer.graphicsCreated(VK_NULL_HANDLE,f.native.graphics,nullptr,other);});
+  const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(!f.vk.insidePipeline.load()&&std::chrono::steady_clock::now()<end)std::this_thread::yield();const bool locked=f.vk.insidePipeline.load();
+  const auto fallback=f.renderer.beforeDraw(f.cb);const auto result=f.submit(false);f.vk.blockPipeline=false;cold.join();
+  check(locked&&fallback.ready&&!fallback.coverage,"cold renderer mutex contention records mask-independent camera-only output without waiting");
+  check(result==VK_SUCCESS&&f.vk.reads.back()==0&&f.vk.recoveryReads.back()==1,"cold contention clears prior exact guards to camera-only on GPU");
+ }
+ cameraRecovery=false;
+}
 int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inputs required");auto vs=words(argv[1]),ps=words(argv[2]);coverageWords=words(argv[3]);
- if(argc==5&&std::strcmp(argv[4],"compressed-coverage")==0)compressedCoverage(vs,ps);
+ if(argc==5&&std::strcmp(argv[4],"camera-only-recovery")==0)cameraOnlyRecovery(vs,ps);
+ else if(argc==5&&std::strcmp(argv[4],"compressed-coverage")==0)compressedCoverage(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"camera-epoch")==0)cameraEpoch(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"camera-pending")==0){cameraPending(vs,ps);idleStartup(vs,ps);cameraEpoch(vs,ps);}
  else if(argc==5&&std::strcmp(argv[4],"resource-pressure")==0){for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);}
@@ -621,5 +657,5 @@ int main(int argc,char** argv){try{check(argc==4||argc==5,"explicit private inpu
  else if(argc==5&&std::strcmp(argv[4],"reservation-recovery")==0)reservationRecovery(vs,ps);
  else if(argc==5&&std::strcmp(argv[4],"continuous")==0)continuous(vs,ps);
  else if(argc==5){check(std::strcmp(argv[4],"artifact-fallback")==0,"explicit bounded renderer subset");coverageReadable=false;{Integration f(vs,ps,1,true,false);check(f.publicPipeline==handle<VkPipeline>(0x60)&&f.vk.createdPipelines.empty(),"unavailable coverage artifact preserves exact ordinary native pipeline without a fallback decoder");const auto before=f.vk.submits;check(f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE)==VK_SUCCESS&&f.vk.submits==before+1,"unavailable coverage forwards native submit exactly once without guard commands");check(!consumer.owner,"missing coverage never advertises an exact-mask route");}coverageReadable=true;{Integration f(vs,ps,1);check(f.record().coverage!=VK_NULL_HANDLE,"valid count1 artifact and exact native interface still prepare full coverage");}}
- else {cameraEpoch(vs,ps);cameraPending(vs,ps);for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);idleStartup(vs,ps);integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);continuous(vs,ps);}
+ else {cameraOnlyRecovery(vs,ps);cameraEpoch(vs,ps);cameraPending(vs,ps);for(unsigned mode=0;mode<6;++mode)resourcePressure(vs,ps,mode);resourceTelemetry(vs,ps);idleStartup(vs,ps);integration(vs,ps);fallbackRecovery(vs,ps);telemetry(vs,ps);timeline(vs,ps);reservationRecovery(vs,ps);continuous(vs,ps);}
  std::cout<<"{\"checks\":"<<checks<<",\"result\":\"PASS\"}\n";return 0;}catch(const std::exception& e){std::cerr<<"renderer failed after "<<checks<<": "<<e.what()<<'\n';return 1;}}

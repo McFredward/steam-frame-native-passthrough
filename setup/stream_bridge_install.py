@@ -84,7 +84,8 @@ TOOLS = frozenset('frame/tools/'+name+'.py' for name in (
 PROFILES = frozenset({'frame/tools/native_shader_contract.json'})
 LOG_DEFAULT = 'logging-default.conf'
 FRAME_DEFAULTS = frozenset({'frame/'+LOG_DEFAULT})
-GENERATED = {'coverage.spv': {'bytes':7188,'sha256':'316ceb1cc3c50a6eef9c6e176d1001d1afd61e0747b628d87728439c3d2bfc6e'}}
+GENERATED = {'coverage.spv': {'bytes':7420,'sha256':'37602d15087deefbe8acc8bd7f53fea80f8b740bb726a25b2fe160f3ab175db3'},
+             'camera-only.spv': {'bytes':7072,'sha256':'a8f7c2a375abb3f8d5188fdf129c00b2a2a1b13f3f3d8e7620b0a833510ea8ee'}}
 # Removal/recovery allowlist only. These files are never generated, installed or
 # selected by this version. An owned update removes them while retaining their
 # exact predecessors in the transaction so explicit Undo remains safe.
@@ -804,7 +805,8 @@ def generate_shaders(engine,bundle,original,stage):
         spec=importlib.util.spec_from_file_location(name,stage/'tools'/filename)
         module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module)
         coverage,_=module.transform(original)
-        outputs={'coverage.spv':coverage}
+        camera_only,_=module.transform(original,camera_only=True)
+        outputs={'coverage.spv':coverage,'camera-only.spv':camera_only}
         for name,raw in outputs.items():
             e.require(len(raw)==GENERATED[name]['bytes'] and e.sha(raw)==GENERATED[name]['sha256'],
                       'The locally generated shader differs from the reviewed output.')
@@ -901,7 +903,7 @@ class FrameInstall:
                   self.config/'vulkan/implicit_layer.d'/MANIFEST,
                   self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf',
                   self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK}
-        names={LIBRARY,'libsfnp_stream_launch.so','coverage.spv','receiver.conf','launch.conf',
+        names={LIBRARY,'libsfnp_stream_launch.so','coverage.spv','camera-only.spv','receiver.conf','launch.conf',
                'receiver.enable','pairings/active.json','install.json',CAMERA_CONFIG,'camera-session.pause',LOG_DEFAULT}|{n.removeprefix('frame/') for n in TOOLS|PROFILES}|RETIRED_FRAME_FILES
         def allowed(path):
             if path in external:return True
@@ -1299,7 +1301,7 @@ class FrameInstall:
             **{self.root/Path(name).relative_to('frame'):bundle.files[name] for name in TOOLS|PROFILES|FRAME_DEFAULTS if name in bundle.files}}
 
     def activation_paths(self):
-        return {self.root/name for name in ('receiver.enable','launch.conf','coverage.spv',CAMERA_CONFIG)}|{
+        return {self.root/name for name in ('receiver.enable','launch.conf','coverage.spv','camera-only.spv',CAMERA_CONFIG)}|{
             self.config/'vulkan/implicit_layer.d'/MANIFEST,
             self.config/'systemd/user/steam.service.d/85-steam-link-native-passthrough.conf',
             self.config/'systemd/user/steamvr.service.d'/CAMERA_HOOK}

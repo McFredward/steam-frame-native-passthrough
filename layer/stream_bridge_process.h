@@ -29,11 +29,13 @@ bool prepareProcessCold() noexcept;
 bool enabled() noexcept;
 // Renderer-only readiness observation. No settings/library/process or I/O work.
 bool cameraAlphaReady() noexcept;
+bool cameraOnlyRecoveryReady() noexcept;
 std::uint64_t cameraAlphaEpoch() noexcept;
 ProcessKind processKind() noexcept;
 stream_bridge_native::NativeImages* sourceImages() noexcept;
 void sourceExportedFd(int) noexcept;
 bool registerConsumerCold(ProcessConsumer) noexcept;
 void unregisterConsumerCold(void*) noexcept;
+bool readCameraOnlyFragmentCold(std::vector<std::uint32_t>&) noexcept;
 bool readCoverageFragmentCold(std::vector<std::uint32_t>&) noexcept;
 } // namespace stream_bridge_renderer

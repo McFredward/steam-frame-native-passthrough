@@ -11,7 +11,7 @@ class ArtifactPins(unittest.TestCase):
     def test_installer_and_production_loader_admit_the_same_generated_outputs(self):
         header = (ROOT / 'layer/stream_bridge_artifacts.h').read_text()
         native = {}
-        for name, filename in (('Coverage', 'coverage.spv'),):
+        for name, filename in (('Coverage', 'coverage.spv'), ('CameraOnly','camera-only.spv')):
             size = re.search(r'\b' + name + r'Bytes=(\d+);', header)
             digest = re.search(r'\b' + name + r'Sha256="([a-f0-9]{64})";', header)
             self.assertIsNotNone(size)

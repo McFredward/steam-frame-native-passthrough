@@ -30,7 +30,7 @@ void run(){
     sb::CoverageEncoding oldMode,newMode;std::vector<std::uint8_t> old,encoded,again;
     check(sb::encodeBestCoverage(bytes(raw),true,oldMode,old),"original lossless selector accepts fractional mask");
     check(sb::encodeBestCoverage(bytes(raw),true,newMode,encoded,true)&&newMode==sb::CoverageEncoding::RleZstd&&encoded.size()<old.size(),"opt-in entropy encoding strictly beats current full payload on noisy fractional alpha");
-    check(sb::encodeBestCoverage(bytes(raw),true,newMode,again,false)&&newMode==oldMode&&again==old,"disabled entropy retains byte-for-byte legacy/Gloomhaven compression");
+    check(sb::encodeBestCoverage(bytes(raw),true,newMode,again,false)&&newMode==oldMode&&again==old,"unnegotiated entropy retains byte-for-byte legacy compression");
     sb::CertifiedAccessUnit frame;frame.descriptor={1,1,width,height};frame.coverageEncoding=sb::CoverageEncoding::RleZstd;frame.coverage=encoded;
     std::vector<std::uint8_t> decoded;sb::CoverageRange range;
     check(sb::decodeCertifiedCoverage(frame,decoded,range)&&decoded==raw&&range.minimum==247&&range.maximum==255,"every fractional sample is reconstructed exactly");
@@ -52,13 +52,22 @@ void run(){
     check(sb::encodeBestCoverage(bytes(overBudget),true,oldMode,baseline)&&sb::encodeBestCoverage(bytes(overBudget),true,newMode,limited,true)&&newMode==oldMode&&limited==baseline,"large masks retain the exact original selector without extra entropy work");
     invalid=encoded;const auto oversized=sb::MaximumEntropyRleBytes+2;for(unsigned i=0;i<4;++i)invalid[i]=static_cast<std::uint8_t>(oversized>>(8*i));
     check(!sb::decompressCoverageRleZstd(bytes(invalid),overBudget.size(),untouched)&&untouched==std::vector<std::uint8_t>{91},"receiver rejects entropy RLE beyond the CPU ceiling before allocation");
+    const auto detailed=pattern(1024,1024,4);
+    check(sb::encodeBestCoverage(bytes(detailed),true,oldMode,baseline)&&sb::encodeBestCoverage(bytes(detailed),true,newMode,limited,true,true)
+        &&newMode==sb::CoverageEncoding::RawZstd&&limited.size()<baseline.size(),"detailed masks can use the separately negotiated fast direct-byte codec without a large RLE expansion");
+    frame.descriptor={3,1,1024,1024};frame.coverageEncoding=newMode;frame.coverage=limited;
+    check(sb::decodeCertifiedCoverage(frame,decoded)&&decoded==detailed,"fast direct-mask mode preserves all opacity samples exactly");
+    invalid=limited;invalid.push_back(0);check(!sb::decompressCoverageRawZstd(bytes(invalid),detailed.size(),untouched)&&untouched==std::vector<std::uint8_t>{91},"raw entropy rejects trailing input transactionally");
+    check(!sb::decompressCoverageRawZstd(bytes(limited),detailed.size()-1,untouched)&&untouched==std::vector<std::uint8_t>{91},"raw decoded extent must exactly match the authenticated descriptor");
+    for(unsigned n=0;n<10000;++n){std::vector<std::uint8_t> malformed(4+random()%100);for(auto& v:malformed)v=static_cast<std::uint8_t>(random());
+        check(!sb::decompressCoverageRawZstd(bytes(malformed),detailed.size(),untouched)&&untouched==std::vector<std::uint8_t>{91},"raw malformed-frame controls never publish partial output");}
     sb::sender::SourceContract source;source.publish(73);const auto v1=source.snapshot(73);
-    check(!source.entropyCodecAllowed(v1,73,true),"mutual codec support alone cannot change a v1/Gloomhaven source");
+    check(source.entropyCodecAllowed(v1,73,true),"every live explicit-RGBA source can use mutually negotiated lossless encoding");
     source.publish(73,true);const auto v2=source.snapshot(73);
     check(source.entropyCodecAllowed(v2,73,true)&&!source.entropyCodecAllowed(v2,73,false),"v2 opt-in requires both peer capability and live application policy");
     check(!source.entropyCodecAllowed(0,73,true)&&!source.entropyCodecAllowed(v2,74,true),"absent/foreign declarations cannot select the codec");
     source.publish(0);check(!source.entropyCodecAllowed(v2,73,true),"source loss revokes optimized encoding eligibility");
-    source.publish(73);check(!source.entropyCodecAllowed(source.snapshot(73),73,true),"a subsequent legacy producer again retains its original encoding path");
+    source.publish(73);check(source.entropyCodecAllowed(source.snapshot(73),73,true),"source version is independent of optional lossless codec support");
     sb::sender::MaskContentSample stats{};check(sb::sender::inspectMaskContent(bytes(raw),width,height,stats)&&stats.samples<=32768&&stats.samples==stats.scene+stats.real+stats.fractional&&stats.distinct==9,"bounded statistics reveal fractional-mask complexity without changing pixels");
     sb::sender::MaskContentPublication publication;check(!publication.read(stats),"no diagnostic publication is not a sample");
     check(publication.due(),"first v2 mask can provide a bounded diagnostic sample");publication.publish(stats);sb::sender::MaskContentSample copy;
@@ -77,7 +86,7 @@ void benchmark(){
     constexpr unsigned width=1152,height=4608,iterations=5;
     for(unsigned kind=0;kind<7;++kind){auto raw=pattern(width,height,kind);std::vector<std::uint8_t> legacy,modern,decoded;sb::CoverageEncoding a,b;
         const auto t0=std::chrono::steady_clock::now();for(unsigned i=0;i<iterations;++i)check(sb::encodeBestCoverage(bytes(raw),true,a,legacy),"legacy benchmark encode");
-        const auto t1=std::chrono::steady_clock::now();for(unsigned i=0;i<iterations;++i)check(sb::encodeBestCoverage(bytes(raw),true,b,modern,true),"optimized benchmark encode");
+        const auto t1=std::chrono::steady_clock::now();for(unsigned i=0;i<iterations;++i)check(sb::encodeBestCoverage(bytes(raw),true,b,modern,true,true),"optimized benchmark encode");
         const auto t2=std::chrono::steady_clock::now();sb::CertifiedAccessUnit frame;frame.descriptor={1,1,width,height};frame.coverageEncoding=b;frame.coverage=modern;
         for(unsigned i=0;i<iterations;++i)check(sb::decodeCertifiedCoverage(frame,decoded)&&decoded==raw,"actual benchmark decode is byte exact");
         const auto t3=std::chrono::steady_clock::now();

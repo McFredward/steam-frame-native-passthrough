@@ -96,7 +96,7 @@ void run(){
     auto release=[&](){check(table.nvEncUnlockBitstream(handle,output)==NV_ENC_SUCCESS,"actual native output unlock forwarded");};
     check(table.nvEncEncodePicture(handle,&pic)==NV_ENC_SUCCESS&&encodes==1&&captures==1&&captureEvent<encodeEvent,"one real Encode receives captured mapping");
     check(bridge.encoderStates()[0].encoded,"only accepted original Encode admits cold runtime bootstrap");
-    auto p=get();check(!observed.coverageSessionAuthorized&&!observed.compressedCoverageAuthorized&&!observed.entropyCoverageAuthorized,"exact source input alone never authorizes a mask or compressed payload before negotiation");check(p.bitstreamBufferPtr==au.data()&&p.bitstreamSizeInBytes==au.size(),"configured augmenter refusal keeps original entire AU");
+    auto p=get();check(!observed.coverageSessionAuthorized&&!observed.compressedCoverageAuthorized&&!observed.entropyCoverageAuthorized&&!observed.cameraOnlyRecoveryAuthorized&&!observed.rawEntropyCoverageAuthorized,"exact source input alone never authorizes a mask or compressed payload before negotiation");check(p.bitstreamBufferPtr==au.data()&&p.bitstreamSizeInBytes==au.size(),"configured augmenter refusal keeps original entire AU");
     check(observed.exactInput&&observed.resource==resource&&observed.encoder==encoder&&observed.mappedInput==mapped&&observed.output==output&&observed.inputTimestamp==pic.inputTimeStamp&&observed.width==1152&&observed.height==4608&&observed.subresource==0,"output exact public registry/map/encode timestamp tuple");
     check(observed.encoderGeneration==bridge.generation(handle)&&observed.resourceGeneration&&observed.mapGeneration>observed.resourceGeneration&&observed.submission>observed.mapGeneration&&observed.submission==captured.submission,"separate monotonically scoped resource/map/submission identities");release();check(retires==1,"input ledger retired at matching successful unlock");
     allowAugment=true;pic.inputTimeStamp++;table.nvEncEncodePicture(handle,&pic);p=get();check(p.bitstreamBufferPtr!=au.data()&&p.bitstreamSizeInBytes==au.size()+1&&bridge.liveLeases()==1,"owned final augmentation borrowed through actual native lease");
@@ -137,7 +137,7 @@ void run(){
     check(makeProbeEcho(peer,probe,authority(),echo)==Status::Ok,"peer echoes only actual observed probe");
     std::array<std::uint8_t,ProbeBytes> encodedEcho{};check(encodeProbe(echo,encodedEcho)==Status::Ok&&bridge.receiveEcho(handle,{encodedEcho.data(),encodedEcho.size()},authority())==Status::Ok,"matching current-generation roundtrip accepted");
     p=sendFrame();const auto before=observed;release();
-    check(before.exactInput&&before.coverageSessionAuthorized&&before.compressedCoverageAuthorized&&before.entropyCoverageAuthorized,"actual Lock snapshots current-generation compatible mutual session plus observed probe and independent compressed-mask capability");
+    check(before.exactInput&&before.coverageSessionAuthorized&&before.compressedCoverageAuthorized&&before.entropyCoverageAuthorized&&before.cameraOnlyRecoveryAuthorized&&before.rawEntropyCoverageAuthorized,"actual Lock snapshots current-generation compatible mutual session plus observed probe and independent compressed-mask capability");
     const auto qosGeneration=bridge.generation(handle);const auto qosResources=before;
     observeRateParams=true;NV_ENC_RECONFIGURE_PARAMS qos{};qos.version=NV_ENC_RECONFIGURE_PARAMS_VER;qos.reInitEncodeParams=ip;
     inspectDiscovery=false;
@@ -352,8 +352,8 @@ void olderCodecPeer(){
     NV_ENC_MAP_INPUT_RESOURCE mp{};mp.version=NV_ENC_MAP_INPUT_RESOURCE_VER;mp.registeredResource=reg;table.nvEncMapInputResource(handle,&mp);
     NV_ENC_PIC_PARAMS pic{};pic.version=NV_ENC_PIC_PARAMS_VER;pic.inputBuffer=mapped;pic.outputBitstream=output;
     pic.inputWidth=pic.inputHeight=64;pic.bufferFmt=NV_ENC_BUFFER_FORMAT_NV12;
-    auto local=localConfig();local.required&=~(CapRleLz4|CapRleZstd);
-    auto remote=local;remote.role=Role::Receiver;remote.nonce[0]=111;remote.offered&=~(CapRleLz4|CapRleZstd);
+    auto local=localConfig();local.required&=~(CapRleLz4|CapRleZstd|CapCameraOnlyRecovery|CapRawZstd);
+    auto remote=local;remote.role=Role::Receiver;remote.nonce[0]=111;remote.offered&=~(CapRleLz4|CapRleZstd|CapCameraOnlyRecovery|CapRawZstd);
     Handshake peer;check(peer.begin(remote,authority())==Status::Ok&&bridge.requestDiscovery(handle,local,authority()),"explicit optional-codec deployment starts older compatible peer");
     auto frame=[&](){++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);NV_ENC_LOCK_BITSTREAM value{};
         value.version=NV_ENC_LOCK_BITSTREAM_VER;value.outputBitstream=output;table.nvEncLockBitstream(handle,&value);return value;};
@@ -370,7 +370,7 @@ void olderCodecPeer(){
     table.nvEncUnlockBitstream(handle,output);ProbeMessage probe,echo;
     check(decodeProbe({body.data(),body.size()},probe)==Status::Ok&&makeProbeEcho(peer,probe,authority(),echo)==Status::Ok,"legacy peer echoes exact observed probe");
     std::array<std::uint8_t,ProbeBytes> bytes{};check(encodeProbe(echo,bytes)==Status::Ok&&bridge.receiveEcho(handle,{bytes.data(),bytes.size()},authority())==Status::Ok,"legacy actual echo accepted");
-    frame();check(observed.coverageSessionAuthorized&&!observed.compressedCoverageAuthorized&&!observed.entropyCoverageAuthorized,"actual exact Lock allows ordinary coverage but never unnegotiated LZ4 for an older peer");
+    frame();check(observed.coverageSessionAuthorized&&!observed.compressedCoverageAuthorized&&!observed.entropyCoverageAuthorized&&!observed.cameraOnlyRecoveryAuthorized&&!observed.rawEntropyCoverageAuthorized,"actual exact Lock allows ordinary coverage but never unnegotiated LZ4 for an older peer");
     table.nvEncUnlockBitstream(handle,output);table.nvEncDestroyEncoder(handle);bridge.stop();
 }
 }

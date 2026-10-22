@@ -452,9 +452,9 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 static_cast<unsigned long long>(stats.certifiedMasks),static_cast<unsigned long long>(stats.maskedVideoBytes),
                 static_cast<unsigned long long>(stats.maskRleBytes),static_cast<unsigned long long>(stats.maskedWireBytes),static_cast<unsigned long long>(stats.maxMaskedWireBytes));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
-                "coverage encoding: raw-mask-bytes=%llu, encoded-coverage-bytes=%llu; frames raw/rle/lz4/zstd=%llu/%llu/%llu/%llu; encode-us=%llu/max%llu; lossless, approximate counters",
+                "coverage encoding: raw-mask-bytes=%llu, encoded-coverage-bytes=%llu; frames raw/rle/lz4/zstd/raw-zstd=%llu/%llu/%llu/%llu/%llu; encode-us=%llu/max%llu; lossless, approximate counters",
                 static_cast<unsigned long long>(stats.maskRawBytes),static_cast<unsigned long long>(stats.maskEncodedBytes),
-                static_cast<unsigned long long>(stats.maskEncodingFrames[1]),static_cast<unsigned long long>(stats.maskEncodingFrames[2]),static_cast<unsigned long long>(stats.maskEncodingFrames[3]),static_cast<unsigned long long>(stats.maskEncodingFrames[4]),
+                static_cast<unsigned long long>(stats.maskEncodingFrames[1]),static_cast<unsigned long long>(stats.maskEncodingFrames[2]),static_cast<unsigned long long>(stats.maskEncodingFrames[3]),static_cast<unsigned long long>(stats.maskEncodingFrames[4]),static_cast<unsigned long long>(stats.maskEncodingFrames[5]),
                 static_cast<unsigned long long>(stats.lastEncodeUs),static_cast<unsigned long long>(stats.maxEncodeUs));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
                 "coverage lifecycle refusals: render-lock=%llu, copy-pair=%llu, stage-full=%llu, input=%llu, stage=%llu, session=%llu, source=%llu/%llu, rle=%llu, certificate=%llu",

@@ -17,7 +17,7 @@ inline bool inspectMaskContent(Bytes raw,std::uint32_t width,std::uint32_t heigh
     s.samples=s.scene=s.real=s.fractional=s.distinct=s.horizontal=s.vertical=0;
     const auto step=std::max<std::size_t>(1,(raw.size+32767)/32768);
     for(std::size_t i=0;i<raw.size;i+=step){const auto v=raw.data[i];++s.samples;
-        if(v==0)++s.scene;else if(v==255)++s.real;else ++s.fractional;
+        if(v==255)++s.scene;else if(v==0)++s.real;else ++s.fractional;
         if(!values[v]){values[v]=true;++s.distinct;}
         if(i%width&&v!=raw.data[i-1])++s.horizontal;
         if(i>=width&&v!=raw.data[i-width])++s.vertical;
@@ -26,7 +26,7 @@ inline bool inspectMaskContent(Bytes raw,std::uint32_t width,std::uint32_t heigh
 }
 class MaskContentPublication {
 public:
-    // One encoded sample every 128 v2 masks. Count is diagnostic only.
+    // One encoded sample every 128 eligible masks. Count is diagnostic only.
     bool due()noexcept{return (calls_.fetch_add(1,std::memory_order_relaxed)&127)==0;}
     void publish(const MaskContentSample& s)noexcept{
         if(writer_.test_and_set(std::memory_order_acquire))return;

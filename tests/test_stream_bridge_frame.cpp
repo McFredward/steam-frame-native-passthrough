@@ -1,5 +1,6 @@
 #include "bridge/stream_bridge_frame.h"
 #include "bridge/hevc_bridge_sei.h"
+#include "bridge/stream_bridge_compression.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -87,6 +88,19 @@ void run(){
         check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::Rle,bytes(malformed),s.sender,output)==sb::FrameStatus::InvalidArgument&&output==std::vector<std::uint8_t>{17},"invalid RLE never publishes a frame");}
     for(auto d:std::vector<sb::FrameDescriptor>{{0,1,64,32},{1,0,64,32},{1,1,0,32},{1,1,8193,8192}}){output={18};
         check(sb::appendCertifiedFrame(bytes(original),d,sb::CoverageEncoding::None,{},s.sender,output)==sb::FrameStatus::InvalidArgument&&output==std::vector<std::uint8_t>{18},"missing or unbounded identity/extent refused");}
+    for(unsigned policy=0;policy<3;++policy){
+        const sb::FrameDescriptor recovery{10+policy,3,64,32,static_cast<std::uint8_t>(policy)};
+        check(sb::appendCertifiedFrame(bytes(original),recovery,sb::CoverageEncoding::None,{},s.sender,held)==sb::FrameStatus::Ok&&sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok&&result.descriptor.cameraRecovery==policy,"camera recovery policy survives real signed AU inspection");
+        check(sb::serializeCoverageMetadata(result,detached),"signed camera policy exports detached metadata");
+        auto changed=detached;changed[72]=static_cast<std::uint8_t>((policy+1)%3);
+        check(sb::inspectCoverageMetadata(bytes(changed),s.observer,local)==sb::FrameStatus::AuthenticationRefused,"unsigned camera policy changes never alter recovery intent");
+    }
+    for(auto mode:{sb::CoverageEncoding::RleZstd,sb::CoverageEncoding::RawZstd}){
+        std::vector<std::uint8_t> compressed;
+        check(mode==sb::CoverageEncoding::RleZstd?sb::compressCoverageRleZstd(bytes(rle),rle.size(),compressed):sb::compressCoverageRawZstd(bytes(rawCoverage),rawCoverage.size(),compressed),"independent compressed certificate source prepared");
+        check(sb::appendCertifiedFrame(bytes(original),descriptor,mode,bytes(compressed),s.sender,held)==sb::FrameStatus::Ok&&sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok,"optional entropy certificate authenticates unchanged original AU");
+        check(sb::serializeCoverageMetadata(result,detached)&&sb::inspectCoverageMetadataDecoded(bytes(detached),s.observer,local,output,range)==sb::FrameStatus::Ok&&output==rawCoverage,"both compressed modes preserve exact fractional values through signed detached handoff");
+    }
     std::vector<std::uint8_t> withHello;check(sb::appendOwned(bytes(original),{envelope.data(),envelope.size()},withHello)==sb::SeiStatus::Ok,"original discovery SEI inserted by actual old codec");
     check(sb::appendCertifiedFrame(bytes(withHello),descriptor,sb::CoverageEncoding::None,{},s.sender,held)==sb::FrameStatus::Ok,"certificate follows control augmentation");
     check(sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok&&result.original==withHello,"certificate removal preserves entire control SEI and native bytes");

@@ -18,7 +18,7 @@ import native_fragment_ssa_probe as ssa
 import native_fragment_count1_interface as count1
 
 
-def transform(original, descriptor_count=1):
+def transform(original, descriptor_count=1, *, camera_only=False):
     original = shader_contract.normalize(original, 'fragment')
     ssa.require(type(descriptor_count) is int and descriptor_count in (1, 3),
                 'explicit owned descriptor count1 or3 required')
@@ -64,6 +64,27 @@ def transform(original, descriptor_count=1):
                    make(133, 8, ordinary_alpha, alpha, valid),
                    make(129, 8, chosen_alpha, ordinary_alpha, inverse_valid),
                    make(82, 9, output, chosen_alpha, 994, 3)]
+    # A second owned control value is an active-source camera-only recovery
+    # grant. It never authorizes game samples. An invalid exact guard plus this
+    # grant emits constant zero RGBA, while ordinary/exact modes retain their
+    # previous native RGB/alpha outputs bit-for-bit.
+    bool_type = next(inst.operands[0] for inst in instructions if inst.opcode == 20)
+    zero_type = next(inst.operands[0] for inst in instructions if inst.opcode == 43 and inst.operands[1] == 95)
+    one_index, zero_rgba, fallback_address, fallback, wants_camera, invalid, recover, final, bool_vector, condition = range(header[3] + 22, header[3] + 32)
+    decorations.append(make(72, control_struct, 1, 35, 4))
+    declarations = [make(30, control_struct, 8, 8) if inst.opcode == 30 and inst.operands[0] == control_struct else inst for inst in declarations]
+    declarations.extend([make(23, bool_vector, bool_type, 4), make(43, zero_type, one_index, 1), make(44, 9, zero_rgba, 210, 210, 210, 210)])
+    recovery = [make(65, float_pointer, fallback_address, control_variable, one_index),
+                make(61, 8, fallback, fallback_address), make(180, bool_type, wants_camera, fallback, 185)]
+    if camera_only:
+        composition = recovery + [make(82, 9, output, 185, 994, 3),
+                                  make(80, bool_vector, condition, wants_camera, wants_camera, wants_camera, wants_camera),
+                                  make(169, 9, final, condition, zero_rgba, output)]
+    else:
+        composition.extend(recovery + [make(180, bool_type, invalid, valid, 210),
+                                        make(167, bool_type, recover, wants_camera, invalid),
+                                        make(80, bool_vector, condition, recover, recover, recover, recover),
+                                        make(169, 9, final, condition, zero_rgba, output)])
     result = []
     annotations = declarations_added = False
     for index, instruction in enumerate(instructions):
@@ -75,10 +96,10 @@ def transform(original, descriptor_count=1):
             declarations_added = True
         if index == store_index:
             result.extend(composition)
-            instruction = make(62, 504, output)
+            instruction = make(62, 504, final)
         result.append(instruction)
     ssa.require(annotations and declarations_added, "native declaration framing changed")
-    header[3] = chosen_alpha + 1  # first unallocated ID
+    header[3] = condition + 1  # first unallocated ID
     words = [*header, *(word for instruction in result for word in instruction.words())]
     binary = struct.pack('<%dI' % len(words), *words)
     return binary, {
@@ -89,7 +110,8 @@ def transform(original, descriptor_count=1):
         'owned_binding9_descriptor_count': descriptor_count,
         'mask_type': 'combined-image-sampler R8_UNORM',
         'recording_control_set': 2, 'recording_control_binding': 0,
-        'recording_control': 'owned coherent float: 0 opaque native RGB, 1 current exact mask',
+        'recording_control': 'owned coherent floats: exact 0/1; camera-only recovery 0/1. Recovery hides every game pixel when exact is absent',
+        'camera_only_shader': camera_only,
         'mask_uv': 'unchanged current native coded-video UVs 538/798 and reconstruction weight 1008',
         'native_rgb_instructions_retained': True,
         'source_and_selected_image_authority_provided_by_runtime': False,

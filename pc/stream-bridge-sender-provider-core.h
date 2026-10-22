@@ -23,6 +23,8 @@ struct NvencOutputEvidence {
     // the receiver can decode an independent lossless LZ4/RLE mask.
     bool compressedCoverageAuthorized=false;
     bool entropyCoverageAuthorized=false;
+    bool rawEntropyCoverageAuthorized=false;
+    bool cameraOnlyRecoveryAuthorized=false;
 };
 struct DeviceObserver {
     // Successful actual public Open session. Device is borrowed native identity;

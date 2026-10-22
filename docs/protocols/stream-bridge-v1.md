@@ -59,9 +59,9 @@ nonzero reserved fields and invalid enums are rejected transactionally.
 
 Known capabilities are negotiation1, Annex-B SEI2, exact source association4,
 opaque fallback8, explicit coverage16, lossless RLE+LZ4 coverage32 and optional
-lossless RLE+Zstd coverage64. The portable
+lossless RLE+Zstd coverage64, camera-only recovery128 and raw+Zstd coverage256. The portable
 mandatory baseline is1|2|8 =11. The installed sender and receiver currently both
-require the original six bits (63) and offer optional bit64; an older peer without bit32 cannot activate
+require the original six bits (63) and offer511; an older peer without bit32 cannot activate
 their paired route. This is separate from the project semantic version.
 Advertising source-association or coverage support is not proof of a particular
 frame or content. Required bits must include the baseline, be known and be a
@@ -177,6 +177,7 @@ preservation, exact removal, aliased vectors and bounded invalid input.
 These are software controls, not an authenticated live transport or a headset
 picture. Actual runtime integration must retain that distinction.
 
-The optional RLE/Zstd capability is selected only by the mutually confirmed
+The optional compression and recovery capabilities are selected only by the mutually confirmed
 intersection. An old peer offering 63 keeps 63; no new encoding is sent to it.
-Version1 producers retain their existing codec choice even with new peers.
+All current explicit-RGBA producer versions may use the negotiated optional modes.
+A v2 rate-budget request remains a separate opt-in contract.

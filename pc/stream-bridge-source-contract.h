@@ -36,10 +36,11 @@ public:
         const auto value=snapshot(pid);return value&&budget_.load(std::memory_order_acquire)==value?value:0;
     }
     // Optional codec policy only. Never authorizes a picture or mask association.
-    // Legacy/Gloomhaven producers do not own this v2 metadata-budget lease.
+    // Every live explicit-RGBA source can use a mutually negotiated lossless codec.
     bool entropyCodecAllowed(std::uint64_t receipt,std::uint32_t pid,bool negotiated)const noexcept {
-        return receipt&&negotiated&&budgetAuthority(pid)==receipt;
+        return receipt&&negotiated&&current(receipt,pid);
     }
+    std::uint64_t cameraAuthority()const noexcept{return identity_.load(std::memory_order_acquire);}
     bool current(std::uint64_t receipt,std::uint32_t pid) const noexcept {
         return inspect(receipt,pid).current();
     }

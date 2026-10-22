@@ -36,6 +36,7 @@ struct Process {
     std::array<bool,native::ReceiverWorker::PendingCapacity> coverageNeeded{};
     std::array<bool,native::MaxDevices*native::MaxBuffers> readyQueued{},pictureCoverage{};
     std::shared_ptr<local::LeaseReader> currentLeases;
+    std::atomic<bool> cameraRecovery{false};
     stream_bridge_camera::Client camera;bool cameraPeer=false,cameraDemand=false,cameraWanted=false,cameraDeferred=false;local::LeaseReference cameraEpoch{};
     std::shared_ptr<std::atomic<bool>> connection;std::uint64_t lastConnect=0;
     std::thread worker;std::uint32_t notes=0;bool prepared=false;
@@ -217,7 +218,8 @@ void consume(Process&p,local::Message& message){
             sb::Pairing pair;const auto status=sb::loadPrivatePairing(p.root/"pairings",sb::Role::Receiver,pair);
             if(status!=sb::CredentialStatus::Ok){count(p,Flow::AuthenticationRefused);return;}
             const auto ready=p.verifier.prepareReceiver(pair,message.source.stream);sb::secureZero(pair.key.data(),pair.key.size());if(ready!=sb::AuthStatus::Ok){count(p,Flow::AuthenticationRefused);return;}
-            requestCamera(p,false,Flow::CameraSource);p.cameraPeer=false;p.cameraDemand=false;p.cameraDeferred=false;
+            if(!p.cameraRecovery.load(std::memory_order_acquire)){requestCamera(p,false,Flow::CameraSource);p.cameraPeer=false;}
+            p.cameraDemand=false;p.cameraDeferred=false;
             p.verifiedSource=message.source.stream;for(auto& old:p.masks)old={};for(auto& old:p.pictures)old={};p.currentLeases.reset();
         }
         const bool wantsDecoded=std::any_of(p.consumers.begin(),p.consumers.end(),[](const auto& consumer){return consumer.owner&&consumer.decodedCoverage&&(!consumer.admitted||consumer.admitted(consumer.owner));});
@@ -226,6 +228,8 @@ void consume(Process&p,local::Message& message){
         const auto status=wantsDecoded?sb::inspectCoverageMetadataDecoded(metadata,p.verifier,certificate,samples,range):sb::inspectCoverageMetadata(metadata,p.verifier,certificate);
         if(status!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor)){count(p,Flow::AuthenticationRefused);return;}
         count(p,Flow::Authenticated);
+        if(certificate.descriptor.cameraRecovery==1)p.cameraRecovery.store(true,std::memory_order_release);
+        else if(certificate.descriptor.cameraRecovery==2)p.cameraRecovery.store(false,std::memory_order_release);
         // Certificates may run ahead of the decoded picture being displayed.
         // In particular, future None metadata must not withdraw the global
         // camera from a still-current active picture. Exact decoded leases
@@ -261,7 +265,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
         const auto state=p.channel.state();
         const bool start=p.kind==ProcessKind::Vrlink||std::any_of(p.consumers.begin(),p.consumers.end(),[](const auto& c){return c.owner&&(!c.admitted||c.admitted(c.owner));});
         if(!start&&state!=local::State::Off){
-            p.cameraPeer=false;p.cameraDemand=false;requestCamera(p,false,Flow::CameraChannel);p.camera.stopCold();
+            p.cameraRecovery.store(false,std::memory_order_release);p.cameraPeer=false;p.cameraDemand=false;requestCamera(p,false,Flow::CameraChannel);p.camera.stopCold();
             if(p.connection)p.connection->store(false,std::memory_order_release);
             p.channel.stop();
         }
@@ -271,7 +275,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
         }
         p.channel.tick();const auto current=p.channel.state();
         if(current!=previous){
-            p.cameraPeer=false;p.cameraDemand=false;p.cameraDeferred=false;requestCamera(p,false,Flow::CameraChannel);
+            p.cameraRecovery.store(false,std::memory_order_release);p.cameraPeer=false;p.cameraDemand=false;p.cameraDeferred=false;requestCamera(p,false,Flow::CameraChannel);
             if(p.connection)p.connection->store(false,std::memory_order_release);
             if(current==local::State::Connected)p.connection=std::make_shared<std::atomic<bool>>(true);
             if(current==local::State::Lost||current==local::State::Refused)p.writer.invalidateCurrentEpoch();
@@ -318,7 +322,7 @@ void workCycle(Process& p,local::State& previous) noexcept{
             const bool deferred=p.cameraPeer&&!p.cameraDemand&&activePicture;
             if(deferred&&!p.cameraDeferred)count(p,Flow::CameraDeferred);
             p.cameraDeferred=deferred;
-            const bool wanted=p.cameraPeer&&(p.cameraDemand||activePicture);
+            const bool wanted=p.cameraPeer&&(p.cameraDemand||activePicture||p.cameraRecovery.load(std::memory_order_acquire));
             requestCamera(p,wanted,wanted?Flow::CameraActive:Flow::CameraNone);
             p.camera.tickCold(p.root,current==local::State::Connected&&p.cameraPeer);
             for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))){
@@ -422,6 +426,7 @@ bool prepareProcessCold() noexcept{
 bool enabled() noexcept{const auto* p=process();return p&&p->kind.load(std::memory_order_acquire)!=ProcessKind::Off;}
 std::uint64_t cameraAlphaEpoch() noexcept{const auto* p=process();return p&&p->kind.load(std::memory_order_acquire)==ProcessKind::Compositor?p->camera.epoch():0;}
 bool cameraAlphaReady() noexcept{return cameraAlphaEpoch()!=0;}
+bool cameraOnlyRecoveryReady() noexcept{const auto* p=process();return p&&p->cameraRecovery.load(std::memory_order_acquire)&&cameraAlphaReady();}
 ProcessKind processKind() noexcept{const auto* p=process();return p?p->kind.load(std::memory_order_acquire):ProcessKind::Off;}
 native::NativeImages* sourceImages() noexcept{auto* p=process();return p&&p->kind==ProcessKind::Vrlink?&p->images:nullptr;}
 void sourceExportedFd(int fd) noexcept{auto* p=process();if(p&&p->kind==ProcessKind::Vrlink)p->writer.associateResourceFd(fd);}
@@ -435,11 +440,12 @@ void unregisterConsumerCold(void* owner) noexcept{
     auto* pointer=process();if(!pointer)return;auto&p=*pointer;std::lock_guard<std::mutex> lock(p.gate);
     for(auto& slot:p.consumers)if(slot.owner==owner)slot={};
     if(std::none_of(p.consumers.begin(),p.consumers.end(),[](const auto& c){return c.owner&&(!c.admitted||c.admitted(c.owner));})){
-        p.cameraPeer=false;p.cameraDemand=false;requestCamera(p,false,Flow::CameraChannel);p.camera.stopCold();
+        p.cameraRecovery.store(false,std::memory_order_release);p.cameraPeer=false;p.cameraDemand=false;requestCamera(p,false,Flow::CameraChannel);p.camera.stopCold();
         if(p.connection)p.connection->store(false,std::memory_order_release);
         p.channel.stop();
     }
 }
+bool readCameraOnlyFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("camera-only.spv",stream_bridge_artifacts::CameraOnlyBytes,stream_bridge_artifacts::CameraOnlySha256,output);}catch(...){return false;}}
 bool readCoverageFragmentCold(std::vector<std::uint32_t>& output) noexcept{try{return fragment("coverage.spv",stream_bridge_artifacts::CoverageBytes,stream_bridge_artifacts::CoverageSha256,output);}catch(...){return false;}}
 __attribute__((constructor)) static void prepareBeforeMain(){prepareProcessCold();}
 } // namespace stream_bridge_renderer

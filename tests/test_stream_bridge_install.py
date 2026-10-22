@@ -245,7 +245,7 @@ class Tests(unittest.TestCase):
     def fake_generation(self):
         # Only the transaction boundary is exercised here. Actual pinned shader
         # derivation is covered by the parent's separate native GPU evidence.
-        with mock.patch.object(b,'generate_shaders',return_value={'coverage.spv':b'fixture coverage'}):yield
+        with mock.patch.object(b,'generate_shaders',return_value={name:b'fixture coverage' for name in b.GENERATED}):yield
 
     def version_bundle(self,pc='0.2.0',frame='0.2.0'):
         self.manifest.update(version='0.2.0')
@@ -726,14 +726,14 @@ class Tests(unittest.TestCase):
         self.assertTrue(self.unit.inventory(self.bundle)['files_current'])
 
     def mock_shader_pin(self):
-        patch=mock.patch.dict(b.GENERATED,{'coverage.spv':{'bytes':len(b'fixture coverage'),'sha256':s.sha(b'fixture coverage')}})
+        patch=mock.patch.dict(b.GENERATED,{name:{'bytes':len(b'fixture coverage'),'sha256':s.sha(b'fixture coverage')} for name in b.GENERATED})
         patch.start();self.addCleanup(patch.stop)
         self.version_bundle(self.manifest['pc'].get('version','0.2.0'),self.manifest['frame'].get('version','0.2.0'))
 
     def install_component_fixture(self,pc='0.2.11',frame='0.2.11'):
         # Match the fake shader boundary's public output pin, without claiming
         # to exercise the separate native shader derivation suite.
-        patch=mock.patch.dict(b.GENERATED,{'coverage.spv':{'bytes':len(b'fixture coverage'),'sha256':s.sha(b'fixture coverage')}})
+        patch=mock.patch.dict(b.GENERATED,{name:{'bytes':len(b'fixture coverage'),'sha256':s.sha(b'fixture coverage')} for name in b.GENERATED})
         patch.start();self.addCleanup(patch.stop)
         self.version_bundle(pc,frame)
         installer=b.LocalInstall(s,self.local);installer.install(self.bundle,self.local.inventory(),self.pair,'192.168.1.4',47631)
@@ -1418,16 +1418,16 @@ class Tests(unittest.TestCase):
         coverage=b'owned fixture coverage'
         files={name:b'# unused own fixture source\n' for name in b.TOOLS}
         files['frame/tools/native_fragment_ssa_probe.py']=b'IDENTITY="owned"\n'
-        files['frame/tools/native_fragment_stream_coverage.py']=b'import native_fragment_ssa_probe as s\ndef transform(original):\n assert s.IDENTITY=="owned"\n return b"owned fixture coverage",{}\n'
+        files['frame/tools/native_fragment_stream_coverage.py']=b'import native_fragment_ssa_probe as s\ndef transform(original,**kwargs):\n assert s.IDENTITY=="owned"\n return b"owned fixture coverage",{}\n'
         for name in b.PROFILES:files[name]=b'owned profile'
         bundle=types.SimpleNamespace(frame={'files':sorted(files)},files=files)
-        pins={name:{'bytes':len(raw),'sha256':s.sha(raw)} for name,raw in [('coverage.spv',coverage)]}
+        pins={name:{'bytes':len(raw),'sha256':s.sha(raw)} for name,raw in [('coverage.spv',coverage),('camera-only.spv',coverage)]}
         cached=types.ModuleType('native_fragment_ssa_probe');cached.IDENTITY='foreign';cached.__file__='/foreign/cached.py'
         previous=sys.modules.get('native_fragment_ssa_probe');sys.modules['native_fragment_ssa_probe']=cached
         try:
             with tempfile.TemporaryDirectory(prefix='sfnp-own-source-') as stage,mock.patch.object(b,'GENERATED',pins):
                 result=b.generate_shaders(s,bundle,b'owned fixture input',Path(stage))
-            self.assertEqual(result,{'coverage.spv':coverage});self.assertIs(sys.modules['native_fragment_ssa_probe'],cached)
+            self.assertEqual(result,{'coverage.spv':coverage,'camera-only.spv':coverage});self.assertIs(sys.modules['native_fragment_ssa_probe'],cached)
         finally:
             if previous is None:sys.modules.pop('native_fragment_ssa_probe',None)
             else:sys.modules['native_fragment_ssa_probe']=previous

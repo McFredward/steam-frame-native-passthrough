@@ -35,6 +35,13 @@
 - A mask belongs to one source session, video frame, eye and extent. A compositor
   submit counter, approximate timestamp or latest received mask is not proof of
   that association. Missing/invalid associations must retain opaque rendering.
+- The maintainer's 2026-10-22 ruling supersedes opaque recovery for an active,
+  authenticated explicit-passthrough source: keep live camera-only output during
+  missing/invalid game data or decoder recovery, and resume game rendering only
+  with its exact current mask/image proof. Camera-only output must contain no
+  game pixels or stale mask. Apply this design generally across apps, including
+  older explicit-RGBA producers, through negotiated capabilities; do not fork a
+  Demeo-specific route. No active source/peer/camera grant retains ordinary video.
 - Preserve native reprojection, distortion and foveation mapping. Do not activate
   a replacement shader until its descriptor and frame/UV bindings are established.
 - Do not redistribute Valve binaries, shader source or disassemblies. Diagnostic

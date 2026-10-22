@@ -89,4 +89,28 @@ bool decompressCoverageRleZstd(Bytes encoded,std::size_t maskBytes,std::vector<s
     if(pixels!=maskBytes)return false;
     output.swap(result);return true;
 }
+// Level one preserves entropy compression on detailed masks whose RLE expansion
+// is large. The selector bounds input size; opacity bytes remain unchanged.
+bool compressCoverageRawZstd(Bytes raw,std::size_t maximum,std::vector<std::uint8_t>& output){
+    if(!raw.data||!raw.size||raw.size>MaximumEntropyRawBytes||maximum<=5)return false;
+    maximum=std::min(maximum,raw.size-1);if(maximum<=5)return false;
+    std::vector<std::uint8_t> result(maximum);
+    const auto count=ZSTD_compress(result.data()+4,result.size()-4,raw.data,raw.size,1);
+    if(ZSTD_isError(count))return false;
+    for(unsigned i=0;i<4;++i)result[i]=static_cast<std::uint8_t>(raw.size>>(8*i));
+    result.resize(4+count);output.swap(result);return true;
+}
+bool decompressCoverageRawZstd(Bytes encoded,std::size_t maskBytes,std::vector<std::uint8_t>& output){
+    if(!encoded.data||encoded.size<=4||encoded.size>MaximumEntropyRawBytes||!maskBytes||maskBytes>MaximumEntropyRawBytes)return false;
+    std::size_t length=0;for(unsigned i=0;i<4;++i)length|=std::size_t(encoded.data[i])<<(8*i);
+    if(length!=maskBytes)return false;
+    const auto* block=encoded.data+4;const auto size=encoded.size-4;
+    if(ZSTD_getFrameContentSize(block,size)!=length||ZSTD_getDictID_fromFrame(block,size)!=0)return false;
+    const auto frameSize=ZSTD_findFrameCompressedSize(block,size);
+    if(ZSTD_isError(frameSize)||frameSize!=size)return false;
+    std::vector<std::uint8_t> result(length);
+    const auto count=ZSTD_decompress(result.data(),result.size(),block,size);
+    if(ZSTD_isError(count)||count!=length)return false;
+    output.swap(result);return true;
+}
 } // namespace stream_bridge

@@ -48,7 +48,7 @@ struct Renderer::Impl {
     struct View{std::uint64_t id=0,image=0,generation=0,serial=0;};
     struct Descriptor{std::uint64_t id=0,view=0,viewSerial=0;bool valid=false;};
     struct DescriptorAllocation{std::uint64_t id=0,pool=0,generation=0;};
-    struct Pipeline{std::uint64_t id=0;VkPipeline coverage{};VkPipelineLayout layout{};};
+    struct Pipeline{std::uint64_t id=0;VkPipeline coverage{},cameraOnly{};VkPipelineLayout layout{};};
     struct Use{gpu::Lease lease{};LocalPicture picture;std::uint64_t descriptor=0,descriptorGeneration=0,viewSerial=0,image=0,imageGeneration=0,memoryGeneration=0;};
     struct Retention {
         gpu::Pool* pool=nullptr;gpu::Lease lease{};
@@ -63,6 +63,35 @@ struct Renderer::Impl {
         std::array<Use,gpu::MaximumSlots> uses{};std::size_t used=0;
     };
     std::atomic<std::uint64_t> observationEpoch{1};std::atomic<bool> lost{false};std::atomic<unsigned> admittedPipelines{0};
+    // Lock-free, immutable-handle publication for camera-only recovery. It
+    // carries no game image/mask permission, and performs no render-thread I/O.
+    struct RecoveryCommand {
+        std::atomic<std::uint64_t> id{0},pipeline{0},cameraEpoch{0};
+        std::atomic<unsigned> control{0};std::atomic<bool> only{false};
+    };
+    struct RecoveryPipeline {std::atomic<std::uint64_t> id{0},pipeline{0},layout{0};};
+    std::array<RecoveryCommand,128> recoveryCommands{};
+    std::array<RecoveryPipeline,128> recoveryPipelines{};
+    RecoveryCommand* recoveryCommand(std::uint64_t id)noexcept{
+        for(auto& record:recoveryCommands)if(record.id.load(std::memory_order_acquire)==id)return &record;
+        return nullptr;
+    }
+    Draw cameraOnlyDraw(VkCommandBuffer cb)noexcept{
+        Draw out;if(!cameraOnlyRecoveryReady()||lost.load(std::memory_order_acquire))return out;
+        auto* command=recoveryCommand(handle(cb));if(!command)return out;
+        const auto epoch=cameraAlphaEpoch();const auto index=command->control.load(std::memory_order_acquire);
+        if(!epoch||command->cameraEpoch.load(std::memory_order_acquire)!=epoch||!index||index>controls.size())return out;
+        const auto nativePipeline=command->pipeline.load(std::memory_order_acquire);if(!nativePipeline)return out;
+        for(auto& record:recoveryPipelines)if(record.id.load(std::memory_order_acquire)==nativePipeline){
+            const auto pipeline=record.pipeline.load(std::memory_order_acquire),layout=record.layout.load(std::memory_order_acquire);
+            if(!pipeline||!layout||record.id.load(std::memory_order_acquire)!=nativePipeline)return out;
+            command->only.store(true,std::memory_order_release);guardedRecordingPossible.store(true,std::memory_order_release);
+            out.original=from<VkPipeline>(nativePipeline);out.replacement=from<VkPipeline>(pipeline);
+            out.layout=from<VkPipelineLayout>(layout);out.control=controls[index-1].set;out.ready=true;
+            counts.cameraOnlyDraws.fetch_add(1,std::memory_order_relaxed);return out;
+        }
+        return out;
+    }
     // Monotonic for this native device lifetime. Before any masked recording
     // can exist, native startup submits need no owned GPU commands at all.
     // Never clear on source loss/reset: a flags=0 CB may still retain coverage.
@@ -70,9 +99,9 @@ struct Renderer::Impl {
     mutable std::mutex gate;VkDevice device{};PFN_vkGetDeviceProcAddr gdpa{};VkPhysicalDeviceMemoryProperties memory{};
     std::uint32_t api=0,family=UINT32_MAX;std::uint64_t generation=0;bool prepared=false,coveragePrepared=false,registered=false,count1Authorized=false;
     gpu::Pool pool;journal::Journal definitions{1,{},journal::PendingCount1::RetainFacts};
-    std::vector<std::uint32_t> coverageWords;
+    std::vector<std::uint32_t> coverageWords,cameraOnlyWords;
     VkDescriptorSetLayout controlLayout{};VkDescriptorPool controlPool{};VkCommandPool guardPool{};
-    VkCommandBuffer zero{};VkQueue queue{};VkBuffer controlsBuffer{};VkDeviceMemory controlsMemory{};std::array<Control,128> controls{};
+    VkCommandBuffer zero{},cameraZero{};VkQueue queue{};VkBuffer controlsBuffer{};VkDeviceMemory controlsMemory{};std::array<Control,128> controls{};
     // Fixed cold metadata budgets; never evict a still-live native generation.
     std::array<Memory,512> memories{};std::array<Image,512> images{};std::array<View,1024> views{};std::array<Descriptor,256> descriptors{};
     std::array<DescriptorAllocation,4096> descriptorAllocations{};std::uint64_t descriptorGeneration=0;
@@ -90,6 +119,7 @@ struct Renderer::Impl {
     struct Counters {
         std::atomic<std::uint64_t> metadata{0},maskNone{0},maskDecoded{0},maskRejected{0},uploadAccepted{0},uploadRefused{0},pictures{0};
         std::atomic<std::uint64_t> maskOpaque{0},maskTransparent{0},maskMixed{0};
+        std::atomic<std::uint64_t> cameraOnlyDraws{0};
         std::atomic<std::uint64_t> begins{0},draws{0},selected{0},guardAttempts{0},guardAccepted{0},guardRefused{0},opaqueSubmits{0};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(DrawRefusal::Count)> refusals{};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
@@ -114,7 +144,7 @@ struct Renderer::Impl {
 #define COUNT(n) out.n=counts.n.load(std::memory_order_relaxed);
         COUNT(metadata) COUNT(maskNone) COUNT(maskDecoded) COUNT(maskRejected) COUNT(uploadAccepted) COUNT(uploadRefused) COUNT(pictures)
         COUNT(maskOpaque) COUNT(maskTransparent) COUNT(maskMixed)
-        COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
+        COUNT(cameraOnlyDraws) COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
         COUNT(collects) COUNT(collected) COUNT(coreSubmits) COUNT(submits2) COUNT(firstNextType) COUNT(firstRefusedNextType)
         COUNT(imageCapacityRefused) COUNT(memoryCapacityRefused) COUNT(viewCapacityRefused) COUNT(descriptorCapacityRefused)
         COUNT(descriptorUntrackedWrites) COUNT(descriptorUntrackedCopies)
@@ -149,6 +179,7 @@ struct Renderer::Impl {
             static_cast<unsigned long long>(s.pictures),static_cast<unsigned long long>(s.selected),static_cast<unsigned long long>(s.draws),static_cast<unsigned long long>(s.begins),
             miss(DrawRefusal::Unavailable),miss(DrawRefusal::Busy),miss(DrawRefusal::Command),miss(DrawRefusal::Epoch),miss(DrawRefusal::Pipeline),miss(DrawRefusal::Ineligible),miss(DrawRefusal::Descriptor),miss(DrawRefusal::Image),miss(DrawRefusal::ExactPicture),miss(DrawRefusal::ReadyMask),miss(DrawRefusal::Capacity),
             static_cast<unsigned long long>(s.guardAccepted),static_cast<unsigned long long>(s.guardAttempts),static_cast<unsigned long long>(s.guardRefused),static_cast<unsigned long long>(s.opaqueSubmits),s.pipelines,unsigned(s.lost));
+        std::fprintf(stderr,"[Steam Link Native Passthrough] renderer camera-only recovery: recorded=%llu; current-grant=%u; no game pixels or stale coverage\n",static_cast<unsigned long long>(s.cameraOnlyDraws),unsigned(cameraOnlyRecoveryReady()));
         std::fprintf(stderr,"[Steam Link Native Passthrough] coverage content: fully-opaque/fully-transparent/mixed=%llu/%llu/%llu; exact pre-draw storage retained; no image capture\n",
             static_cast<unsigned long long>(s.maskOpaque),static_cast<unsigned long long>(s.maskTransparent),static_cast<unsigned long long>(s.maskMixed));
         std::fprintf(stderr,"[Steam Link Native Passthrough] descriptor flow: allocated/refused=%llu/%llu; pool-retire/set-retire=%llu/%llu; unknown-updates/copies=%llu/%llu\n",
@@ -189,7 +220,7 @@ struct Renderer::Impl {
     bool makeControls(){
         VkCommandPoolCreateInfo cp{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};cp.queueFamilyIndex=family;
         if(CreateCommandPool(device,&cp,nullptr,&guardPool)!=VK_SUCCESS)return false;
-        std::array<VkCommandBuffer,129> cbs{};VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        std::array<VkCommandBuffer,130> cbs{};VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         ca.commandPool=guardPool;ca.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ca.commandBufferCount=cbs.size();
         if(AllocateCommandBuffers(device,&ca,cbs.data())!=VK_SUCCESS)return false;
         zero=cbs[0];VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -226,6 +257,18 @@ struct Renderer::Impl {
             barrier(control.one,control,true);CmdUpdateBuffer(control.one,control.buffer,control.offset,sizeof(on),&on);barrier(control.one,control,false);
             if(EndCommandBuffer(control.one)!=VK_SUCCESS)return false;
         }
+        cameraZero=cbs.back();
+        if(BeginCommandBuffer(cameraZero,&begin)!=VK_SUCCESS)return false;
+        all.srcAccessMask=VK_ACCESS_UNIFORM_READ_BIT;all.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+        CmdPipelineBarrier(cameraZero,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,1,&all,0,nullptr);
+        // One immutable 32-KiB GPU update, rather than 128 tiny commands on
+        // every mobile-compositor submission. Vulkan's update limit is64 KiB.
+        std::array<float,128*64> recovery{};
+        for(std::size_t n=0;n<controls.size();++n)recovery[n*64+1]=1;
+        CmdUpdateBuffer(cameraZero,controlsBuffer,0,sizeof(recovery),recovery.data());
+        all.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;all.dstAccessMask=VK_ACCESS_UNIFORM_READ_BIT;
+        CmdPipelineBarrier(cameraZero,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,1,&all,0,nullptr);
+        if(EndCommandBuffer(cameraZero)!=VK_SUCCESS)return false;
         return EndCommandBuffer(zero)==VK_SUCCESS;
     }
     void destroyControls(){
@@ -233,7 +276,7 @@ struct Renderer::Impl {
         if(controlsBuffer)DestroyBuffer(device,controlsBuffer,nullptr);
         if(controlsMemory)FreeMemory(device,controlsMemory,nullptr);
         controlsBuffer={};controlsMemory={};for(auto& control:controls)control={};
-        guardPool={};zero={};
+        guardPool={};zero={};cameraZero={};
     }
     static bool admitted(void* owner) noexcept{
         auto&p=*static_cast<Impl*>(owner);return !p.lost.load(std::memory_order_acquire)&&p.admittedPipelines.load(std::memory_order_acquire)>0;
@@ -297,6 +340,7 @@ struct Renderer::Impl {
         ++counts.collects;
         const auto refuse=[&](CollectRefusal reason){++counts.collectRefusals[static_cast<std::size_t>(reason)];return false;};
         auto* command=find(commands,handle(cb));if(!command)return refuse(CollectRefusal::Command);
+        if(auto* recovery=recoveryCommand(handle(cb));recovery&&recovery->only.load(std::memory_order_acquire))return refuse(CollectRefusal::Camera);
         if(!command->used)return refuse(CollectRefusal::Empty);
         if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch())return refuse(CollectRefusal::Camera);
         CollectRefusal why=CollectRefusal::Count;
@@ -357,7 +401,7 @@ bool Renderer::prepareCold(VkDevice device,VkPhysicalDeviceMemoryProperties memo
         if(!p.load()){coldNote("renderer unavailable: required Vulkan dispatch missing; original retained");return false;}
         // Ordinary native RGB is always the baseline. Missing exact coverage
         // never installs a picture/mask atlas decoder or replaces the picture.
-        if(!readCoverageFragmentCold(p.coverageWords)){coldNote("exact coverage unavailable: coverage.spv missing, changed or inaccessible; ordinary native video retained");return false;}
+        if(!readCoverageFragmentCold(p.coverageWords)||!readCameraOnlyFragmentCold(p.cameraOnlyWords)){coldNote("exact coverage unavailable: coverage.spv missing, changed or inaccessible; ordinary native video retained");return false;}
         if(family==UINT32_MAX){coldNote("exact coverage unavailable: no admitted graphics queue; ordinary native video retained");return false;}
         if(!p.pool.prepare(device,get,memory,family)){coldNote("exact coverage unavailable: GPU pool preparation failed; ordinary native video retained");return false;}
         VkDescriptorSetLayoutBinding binding{0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};VkDescriptorSetLayoutCreateInfo layout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};layout.bindingCount=1;layout.pBindings=&binding;
@@ -397,8 +441,13 @@ void Renderer::graphicsCreated(VkPipelineCache cache,const VkGraphicsPipelineCre
         VkPipelineLayout coverageLayout{};
         if(p.CreatePipelineLayout(p.device,&ci,nullptr,&coverageLayout)==VK_SUCCESS&&coverageLayout){
             entry->layout=coverageLayout;create(p.coverageWords,entry->layout,entry->coverage);
+            create(p.cameraOnlyWords,entry->layout,entry->cameraOnly);
         }
         if(entry->coverage){
+            if(entry->cameraOnly)for(auto& record:p.recoveryPipelines)if(!record.id.load(std::memory_order_relaxed)){
+                record.pipeline.store(handle(entry->cameraOnly),std::memory_order_relaxed);record.layout.store(handle(entry->layout),std::memory_order_relaxed);
+                record.id.store(entry->id,std::memory_order_release);break;
+            }
             p.admittedPipelines.fetch_add(1,std::memory_order_release);
             if(!p.registered)p.registered=registerConsumerCold({&p,Impl::coverage,Impl::picture,Impl::tick,Impl::admitted,Impl::published,Impl::decodedCoverage});
             coldNote("native exact-coverage pipeline prepared; original picture preserved",sb::logging::Level::Important);
@@ -409,6 +458,8 @@ void Renderer::pipelineDestroyed(VkPipeline original) noexcept{
     auto&p=*impl_;try{std::lock_guard<std::mutex> lock(p.gate);if(auto* entry=find(p.pipelines,handle(original))){
         p.definitions.destroyPipeline(original);
         if(entry->coverage)p.admittedPipelines.fetch_sub(1,std::memory_order_release);
+        for(auto& record:p.recoveryPipelines)if(record.id.load(std::memory_order_acquire)==handle(original))record.id.store(0,std::memory_order_release);
+        if(entry->cameraOnly)p.DestroyPipeline(p.device,entry->cameraOnly,nullptr);
         if(entry->coverage)p.DestroyPipeline(p.device,entry->coverage,nullptr);
         if(entry->layout)p.DestroyPipelineLayout(p.device,entry->layout,nullptr);
         // The downstream original vkDestroyPipeline owns its native pipeline.
@@ -504,42 +555,52 @@ void Renderer::descriptorInvalidated(VkDescriptorSet value) noexcept{auto&p=*imp
 void Renderer::descriptorsInvalidated() noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);for(auto& entry:p.descriptors)entry={};}
 void Renderer::queueObserved(VkQueue,std::uint32_t) noexcept{}
 void Renderer::commandAllocated(VkCommandBuffer value,VkCommandBufferLevel level,std::uint32_t family) noexcept{
-    auto&p=*impl_;if(!p.prepared)return;try{std::lock_guard<std::mutex> lock(p.gate);if(auto* command=add(p.commands,handle(value))){command->primary=level==VK_COMMAND_BUFFER_LEVEL_PRIMARY&&family==p.family;if(command->primary){for(auto& control:p.controls)if(!control.assigned){control.assigned=true;command->control=&control;break;}if(!command->control)command->primary=false;}}}catch(...){}
+    auto&p=*impl_;if(!p.prepared)return;try{std::lock_guard<std::mutex> lock(p.gate);if(auto* command=add(p.commands,handle(value))){
+        command->primary=level==VK_COMMAND_BUFFER_LEVEL_PRIMARY&&family==p.family;
+        if(command->primary)for(unsigned n=0;n<p.controls.size();++n)if(!p.controls[n].assigned){p.controls[n].assigned=true;command->control=&p.controls[n];
+            for(auto& record:p.recoveryCommands)if(!record.id.load(std::memory_order_relaxed)){
+                record.pipeline.store(0);record.cameraEpoch.store(0);record.only.store(false);record.control.store(n+1);
+                record.id.store(handle(value),std::memory_order_release);break;
+            }break;
+        }
+        if(!command->control)command->primary=false;
+    }}catch(...){}
 }
-void Renderer::commandRetired(VkCommandBuffer value) noexcept{auto&p=*impl_;std::lock_guard<std::mutex> lock(p.gate);if(auto* command=find(p.commands,handle(value))){p.release(*command);if(command->control)command->control->assigned=false;*command={};}}
+void Renderer::commandRetired(VkCommandBuffer value) noexcept{auto&p=*impl_;if(auto* record=p.recoveryCommand(handle(value)))record->id.store(0,std::memory_order_release);std::lock_guard<std::mutex> lock(p.gate);if(auto* command=find(p.commands,handle(value))){p.release(*command);if(command->control)command->control->assigned=false;*command={};}}
 void Renderer::commandBegin(VkCommandBuffer value,const VkCommandBufferBeginInfo* info) noexcept{
-    auto&p=*impl_;++p.counts.begins;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}
+    auto&p=*impl_;if(auto* record=p.recoveryCommand(handle(value))){record->pipeline.store(0);record->only.store(false);record->cameraEpoch.store(cameraAlphaEpoch(),std::memory_order_release);}
+    ++p.counts.begins;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}
     if(auto* command=find(p.commands,handle(value))){p.release(*command);command->eligible=command->primary&&info&&info->sType==VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO&&!info->pNext&&
         !(info->flags&VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);command->epoch=p.observationEpoch.load(std::memory_order_acquire);
         // An A arriving between stereo draws must never authorize half a CB.
         command->cameraEpoch=cameraAlphaEpoch();}
 }
-void Renderer::pipelineBound(VkCommandBuffer value,VkPipelineBindPoint point,VkPipeline pipeline) noexcept{auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){command->pipeline=point==VK_PIPELINE_BIND_POINT_GRAPHICS?handle(pipeline):0;}}
+void Renderer::pipelineBound(VkCommandBuffer value,VkPipelineBindPoint point,VkPipeline pipeline) noexcept{auto&p=*impl_;if(auto* record=p.recoveryCommand(handle(value)))record->pipeline.store(point==VK_PIPELINE_BIND_POINT_GRAPHICS?handle(pipeline):0,std::memory_order_release);std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){command->pipeline=point==VK_PIPELINE_BIND_POINT_GRAPHICS?handle(pipeline):0;}}
 void Renderer::setsBound(VkCommandBuffer value,VkPipelineBindPoint point,std::uint32_t first,std::uint32_t count,const VkDescriptorSet* sets,std::uint32_t dynamic) noexcept{auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){if(point!=VK_PIPELINE_BIND_POINT_GRAPHICS||dynamic){command->set0=0;return;}if(!first&&count&&sets)command->set0=handle(sets[0]);}}
-void Renderer::commandUnknown(VkCommandBuffer value) noexcept{auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){command->eligible=false;command->pipeline=command->set0=0;}}
+void Renderer::commandUnknown(VkCommandBuffer value) noexcept{auto&p=*impl_;if(auto* record=p.recoveryCommand(handle(value)))record->pipeline.store(0,std::memory_order_release);std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}if(auto* command=find(p.commands,handle(value))){command->eligible=false;command->pipeline=command->set0=0;}}
 Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     auto&p=*impl_;++p.counts.draws;Draw out;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
-    if(!lock){p.refused(DrawRefusal::Busy);return out;}
-    if(!p.prepared||p.lost.load(std::memory_order_acquire)){p.refused(DrawRefusal::Unavailable);return out;}
-    auto* command=find(p.commands,handle(value));if(!command){p.refused(DrawRefusal::Command);return out;}
-    if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch()){p.refused(DrawRefusal::Camera);return out;}
-    if(command->epoch!=p.observationEpoch.load(std::memory_order_acquire)){p.refused(DrawRefusal::Epoch);return out;}
-    auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline){p.refused(DrawRefusal::Pipeline);return out;}
+    if(!lock){p.refused(DrawRefusal::Busy);return p.cameraOnlyDraw(value);}
+    if(!p.prepared||p.lost.load(std::memory_order_acquire)){p.refused(DrawRefusal::Unavailable);return p.cameraOnlyDraw(value);}
+    auto* command=find(p.commands,handle(value));if(!command){p.refused(DrawRefusal::Command);return p.cameraOnlyDraw(value);}
+    if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch()){p.refused(DrawRefusal::Camera);return p.cameraOnlyDraw(value);}
+    if(command->epoch!=p.observationEpoch.load(std::memory_order_acquire)){p.refused(DrawRefusal::Epoch);return p.cameraOnlyDraw(value);}
+    auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline){p.refused(DrawRefusal::Pipeline);return p.cameraOnlyDraw(value);}
     out.original=from<VkPipeline>(pipeline->id);
-    if(!command->eligible||!command->control||!pipeline->coverage){p.refused(DrawRefusal::Ineligible);return out;}
+    if(!command->eligible||!command->control||!pipeline->coverage){p.refused(DrawRefusal::Ineligible);return p.cameraOnlyDraw(value);}
     const auto descriptorMiss=[&](DescriptorRefusal why,DrawRefusal reason){++p.counts.descriptorRefusals[static_cast<std::size_t>(why)];p.refused(reason);};
     const auto* descriptor=find(p.descriptors,command->set0);const auto* descriptorAllocation=find(p.descriptorAllocations,command->set0);
-    if(!descriptorAllocation){descriptorMiss(DescriptorRefusal::MissingAllocation,DrawRefusal::Descriptor);return out;}
-    if(!descriptor){descriptorMiss(DescriptorRefusal::MissingEntry,DrawRefusal::Descriptor);return out;}
-    if(!descriptor->valid){descriptorMiss(DescriptorRefusal::InvalidEntry,DrawRefusal::Descriptor);return out;}
+    if(!descriptorAllocation){descriptorMiss(DescriptorRefusal::MissingAllocation,DrawRefusal::Descriptor);return p.cameraOnlyDraw(value);}
+    if(!descriptor){descriptorMiss(DescriptorRefusal::MissingEntry,DrawRefusal::Descriptor);return p.cameraOnlyDraw(value);}
+    if(!descriptor->valid){descriptorMiss(DescriptorRefusal::InvalidEntry,DrawRefusal::Descriptor);return p.cameraOnlyDraw(value);}
     const auto* view=find(p.views,descriptor->view);
-    if(!view){descriptorMiss(DescriptorRefusal::MissingView,DrawRefusal::Image);return out;}
-    if(view->serial!=descriptor->viewSerial){descriptorMiss(DescriptorRefusal::ViewSerial,DrawRefusal::Image);return out;}
-    const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation){p.refused(DrawRefusal::Image);return out;}
-    std::shared_ptr<const LocalPicture> picture;if(!p.matchingImage(image->id,picture)){p.refused(DrawRefusal::ExactPicture);return out;}
+    if(!view){descriptorMiss(DescriptorRefusal::MissingView,DrawRefusal::Image);return p.cameraOnlyDraw(value);}
+    if(view->serial!=descriptor->viewSerial){descriptorMiss(DescriptorRefusal::ViewSerial,DrawRefusal::Image);return p.cameraOnlyDraw(value);}
+    const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation){p.refused(DrawRefusal::Image);return p.cameraOnlyDraw(value);}
+    std::shared_ptr<const LocalPicture> picture;if(!p.matchingImage(image->id,picture)){p.refused(DrawRefusal::ExactPicture);return p.cameraOnlyDraw(value);}
     Impl::Use* use=nullptr;
     for(unsigned n=0;n<command->used;++n)if(command->uses[n].descriptor==command->set0&&command->uses[n].descriptorGeneration==descriptorAllocation->generation&&command->uses[n].viewSerial==view->serial&&command->uses[n].picture.metadata.binding==picture->metadata.binding&&same(command->uses[n].picture.metadata.descriptor,picture->metadata.descriptor)){use=&command->uses[n];break;}
-    if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return out;}auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return out;}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->descriptorGeneration=descriptorAllocation->generation;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
+    if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return p.cameraOnlyDraw(value);}auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return p.cameraOnlyDraw(value);}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->descriptorGeneration=descriptorAllocation->generation;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
     // Publish before the wrapper can record the companion bind/draw. A submit
     // observing false cannot contain an earlier guarded recording; recording
     // and submitting the same CB concurrently is outside native Vulkan rules.
@@ -547,7 +608,7 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     out.replacement=pipeline->coverage;out.layout=pipeline->layout;out.coverage=use->lease.set;out.control=command->control->set;out.ready=true;++p.counts.selected;return out;
 }
 void Renderer::commandReset(VkCommandBuffer value) noexcept{
-    auto&p=*impl_;std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
+    auto&p=*impl_;if(auto* record=p.recoveryCommand(handle(value))){record->pipeline.store(0);record->cameraEpoch.store(0);record->only.store(false);}std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
     if(!lock){p.observationEpoch.fetch_add(1,std::memory_order_acq_rel);return;}
     if(auto* command=find(p.commands,handle(value)))p.release(*command);
 }
@@ -564,9 +625,10 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
     // pNext and fence retained. A leading immutable zero command makes even a
     // reused flags=0 CB fail closed. Only current exact leases get a one guard.
     std::array<VkSubmitInfo,65> submits{};std::array<VkCommandBuffer,1024> commands{};
-    submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submits[0].commandBufferCount=1;submits[0].pCommandBuffers=&p.zero;
+    submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submits[0].commandBufferCount=1;const auto defaultControl=cameraOnlyRecoveryReady()?p.cameraZero:p.zero;
+    submits[0].pCommandBuffers=&defaultControl;
     std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
-    bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0,guards=0;p.submittedCount=0;
+    bool supported=lock.owns_lock()&&count<=64&&(infos||!count);bool cameraOnlyBatch=false;std::size_t used=0,guards=0;p.submittedCount=0;
     if(!supported)p.submitRefused(!lock.owns_lock()?SubmitRefusal::Busy:count>64?SubmitRefusal::Bounds:SubmitRefusal::Shape);
     if(supported)for(unsigned n=0;n<count;++n){
         const auto& info=infos[n];std::uint32_t nextType=0;
@@ -580,7 +642,10 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
         if(why!=SubmitRefusal::Count){p.submitRefused(why,nextType);supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBuffers=commands.data()+used;submits[n+1].commandBufferCount=0;
         for(unsigned k=0;k<infos[n].commandBufferCount;++k){const auto cb=infos[n].pCommandBuffers[k];
-            if(p.collect(cb)){auto* command=find(p.commands,handle(cb));if(command&&command->control){commands[used++]=command->control->one;++submits[n+1].commandBufferCount;++guards;}}
+            const bool exact=p.collect(cb);
+            if(cameraOnlyRecoveryReady()){const auto* tracked=find(p.commands,handle(cb));const auto* recovery=p.recoveryCommand(handle(cb));
+                cameraOnlyBatch|=!exact&&((tracked&&tracked->used)||(recovery&&recovery->only.load(std::memory_order_acquire)));}
+            if(exact){auto* command=find(p.commands,handle(cb));if(command&&command->control){commands[used++]=command->control->one;++submits[n+1].commandBufferCount;++guards;}}
             commands[used++]=cb;++submits[n+1].commandBufferCount;
         }
     }
@@ -609,12 +674,13 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
         }
         return VK_SUCCESS;
     }
+    if(cameraOnlyBatch){for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one)commands[n]=defaultControl;guards=0;}
     p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
     const auto reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
     if(!reserved){
         // Fenced retirement is part of admission, not just resource accounting.
         // Clear all one guards on refusal while retaining ordinary native RGB.
-        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one)commands[n]=p.zero;
+        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one)commands[n]=defaultControl;
     }
     const auto result=p.QueueSubmit(queue,count+1,submits.data(),fence);
     if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);
@@ -629,9 +695,9 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
     if(!p.coveragePrepared||queue!=p.queue||!p.guardedRecordingPossible.load(std::memory_order_acquire))return forward(queue,count,infos,fence);
     ++p.counts.submits2;
     std::array<VkSubmitInfo2,65> submits{};std::array<VkCommandBufferSubmitInfo,1024> commands{};
-    const VkCommandBufferSubmitInfo zero{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,p.zero,1};
+    const VkCommandBufferSubmitInfo zero{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,cameraOnlyRecoveryReady()?p.cameraZero:p.zero,1};
     submits[0].sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submits[0].commandBufferInfoCount=1;submits[0].pCommandBufferInfos=&zero;
-    std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);bool supported=lock.owns_lock()&&count<=64&&(infos||!count);std::size_t used=0,guards=0;p.submittedCount=0;
+    std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);bool supported=lock.owns_lock()&&count<=64&&(infos||!count);bool cameraOnlyBatch=false;std::size_t used=0,guards=0;p.submittedCount=0;
     if(!supported)p.submitRefused(!lock.owns_lock()?SubmitRefusal::Busy:count>64?SubmitRefusal::Bounds:SubmitRefusal::Shape);
     if(supported)for(unsigned n=0;n<count;++n){
         const auto& info=infos[n];const auto nextType=info.pNext?static_cast<std::uint32_t>(static_cast<const VkBaseInStructure*>(info.pNext)->sType):0;p.nextObserved(nextType);
@@ -639,7 +705,10 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
             p.submitRefused(info.pNext?SubmitRefusal::Extension:info.flags?SubmitRefusal::Flags:(!info.pCommandBufferInfos&&info.commandBufferInfoCount)?SubmitRefusal::Shape:SubmitRefusal::Bounds,nextType);supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBufferInfos=commands.data()+used;submits[n+1].commandBufferInfoCount=0;
         for(unsigned k=0;k<infos[n].commandBufferInfoCount;++k){const auto& cb=infos[n].pCommandBufferInfos[k];
-            if(p.collect(cb.commandBuffer)){auto* command=find(p.commands,handle(cb.commandBuffer));if(command&&command->control){commands[used++]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,command->control->one,1};++submits[n+1].commandBufferInfoCount;++guards;}}
+            const bool exact=p.collect(cb.commandBuffer);
+            if(cameraOnlyRecoveryReady()){const auto* tracked=find(p.commands,handle(cb.commandBuffer));const auto* recovery=p.recoveryCommand(handle(cb.commandBuffer));
+                cameraOnlyBatch|=!exact&&((tracked&&tracked->used)||(recovery&&recovery->only.load(std::memory_order_acquire)));}
+            if(exact){auto* command=find(p.commands,handle(cb.commandBuffer));if(command&&command->control){commands[used++]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,command->control->one,1};++submits[n+1].commandBufferInfoCount;++guards;}}
             commands[used++]=cb;++submits[n+1].commandBufferInfoCount;
         }
     }
@@ -658,10 +727,11 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
         }
         return VK_SUCCESS;
     }
+    if(cameraOnlyBatch){for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one)commands[n].commandBuffer=zero.commandBuffer;guards=0;}
     p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
     const auto reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
     if(!reserved){
-        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one)commands[n].commandBuffer=p.zero;
+        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one)commands[n].commandBuffer=zero.commandBuffer;
     }
     const auto result=forward(queue,count+1,submits.data(),fence);
     if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);
@@ -679,7 +749,7 @@ void Renderer::stopCold() noexcept{
     if(p.DeviceWaitIdle&&p.DeviceWaitIdle(p.device)==VK_SUCCESS){
         for(auto& command:p.commands)p.release(command);
         p.pool.destroyAfterIdle();p.destroyControls();
-        for(auto& entry:p.pipelines){if(entry.coverage)p.DestroyPipeline(p.device,entry.coverage,nullptr);if(entry.layout)p.DestroyPipelineLayout(p.device,entry.layout,nullptr);entry={};}
+        for(auto& entry:p.pipelines){if(entry.cameraOnly)p.DestroyPipeline(p.device,entry.cameraOnly,nullptr);if(entry.coverage)p.DestroyPipeline(p.device,entry.coverage,nullptr);if(entry.layout)p.DestroyPipelineLayout(p.device,entry.layout,nullptr);entry={};}
         if(p.controlPool)p.DestroyDescriptorPool(p.device,p.controlPool,nullptr);
         if(p.controlLayout)p.DestroyDescriptorSetLayout(p.device,p.controlLayout,nullptr);
     }else p.pool.abandonAfterDeviceDestroy(); // Native DestroyDevice owns eventual reclamation.

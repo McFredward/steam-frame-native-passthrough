@@ -179,11 +179,15 @@ struct SenderCoverage::Impl {
     static bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8_t>& output,void* opaque){
         auto& s=*static_cast<Impl*>(opaque);if(!e.exactInput||!e.submission||e.width>8192||e.height>8192)return s.gates.refuse(CoverageGate::InputReceipt);
         FrameDescriptor descriptor{e.submission,e.encoderGeneration,static_cast<std::uint16_t>(e.width),static_cast<std::uint16_t>(e.height)};
+        const auto certify=[&](CoverageEncoding kind,Bytes mask){
+            descriptor.cameraRecovery=e.cameraOnlyRecoveryAuthorized?(s.sourceContract.cameraAuthority()?1:2):0;
+            return s.control.certifyAccessUnit(candidate,descriptor,kind,mask,output);
+        };
         // Reconfigure can Encode/Lock before the cold worker replaces control.
         // The old paired control binding is not new-generation mask permission.
         // Certificate-only discovery must remain possible to bootstrap that
         // fresh handshake, without reading/compressing any coverage staging.
-        if(!e.coverageSessionAuthorized){s.gates.refuse(CoverageGate::CoverageSession);const bool certified=s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;}
+        if(!e.coverageSessionAuthorized){s.gates.refuse(CoverageGate::CoverageSession);const bool certified=certify(CoverageEncoding::None,{});if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;}
         if(!s.enabled)return s.gates.refuse(CoverageGate::Prepared);
         std::vector<std::uint8_t> pixels;std::uint32_t maskPid=0;std::uint64_t maskContract=0;
         {
@@ -214,9 +218,10 @@ struct SenderCoverage::Impl {
             std::vector<std::uint8_t> encoded;CoverageEncoding encoding=CoverageEncoding::None;
             const auto encodeStarted=clockMicros();
             const bool entropy=s.sourceContract.entropyCodecAllowed(maskContract,maskPid,e.entropyCoverageAuthorized);
-            const bool encodedMask=encodeBestCoverage({pixels.data(),pixels.size()},e.compressedCoverageAuthorized,encoding,encoded,entropy);
+            const bool rawEntropy=s.sourceContract.entropyCodecAllowed(maskContract,maskPid,e.rawEntropyCoverageAuthorized);
+            const bool encodedMask=encodeBestCoverage({pixels.data(),pixels.size()},e.compressedCoverageAuthorized,encoding,encoded,entropy,rawEntropy);
             const auto encodeUs=elapsedMicros(encodeStarted,clockMicros());
-            if(entropy&&encodedMask&&logging::debug()&&s.maskContent.due()){
+            if((entropy||rawEntropy)&&encodedMask&&logging::debug()&&s.maskContent.due()){
                 MaskContentSample sample{};sample.pid=maskPid;sample.frame=descriptor.sourceFrame;
                 sample.encodedBytes=static_cast<std::uint32_t>(encoded.size());sample.encoding=static_cast<unsigned>(encoding);
                 if(encoding==CoverageEncoding::Rle)sample.rleBytes=sample.encodedBytes;
@@ -226,7 +231,7 @@ struct SenderCoverage::Impl {
             }
             if(!encodedMask)s.gates.refuse(CoverageGate::RleEncode);
             else if(!s.sourceCurrent(maskContract,maskPid))s.gates.refuse(CoverageGate::SourceRevoked);
-            else if(!s.control.certifyAccessUnit(candidate,descriptor,encoding,{encoded.data(),encoded.size()},output))s.gates.refuse(CoverageGate::FrameCertificate);
+            else if(!certify(encoding,{encoded.data(),encoded.size()}))s.gates.refuse(CoverageGate::FrameCertificate);
             else{
                 // Local EOF can revoke the format during compression or MAC.
                 // Only publish the still-current capture; no stale mask leaves
@@ -237,7 +242,7 @@ struct SenderCoverage::Impl {
         }
         // Discovery/coded-boundary certificate without a mask is useful and
         // explicitly does NOT permit transparent rendering on the receiver.
-        const bool certified=s.control.certifyAccessUnit(candidate,descriptor,CoverageEncoding::None,{},output);if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;
+        const bool certified=certify(CoverageEncoding::None,{});if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;
     }
     static void STDMETHODCALLTYPE forwardDraw(ID3D11DeviceContext* context,UINT count,UINT start){
         auto& s=*instance.load();bits<NativeDraw>(s.facade.originalFunction(13))(context,count,start);
