@@ -37,4 +37,10 @@ settings. RGB reconstruction, UVs, distortion and foveation stay native.
 Software fixtures cover signed policy tampering, negotiation with older
 peers, source/input reuse, source renewal, authenticated decoded handoff,
 future metadata, camera continuity and all three Vulkan submission APIs.
-Headset confirmation of desktop visibility and game return is pending.
+The maintainer reported the desktop fix working on 2026-10-22. The subsequent
+21:39–21:45 Frame capture covers Battlemarked, Battles and Demeo and records
+2,621 guarded ordinary-video submissions, zero rejected masks/uploads/game
+submissions and zero lost pipelines. Its decoder resets once during initial
+connection setup, before game startup; one late native metadata event occurs
+at Demeo launch. These observations support the reported result without
+claiming visual proof for every frame or every runtime version.

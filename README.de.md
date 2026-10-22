@@ -35,6 +35,7 @@ auch bei Teiltransparenz; das Kamerabild bleibt auf der Brille.
 | Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** |
 | Demeo | [Demeo Mixed Reality](https://github.com/McFredward/Demeo_GreenScreen) | **2.0.0** |
 | Demeo Battles | [Demeo Mixed Reality](https://github.com/McFredward/Demeo_GreenScreen) | **2.0.0** |
+| Demeo Battlemarked | [Demeo Mixed Reality](https://github.com/McFredward/Demeo_GreenScreen) | **2.0.0** |
 
 Andere Spiele benötigen eine Integration; der Patch allein reicht nicht aus.
 
