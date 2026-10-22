@@ -14,8 +14,10 @@ constexpr std::array<std::uint8_t,16> FrameUuid{{
 struct FrameDescriptor {
     std::uint64_t sourceFrame=0,encoderGeneration=0;
     std::uint16_t codedWidth=0,codedHeight=0;
-    // Signed policy only: 0 unchanged, 1 camera-only recovery, 2 ordinary video.
-    // Never authorizes a game picture, extent, source or per-eye mask.
+    // Signed policy: 0 unchanged, 1 active MR recovery, 2 source withdrawn,
+    // 3 this AU is ordinary video while the MR recovery source stays active.
+    // Policy3 requires CapOrdinaryVideoPicture and None coverage. Only an exact
+    // current decoded-image lease can exempt that picture from MR recovery.
     std::uint8_t cameraRecovery=0;
 };
 enum class CoverageEncoding:std::uint8_t { None=0,Raw=1,Rle=2,RleLz4=3,RleZstd=4,RawZstd=5 };

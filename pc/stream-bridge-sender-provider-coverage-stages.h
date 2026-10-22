@@ -19,6 +19,7 @@ public:
         std::uint64_t contract=0,present=0,copyMicros=0,submissionMicros=0,submission=0,encoderGeneration=0;
         void* encoder=nullptr;
         std::uint32_t pid=0,width=0,height=0;
+        bool ordinaryVideo=false;
     };
     struct Entry {Resources resources{};Receipt receipt{};};
 private:
@@ -64,6 +65,13 @@ public:
         for(std::size_t i=0;i<Capacity;++i){
             auto result=claim(i,Phase::Free,Phase::Writing);if(result)return result;
             result=claim(i,Phase::Retired,Phase::Writing);if(result)return result;
+        }
+        return {};
+    }
+    Claim discardCaptured(std::uintptr_t input)noexcept{
+        if(!input)return {};
+        for(std::size_t i=0;i<Capacity;++i)if(matchesCaptured(i,input)){
+            auto owned=claim(i,Phase::Captured,Phase::Writing);if(owned)return owned;
         }
         return {};
     }

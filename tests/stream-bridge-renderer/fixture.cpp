@@ -422,7 +422,7 @@ void telemetry(const std::vector<std::uint32_t>& vs,const std::vector<std::uint3
  {Integration f(vs,ps);f.renderer.beforeDraw(handle<VkCommandBuffer>(0xdead));f.renderer.beforeDraw(handle<VkCommandBuffer>(0x70fff));f.record(VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);
   f.record();f.renderer.pipelineBound(f.cb,VK_PIPELINE_BIND_POINT_GRAPHICS,handle<VkPipeline>(0xbeef));f.renderer.beforeDraw(f.cb);
   f.record();f.writeView(handle<VkImageView>(0xdead));f.renderer.beforeDraw(f.cb);
-  auto s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Command)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Camera)]==1&&!s.drawRefusals[std::size_t(sr::DrawRefusal::Epoch)]&&s.drawRefusals[std::size_t(sr::DrawRefusal::Ineligible)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Pipeline)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Descriptor)]==1,"unknown and never-begun CB, pipeline, eligibility and descriptor misses retain their actual distinct safety gates");
+  auto s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Command)]==1&&!s.drawRefusals[std::size_t(sr::DrawRefusal::Camera)]&&s.drawRefusals[std::size_t(sr::DrawRefusal::Epoch)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Ineligible)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Pipeline)]==1&&s.drawRefusals[std::size_t(sr::DrawRefusal::Descriptor)]==1,"unknown and never-begun CB, pipeline, eligibility and descriptor misses retain their actual distinct safety gates");
   f.writeView(f.view);f.renderer.imageDestroyed(f.image);f.renderer.beforeDraw(f.cb);s=f.renderer.statsCold();check(s.drawRefusals[std::size_t(sr::DrawRefusal::Image)]==1,"retired imported image has a distinct draw refusal");
  }
 }
@@ -611,7 +611,40 @@ void integration(const std::vector<std::uint32_t>& vs,const std::vector<std::uin
  {Integration f(vs,ps);f.record();for(unsigned n=0;n<stream_bridge_coverage_gpu::MaximumSubmissionFences;++n)check(f.submit(false)==VK_SUCCESS,"bounded unsignaled retirement reservation");f.submit(false);check(f.vk.reads.back()==0,"retirement capacity refusal must disable image guard before original submit");}
 }
 }
+void ordinaryVideo(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ cameraRecovery=true;
+ for(unsigned mode=0;mode<3;++mode){
+  Integration f(vs,ps,1,true,true,false,false,false);
+  f.publish(sb::CoverageEncoding::None);
+  consumer.picture(consumer.owner,f.picture);
+  check(f.record().ready&&f.submit(false)==VK_SUCCESS&&f.vk.recoveryReads.back()==1,
+      "None metadata alone cannot expose video from an active MR source");
+  f.picture.ordinaryVideo=true;consumer.picture(consumer.owner,f.picture);
+  auto ordinary=f.record();check(ordinary.ready&&!ordinary.coverage&&ordinary.control,
+      "exact ordinary desktop image records without allocating mask storage");
+  const auto submit=[&]{
+   if(!mode)return f.submit(false);
+   VkCommandBufferSubmitInfo command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};command.commandBuffer=f.cb;command.deviceMask=1;
+   VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};info.commandBufferInfoCount=1;info.pCommandBufferInfos=&command;
+   return f.renderer.submit2(f.vk.queue,1,&info,VK_NULL_HANDLE,mode==2);
+  };
+  check(submit()==VK_SUCCESS&&f.vk.reads.back()==0&&f.vk.recoveryReads.back()==0,
+      "core, Submit2 and KHR display ordinary desktop RGB while global MR recovery remains active");
+  cameraReady=false;check(f.record().ready&&submit()==VK_SUCCESS&&f.vk.recoveryReads.back()==0,
+      "ordinary desktop visibility does not require a camera readiness acknowledgment");
+  cameraReady=true;f.record();leaseCurrent=false;
+  check(submit()==VK_SUCCESS&&f.vk.recoveryReads.back()==1,
+      "a retired ordinary recording cannot expose another game image using stale desktop permission");
+  leaseCurrent=true;f.picture.ordinaryVideo=false;++f.picture.metadata.descriptor.sourceFrame;
+  f.picture.metadata.lease.sequence=++leaseSequence;f.publish();consumer.picture(consumer.owner,f.picture);
+  f.renderer.submit(f.vk.queue,0,nullptr,VK_NULL_HANDLE);f.vk.signal();consumer.tick(consumer.owner);
+  check(f.record().coverage&&submit()==VK_SUCCESS&&f.vk.reads.back()==1,
+      "closing the desktop resumes exact game coverage with the original recovery camera");
+ }
+ cameraRecovery=false;
+}
 void cameraOnlyRecovery(const std::vector<std::uint32_t>& vs,const std::vector<std::uint32_t>& ps){
+ ordinaryVideo(vs,ps);
  cameraRecovery=true;
  {Integration f(vs,ps,1);auto exact=f.record();check(exact.coverage!=VK_NULL_HANDLE,"normal active source retains its exact mask");
   leaseCurrent=false;const auto before=f.vk.reads.size();check(f.submit(false)==VK_SUCCESS,"source loss preserves native queue submission");

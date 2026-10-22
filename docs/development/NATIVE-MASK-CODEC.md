@@ -29,10 +29,13 @@ mask resolution, native reprojection, distortion or foveation mapping.
 
 ## Independent lossless representations
 
-Both peers offer511 and still require63. Optional negotiated bits64,128 and256
+Both peers offer1023 and still require63. Optional negotiated bits64,128 and256
 permit RLE/Zstd, camera-only recovery and raw/Zstd respectively. Old63 peers keep
 their original encodings and behavior. Current source receipts, peer confirmation
 and coded-AU roundtrip remain mandatory on the sender.
+
+Optional bit512 identifies ordinary desktop/compositor pictures while the
+explicit-MR recovery source stays live. See [desktop recovery](DESKTOP-RECOVERY.md).
 
 The old raw/RLE/LZ4 winner is computed first. Level1 RLE/Zstd is attempted only
 for RLE at most1 MiB and a winning payload of at least4096 bytes. Level1 raw/Zstd

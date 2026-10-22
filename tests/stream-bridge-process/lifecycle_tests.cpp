@@ -321,6 +321,16 @@ void cameraRecoveryPolicy(){
     auto active=f.queue(true,0,true,1);f.cycle();
     check(f.display.camera.ready()&&f.display.cameraRecovery.load(),"authenticated explicit-RGBA source opts into general camera-only recovery");
     const auto before=sfnp_camera_fixture::events(f.directory.path);
+    auto desktop=f.queue(false,1,false,3);f.cycle();
+    check(!f.display.pictures[active.lease.slot].ordinaryVideo,"future desktop metadata never exempts an already selected game picture");
+    check(f.display.camera.ready()&&f.display.cameraRecovery.load(),"desktop metadata keeps the acknowledged recovery camera active");
+    auto wrong=desktop;++wrong.submittedContent;f.sendDecoded(wrong);f.cycle();
+    check(!f.display.pictures[desktop.lease.slot].ordinaryVideo,"an unrelated decoded frame cannot borrow a desktop certificate");
+    f.sendDecoded(desktop);f.cycle();
+    check(f.display.pictures[desktop.lease.slot].ordinaryVideo,"only the matched authenticated decoded desktop lease receives the ordinary-video exemption");
+    auto game=f.queue(true,0,true,1);f.cycle();
+    check(!f.display.pictures[game.lease.slot].ordinaryVideo&&f.display.camera.ready(),"return to the game immediately requires its own exact mask without camera restart");
+    check(sfnp_camera_fixture::events(f.directory.path)==before,"opening and closing the desktop never toggles physical camera settings");
     f.source.writer.invalidateCurrentEpoch();f.cycle();
     check(f.display.camera.ready()&&!f.display.pictures[active.lease.slot].leases->current(active.lease),"decoder pool retirement retains physical camera while revoking exact game-image authority");
     ++f.binding[0];auto producer=f.pair;producer.role=sb::Role::Producer;

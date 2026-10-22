@@ -25,6 +25,7 @@ struct NvencOutputEvidence {
     bool entropyCoverageAuthorized=false;
     bool rawEntropyCoverageAuthorized=false;
     bool cameraOnlyRecoveryAuthorized=false;
+    bool ordinaryVideoAuthorized=false;
 };
 struct DeviceObserver {
     // Successful actual public Open session. Device is borrowed native identity;

@@ -1,4 +1,5 @@
 #include "pc/stream-bridge-source-contract.h"
+#include "pc/stream-bridge-sender-provider-coverage-stages.h"
 #include "pc/stream-bridge-sender-provider-sourceipc.h"
 #include "pc/stream-bridge-wire-budget.h"
 #include <cstdio>
@@ -64,6 +65,33 @@ void run(){
  }
  check(WireBudget::videoRate(0,UINT32_MAX)==0&&WireBudget::videoRate(1,UINT32_MAX)==1,"small and zero native budgets never underflow to an invalid large rate");
  accounting.reset();check(!accounting.reserve(budget+1,90,1),"encoder reset clears all rate samples");
+ // A desktop exemption follows its native copy into one accepted input;
+ // changing the latest process or losing a mask can never manufacture it.
+ for(bool v2:{false,true}){
+  SourceContract appSource;check(appSource.publish(73,v2),"both old and new explicit-RGBA apps establish recovery intent");
+  const auto intent=appSource.cameraAuthority();
+  check(appSource.recoveryPolicy(true,true)==1,"missing game data retains camera-only recovery");
+  check(appSource.recoveryPolicy(false,true,intent,74)==0,"unnegotiated recovery cannot emit a new policy");
+  using Slots=CoverageStages<int>;Slots slots;
+  auto copy=slots.capture(0x1100);check(bool(copy),"exact native destination has a bounded receipt slot");
+  copy->receipt={};auto& r=copy->receipt;r.input=0x1100;r.contract=intent;r.present=9;r.pid=74;r.width=64;r.height=32;r.ordinaryVideo=true;
+  copy.publish(Slots::Phase::Captured);
+  void* encoder=reinterpret_cast<void*>(0x2200);
+  check(!slots.bind(0x1100,32,64,1,encoder,7,10),"wrong extent cannot borrow a desktop copy receipt");
+  check(slots.bind(0x1100,64,32,1,encoder,7,10)&&!slots.bind(0x1100,64,32,2,encoder,7,11),"only one accepted input can consume an exact copy");
+  check(!slots.read(2,encoder,7)&&!slots.read(1,encoder,8),"latest or another encoder generation cannot borrow ordinary-video permission");
+  auto accepted=slots.read(1,encoder,7);check(bool(accepted),"matching native completion owns its frozen source receipt");
+  check(appSource.recoveryPolicy(true,true,accepted->receipt.contract,accepted->receipt.pid)==3,"the exact foreign input displays ordinary video while keeping recovery intent");
+  check(appSource.recoveryPolicy(true,false,accepted->receipt.contract,accepted->receipt.pid)==2,"old receivers never receive an unknown policy3");
+  accepted->receipt={};accepted.publish(Slots::Phase::Retired);
+  copy=slots.capture(0x1100);copy->receipt={};copy->receipt.input=0x1100;copy->receipt.contract=intent;copy->receipt.present=10;copy->receipt.pid=74;copy->receipt.width=64;copy->receipt.height=32;copy.publish(Slots::Phase::Captured);
+  auto overwritten=slots.discardCaptured(0x1100);check(bool(overwritten),"a following unrecognized native copy invalidates the old unconsumed desktop receipt");
+  overwritten->receipt={};overwritten.publish(Slots::Phase::Retired);
+  check(!slots.bind(0x1100,64,32,3,encoder,7,12),"reused input cannot expose a game frame using an old desktop exemption");
+  check(appSource.recoveryPolicy(true,true,intent,73)==1,"a fully opaque or missing game mask never turns its game PID into desktop video");
+  appSource.publish(0);check(appSource.recoveryPolicy(true,true,intent,74)==2,"source withdrawal restores ordinary video without keeping an old exemption");
+  appSource.publish(73,v2);check(appSource.recoveryPolicy(true,true,intent,74)==1,"reconnected PID cannot revive a previous-generation desktop receipt");
+ }
  SourceContract exhausted(UINT32_MAX-1);check(exhausted.publish(1)&&exhausted.snapshot(1),"last nonwrapping declaration epoch is usable");
  check(!exhausted.publish(0)&&!exhausted.snapshot(1),"revocation at exhaustion remains immediate and opaque");
  check(!exhausted.publish(1)&&!exhausted.snapshot(1),"exhaustion cannot wrap and resurrect an old receipt");

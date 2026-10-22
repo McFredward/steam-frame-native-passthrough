@@ -41,6 +41,18 @@ public:
         return receipt&&negotiated&&current(receipt,pid);
     }
     std::uint64_t cameraAuthority()const noexcept{return identity_.load(std::memory_order_acquire);}
+    // A caller must separately prove the exact native copy/accepted input.
+    // Foreign process identity alone is never a picture exemption.
+    bool ordinaryPicture(std::uint64_t receipt,std::uint32_t pid)const noexcept {
+        return receipt&&pid&&static_cast<std::uint32_t>(receipt)!=pid
+            &&identity_.load(std::memory_order_acquire)==receipt;
+    }
+    std::uint8_t recoveryPolicy(bool negotiated,bool ordinaryNegotiated,
+        std::uint64_t receipt=0,std::uint32_t pid=0)const noexcept {
+        if(!negotiated)return 0;
+        if(ordinaryPicture(receipt,pid))return ordinaryNegotiated?3:2;
+        return cameraAuthority()?1:2;
+    }
     bool current(std::uint64_t receipt,std::uint32_t pid) const noexcept {
         return inspect(receipt,pid).current();
     }

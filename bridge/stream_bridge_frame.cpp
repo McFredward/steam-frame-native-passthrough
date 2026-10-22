@@ -71,9 +71,10 @@ std::vector<std::uint8_t> encodeNal(Bytes payload,unsigned layer,unsigned tempor
     std::vector<std::uint8_t> out{0,0,0,1,std::uint8_t((39<<1)|(layer>>5)),std::uint8_t((layer<<3)|temporal)};unsigned zeros=0;
     for(auto c:rbsp){if(zeros==2&&c<=3){out.push_back(3);zeros=0;}out.push_back(c);zeros=c==0?std::min(2u,zeros+1):0;}return out;
 }
-bool descriptorValid(const FrameDescriptor& d){return d.cameraRecovery<=2&&d.sourceFrame&&d.encoderGeneration&&d.codedWidth&&d.codedHeight&&
+bool descriptorValid(const FrameDescriptor& d){return d.cameraRecovery<=3&&d.sourceFrame&&d.encoderGeneration&&d.codedWidth&&d.codedHeight&&
     d.codedWidth<=8192&&d.codedHeight<=8192&&std::size_t(d.codedWidth)*d.codedHeight<=MaximumCoverageBytes;}
 bool coverageValid(const FrameDescriptor& d,CoverageEncoding encoding,Bytes b){
+    if(d.cameraRecovery==3&&encoding!=CoverageEncoding::None)return false;
     if(encoding==CoverageEncoding::None)return !b.size;
     if(!b.data||!b.size||b.size>MaximumCoverageBytes)return false;
     const auto size=std::size_t(d.codedWidth)*d.codedHeight;
@@ -139,11 +140,12 @@ FrameStatus inspectMetadata(Bytes payload,AuthSession& auth,CertifiedAccessUnit&
     if(payload.size<FrameCertificateBytes)return FrameStatus::Malformed;
     const auto* h=payload.data;
     if(std::memcmp(h,"SFV1",4)||h[4]!=1||h[5]>std::uint8_t(CoverageEncoding::RawZstd)||get(h+6,2)!=FrameCertificateBytes)return FrameStatus::Malformed;
-    if(h[72]>2)return FrameStatus::Malformed;
+    if(h[72]>3)return FrameStatus::Malformed;
     for(unsigned i=73;i<80;++i)if(h[i])return FrameStatus::Malformed;
     CertifiedAccessUnit result;result.descriptor={get(h+40,8),get(h+48,8),std::uint16_t(get(h+64,2)),std::uint16_t(get(h+66,2)),h[72]};
     const auto& d=result.descriptor;result.coverageEncoding=CoverageEncoding(h[5]);
     if(!descriptorValid(d)||get(h+60,4)!=payload.size-FrameCertificateBytes)return FrameStatus::Malformed;
+    if(d.cameraRecovery==3&&result.coverageEncoding!=CoverageEncoding::None)return FrameStatus::Malformed;
     const auto rawSize=result.coverageEncoding==CoverageEncoding::None?0:std::size_t(d.codedWidth)*d.codedHeight;
     if(get(h+68,4)!=rawSize)return FrameStatus::Malformed;
     const Bytes coverage{h+FrameCertificateBytes,payload.size-FrameCertificateBytes};

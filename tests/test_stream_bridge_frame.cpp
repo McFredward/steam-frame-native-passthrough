@@ -88,13 +88,17 @@ void run(){
         check(sb::appendCertifiedFrame(bytes(original),descriptor,sb::CoverageEncoding::Rle,bytes(malformed),s.sender,output)==sb::FrameStatus::InvalidArgument&&output==std::vector<std::uint8_t>{17},"invalid RLE never publishes a frame");}
     for(auto d:std::vector<sb::FrameDescriptor>{{0,1,64,32},{1,0,64,32},{1,1,0,32},{1,1,8193,8192}}){output={18};
         check(sb::appendCertifiedFrame(bytes(original),d,sb::CoverageEncoding::None,{},s.sender,output)==sb::FrameStatus::InvalidArgument&&output==std::vector<std::uint8_t>{18},"missing or unbounded identity/extent refused");}
-    for(unsigned policy=0;policy<3;++policy){
+    for(unsigned policy=0;policy<4;++policy){
         const sb::FrameDescriptor recovery{10+policy,3,64,32,static_cast<std::uint8_t>(policy)};
         check(sb::appendCertifiedFrame(bytes(original),recovery,sb::CoverageEncoding::None,{},s.sender,held)==sb::FrameStatus::Ok&&sb::inspectCertifiedFrame(bytes(held),s.observer,result)==sb::FrameStatus::Ok&&result.descriptor.cameraRecovery==policy,"camera recovery policy survives real signed AU inspection");
         check(sb::serializeCoverageMetadata(result,detached),"signed camera policy exports detached metadata");
-        auto changed=detached;changed[72]=static_cast<std::uint8_t>((policy+1)%3);
+        auto changed=detached;changed[72]=static_cast<std::uint8_t>((policy+1)%4);
         check(sb::inspectCoverageMetadata(bytes(changed),s.observer,local)==sb::FrameStatus::AuthenticationRefused,"unsigned camera policy changes never alter recovery intent");
     }
+    const sb::FrameDescriptor ordinary{99,3,64,32,3};
+    check(sb::appendCertifiedFrame(bytes(original),ordinary,sb::CoverageEncoding::Raw,bytes(rawCoverage),s.sender,held)==sb::FrameStatus::InvalidArgument,"ordinary picture policy cannot carry a game coverage mask");
+    const sb::FrameDescriptor unknown{99,3,64,32,4};
+    check(sb::appendCertifiedFrame(bytes(original),unknown,sb::CoverageEncoding::None,{},s.sender,held)==sb::FrameStatus::InvalidArgument,"unknown recovery policy cannot be signed");
     for(auto mode:{sb::CoverageEncoding::RleZstd,sb::CoverageEncoding::RawZstd}){
         std::vector<std::uint8_t> compressed;
         check(mode==sb::CoverageEncoding::RleZstd?sb::compressCoverageRleZstd(bytes(rle),rle.size(),compressed):sb::compressCoverageRawZstd(bytes(rawCoverage),rawCoverage.size(),compressed),"independent compressed certificate source prepared");

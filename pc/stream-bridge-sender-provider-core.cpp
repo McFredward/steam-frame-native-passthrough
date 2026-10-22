@@ -328,6 +328,8 @@ NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* pa
             &&(s->adapter.handshake().negotiatedCapabilities()&CapRawZstd)!=0;
         evidence.cameraOnlyRecoveryAuthorized=evidence.coverageSessionAuthorized
             &&(s->adapter.handshake().negotiatedCapabilities()&CapCameraOnlyRecovery)!=0;
+        evidence.ordinaryVideoAuthorized=evidence.cameraOnlyRecoveryAuthorized
+            &&(s->adapter.handshake().negotiatedCapabilities()&CapOrdinaryVideoPicture)!=0;
     }else count(self.outputStats_.unmatched);
     const Bytes original{static_cast<const std::uint8_t*>(params->bitstreamBufferPtr),params->bitstreamSizeInBytes};
     std::uint64_t ticket=0;

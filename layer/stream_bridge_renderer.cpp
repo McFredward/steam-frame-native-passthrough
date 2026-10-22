@@ -56,7 +56,7 @@ struct Renderer::Impl {
         ~Retention(){if(pool)pool->releaseRecorded(lease);}
     };
     struct PreparedPicture:LocalPicture {std::shared_ptr<Retention> retained;};
-    struct Control{VkBuffer buffer{};VkDeviceSize offset=0;VkDescriptorSet set{};VkCommandBuffer one{};bool assigned=false;};
+    struct Control{VkBuffer buffer{};VkDeviceSize offset=0;VkDescriptorSet set{};VkCommandBuffer one{},ordinary{};bool assigned=false;};
     struct Command{
         std::uint64_t id=0,pipeline=0,set0=0,epoch=0,cameraEpoch=0;bool primary=false,eligible=false;
         Control* control=nullptr;
@@ -119,7 +119,7 @@ struct Renderer::Impl {
     struct Counters {
         std::atomic<std::uint64_t> metadata{0},maskNone{0},maskDecoded{0},maskRejected{0},uploadAccepted{0},uploadRefused{0},pictures{0};
         std::atomic<std::uint64_t> maskOpaque{0},maskTransparent{0},maskMixed{0};
-        std::atomic<std::uint64_t> cameraOnlyDraws{0};
+        std::atomic<std::uint64_t> cameraOnlyDraws{0},ordinaryDraws{0},ordinarySubmits{0};
         std::atomic<std::uint64_t> begins{0},draws{0},selected{0},guardAttempts{0},guardAccepted{0},guardRefused{0},opaqueSubmits{0};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(DrawRefusal::Count)> refusals{};
         std::array<std::atomic<std::uint64_t>,static_cast<std::size_t>(CollectRefusal::Count)> collectRefusals{};
@@ -144,7 +144,7 @@ struct Renderer::Impl {
 #define COUNT(n) out.n=counts.n.load(std::memory_order_relaxed);
         COUNT(metadata) COUNT(maskNone) COUNT(maskDecoded) COUNT(maskRejected) COUNT(uploadAccepted) COUNT(uploadRefused) COUNT(pictures)
         COUNT(maskOpaque) COUNT(maskTransparent) COUNT(maskMixed)
-        COUNT(cameraOnlyDraws) COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
+        COUNT(cameraOnlyDraws) COUNT(ordinaryDraws) COUNT(ordinarySubmits) COUNT(begins) COUNT(draws) COUNT(selected) COUNT(guardAttempts) COUNT(guardAccepted) COUNT(guardRefused) COUNT(opaqueSubmits)
         COUNT(collects) COUNT(collected) COUNT(coreSubmits) COUNT(submits2) COUNT(firstNextType) COUNT(firstRefusedNextType)
         COUNT(imageCapacityRefused) COUNT(memoryCapacityRefused) COUNT(viewCapacityRefused) COUNT(descriptorCapacityRefused)
         COUNT(descriptorUntrackedWrites) COUNT(descriptorUntrackedCopies)
@@ -180,6 +180,7 @@ struct Renderer::Impl {
             miss(DrawRefusal::Unavailable),miss(DrawRefusal::Busy),miss(DrawRefusal::Command),miss(DrawRefusal::Epoch),miss(DrawRefusal::Pipeline),miss(DrawRefusal::Ineligible),miss(DrawRefusal::Descriptor),miss(DrawRefusal::Image),miss(DrawRefusal::ExactPicture),miss(DrawRefusal::ReadyMask),miss(DrawRefusal::Capacity),
             static_cast<unsigned long long>(s.guardAccepted),static_cast<unsigned long long>(s.guardAttempts),static_cast<unsigned long long>(s.guardRefused),static_cast<unsigned long long>(s.opaqueSubmits),s.pipelines,unsigned(s.lost));
         std::fprintf(stderr,"[Steam Link Native Passthrough] renderer camera-only recovery: recorded=%llu; current-grant=%u; no game pixels or stale coverage\n",static_cast<unsigned long long>(s.cameraOnlyDraws),unsigned(cameraOnlyRecoveryReady()));
+        std::fprintf(stderr,"[Steam Link Native Passthrough] renderer ordinary video: recorded=%llu; submit-guards=%llu; exact decoded image proof required\n",static_cast<unsigned long long>(s.ordinaryDraws),static_cast<unsigned long long>(s.ordinarySubmits));
         std::fprintf(stderr,"[Steam Link Native Passthrough] coverage content: fully-opaque/fully-transparent/mixed=%llu/%llu/%llu; exact pre-draw storage retained; no image capture\n",
             static_cast<unsigned long long>(s.maskOpaque),static_cast<unsigned long long>(s.maskTransparent),static_cast<unsigned long long>(s.maskMixed));
         std::fprintf(stderr,"[Steam Link Native Passthrough] descriptor flow: allocated/refused=%llu/%llu; pool-retire/set-retire=%llu/%llu; unknown-updates/copies=%llu/%llu\n",
@@ -220,7 +221,7 @@ struct Renderer::Impl {
     bool makeControls(){
         VkCommandPoolCreateInfo cp{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};cp.queueFamilyIndex=family;
         if(CreateCommandPool(device,&cp,nullptr,&guardPool)!=VK_SUCCESS)return false;
-        std::array<VkCommandBuffer,130> cbs{};VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        std::array<VkCommandBuffer,258> cbs{};VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         ca.commandPool=guardPool;ca.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ca.commandBufferCount=cbs.size();
         if(AllocateCommandBuffers(device,&ca,cbs.data())!=VK_SUCCESS)return false;
         zero=cbs[0];VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -245,7 +246,7 @@ struct Renderer::Impl {
         CmdFillBuffer(zero,controlsBuffer,0,VK_WHOLE_SIZE,0);
         all.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;all.dstAccessMask=VK_ACCESS_UNIFORM_READ_BIT;
         CmdPipelineBarrier(zero,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,1,&all,0,nullptr);
-        for(std::size_t k=0;k<controls.size();++k){auto& control=controls[k];control.one=cbs[k+1];control.buffer=controlsBuffer;control.offset=k*stride;
+        for(std::size_t k=0;k<controls.size();++k){auto& control=controls[k];control.one=cbs[k+1];control.ordinary=cbs[k+1+controls.size()];control.buffer=controlsBuffer;control.offset=k*stride;
             VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};allocate.descriptorPool=controlPool;allocate.descriptorSetCount=1;allocate.pSetLayouts=&controlLayout;
             if(AllocateDescriptorSets(device,&allocate,&control.set)!=VK_SUCCESS)return false;
             VkDescriptorBufferInfo info{control.buffer,control.offset,16};VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};write.dstSet=control.set;write.descriptorCount=1;
@@ -256,6 +257,12 @@ struct Renderer::Impl {
             if(BeginCommandBuffer(control.one,&begin)!=VK_SUCCESS)return false;
             barrier(control.one,control,true);CmdUpdateBuffer(control.one,control.buffer,control.offset,sizeof(on),&on);barrier(control.one,control,false);
             if(EndCommandBuffer(control.one)!=VK_SUCCESS)return false;
+            const float ordinary[4]{0,0,0,0};
+            if(BeginCommandBuffer(control.ordinary,&begin)!=VK_SUCCESS)return false;
+            barrier(control.ordinary,control,true);
+            CmdUpdateBuffer(control.ordinary,control.buffer,control.offset,sizeof(ordinary),ordinary);
+            barrier(control.ordinary,control,false);
+            if(EndCommandBuffer(control.ordinary)!=VK_SUCCESS)return false;
         }
         cameraZero=cbs.back();
         if(BeginCommandBuffer(cameraZero,&begin)!=VK_SUCCESS)return false;
@@ -314,11 +321,13 @@ struct Renderer::Impl {
             if(value.metadata.lease.slot>=p.pictures.size()||!current(value))return;
             auto& slot=p.pictures[value.metadata.lease.slot];const auto old=std::atomic_load_explicit(&slot,std::memory_order_acquire);
             const bool samePicture=old&&old->metadata.binding==value.metadata.binding&&same(old->metadata.descriptor,value.metadata.descriptor)
-                &&old->metadata.lease.epoch==value.metadata.lease.epoch&&old->metadata.lease.sequence==value.metadata.lease.sequence;
+                &&old->metadata.lease.epoch==value.metadata.lease.epoch&&old->metadata.lease.sequence==value.metadata.lease.sequence&&old->ordinaryVideo==value.ordinaryVideo;
             if(samePicture)return;
-            const auto lease=p.pool.acquireScheduled({value.metadata.binding,value.metadata.descriptor});if(!lease)return;
             std::shared_ptr<Retention> retained;
-            try{retained=std::make_shared<Retention>(p.pool,lease);}catch(...){p.pool.releaseRecorded(lease);return;}
+            if(!value.ordinaryVideo){
+                const auto lease=p.pool.acquireScheduled({value.metadata.binding,value.metadata.descriptor});if(!lease)return;
+                try{retained=std::make_shared<Retention>(p.pool,lease);}catch(...){p.pool.releaseRecorded(lease);return;}
+            }
             auto snapshot=std::make_shared<PreparedPicture>();static_cast<LocalPicture&>(*snapshot)=value;snapshot->retained=std::move(retained);
             std::atomic_store_explicit(&slot,std::shared_ptr<const PreparedPicture>(std::move(snapshot)),std::memory_order_release);++p.counts.pictures;
         }catch(...){}
@@ -326,8 +335,8 @@ struct Renderer::Impl {
     static bool published(void* owner,const LocalPicture& value) noexcept{
         auto&p=*static_cast<Impl*>(owner);if(value.metadata.lease.slot>=p.pictures.size())return false;
         const auto ready=std::atomic_load_explicit(&p.pictures[value.metadata.lease.slot],std::memory_order_acquire);
-        return ready&&current(*ready)&&ready->retained&&ready->metadata.binding==value.metadata.binding&&same(ready->metadata.descriptor,value.metadata.descriptor)
-            &&ready->metadata.lease.epoch==value.metadata.lease.epoch&&ready->metadata.lease.sequence==value.metadata.lease.sequence;
+        return ready&&current(*ready)&&(ready->ordinaryVideo||ready->retained)&&ready->metadata.binding==value.metadata.binding&&same(ready->metadata.descriptor,value.metadata.descriptor)
+            &&ready->metadata.lease.epoch==value.metadata.lease.epoch&&ready->metadata.lease.sequence==value.metadata.lease.sequence&&ready->ordinaryVideo==value.ordinaryVideo;
     }
     static void tick(void* owner) noexcept{auto& p=*static_cast<Impl*>(owner);p.retirePictures();p.pool.reapCold();p.reportCold();}
     bool matchingImage(std::uint64_t image,std::shared_ptr<const LocalPicture>& output){
@@ -336,18 +345,23 @@ struct Renderer::Impl {
         for(const auto& slot:pictures){auto picture=std::atomic_load_explicit(&slot,std::memory_order_acquire);if(picture&&current(*picture)&&picture->metadata.lease.kernel==local::KernelIdentity{{m->device,m->inode}}&&picture->metadata.descriptor.codedWidth==i->width&&picture->metadata.descriptor.codedHeight==i->height){if(output)return false;output=std::move(picture);}}
         return output!=nullptr;
     }
-    bool collect(VkCommandBuffer cb){
+    bool collect(VkCommandBuffer cb,bool& ordinary){
+        ordinary=false;
         ++counts.collects;
         const auto refuse=[&](CollectRefusal reason){++counts.collectRefusals[static_cast<std::size_t>(reason)];return false;};
         auto* command=find(commands,handle(cb));if(!command)return refuse(CollectRefusal::Command);
         if(auto* recovery=recoveryCommand(handle(cb));recovery&&recovery->only.load(std::memory_order_acquire))return refuse(CollectRefusal::Camera);
         if(!command->used)return refuse(CollectRefusal::Empty);
-        if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch())return refuse(CollectRefusal::Camera);
+        ordinary=command->uses[0].picture.ordinaryVideo;
+        if(!ordinary){
+            if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch())return refuse(CollectRefusal::Camera);
+        }
         CollectRefusal why=CollectRefusal::Count;
         const auto require=[&](bool condition,CollectRefusal reason){if(!condition&&why==CollectRefusal::Count)why=reason;};
         require(command->eligible,CollectRefusal::Ineligible);
         require(!lost.load(std::memory_order_acquire)&&command->epoch==observationEpoch.load(std::memory_order_acquire),CollectRefusal::Epoch);
         for(std::size_t n=0;n<command->used;++n){auto& use=command->uses[n];require(current(use.picture),CollectRefusal::Lease);
+            require(use.picture.ordinaryVideo==ordinary,CollectRefusal::Ineligible);
             // A descriptor can legally change after recording but before
             // submission. It must still name this EXACT leased image.
             const auto* descriptor=find(descriptors,use.descriptor);
@@ -360,6 +374,7 @@ struct Renderer::Impl {
                 image&&image->id==use.image&&image->generation==use.imageGeneration&&view->generation==use.imageGeneration,CollectRefusal::Image);
             require(memory&&memory->generation==use.memoryGeneration&&image->memoryGeneration==use.memoryGeneration&&
                 local::KernelIdentity{{memory->device,memory->inode}}==use.picture.metadata.lease.kernel,CollectRefusal::Memory);
+            if(ordinary)continue; // No mask storage or mask submission permission.
             bool seen=false;for(std::size_t k=0;k<submittedCount;++k)seen|=submittedLeases[k].slot==use.lease.slot&&submittedLeases[k].generation==use.lease.generation;
             if(!seen){if(submittedCount==submittedLeases.size())require(false,CollectRefusal::Capacity);else submittedLeases[submittedCount++]=use.lease;}
         }
@@ -583,11 +598,11 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     if(!lock){p.refused(DrawRefusal::Busy);return p.cameraOnlyDraw(value);}
     if(!p.prepared||p.lost.load(std::memory_order_acquire)){p.refused(DrawRefusal::Unavailable);return p.cameraOnlyDraw(value);}
     auto* command=find(p.commands,handle(value));if(!command){p.refused(DrawRefusal::Command);return p.cameraOnlyDraw(value);}
-    if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch()){p.refused(DrawRefusal::Camera);return p.cameraOnlyDraw(value);}
     if(command->epoch!=p.observationEpoch.load(std::memory_order_acquire)){p.refused(DrawRefusal::Epoch);return p.cameraOnlyDraw(value);}
     auto* pipeline=find(p.pipelines,command->pipeline);if(!pipeline){p.refused(DrawRefusal::Pipeline);return p.cameraOnlyDraw(value);}
     out.original=from<VkPipeline>(pipeline->id);
     if(!command->eligible||!command->control||!pipeline->coverage){p.refused(DrawRefusal::Ineligible);return p.cameraOnlyDraw(value);}
+    if(!pipeline->cameraOnly){p.refused(DrawRefusal::Pipeline);return p.cameraOnlyDraw(value);}
     const auto descriptorMiss=[&](DescriptorRefusal why,DrawRefusal reason){++p.counts.descriptorRefusals[static_cast<std::size_t>(why)];p.refused(reason);};
     const auto* descriptor=find(p.descriptors,command->set0);const auto* descriptorAllocation=find(p.descriptorAllocations,command->set0);
     if(!descriptorAllocation){descriptorMiss(DescriptorRefusal::MissingAllocation,DrawRefusal::Descriptor);return p.cameraOnlyDraw(value);}
@@ -598,14 +613,20 @@ Draw Renderer::beforeDraw(VkCommandBuffer value) noexcept{
     if(view->serial!=descriptor->viewSerial){descriptorMiss(DescriptorRefusal::ViewSerial,DrawRefusal::Image);return p.cameraOnlyDraw(value);}
     const auto* image=find(p.images,view->image);if(!image||image->generation!=view->generation){p.refused(DrawRefusal::Image);return p.cameraOnlyDraw(value);}
     std::shared_ptr<const LocalPicture> picture;if(!p.matchingImage(image->id,picture)){p.refused(DrawRefusal::ExactPicture);return p.cameraOnlyDraw(value);}
+    if(!picture->ordinaryVideo){
+    if(!command->cameraEpoch||command->cameraEpoch!=cameraAlphaEpoch()){p.refused(DrawRefusal::Camera);return p.cameraOnlyDraw(value);}
+    }
     Impl::Use* use=nullptr;
     for(unsigned n=0;n<command->used;++n)if(command->uses[n].descriptor==command->set0&&command->uses[n].descriptorGeneration==descriptorAllocation->generation&&command->uses[n].viewSerial==view->serial&&command->uses[n].picture.metadata.binding==picture->metadata.binding&&same(command->uses[n].picture.metadata.descriptor,picture->metadata.descriptor)){use=&command->uses[n];break;}
-    if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return p.cameraOnlyDraw(value);}auto lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return p.cameraOnlyDraw(value);}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->descriptorGeneration=descriptorAllocation->generation;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
+    if(!use){if(command->used==command->uses.size()){p.refused(DrawRefusal::Capacity);return p.cameraOnlyDraw(value);}gpu::Lease lease{};if(!picture->ordinaryVideo){lease=p.pool.acquireScheduled({picture->metadata.binding,picture->metadata.descriptor});if(!lease){p.refused(DrawRefusal::ReadyMask);return p.cameraOnlyDraw(value);}}use=&command->uses[command->used++];use->lease=lease;use->picture=*picture;use->descriptor=command->set0;use->descriptorGeneration=descriptorAllocation->generation;use->viewSerial=view->serial;use->image=image->id;use->imageGeneration=image->generation;use->memoryGeneration=image->memoryGeneration;}
     // Publish before the wrapper can record the companion bind/draw. A submit
     // observing false cannot contain an earlier guarded recording; recording
     // and submitting the same CB concurrently is outside native Vulkan rules.
     p.guardedRecordingPossible.store(true,std::memory_order_release);
-    out.replacement=pipeline->coverage;out.layout=pipeline->layout;out.coverage=use->lease.set;out.control=command->control->set;out.ready=true;++p.counts.selected;return out;
+    out.replacement=picture->ordinaryVideo?pipeline->cameraOnly:pipeline->coverage;
+    out.layout=pipeline->layout;out.coverage=use->lease.set;out.control=command->control->set;out.ready=true;
+    if(picture->ordinaryVideo)++p.counts.ordinaryDraws;else ++p.counts.selected;
+    return out;
 }
 void Renderer::commandReset(VkCommandBuffer value) noexcept{
     auto&p=*impl_;if(auto* record=p.recoveryCommand(handle(value))){record->pipeline.store(0);record->cameraEpoch.store(0);record->only.store(false);}std::unique_lock<std::mutex> lock(p.gate,std::try_to_lock);
@@ -642,10 +663,10 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
         if(why!=SubmitRefusal::Count){p.submitRefused(why,nextType);supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBuffers=commands.data()+used;submits[n+1].commandBufferCount=0;
         for(unsigned k=0;k<infos[n].commandBufferCount;++k){const auto cb=infos[n].pCommandBuffers[k];
-            const bool exact=p.collect(cb);
+            bool ordinary=false;const bool exact=p.collect(cb,ordinary);
             if(cameraOnlyRecoveryReady()){const auto* tracked=find(p.commands,handle(cb));const auto* recovery=p.recoveryCommand(handle(cb));
                 cameraOnlyBatch|=!exact&&((tracked&&tracked->used)||(recovery&&recovery->only.load(std::memory_order_acquire)));}
-            if(exact){auto* command=find(p.commands,handle(cb));if(command&&command->control){commands[used++]=command->control->one;++submits[n+1].commandBufferCount;++guards;}}
+            if(exact){auto* command=find(p.commands,handle(cb));if(command&&command->control){commands[used++]=ordinary?command->control->ordinary:command->control->one;++submits[n+1].commandBufferCount;if(ordinary)++p.counts.ordinarySubmits;else ++guards;}}
             commands[used++]=cb;++submits[n+1].commandBufferCount;
         }
     }
@@ -674,13 +695,13 @@ VkResult Renderer::submit(VkQueue queue,std::uint32_t count,const VkSubmitInfo* 
         }
         return VK_SUCCESS;
     }
-    if(cameraOnlyBatch){for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one)commands[n]=defaultControl;guards=0;}
+    if(cameraOnlyBatch){for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one||((cameraOnlyBatch||p.submittedCount)&&commands[n]==control.ordinary))commands[n]=defaultControl;guards=0;}
     p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
     const auto reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
     if(!reserved){
         // Fenced retirement is part of admission, not just resource accounting.
         // Clear all one guards on refusal while retaining ordinary native RGB.
-        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one)commands[n]=defaultControl;
+        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n]==control.one||((cameraOnlyBatch||p.submittedCount)&&commands[n]==control.ordinary))commands[n]=defaultControl;
     }
     const auto result=p.QueueSubmit(queue,count+1,submits.data(),fence);
     if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);
@@ -705,10 +726,10 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
             p.submitRefused(info.pNext?SubmitRefusal::Extension:info.flags?SubmitRefusal::Flags:(!info.pCommandBufferInfos&&info.commandBufferInfoCount)?SubmitRefusal::Shape:SubmitRefusal::Bounds,nextType);supported=false;break;}
         submits[n+1]=infos[n];submits[n+1].pCommandBufferInfos=commands.data()+used;submits[n+1].commandBufferInfoCount=0;
         for(unsigned k=0;k<infos[n].commandBufferInfoCount;++k){const auto& cb=infos[n].pCommandBufferInfos[k];
-            const bool exact=p.collect(cb.commandBuffer);
+            bool ordinary=false;const bool exact=p.collect(cb.commandBuffer,ordinary);
             if(cameraOnlyRecoveryReady()){const auto* tracked=find(p.commands,handle(cb.commandBuffer));const auto* recovery=p.recoveryCommand(handle(cb.commandBuffer));
                 cameraOnlyBatch|=!exact&&((tracked&&tracked->used)||(recovery&&recovery->only.load(std::memory_order_acquire)));}
-            if(exact){auto* command=find(p.commands,handle(cb.commandBuffer));if(command&&command->control){commands[used++]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,command->control->one,1};++submits[n+1].commandBufferInfoCount;++guards;}}
+            if(exact){auto* command=find(p.commands,handle(cb.commandBuffer));if(command&&command->control){commands[used++]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,nullptr,ordinary?command->control->ordinary:command->control->one,1};++submits[n+1].commandBufferInfoCount;if(ordinary)++p.counts.ordinarySubmits;else ++guards;}}
             commands[used++]=cb;++submits[n+1].commandBufferInfoCount;
         }
     }
@@ -727,11 +748,11 @@ VkResult Renderer::submit2(VkQueue queue,std::uint32_t count,const VkSubmitInfo2
         }
         return VK_SUCCESS;
     }
-    if(cameraOnlyBatch){for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one)commands[n].commandBuffer=zero.commandBuffer;guards=0;}
+    if(cameraOnlyBatch){for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one||((cameraOnlyBatch||p.submittedCount)&&commands[n].commandBuffer==control.ordinary))commands[n].commandBuffer=zero.commandBuffer;guards=0;}
     p.counts.guardAttempts.fetch_add(guards,std::memory_order_relaxed);
     const auto reserved=p.pool.prepareSubmit(queue,p.submittedLeases.data(),p.submittedCount);
     if(!reserved){
-        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one)commands[n].commandBuffer=zero.commandBuffer;
+        for(std::size_t n=0;n<used;++n)for(const auto& control:p.controls)if(commands[n].commandBuffer==control.one||((cameraOnlyBatch||p.submittedCount)&&commands[n].commandBuffer==control.ordinary))commands[n].commandBuffer=zero.commandBuffer;
     }
     const auto result=forward(queue,count+1,submits.data(),fence);
     if(reserved&&result==VK_SUCCESS)p.counts.guardAccepted.fetch_add(guards,std::memory_order_relaxed);

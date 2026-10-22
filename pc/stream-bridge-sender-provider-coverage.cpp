@@ -179,8 +179,10 @@ struct SenderCoverage::Impl {
     static bool augment(Bytes candidate,const NvencOutputEvidence& e,std::vector<std::uint8_t>& output,void* opaque){
         auto& s=*static_cast<Impl*>(opaque);if(!e.exactInput||!e.submission||e.width>8192||e.height>8192)return s.gates.refuse(CoverageGate::InputReceipt);
         FrameDescriptor descriptor{e.submission,e.encoderGeneration,static_cast<std::uint16_t>(e.width),static_cast<std::uint16_t>(e.height)};
+        std::uint64_t ordinaryContract=0;std::uint32_t ordinaryPid=0;
         const auto certify=[&](CoverageEncoding kind,Bytes mask){
-            descriptor.cameraRecovery=e.cameraOnlyRecoveryAuthorized?(s.sourceContract.cameraAuthority()?1:2):0;
+            descriptor.cameraRecovery=s.sourceContract.recoveryPolicy(e.cameraOnlyRecoveryAuthorized,
+                e.ordinaryVideoAuthorized,ordinaryContract,ordinaryPid);
             return s.control.certifyAccessUnit(candidate,descriptor,kind,mask,output);
         };
         // Reconfigure can Encode/Lock before the cold worker replaces control.
@@ -199,7 +201,12 @@ struct SenderCoverage::Impl {
                 // Format permission comes from the live kernel-validated app.
                 // Fully opaque eyes are legitimate; sparse pixel samples cannot
                 // establish the semantics of an entire submitted texture.
-                if(!s.sourceCurrent(slot.contract,slot.pid))s.gates.refuse(CoverageGate::SourceRevoked);
+                if(slot.ordinaryVideo){
+                    if(s.sourceContract.ordinaryPicture(slot.contract,slot.pid)){
+                        ordinaryContract=slot.contract;ordinaryPid=slot.pid;
+                    }
+                }
+                else if(!s.sourceCurrent(slot.contract,slot.pid))s.gates.refuse(CoverageGate::SourceRevoked);
                 else if(gpu.ready()&&slot.width==e.width&&slot.height==e.height){
                     pixels.resize(std::size_t(slot.width)*slot.height);
                     const auto started=clockMicros();CoverageReadbackResult receipt;
@@ -240,9 +247,15 @@ struct SenderCoverage::Impl {
                 s.lastPid=maskPid;s.state=7;s.gates.payload(candidate.size,encoded.size(),output.size(),static_cast<unsigned>(encoding),pixels.size(),encodeUs);s.gates.signal(CoverageSignal::CertifiedMasks);return true;
             }
         }
-        // Discovery/coded-boundary certificate without a mask is useful and
-        // explicitly does NOT permit transparent rendering on the receiver.
-        const bool certified=certify(CoverageEncoding::None,{});if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);return certified;
+        // A positively identified desktop/compositor picture remains ordinary
+        // video while a live MR app is in the background. A missing game mask
+        // still requests camera-only recovery. Never classify by mask absence.
+        const bool certified=certify(CoverageEncoding::None,{});
+        if(ordinaryContract&&!s.sourceContract.ordinaryPicture(ordinaryContract,ordinaryPid)){
+            output.clear();s.gates.refuse(CoverageGate::SourceRevoked);return false;
+        }
+        if(!certified)s.gates.refuse(CoverageGate::FrameCertificate);
+        return certified;
     }
     static void STDMETHODCALLTYPE forwardDraw(ID3D11DeviceContext* context,UINT count,UINT start){
         auto& s=*instance.load();bits<NativeDraw>(s.facade.originalFunction(13))(context,count,start);
@@ -415,12 +428,21 @@ struct SenderCoverage::Impl {
     static void STDMETHODCALLTYPE copy(ID3D11DeviceContext* ctx,ID3D11Resource* destination,ID3D11Resource* source){
         auto& s=*instance.load();const auto* frame=DirectModeBoundary::currentFrame();
         const bool caller=s.site(__builtin_return_address(0),0xa217fb);if(caller)s.gates.signal(CoverageSignal::NativeCopies);
+        // Invalidate the preceding unconsumed copy for this destination even
+        // when the new copy is unrecognized or its metadata lock is busy.
+        // Otherwise a reused desktop input could exempt an unknown game frame.
+        auto* invalidatedInput=identity(destination);
+        auto previous=s.stages.discardCaptured(reinterpret_cast<std::uintptr_t>(invalidatedInput));
+        release(invalidatedInput);
+        if(previous){release(previous->resources.input);previous->receipt={};previous.publish(Stages::Phase::Retired);}
         // Every refusal still forwards the native operation exactly once.
         // No source, destination, format or resource content is rewritten.
         if(ctx!=s.context||!s.enabled||!caller||!frame){if(caller)s.gates.refuse(ctx!=s.context?CoverageGate::Context:CoverageGate::DirectFrame);forwardCopy(ctx,destination,source);return;}
         std::unique_lock<std::mutex> lock(s.mutex,std::try_to_lock);if(!lock){s.gates.refuse(CoverageGate::Lock);forwardCopy(ctx,destination,source);return;}
         if(!s.prepared||s.invalid||frame->presentSerial!=s.activeSerial||frame->presentSerial==s.failedSerial||frame->registryEpoch!=s.activeEpoch||!same(source,s.nativeOutput)||s.drawBits!=((1u<<(2*frame->layerCount))-1)){s.gates.refuse(CoverageGate::CopyPair);forwardCopy(ctx,destination,source);return;}
-        if(!s.sourceCurrent(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);forwardCopy(ctx,destination,source);return;}
+        const auto authority=s.sourceContract.cameraAuthority();
+        const bool ordinary=s.sourceContract.ordinaryPicture(authority,s.activePid);
+        if(!ordinary&&!s.sourceCurrent(s.activeContract,s.activePid)){s.gates.refuse(CoverageGate::SourceContract);forwardCopy(ctx,destination,source);return;}
         auto* input=identity(destination);if(!input){s.gates.refuse(CoverageGate::InputReceipt);forwardCopy(ctx,destination,source);return;}
         // A stage is frozen from the native input handoff through matching
         // Unlock; another accepted frame and cold maintenance cannot evict it.
@@ -428,13 +450,18 @@ struct SenderCoverage::Impl {
         if(!free){release(input);s.gates.refuse(CoverageGate::StageFull);forwardCopy(ctx,destination,source);return;}
         auto& gpu=free->resources;release(gpu.input);gpu.input=input;
         free->receipt={};auto& receipt=free->receipt;
-        receipt.input=reinterpret_cast<std::uintptr_t>(input);receipt.contract=s.activeContract;receipt.present=frame->presentSerial;
+        receipt.input=reinterpret_cast<std::uintptr_t>(input);receipt.contract=ordinary?authority:s.activeContract;receipt.present=frame->presentSerial;receipt.ordinaryVideo=ordinary;
         receipt.pid=s.activePid;receipt.width=s.width;receipt.height=s.height;
         MultithreadScope protect(s.multithread);const auto captured=clockMicros();
         // Native NVENC completion is input-resource-specific. Explicitly submit
         // this independent readback and its own EVENT before the handoff; do
         // not infer completion from elapsed time or a finished bitstream.
         receipt.copyMicros=captured;
+        if(ordinary){
+            // Freeze only source policy, through the same canonical input and
+            // accepted NVENC submission as masks. No GPU readback is needed.
+            free.publish(Stages::Phase::Captured);forwardCopy(ctx,destination,source);return;
+        }
         const CoveragePublication publication{[](void* value)noexcept{static_cast<Stages::Claim*>(value)->publish(Stages::Phase::Captured);},&free};
         copyCoverageBeforeNative(ctx,destination,source,gpu.texture,s.target,gpu.completion,forwardCopy,forwardEnd,forwardFlush,publication);
         s.gates.submitted();s.gates.signal(CoverageSignal::CapturedCopies);

@@ -228,7 +228,7 @@ void consume(Process&p,local::Message& message){
         const auto status=wantsDecoded?sb::inspectCoverageMetadataDecoded(metadata,p.verifier,certificate,samples,range):sb::inspectCoverageMetadata(metadata,p.verifier,certificate);
         if(status!=sb::FrameStatus::Ok||certificate.binding!=message.binding||!sameDescriptor(certificate.descriptor,message.descriptor)){count(p,Flow::AuthenticationRefused);return;}
         count(p,Flow::Authenticated);
-        if(certificate.descriptor.cameraRecovery==1)p.cameraRecovery.store(true,std::memory_order_release);
+        if(certificate.descriptor.cameraRecovery==1||certificate.descriptor.cameraRecovery==3)p.cameraRecovery.store(true,std::memory_order_release);
         else if(certificate.descriptor.cameraRecovery==2)p.cameraRecovery.store(false,std::memory_order_release);
         // Certificates may run ahead of the decoded picture being displayed.
         // In particular, future None metadata must not withdraw the global
@@ -237,17 +237,19 @@ void consume(Process&p,local::Message& message){
         p.cameraPeer=true;
         const auto index=message.descriptor.sourceFrame%p.masks.size();
         auto* target=&p.masks[index];*target=message;p.coverageNeeded[index]=certificate.coverageEncoding!=sb::CoverageEncoding::None;
+        target->descriptor.cameraRecovery=certificate.descriptor.cameraRecovery;
         for(const auto& consumer:p.consumers)if(consumer.owner&&(!consumer.admitted||consumer.admitted(consumer.owner))){
             if(wantsDecoded&&consumer.decodedCoverage)consumer.decodedCoverage(consumer.owner,certificate,{samples.data(),samples.size()},range);
             else if(consumer.coverage)consumer.coverage(consumer.owner,certificate);
         }
     }else if(message.kind==local::Kind::Decoded){
         count(p,Flow::DecodedReceived);
-        bool certified=false,needsCoverage=false;for(std::size_t n=0;n<p.masks.size();++n){const auto& mask=p.masks[n];if(mask.peerConfirmed&&mask.binding==message.binding&&sameSource(mask.source.stream,message.source.stream)&&sameDescriptor(mask.descriptor,message.descriptor)&&mask.nativeTimestampToken==message.nativeTimestampToken&&mask.submittedContent==message.submittedContent){certified=true;needsCoverage=p.coverageNeeded[n];break;}}
+        bool certified=false,needsCoverage=false,ordinaryVideo=false;for(std::size_t n=0;n<p.masks.size();++n){const auto& mask=p.masks[n];if(mask.peerConfirmed&&mask.binding==message.binding&&sameSource(mask.source.stream,message.source.stream)&&sameDescriptor(mask.descriptor,message.descriptor)&&mask.nativeTimestampToken==message.nativeTimestampToken&&mask.submittedContent==message.submittedContent){certified=true;needsCoverage=p.coverageNeeded[n];ordinaryVideo=!needsCoverage&&mask.descriptor.cameraRecovery==3;break;}}
         if(!certified||message.dmabuf<0||message.readOnlyLeases<0){count(p,Flow::CertificateMiss);return;}
         auto reader=std::make_shared<local::LeaseReader>();if(!reader->mapReadOnly(message.readOnlyLeases)||!reader->current(message.lease)){count(p,Flow::ReceivedLeaseMiss);return;}
         struct stat file{};if(fstat(message.dmabuf,&file)||local::KernelIdentity{{std::uint64_t(file.st_dev),std::uint64_t(file.st_ino)}}!=message.lease.kernel){count(p,Flow::KernelMiss);return;}
         LocalPicture picture;picture.metadata=message;picture.metadata.dmabuf=picture.metadata.readOnlyLeases=-1;picture.leases=reader;picture.connection=p.connection;
+        picture.ordinaryVideo=ordinaryVideo;
         if(message.lease.slot>=p.pictures.size())return;
         p.currentLeases=reader;p.cameraEpoch=message.lease;p.cameraDemand=needsCoverage;p.pictureCoverage[message.lease.slot]=needsCoverage;
         auto& old=p.pictures[message.lease.slot];old=std::move(picture);p.readyQueued[message.lease.slot]=false;count(p,Flow::PicturesRetained);

@@ -10,6 +10,9 @@ struct LocalPicture {
     stream_bridge_local::Message metadata{};
     std::shared_ptr<stream_bridge_local::LeaseReader> leases;
     std::shared_ptr<std::atomic<bool>> connection;
+    // Set only after matching authenticated policy3 metadata to this exact
+    // decoded lease. An absent mask or a latest metadata message is not proof.
+    bool ordinaryVideo=false;
 };
 struct ProcessConsumer {
     void* owner=nullptr;
