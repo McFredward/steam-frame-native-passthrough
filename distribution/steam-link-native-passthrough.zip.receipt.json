@@ -1,7 +1,7 @@
 {
   "archive": {
-    "bytes": 18336517,
-    "sha256": "cd66ebf1ef36e50a9897ce4184d0180a4148a7e818f5842f41200683e681fee4"
+    "bytes": 18336516,
+    "sha256": "280ee38c3968a3f914d5cbc014c4fa1ed9fb99b9d8d63c13af4a0e6d7d15ca55"
   },
   "artifacts": {
     "frame_layer": {
@@ -14,12 +14,12 @@
     },
     "pc_provider": {
       "bytes": 1308672,
-      "sha256": "895e249abf609ce3e680a3333dafc2d20f17f753121c73fc876acd3ae6349d12"
+      "sha256": "4677554de25b1421379ca0f330bbe106408b65eb44d30788fa39615a371d7881"
     }
   },
   "component_versions": {
     "frame": "0.2.15",
-    "pc": "0.2.18"
+    "pc": "0.2.19"
   },
   "device_actions": false,
   "hardware_verified": false,
@@ -29,7 +29,7 @@
   "result": "PASS",
   "runtime_profile": {
     "bytes": 9894,
-    "sha256": "55c093e0350bd55791cd600fd8ef2c3dd582dae17b5283207b404e4dae53cce1"
+    "sha256": "6943307271770cc366873e122ff21a91eae718c5ec160710c824e7d65714d04e"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -39,7 +39,7 @@
     },
     "PATCH_VERSIONS.json": {
       "bytes": 80,
-      "sha256": "a4abd607027d095d12e7a6fe5337a57d5605450072151093640b5e1f3a28e7ce"
+      "sha256": "1140123823ebb474b88196194704792a69d3bb84c82067b0df64aa0234fdf6eb"
     },
     "VERSION": {
       "bytes": 7,
@@ -194,7 +194,7 @@
       "sha256": "8eec889523a0b0e203ae5ec3ccbaca560860ca6601f29774a3cbda8ec942b8e4"
     }
   },
-  "source_revision": "917f5a408a04f5ec6dde0df89ac366c69552ccc6",
+  "source_revision": "9645ed07d6118b6395620f05f02e429caf7ec548",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -212,7 +212,7 @@
       "hardware_verified": false,
       "pin": {
         "bytes": 7074,
-        "sha256": "3cd815d9153afd2c6e8b9e2a90df9288916fefaba9f84812264fe257b9e6ff16"
+        "sha256": "3bcf3eaed85f365a80a9641f4b3d2f876ab05fe4ef5b1766f444a522ddd82075"
       }
     }
   ],
