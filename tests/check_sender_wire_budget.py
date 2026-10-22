@@ -25,6 +25,16 @@ def main():
             'encoder,params',
             'v2 reserves the actual 70000 added bytes at 120Hz inside the original video budget'),
     }
+    controls.update({
+        'unbounded-video-buffer': (
+            'budgetConfig.rcParams.vbvBufferSize=buffer.bits;budgetConfig.rcParams.vbvInitialDelay=buffer.delay;',
+            '(void)buffer;',
+            'v2 bounds the complete-frame burst instead of keeping the native video-only VBV'),
+        'averaged-loading-spike': (
+            'const auto metadata=s->wireBudget.reserve(authority,contract.frameRateNum,contract.frameRateDen);',
+            'const auto metadata=s->wireBudget.average(authority,contract.frameRateNum,contract.frameRateDen);',
+            'one scene-transition metadata spike reserves its full peak at the next native QoS call'),
+    })
     results = {}
     with tempfile.TemporaryDirectory(prefix='native-continuity-', dir=output) as temporary:
         temporary = Path(temporary)
@@ -52,7 +62,7 @@ def main():
         'controls': results,
         'device_access': False,
     }, indent=2) + '\n')
-    print('Restoring the unaccounted native video rate fails the production QoS witness.')
+    print('Unaccounted rate, unbounded VBV and averaged loading spikes each fail their production QoS witness.')
 
 
 if __name__ == '__main__':

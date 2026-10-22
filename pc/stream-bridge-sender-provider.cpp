@@ -311,10 +311,12 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             const auto now=std::chrono::steady_clock::now();if(!final&&now<nextBudgetReport)return;
             nextBudgetReport=now+std::chrono::seconds(5);
             const auto stats=boundary().reconfigureStats();if(!stats.budgeted||(!final&&stats.budgeted==budgetReports))return;
-            budgetReports=stats.budgeted;char text[320]{};
-            std::snprintf(text,sizeof text,"producer wire budget: attempts/accepted/rejected=%llu/%llu/%llu; last video requested/passed=%u/%u bit/s; measured added metadata=%u bit/s; producer-v2 only, original wire format and exact coverage retained",
+            budgetReports=stats.budgeted;char text[512]{};
+            std::snprintf(text,sizeof text,"producer wire budget: attempts/accepted/rejected=%llu/%llu/%llu; last video requested/passed=%u/%u bit/s; reserved metadata peak/mean=%u/%u bit/s; VBV requested/passed=%u/%u bits; delay=%u/%u bits; over-budget=%u; producer-v2 only, exact coverage retained",
                 static_cast<unsigned long long>(stats.budgeted),static_cast<unsigned long long>(stats.budgetAccepted),static_cast<unsigned long long>(stats.budgetRejected),
-                stats.requestedVideoRate,stats.appliedVideoRate,stats.metadataRate);report(text);
+                stats.requestedVideoRate,stats.appliedVideoRate,stats.metadataRate,stats.meanMetadataRate,
+                stats.requestedVbv,stats.appliedVbv,stats.requestedDelay,stats.appliedDelay,
+                unsigned(std::uint64_t(stats.appliedVideoRate)+stats.metadataRate>stats.requestedVideoRate));report(text);
         };
         // Atomic metadata is sampled/formatted only here, never inside a D3D
         // callback. Refusal populations distinguish the actual first gate from

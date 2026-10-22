@@ -53,7 +53,8 @@ struct ReconfigureStats {
     int lastStatus=0;std::uint32_t lastWidth=0,lastHeight=0;
     bool lastContractKnown=false,lastSameContract=false,lastResetEncoder=false;
     std::uint64_t budgeted=0,budgetAccepted=0,budgetRejected=0;
-    std::uint32_t requestedVideoRate=0,appliedVideoRate=0,metadataRate=0;
+    std::uint32_t requestedVideoRate=0,appliedVideoRate=0,metadataRate=0,meanMetadataRate=0;
+    std::uint32_t requestedVbv=0,appliedVbv=0,requestedDelay=0,appliedDelay=0;
 };
 struct OutputStats {
     std::uint64_t locks=0,exact=0,unmatched=0,completedBeforeEncodeReturn=0;

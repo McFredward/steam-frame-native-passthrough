@@ -44,9 +44,18 @@ void run(){
  check(WireBudget::videoRate(150000000,50400000)==99600000,"video plus lossless metadata fits the producer budget under sustained load");
  check(!accounting.reserve(0,90,1)&&!accounting.reserve(budget+1,90,1),"another source or absent policy cannot use these measurements");
  check(!accounting.reserve(budget,0,1)&&!accounting.reserve(budget,90,0)&&!accounting.reserve(budget,UINT32_MAX,1),"unknown and overflowing framerates never change policy");
- for(unsigned n=0;n<32;++n)accounting.observe(budget,200000,200000);
+ for(unsigned n=0;n<WireBudget::Window;++n)accounting.observe(budget,200000,200000);
  check(!accounting.reserve(budget,90,1),"retired overhead ages out of the fixed current window");
- accounting.observe(budget+1,200000,270000);check(!accounting.reserve(budget+1,90,1),"new source warmup cannot reuse another epoch's samples");
+ accounting.observe(budget+1,200000,207000);check(accounting.reserve(budget+1,90,1)==5040000,"the first current sample is used immediately without borrowing another epoch's peak");
+ accounting.observe(budget+1,200000,280000);
+ check(accounting.reserve(budget+1,90,1)==57600000&&accounting.average(budget+1,90,1)==31320000,
+    "a loading spike reserves the exact observed peak instead of averaging it away");
+ for(unsigned n=0;n<WireBudget::Window-1;++n)accounting.observe(budget+1,200000,207000);
+ check(accounting.reserve(budget+1,90,1)==57600000,"one low frame cannot immediately restore a burst-prone rate");
+ accounting.observe(budget+1,200000,207000);check(accounting.reserve(budget+1,90,1)==5040000,"retired peaks age out after bounded fresh outputs");
+ check(WireBudget::boundVbv(100000000,32800000,120,1,1000000,800000).bits==273333,"explicit native VBV is scaled and capped to one video-frame budget");
+ check(!WireBudget::boundVbv(0,1,90,1,0,0).bits&&!WireBudget::boundVbv(100,101,90,1,0,0).bits,"invalid rate inputs cannot create a new encoder buffer");
+ check(WireBudget::boundVbv(UINT32_MAX,UINT32_MAX,1,1000000,0,0).bits==UINT32_MAX,"large frame periods saturate rather than truncate buffer size");
  check(WireBudget::videoRate(100000000,UINT32_MAX)==25000000,"excessive metadata remains bounded without removing any exact coverage");
  check(WireBudget::videoRate(0,UINT32_MAX)==0&&WireBudget::videoRate(1,UINT32_MAX)==1,"small and zero native budgets never underflow to an invalid large rate");
  accounting.reset();check(!accounting.reserve(budget+1,90,1),"encoder reset clears all rate samples");

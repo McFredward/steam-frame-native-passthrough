@@ -16,7 +16,7 @@ NvencOutputEvidence captured{},observed{};bool allowAugment=false,wrongTimestamp
 std::uint64_t rateAuthority=0;
 std::size_t augmentBytes=1;
 NV_ENC_RECONFIGURE_PARAMS* receivedRateParams=nullptr;
-std::uint32_t receivedRate=0,receivedMaximum=0;bool observeRateParams=false;
+std::uint32_t receivedRate=0,receivedMaximum=0,receivedBuffer=0,receivedDelay=0;bool observeRateParams=false;
 std::uint64_t budgetAuthority(void*)noexcept{return rateAuthority;}
 std::uint64_t timestamp=0;NVENCSTATUS encodeResult=NV_ENC_SUCCESS,lockResult=NV_ENC_SUCCESS,unlockResult=NV_ENC_SUCCESS,reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
 NvencBoundary* activeBoundary=nullptr;PNVENCUNREGISTERRESOURCE nestedUnregister=nullptr;bool unregisterInside=false,discoveryRevokedInside=false;
@@ -32,7 +32,7 @@ NVENCSTATUS NVENCAPI open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*,void** e){*e=enc
 NVENCSTATUS NVENCAPI init(void*,NV_ENC_INITIALIZE_PARAMS*){return NV_ENC_SUCCESS;}
 NVENCSTATUS NVENCAPI reconfigure(void* handle,NV_ENC_RECONFIGURE_PARAMS* params){
     receivedRateParams=params;
-    if(observeRateParams&&params&&params->reInitEncodeParams.encodeConfig){receivedRate=params->reInitEncodeParams.encodeConfig->rcParams.averageBitRate;receivedMaximum=params->reInitEncodeParams.encodeConfig->rcParams.maxBitRate;}
+    if(observeRateParams&&params&&params->reInitEncodeParams.encodeConfig){receivedRate=params->reInitEncodeParams.encodeConfig->rcParams.averageBitRate;receivedMaximum=params->reInitEncodeParams.encodeConfig->rcParams.maxBitRate;receivedBuffer=params->reInitEncodeParams.encodeConfig->rcParams.vbvBufferSize;receivedDelay=params->reInitEncodeParams.encodeConfig->rcParams.vbvInitialDelay;}
     if(inspectDiscovery)discoveryRevokedInside=!activeBoundary->requestDiscovery(handle,localConfig(),authority());
     if(inspectPendingQos){
         // The actual output thread completes a previously accepted native
@@ -204,19 +204,36 @@ void run(){
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"fresh post-barrier Encode can resume exact coverage");release();
     // The old v1 producer still reaches the native API with its exact pointer
     // and unchanged configuration, even after receiving many augmented AUs.
-    check(receivedRateParams==&qos&&receivedRate==codecConfig.rcParams.averageBitRate,"v1/Gloomhaven keeps the original native QoS arguments and video rate");
+    check(receivedRateParams==&qos&&receivedRate==codecConfig.rcParams.averageBitRate&&receivedBuffer==codecConfig.rcParams.vbvBufferSize&&receivedDelay==codecConfig.rcParams.vbvInitialDelay,"v1/Gloomhaven keeps the original native QoS arguments and video rate");
     bridge.setOutputAugmenter({augment,nullptr,budgetAuthority});
     rateAuthority=0x123400000049;augmentBytes=70000;
     for(unsigned n=0;n<32;++n){p=sendFrame();release();}
     codecConfig.rcParams.averageBitRate=100000000;codecConfig.rcParams.maxBitRate=120000000;
+    codecConfig.rcParams.vbvBufferSize=1000000;codecConfig.rcParams.vbvInitialDelay=800000;
     const auto originalQos=qos;const auto originalRateConfig=codecConfig;
     reconfigureResult=NV_ENC_SUCCESS;
     check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_SUCCESS,"budgeted native Reconfigure retains its original return code");
     check(receivedRateParams!=&qos&&receivedRate==32800000&&receivedMaximum==52800000,"v2 reserves the actual 70000 added bytes at 120Hz inside the original video budget");
+    check(receivedBuffer==273333&&receivedDelay==262400,
+        "v2 bounds the complete-frame burst instead of keeping the native video-only VBV");
+    check(std::uint64_t(receivedBuffer)+70000*8<=100000000/120,
+        "video VBV plus exact peak metadata fits the caller's one-frame bit budget");
     check(!std::memcmp(&qos,&originalQos,sizeof qos)&&!std::memcmp(&codecConfig,&originalRateConfig,sizeof codecConfig),"budget accounting never mutates caller configuration or pointers");
     check(bridge.generation(handle)==qosGeneration&&bridge.encoderStates()[0].probeObserved,"budget-only change retains exact source and paired encoder proof");
     const auto rates=bridge.reconfigureStats();
     check(rates.budgeted==1&&rates.budgetAccepted==1&&!rates.budgetRejected&&rates.requestedVideoRate==100000000&&rates.appliedVideoRate==32800000&&rates.metadataRate==67200000,"cold accounting reports requested video, applied video and escaped metadata separately");
+    augmentBytes=75000;p=sendFrame();release();
+    check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_SUCCESS&&receivedRate==28000000,
+        "one scene-transition metadata spike reserves its full peak at the next native QoS call");
+    augmentBytes=70000;for(unsigned n=0;n<128;++n){p=sendFrame();release();}
+    codecConfig.rcParams.vbvBufferSize=codecConfig.rcParams.vbvInitialDelay=0;
+    table.nvEncReconfigureEncoder(handle,&qos);
+    check(receivedBuffer==273333&&receivedDelay==273333,"automatic native VBV defaults become an explicit bounded video-frame buffer for v2");
+    codecConfig.rcParams.vbvBufferSize=6000;codecConfig.rcParams.vbvInitialDelay=6200;
+    table.nvEncReconfigureEncoder(handle,&qos);
+    check(receivedBuffer==1968&&receivedDelay==1968,"a stricter native buffer is scaled rather than enlarged and delay cannot exceed its new size");
+    codecConfig.rcParams.vbvBufferSize=1000000;codecConfig.rcParams.vbvInitialDelay=800000;
+    check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_SUCCESS,"last accepted original VBV restored before rejection and NULL-config checks");
     reconfigureResult=NV_ENC_ERR_INVALID_PARAM;
     check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_ERR_INVALID_PARAM&&bridge.generation(handle)==qosGeneration,"a native refusal is forwarded without pretending the budget was applied or revoking valid input");
     codecConfig.rcParams.maxBitRate=1;
@@ -227,13 +244,13 @@ void run(){
     table.nvEncReconfigureEncoder(handle,&qos);
     check(receivedRateParams!=&qos&&receivedRate==32800000,"NULL-config QoS still accounts metadata against the caller's saved original config");
     rateAuthority=0;table.nvEncReconfigureEncoder(handle,&qos);
-    check(receivedRateParams!=&qos&&receivedRate==100000000,"NULL-config withdrawal explicitly restores the caller rate instead of retaining a previous adjusted driver rate");
+    check(receivedRateParams!=&qos&&receivedRate==100000000&&receivedBuffer==1000000&&receivedDelay==800000,"NULL-config withdrawal explicitly restores the caller rate instead of retaining a previous adjusted driver rate");
     qos.reInitEncodeParams.encodeConfig=&codecConfig;
     table.nvEncReconfigureEncoder(handle,&qos);
     check(receivedRateParams==&qos&&receivedRate==100000000,"EOF, opt-out or another v1 producer immediately restores the original native QoS path");
     rateAuthority=0x223400000049;
-    p=sendFrame();release();table.nvEncReconfigureEncoder(handle,&qos);
-    check(receivedRateParams==&qos&&receivedRate==100000000,"a new source epoch cannot borrow the previous metadata rate window");
+    augmentBytes=7000;p=sendFrame();release();table.nvEncReconfigureEncoder(handle,&qos);
+    check(receivedRateParams!=&qos&&receivedRate==93280000,"a new source epoch uses only its first current sample rather than the previous metadata peak");
     observeRateParams=false;rateAuthority=0;augmentBytes=1;bridge.setOutputAugmenter({augment,nullptr});
     qos.reInitEncodeParams.encodeConfig=nullptr;table.nvEncReconfigureEncoder(handle,&qos);
     check(bridge.generation(handle)==qosGeneration,"documented NULL config retains current deep-copied config with unchanged preset");
@@ -243,7 +260,7 @@ void run(){
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"QoS never resurrects a resource unregistered by the native callback");release();
     table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"native re-registration gets fresh valid input after QoS");release();
-    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==13&&qosStats.preservedRejected==3,"cold QoS counters distinguish successes from rejected attempts");
+    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==17&&qosStats.preservedRejected==3,"cold QoS counters distinguish successes from rejected attempts");
     check(qosStats.overlappingInputs==1&&qosStats.overlappingOutputs==2,"cold counters identify exact completions across both QoS overlap schedules");
     const auto paddingStart=offsetof(NV_ENC_INITIALIZE_PARAMS,privDataSize)+sizeof qos.reInitEncodeParams.privDataSize;
     const auto paddingEnd=offsetof(NV_ENC_INITIALIZE_PARAMS,privData);

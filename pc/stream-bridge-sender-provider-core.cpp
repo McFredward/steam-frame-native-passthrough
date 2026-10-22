@@ -187,9 +187,15 @@ NVENCSTATUS NVENCAPI NvencBoundary::reconfigure(void* encoder,NV_ENC_RECONFIGURE
                     const auto requested=requestedConfig.rcParams.averageBitRate;
                     budgetConfig.rcParams.averageBitRate=WireBudget::videoRate(requested,metadata);
                     if(requestedConfig.rcParams.maxBitRate)budgetConfig.rcParams.maxBitRate=std::max(budgetConfig.rcParams.averageBitRate,WireBudget::videoRate(requestedConfig.rcParams.maxBitRate,metadata));
+                    const auto buffer=WireBudget::boundVbv(requested,budgetConfig.rcParams.averageBitRate,contract.frameRateNum,contract.frameRateDen,
+                        requestedConfig.rcParams.vbvBufferSize,requestedConfig.rcParams.vbvInitialDelay);
+                    budgetConfig.rcParams.vbvBufferSize=buffer.bits;budgetConfig.rcParams.vbvInitialDelay=buffer.delay;
                     budgeted.reInitEncodeParams.encodeConfig=&budgetConfig;applyBudget=applyingBudget=true;
                     count(self.reconfigureStats_.budgeted);self.reconfigureStats_.requestedVideoRate=requested;
                     self.reconfigureStats_.appliedVideoRate=budgetConfig.rcParams.averageBitRate;self.reconfigureStats_.metadataRate=metadata;
+                    self.reconfigureStats_.meanMetadataRate=s->wireBudget.average(authority,contract.frameRateNum,contract.frameRateDen);
+                    self.reconfigureStats_.requestedVbv=requestedConfig.rcParams.vbvBufferSize;self.reconfigureStats_.appliedVbv=buffer.bits;
+                    self.reconfigureStats_.requestedDelay=requestedConfig.rcParams.vbvInitialDelay;self.reconfigureStats_.appliedDelay=buffer.delay;
                 }else if(s->budgetApplied&&!hasConfig&&haveConfig){
                     // NULL retains the DRIVER's last rate, which may be our
                     // adjusted value. Restore the caller's saved original rate

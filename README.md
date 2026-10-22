@@ -83,7 +83,20 @@ developed here by McFredward and contributors.
 
 Unofficial project, not affiliated with Valve.
 
-## Update recognition candidate (installer/PC0.2.16, Frame0.2.13)
+## Burst budget candidate (PC0.2.17)
+
+The latest Battles run activates passthrough on PC SteamVR2.18.4, but two
+unrecoverable native packet-loss resets interrupt it after scenario loading.
+PC0.2.17 reserves observed metadata peaks and bounds the video encoder buffer
+so a large video frame cannot retain the old video-only burst allowance with
+coverage added afterward. Video compression can increase under load; full mask
+precision, resolution and frame rate are retained. Gloomhaven's v1 policy and
+Frame0.2.13 are unchanged. With that Frame version already installed, this is a
+PC-only update without Frame writes/restart. **An extended headset test remains
+required**; this does not promise recovery from arbitrary network loss.
+[Evidence and software checks](docs/development/BATTLES-BURST-BUDGET.md).
+
+## Update recognition (introduced in installer/PC0.2.16, Frame0.2.13)
 
 SteamVR 2.18.4 changed the PC sender's internal positions. This candidate finds
 its public imports and DirectMode interface in the current module, retaining the
@@ -92,10 +105,11 @@ ELF/V4L2/OpenVR contracts; shader ID/debug metadata changes are accepted only
 when normalization proves unchanged executable logic and bindings. An unknown
 version or whole-file digest alone no longer disables passthrough.
 
-The supplied PC2.18.4 image passes static binding discovery. **A new headset test
-is still needed**; it is not listed as successfully tested above. Gloomhaven's
-existing producer protocol and encoder policy remain unchanged. This candidate
-also updates the Frame component; later updates with unchanged Frame files,
+The supplied PC2.18.4 image passes binding discovery and the first Battles run
+delivers passthrough. Its transport resets remain under test as described above;
+it is not yet listed as successfully tested. Gloomhaven's
+existing producer protocol and encoder policy remain unchanged. The original0.2.16/0.2.13 update changed
+the Frame component; later updates with unchanged Frame files,
 settings and components still leave the Frame untouched and do not restart it.
 PC SteamVR remains closed after setup. See the [implementation and validation
 limits](docs/development/NATIVE-UPDATE-RECOGNITION.md).

@@ -83,7 +83,20 @@ wird hier von McFredward und Mitwirkenden entwickelt.
 
 Inoffizielles Projekt, nicht mit Valve verbunden.
 
-## Kandidat mit Update-Erkennung (Installer/PC0.2.16, Frame0.2.13)
+## Kandidat gegen Übertragungsspitzen (PC0.2.17)
+
+Im jüngsten Battles-Test läuft Passthrough unter PC-SteamVR2.18.4. Nach dem
+Szenariowechsel verursachen allerdings zwei nicht behebbare Paketverluste kurze
+Videostream-Resets. PC0.2.17 reserviert gemessene Metadatenspitzen und begrenzt
+auch den Encoder-Puffer für einzelne große Videobilder. Die Videokompression
+kann unter Last stärker ausfallen; Maskengenauigkeit, Auflösung und Bildrate
+bleiben erhalten. Gloomhavens v1-Regelung und Frame0.2.13 sind unverändert.
+Ist diese Frame-Version bereits installiert, betrifft das Update ausschließlich
+den PC und verändert oder startet die Frame nicht. **Der längere Headset-Test
+steht noch aus**; beliebige Netzwerkverluste lassen sich damit nicht ausschließen.
+[Nachweise und Softwaretests](docs/development/BATTLES-BURST-BUDGET.md).
+
+## Update-Erkennung (eingeführt mit Installer/PC0.2.16, Frame0.2.13)
 
 SteamVR 2.18.4 hat die internen Positionen des PC-Senders verändert. Dieser
 Kandidat findet dessen öffentliche Imports und DirectMode-Schnittstelle in der
@@ -94,11 +107,12 @@ Normalisierung die ausführbare Berechnung und ihre Bindungen unverändert sind.
 Eine unbekannte Versionsnummer oder Dateiprüfsumme allein deaktiviert Passthrough
 nicht mehr.
 
-Die bereitgestellte PC-Datei aus 2.18.4 besteht die statische Erkennungsprüfung.
-**Der neue Test auf dem Headset steht noch aus**; deshalb zählt diese Version
-oben noch nicht zu den erfolgreich getesteten. Gloomhavens bisheriges
-Producer-Protokoll und dessen Encoder-Verhalten bleiben erhalten. Dieser
-Kandidat aktualisiert auch die Frame-Komponente. Bei späteren Updates mit
+Die bereitgestellte PC-Datei aus 2.18.4 besteht die Erkennungsprüfung und liefert
+im ersten Battles-Test Passthrough. Die Übertragungs-Resets werden wie oben
+beschrieben weiter geprüft; deshalb zählt diese Version noch nicht zu den
+erfolgreich getesteten. Gloomhavens bisheriges
+Producer-Protokoll und dessen Encoder-Verhalten bleiben erhalten. Das damalige
+Update aktualisierte auch die Frame-Komponente. Bei späteren Updates mit
 unveränderten Frame-Dateien, Einstellungen und Komponenten bleibt die Frame
 weiterhin unangetastet und wird nicht neu gestartet. PC-SteamVR bleibt nach dem
 Setup geschlossen. [Details und Testgrenzen](docs/development/NATIVE-UPDATE-RECOGNITION.md).
