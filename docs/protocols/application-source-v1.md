@@ -1,4 +1,4 @@
-# Application source API v1
+# Application source API: SBN1 v1 and optional v2
 
 This is the current **Windows application → local sender companion** contract.
 It declares an application's output format. It does not carry pixels, grant
@@ -12,8 +12,12 @@ The application supplies its complete ordinary per-eye image: contribution RGB
 `E` and independent coverage alpha `A`, with the same eye, extent, source epoch
 and native submission. Composition is `E + (1 − A) × camera`. Preserve positive
 RGB at zero alpha for additive emission; do not multiply contribution by alpha
-again. The current profile is Gamma SDR UNorm and MultiPass. No atlas, second
-scene camera, CPU pixel export or changed resolution is required by this API.
+again. The current profile requires ordinary SDR RGBA with independently proved
+eyes. A Linear-lit game can preserve its normal sRGB encoding; do not require a
+Gamma project or reinterpret an unknown colour declaration. Demeo's verified
+OpenVR adapter copies the existing encoded bytes to compatible UNorm exchange
+storage with an explicit Gamma declaration. No atlas, second scene camera, CPU
+pixel export or changed resolution is required by this API.
 
 Open the sender's local named pipe:
 `\\.\pipe\SFNP.StreamBridge.V1.<ownerPID>`. Discover the actual SteamVR host
@@ -40,7 +44,7 @@ without native struct padding. Reserved bytes must be zero.
 |---:|---:|---|
 | 0 | 4 | ASCII `SBN1` |
 | 4 | 2 | Kind: request 1, reply 2 |
-| 6 | 2 | Version 1 |
+| 6 | 2 | Version 1, or explicitly requested version 2 below |
 | 8 | 2 | Total length 128 |
 | 10 | 2 | Reply flags; request is zero |
 | 12 | 4 | Output profile 1 |
@@ -71,6 +75,9 @@ saved preference or successful handshake is insufficient.
 shows the client, stereo cohorts, material coverage and render callback checks.
 Its retry policy is application behavior, not a wire-protocol timer. It is an
 example rather than an additional runtime dependency for other games.
+
+The [game integration guide](../development/GAME-INTEGRATION.md) supplies the
+implementation sequence, current examples and a copyable agent handoff.
 
 Test both eyes, fractional alpha, additive materials, loading, native head and
 render-target replacement, menu transitions, toggles, reconnect and teardown.

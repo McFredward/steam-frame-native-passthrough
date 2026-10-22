@@ -1,5 +1,9 @@
 # Patch versions
 
+The October22 stable release is installer **0.2.22**, PC **0.2.21**, Frame
+**0.2.18**. The current repository version files remain authoritative; the
+examples below illustrate independent versioning, not a runtime allowlist.
+
 `VERSION` identifies the installer. `PATCH_VERSIONS.json` independently identifies
 the PC sender and Frame receiver patches. Installer-only changes increment
 `VERSION` without claiming a new native patch: installer **0.2.13**, for example,

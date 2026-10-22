@@ -2,7 +2,9 @@
 
 PC 0.2.18, Frame 0.2.14 and installer 0.2.18 introduce Error, Warning,
 Important and Debug thresholds. Game-mod logging is configured independently
-in its greenscreen.ini. Both dev packages retain existing diagnostic output;
+in its loader config or legacy INI. Demeo uses `[LOGGING] Level` in
+`BepInEx/config/DemeoMixedReality.cfg` (MelonLoader uses `greenscreen.ini`).
+Both dev packages retain existing diagnostic output;
 main packages default to Important. Existing Valve/Unity/loader logs are outside
 our control.
 

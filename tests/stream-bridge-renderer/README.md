@@ -1,5 +1,23 @@
 # Actual renderer integration fixture
 
+## Current camera-only and desktop checks
+
+The normal suite includes camera-only recovery and exact ordinary desktop
+pictures. With active authenticated MR intent, unproved game data records zero
+game RGBA. An ordinary decoded image instead needs exact current imported-image
+and descriptor proof at recording and submission, without a game mask or camera
+acknowledgment. A recycled/expired ordinary image cannot exempt a game image.
+Core Submit, Submit2 and KHR Submit2 all execute immutable policy controls; a
+retained command cannot borrow an old successful guard.
+
+`--camera-only-recovery-only` selects these recovery/desktop cases using the
+same required shader arguments shown below. Use `--sanitize` for ASan/UBSan.
+Also run `python3 -B tests/test_stream_bridge_vulkan.py` when the native wrapper
+changes: Renderer/Pool alone did not catch the set2-without-set1 wrapper bug.
+The separate real GPU readback checks RGB/zero-RGBA shader output, not the
+headset's actual native image binding. See
+[integration lessons](../../docs/development/INTEGRATION-LESSONS.md#recovery-and-desktop-are-different-picture-policies).
+
 This focused fixture compiles the production `stream_bridge_renderer.cpp` and
 `stream_bridge_coverage_gpu.cpp`. It exercises public Renderer entry points,
 its real definition journal and real mask pool. The public Vulkan fake executes

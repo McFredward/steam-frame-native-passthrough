@@ -1,19 +1,19 @@
 # Tested versions and evidence
 
-## Officially supported, successfully tested runtimes
+## Successfully tested runtimes: October22 release baseline
 
 | Component | Current paired route |
 |---|---|
 | Headset and transport | Steam Frame over Steam Link |
-| PC SteamVR | **2.18.4 · build 1792185270**, user-confirmed Battles picture and scenario transition with PC 0.2.17 |
+| PC SteamVR | **2.18.4 · build 1792185270**; earlier PC2.17.10 also tested |
 | Frame SteamVR | **2.18.2 · build 1791331621**, user-confirmed paired picture |
 | PC sender | Windows x86_64, supported NVIDIA encoder, HEVC |
-| Game source | Explicit integration; Gamma SDR UNorm, MultiPass, real RGB contribution and alpha |
+| Game source | Explicit SDR RGBA integration; real RGB contribution, coverage alpha and independently proved native eyes |
 | Installation | Matching PC and Frame companions, [guided setup](PC-FRAME-SETUP.md) |
-| Hardware status | User-confirmed Battles continuity in the October 22 follow-up; simultaneous local menu/game remains unconfirmed |
+| Released components | Installer0.2.22, PC0.2.21, Frame0.2.18; Demeo Mixed Reality2.0.0 |
+| Hardware status | Demeo, Battles and Battlemarked tested; latest desktop-overlay fix reported working |
 
 The supported game and minimum version have their own [table](../README.md#supported-games).
-A matching development build is needed before an upcoming game release is available.
 Steam Frame standalone passthrough is separate and requires neither streamed companion.
 
 These are recorded successful tests, not a runtime version allowlist. The PC
@@ -22,8 +22,9 @@ need after an update. Whole-file hashes record provenance and preserve the known
 path; a changed hash alone does not disable the patch. PC SteamVR 2.18.4 and
 Frame SteamVR 2.18.2 are officially supported following the
 [October 22 successful Battles follow-up](development/BATTLES-BURST-BUDGET.md#confirmed-follow-up-october-22).
-Earlier PC 2.17.10 tests confirmed Demeo, Battles and Gloomhaven pictures; the
-new PC version has been retested with Battles, not all games. The Frame version
+Earlier PC2.17.10 tests confirmed Demeo, Battles and Gloomhaven pictures. The
+subsequent October22 follow-up covers all three Demeo games on the current route;
+it is not a new Gloomhaven headset test. The Frame version
 does not imply a PC SteamVR version. Native Linux PC sender installation is not yet supported; running the
 Windows game through Proton still uses Linux SteamVR as the driver host. Other
 headsets, Virtual Desktop, ALVR, HDR and unknown stereo/source formats are outside
@@ -34,7 +35,7 @@ this route's current validated combination.
 The v2 rate policy supports Auto and fixed Steam Link bitrate settings. The
 confirmed October 22 headset run used Auto; constant-target CBR software tests
 cover fixed bitrate with changing mask load. Fixed-bitrate headset validation
-remains separate. See [bitrate behavior](../README.md#steam-link-bitrate-and-ovr-advanced-settings).
+remains separate. See the [player notes](../README.md#supported-games).
 
 **OVR Advanced Settings is a known incompatibility in Demeo:** unwanted tracking
 origin changes/recenters occurred with it running and were no longer observed
@@ -52,8 +53,11 @@ resolution/foveation/sharpening lease.
 
 Both companions, supported game source and valid current-image proof are required.
 A successful install, compatible peer, generated mask or healthy startup is not
-proof that the headset is displaying the right image. Missing/invalid proof keeps
-ordinary opaque video. No previous or latest mask is substituted. Other codecs
+proof that the headset is displaying the right image. Missing exact game proof
+under authenticated active-MR intent and a current camera grant produces live
+camera-only output. Without that authority, ordinary native output is retained.
+Exactly authenticated ordinary desktop pictures bypass game coverage while
+keeping the camera warm. No previous or latest mask is substituted. Other codecs
 must continue ordinary Steam Link without gaining passthrough permission.
 
 Partial opacity is represented. It does not let game shaders refract the real
@@ -62,38 +66,32 @@ background-sampling shaders and every material family are not certified.
 
 ## Current evidence
 
-Software checks exercise production native dispatch, source/texture ownership,
-authenticated control, accepted access units, receiver leases and guarded GPU
-coverage. The independent-mask route has user-confirmed visible room pictures.
-The paired 0.2.9 hardware run was reported as the best continuous picture yet,
-with a brief activation interruption and a later native video reset. Lossless
-compression was verified in use, reducing coverage payload from 108.6% of
-original video in the 0.2.8 capture to 53.5% in that different run; this is not
-a controlled benchmark.
+The stable [0.2.22 release](https://github.com/McFredward/steam-link-native-passthrough/releases/tag/v0.2.22)
+contains the native PC0.2.21/Frame0.2.18 binaries tested on dev. Main changes only
+the logging defaults and related integrity metadata. The full native CI and
+Windows/Linux installer CI passed before publication; public asset downloads
+were compared byte-for-byte with the reviewed artifacts.
 
-The latest read-only audit of game Build 713 / patch 0.2.10 verifies 8,481
-decoded/uploaded masks without decode, upload or guarded-submit refusals. There
-is no native backtrack reset after active masks begin. The logs still identify
-a game-owned main-menu head replacement that withdraws its source, and two
-decoder emergency handoff timeouts (one before active masks). These are bounded
-observations, not proof that every visible frame was correct or uninterrupted.
-Candidate 0.2.11 repairs two source-proven avoidable waits: lost notification
-after exact capture retirement, and waiting for an exact token already known
-to be permanently rejected. Its focused software controls pass; the candidate
-has not yet been observed on the headset and does not claim to explain both
-previous aggregate timeout events. Game Build 714 separately preserves its
-owned menu head across native menu-anchor replacement.
-The latest automated and log results do not certify arbitrary game materials,
-new runtimes or a final like-for-like sharpness/latency comparison. See the
-[continuity evidence and limits](development/FRAME-CONTINUITY.md).
-The maintainer's October21 Demeo1.4.11 test confirms the PC0.2.14 repair:
-correct opacity/matching eyes and no recurring flashes or noticed glitches.
-The log confirms29exact output completions during QoS with0unmatched outputs;
-all14,629certified masks reach Frame metadata. Frame0.2.12 is unchanged.
-Short authored game fades and native loading/source switches remain distinct.
-Demeo mod1.4.12 separately changes identified game fades toward passthrough;
-its new fades and the other two games still require their own headset tests.
-Simultaneous local Steam menu/game mixed reality remains unconfirmed.
+The maintainer reported the desktop fix working. The October22 21:39–21:45
+read-only Frame capture covers Battlemarked, Battles and Demeo: 2,621 ordinary
+desktop/video submissions, 10,189 decoded/uploaded masks, zero rejected masks,
+uploads or guarded game submits, and zero lost pipelines. One decoder reset is
+at initial connection setup before game startup; no later reset is logged.
+One native metadata event arrived late at Demeo launch. These logs support the
+reported result; they do not prove every displayed frame was visually correct.
+See [desktop recovery](development/DESKTOP-RECOVERY.md).
+
+Software checks separately exercise native dispatch, source/texture ownership,
+authentication, accepted access units, decoder/image leases, camera grants,
+ordinary desktop exemption and the real Vulkan wrapper. Offscreen Vulkan RGB
+comparisons and sanitizer fixtures do not replace the headset test.
+
+Older Gloomhaven/Demeo observations and candidate investigations remain in the
+[continuity record](development/FRAME-CONTINUITY.md) and dated notes. Their
+pending statuses describe those earlier artifacts, not the released desktop
+fix. No current result certifies arbitrary materials, new runtimes, fixed-rate
+headset behavior or a controlled sharpness/latency benchmark. General source
+and recovery changes must preserve v1/Gloomhaven as well as v2 integrations.
 
 The [old receiver's visible gameplay and sharpness limitations](history/ATLAS-RECEIVER.md)
 are historical results of a different, retired method. They must not be presented

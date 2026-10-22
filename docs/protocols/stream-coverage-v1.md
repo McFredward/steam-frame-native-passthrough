@@ -29,7 +29,7 @@ unsigned little-endian. Its dedicated `user_data_unregistered` SEI UUID is
 | 64 | 2 | Coded width |
 | 66 | 2 | Coded height |
 | 68 | 4 | Decoded R8 byte count; zero for None |
-| 72 | 1 | Optional camera intent: 0 unchanged, 1 active, 2 withdrawn |
+| 72 | 1 | Optional policy: 0 unchanged, 1 active MR recovery, 2 withdrawn, 3 exact ordinary picture with MR recovery retained |
 | 73 | 7 | Reserved, zero |
 | 80 | 32 | SHA256 of the complete original access unit |
 | 112 | 32 | SHA256 of the encoded coverage |
@@ -118,3 +118,25 @@ pixels, image association or mask reuse. Only a current camera acknowledgment
 allows zero game RGBA while exact source/frame/eye/image proof is absent. Real
 local session loss clears policy; decoder generation renewal keeps the camera
 warm while requiring fresh image proof and authenticated producer binding.
+
+## Optional ordinary-picture policy3
+
+Bit512 (`CapOrdinaryVideoPicture`), together with negotiated bit128, permits
+signed policy3 only with None coverage. It retains active recovery intent while
+authorizing the matching ordinary desktop/compositor picture without a game
+mask. It does not authorize unproved game pixels. Unknown policies and policy3
+with any non-None mask are rejected; peers without the capability never receive3.
+
+The PC proves the complete native source/copy, held allocation, accepted encoder
+input and matching output. A foreign PID or missing mask alone is insufficient.
+Frame Process joins the authenticated metadata to the exact decoded lease by
+source, frame, binding, timestamp and submitted-content identity. The local IPC
+descriptor does not serialize this policy; Process retains the verified value
+for that exact join. Future metadata cannot reclassify an already selected image.
+
+The renderer verifies the current imported-image/descriptor generations at draw
+and submit. An ordinary picture needs no mask or camera acknowledgment; policy3
+keeps the physical camera warm. Returning to a game picture immediately requires
+that picture's exact mask and current camera grant. See
+[desktop recovery](../development/DESKTOP-RECOVERY.md) for implementation and
+the maintainer-confirmed October22 observation.

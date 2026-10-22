@@ -4,6 +4,10 @@ This is a developer workflow, not an installation guide. Players use the
 [guided installer](../../README.md#installation). A local build never authorizes
 a device write or service restart.
 
+For a game-side integration, start with the [game guide](GAME-INTEGRATION.md)
+and its affected-check matrix. Reusing the existing application-source API does
+not itself require rebuilding or reinstalling the native companions.
+
 ## Portable modules and focused tests
 
 The commands below require CMake/CTest 3.20+, C++17 and Python 3.
@@ -23,6 +27,15 @@ ctest --test-dir build/bridge -C Release --output-on-failure \
 Linux also provides `test_stream_bridge_control`, `test_stream_bridge_local`,
 `test_stream_bridge_native_decode` and `test_stream_bridge_native_runtime`.
 Build the actual targets before selecting their names with `ctest -R`.
+For the game-source wire format and native source ownership boundary:
+
+```sh
+cmake --build build/bridge --parallel 4 --target \
+  test_stream_bridge_source_contract test_stream_bridge_sender_provider_sourceipc
+ctest --test-dir build/bridge -C Release --output-on-failure \
+  -R '^stream_bridge_(source_contract|sender_provider_sourceipc)$'
+```
+
 Native Process, renderer and real Vulkan fixtures have additional explicit
 inputs; use their [Process](../../tests/stream-bridge-process/README.md),
 [renderer](../../tests/stream-bridge-renderer/README.md) and GPU runner instructions.
@@ -93,7 +106,16 @@ Follow [versioning](../PATCH-VERSIONING.md) and the
 [immutable payload publication sequence](../../distribution/README.md): commit
 the validated archive, then pin its full commit URL/size/hash in both bootstraps,
 then update compatibility aliases. Check the ordinary entry, not only a preview
-or an extracted local package. No separate GitHub Release is required.
+or an extracted local package. No separate GitHub Release is required. A stable
+release can also have a GitHub Release when explicitly requested by the
+maintainer; it does not change the immutable installer download route.
+
+Package defaults are dev/Debug and main/Important; they are not new native
+versions. `tools/publish_logging_channel.py` checks that retargeting changes only
+logging data and integrity metadata, preserving native/setup binaries exactly.
+Its `--publish` mode commits and pushes: use it only for authorized publication,
+not a game agent's local build. A PC-only update with unchanged Frame payload
+must not write to or restart the Frame; see `tests/test_pc_only_setup.py`.
 
 Retain source revisions, exact artifacts, commands/results and borrowed-input
 pins. Once child processes have exited, remove generated object trees and

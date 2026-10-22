@@ -1,5 +1,11 @@
 # General native mask compression and camera-only recovery
 
+This is the versioned codec/recovery investigation. Candidate and pending-test
+statements below refer to their recorded checkpoints. The released PC0.2.21 /
+Frame0.2.18 baseline and later desktop confirmation are recorded in
+[current compatibility](../COMPATIBILITY.md#current-evidence) and
+[desktop recovery](DESKTOP-RECOVERY.md).
+
 PC 0.2.20 and Frame 0.2.16 apply these policies to every current explicit-RGBA
 producer, including v1/Gloomhaven. Application names and v2 budget leases do not
 select a special recovery/codec route. The separate video-rate budget remains
@@ -59,7 +65,10 @@ to be measured. Byte savings alone cannot prove that network overload is solved.
 ## Camera-only recovery is policy, never image proof
 
 Signed certificate byte72 carries0 unchanged/discovery,1 active explicit-MR intent,
-2 source withdrawn. Bit128 must be negotiated to send nonzero intent. Any current
+2 source withdrawn, or optional3 for an exact ordinary picture retaining MR
+recovery. Policy3 additionally requires bit512 and None coverage; see the
+[signed policy contract](../protocols/stream-coverage-v1.md#optional-ordinary-picture-policy3).
+Bit128 must be negotiated to send nonzero intent. Any current
 explicit-RGBA producer may activate it. A decoder generation change preserves the
 acknowledged camera intent while revoking all old image/mask authority. Renewed
 source generations still require fresh authenticated producer bindings. Explicit
