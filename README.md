@@ -18,9 +18,7 @@
 > [!IMPORTANT]
 > **Currently supports <img src="docs/img/windows.svg" width="18" height="18" alt=""> Windows PCs with an <img src="docs/img/nvidia.svg" width="20" height="20" alt=""> NVIDIA GPU only.**
 >
-> **Officially supported and successfully tested: PC SteamVR 2.18.4 (build 1792185270) · Steam Frame SteamVR 2.18.2 (build 1791331621).**
->
-> These are test results, not version limits. The patch recognizes the required interfaces after updates and continues when their contracts remain intact. Untested versions show a warning; **Install anyway** enables the patch for testing.
+> Untested SteamVR versions can be tried after a warning with **Install anyway**.
 
 Play supported PC VR games in your real room over Steam Link.
 
@@ -35,8 +33,21 @@ partial transparency; the camera image stays on the headset.
 | Game | Required mod | Minimum version |
 |---|---|---|
 | Gloomhaven Digital | [GloomhavenVR](https://github.com/McFredward/GloomhavenVR) | **1.2.0** |
+| Demeo | [Demeo GreenScreen](https://github.com/McFredward/Demeo_GreenScreen) | **1.4.0** |
+| Demeo Battles | [Demeo GreenScreen](https://github.com/McFredward/Demeo_GreenScreen) | **1.4.0** |
 
 Other games need an integration; installing the patch alone is not enough.
+
+Steam Link can use **Auto or a fixed bitrate**.
+**Close OVR Advanced Settings when playing Demeo**; it can cause unwanted recentering.
+
+## Successfully tested SteamVR versions
+
+| Component | Version | Build |
+|---|---|---|
+| PC SteamVR | **2.18.4** | 1792185270 |
+| Steam Frame SteamVR | **2.18.2** | 1791331621 |
+| PC SteamVR (earlier test) | 2.17.10 | 1789498647 |
 
 ## Installation
 
@@ -82,55 +93,3 @@ Its history and [MIT license](LICENSE) are preserved; native transparency is
 developed here by McFredward and contributors.
 
 Unofficial project, not affiliated with Valve.
-
-## Confirmed Battles continuity (PC 0.2.17)
-
-The October 22 follow-up headset test reports no black flashes, glitches or
-unwanted recenter after scenario loading. Logs confirm 8,719 masks received,
-zero rejected masks/uploads, 10,330 exact encoder outputs with zero unmatched,
-and no new stream/decoder reset during gameplay. Packet retries and one late
-metadata message remain, without the previous unrecoverable-loss resets.
-This records the tested run, not immunity to future network loss.
-
-PC 0.2.17 reserves metadata peaks and bounds the encoder's single-frame video
-buffer. Frame 0.2.13 and Gloomhaven's v1 policy are unchanged. Installer 0.2.17
-recognizes the confirmed current SteamVR versions and PC runtime fingerprint;
-**neither native patch needs updating** if already installed. No Frame writes
-or restart are required. [Evidence](docs/development/BATTLES-BURST-BUDGET.md#confirmed-follow-up-october-22).
-
-## Steam Link bitrate and OVR Advanced Settings
-
-Both **Auto and a fixed Steam Link bitrate** use the same v2 coverage budget.
-The patch reserves space for mask metadata inside the encoder-requested bitrate
-and bounds video bursts; it does not require Auto to lower the requested value.
-At a fixed setting, video compression can increase as mask complexity grows.
-A fixed 100 Mbit/s CBR software test keeps the target constant while mask sizes
-change and confirms the combined video/metadata budget. The successful headset
-run above used **Auto**; a fixed-bitrate headset run is not yet confirmed.
-If the configured rate is too low even for mask data and the retained video
-floor, this policy cannot make it fit; diagnostics report the excess without
-dropping masks. No extra encoder resets or calls are injected.
-
-**Known incompatibility: OVR Advanced Settings.** In the Demeo tests it caused
-unwanted tracking-origin changes/recenters; tests with it closed no longer
-showed that behavior. Close OVR Advanced Settings while using this mod and
-native passthrough. Gloomhaven's separate test history does not establish that
-this combination is safe for Demeo.
-
-## Update recognition (introduced in installer/PC0.2.16, Frame0.2.13)
-
-SteamVR 2.18.4 changed the PC sender's internal positions. The patch finds
-its public imports and DirectMode interface in the current module, retaining the
-actual native shader and resource bindings. The Frame recognizes its public
-ELF/V4L2/OpenVR contracts; shader ID/debug metadata changes are accepted only
-when normalization proves unchanged executable logic and bindings. An unknown
-version or whole-file digest alone no longer disables passthrough.
-
-PC SteamVR 2.18.4 is now officially supported following the successful Battles
-headset test above. Older PC 2.17.10 tests remain recorded in the
-[test history](docs/COMPATIBILITY.md). Gloomhaven's
-existing producer protocol and encoder policy remain unchanged. The original0.2.16/0.2.13 update changed
-the Frame component; later updates with unchanged Frame files,
-settings and components still leave the Frame untouched and do not restart it.
-PC SteamVR remains closed after setup. See the [implementation and validation
-limits](docs/development/NATIVE-UPDATE-RECOGNITION.md).
