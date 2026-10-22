@@ -1,25 +1,25 @@
 {
   "archive": {
-    "bytes": 18336650,
-    "sha256": "04552195b4f39bb4fa01b4a62d96ea56eb753116c6681f93c4d2c938c4e7efa8"
+    "bytes": 19024367,
+    "sha256": "83488bb228a646d1e09262740ddaf43cf7fe433dfe15b76dc8b70dffc4f6f521"
   },
   "artifacts": {
     "frame_layer": {
-      "bytes": 2896280,
-      "sha256": "2fa595b5c44c9a53afdf704400328e7a54af3a561ac4cd2b54e7a1455a7cf980"
+      "bytes": 3650648,
+      "sha256": "93b2c3fdf8b6b0b13ed0c9b761efcffc8720b75fb4cc33cdcb4cfcd9cf43e01c"
     },
     "frame_selector": {
       "bytes": 73360,
       "sha256": "3ee160069c02826cf6312e8644a98d5dd148d3afac58a67bfee0987bae79e2ec"
     },
     "pc_provider": {
-      "bytes": 1308672,
-      "sha256": "4677554de25b1421379ca0f330bbe106408b65eb44d30788fa39615a371d7881"
+      "bytes": 1993728,
+      "sha256": "d66034a2ed07611de7a5f62a6737e87717687932494129d95e893ba1995e7497"
     }
   },
   "component_versions": {
-    "frame": "0.2.15",
-    "pc": "0.2.19"
+    "frame": "0.2.16",
+    "pc": "0.2.20"
   },
   "device_actions": false,
   "hardware_verified": false,
@@ -28,8 +28,8 @@
   "readiness": "release",
   "result": "PASS",
   "runtime_profile": {
-    "bytes": 9894,
-    "sha256": "3c069a6333f1d0a58d343644efd0434631e07a992c6a0412027b6c84ce644889"
+    "bytes": 10183,
+    "sha256": "019a045d3a26fcef1d0e46fda10e130b0821fb5c508a427e8636acc50aa61aa8"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -39,11 +39,11 @@
     },
     "PATCH_VERSIONS.json": {
       "bytes": 80,
-      "sha256": "1140123823ebb474b88196194704792a69d3bb84c82067b0df64aa0234fdf6eb"
+      "sha256": "ed90f0ffb01cc04f94fa108f1862c6196c74235e0e7d8cbdbbe34122ee34b1f2"
     },
     "VERSION": {
       "bytes": 7,
-      "sha256": "d8f3e6b0f7817c4ad634608dc673833c04c255c7ad2ef87ece9a443579553d25"
+      "sha256": "f2b441d0c9b7b81e8d9385e7e89ede33d7521583579dcb7b42fa366fd49758ab"
     },
     "packaging/setup-openssh.json": {
       "bytes": 1029,
@@ -130,12 +130,16 @@
       "sha256": "06dcc953d97bdea5aad9740e2513514ab7ee6cf514ff336fd3bd72f81db45208"
     },
     "setup/stream_bridge_install.py": {
-      "bytes": 170359,
-      "sha256": "6aaf78675ee0dfc208b5a62ea6ac36b37e86ac445dec894384403b4d842d8255"
+      "bytes": 170615,
+      "sha256": "224b66f87d4d4bde56f884d953906ca2816d4c0770fa382b8e6447078b15eb19"
     },
     "third_party/lz4/LICENSE": {
       "bytes": 1311,
       "sha256": "8b58c446121a109ccf32edc094bba3010a3d85e4ee3702950db55e4d3e87736c"
+    },
+    "third_party/zstd/LICENSE": {
+      "bytes": 1549,
+      "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
     },
     "tools/app_payload_probe.py": {
       "bytes": 23988,
@@ -158,8 +162,8 @@
       "sha256": "a375a068bc68f0c8e34fa2051bb7371d816aa737cbf527bcfaaac0e5dcb06a93"
     },
     "tools/native_fragment_stream_coverage.py": {
-      "bytes": 6771,
-      "sha256": "4a556427f008295b6aa8ef20ada29951334b798cf624fe4485570c221370943e"
+      "bytes": 8750,
+      "sha256": "a8e947aa49bd1881d66ae9a2bed6b3eeb5761e0a5e3368165467495f4046a511"
     },
     "tools/native_shader_contract.json": {
       "bytes": 13764,
@@ -178,8 +182,8 @@
       "sha256": "fe07748a2ba42932aa98e2526cd477f73b75860d0b962878aca5940768f1d2a7"
     },
     "tools/package_stream_bridge.py": {
-      "bytes": 18886,
-      "sha256": "226a34d87afea0da2d8c7937c1d0b8793b011dd5ae23e71c16da39fa01925fbc"
+      "bytes": 18993,
+      "sha256": "46574f4e1fcc7b606fca6980bf1ec2d3b4dba0a77eb732325dd04fa99e715755"
     },
     "tools/package_stream_link_setup.py": {
       "bytes": 7826,
@@ -194,7 +198,7 @@
       "sha256": "8eec889523a0b0e203ae5ec3ccbaca560860ca6601f29774a3cbda8ec942b8e4"
     }
   },
-  "source_revision": "8f60a79ae19e42d03210e886614adb92d492e038",
+  "source_revision": "a4ad13f75493e4c45409da2deb0a9f35e9ccf389",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -211,10 +215,10 @@
       ],
       "hardware_verified": false,
       "pin": {
-        "bytes": 7074,
-        "sha256": "2561a6f8dbb5cf0bdbe2b3c3556650c7360c478bb4c9648a58e844b161ef6b6d"
+        "bytes": 7219,
+        "sha256": "8b7ded83cc9adec7d4c186019c3d0bce437fd08b3e71c360f761ac40063cbbf8"
       }
     }
   ],
-  "version": "0.2.19"
+  "version": "0.2.20"
 }

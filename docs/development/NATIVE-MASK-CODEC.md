@@ -94,3 +94,16 @@ bounded; main Important excludes mask-content samples. The user-run installer
 must update both changed components; unchanged Frame installations in future
 PC-only updates remain untouched, and PC SteamVR remains closed. No device write
 or restart is performed during development validation. A headset test is pending.
+
+The final local validation passed all180 full-project CTests,32 bridge-only
+CTests, three codec ASAN/UBSAN tests,345 process checks (also sanitized),906531
+Renderer/Pool checks (also sanitized),28 causal controls and840 real Vulkan GPU
+checks with zero validation errors. The stereo/contended-recovery subset passed
+128091 checks in normal and sanitized runs. Installer91, PC-only21 and packaging15
+tests passed. Native optional-codec and shader/source proof stayed unchanged in
+the final test-runner routing corrections. Hosted codec, stage, readback, source,
+resource, update and lifecycle workflows passed on sourcea4ad13f; the broad hosted
+native workflow stalled while installing apt dependencies. Its full local180-test
+counterpart passed; do not label the hosted workflow successful from that result.
+The setup workflow's individual job steps completed successfully while its API
+still reported in_progress. Hardware verification remains false.
