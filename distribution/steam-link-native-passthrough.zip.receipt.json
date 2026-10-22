@@ -1,25 +1,25 @@
 {
   "archive": {
-    "bytes": 19022370,
-    "sha256": "9fe6b95f03d1386b86b354aa5e6e5a816caf6242697aff0ed062739e30970faa"
+    "bytes": 19023165,
+    "sha256": "598de298ec5861d9a477487fe537a932d22258787e1a364c9b61fe70cfe5490b"
   },
   "artifacts": {
     "frame_layer": {
-      "bytes": 3650368,
-      "sha256": "50bb8d9961e208f992054af1f2dc8e4e5a35c0f1f9035526ece2acc9887c8bdd"
+      "bytes": 3649904,
+      "sha256": "82259264024271f164224c36f4ec0bfdb604035d8916ef84af163685766b3da3"
     },
     "frame_selector": {
       "bytes": 73360,
       "sha256": "3ee160069c02826cf6312e8644a98d5dd148d3afac58a67bfee0987bae79e2ec"
     },
     "pc_provider": {
-      "bytes": 1993728,
-      "sha256": "d66034a2ed07611de7a5f62a6737e87717687932494129d95e893ba1995e7497"
+      "bytes": 1994752,
+      "sha256": "f592270337701b64c2ae1e2ebb7bef40f90646b92f7722d63e196fc75fc72edf"
     }
   },
   "component_versions": {
-    "frame": "0.2.17",
-    "pc": "0.2.20"
+    "frame": "0.2.18",
+    "pc": "0.2.21"
   },
   "device_actions": false,
   "hardware_verified": false,
@@ -29,7 +29,7 @@
   "result": "PASS",
   "runtime_profile": {
     "bytes": 10183,
-    "sha256": "b34094dd360c27d56187daba10847199b09864e60ccbd7aea0bdeec201722f4d"
+    "sha256": "2b993ded9be7d91692d0d75d5c8e0e6ceab4d65f19812e9f992f06b117ce17da"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -39,11 +39,11 @@
     },
     "PATCH_VERSIONS.json": {
       "bytes": 80,
-      "sha256": "94c7c7f38c91f58ff07017bbc4fbd21cf62206dae0d1fba1b958b713b76b1328"
+      "sha256": "701db8a75479d1fc0bdfc9f71c3ea07d77a774c2e68440bcfeff4602f958e7f3"
     },
     "VERSION": {
       "bytes": 7,
-      "sha256": "d612e32bad3e982c0bff1240bd4d9f08fced471fe070dc54d15a669eb636909e"
+      "sha256": "1c26b6827d8350fcc391724bf4e71440a594c6580edb5e88687febdab34f8a70"
     },
     "packaging/setup-openssh.json": {
       "bytes": 1029,
@@ -198,7 +198,7 @@
       "sha256": "8eec889523a0b0e203ae5ec3ccbaca560860ca6601f29774a3cbda8ec942b8e4"
     }
   },
-  "source_revision": "25572b77996c623ef1e5a5a1bd727d177636bcdf",
+  "source_revision": "f376a2ece12ae4f0de26861999f9cc6ef9b54c4a",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -216,9 +216,9 @@
       "hardware_verified": false,
       "pin": {
         "bytes": 7219,
-        "sha256": "d9ad7510496b27821fa6c17dcce8b7f1d6349abaf8c6ae4a99e6ac08cd160fb9"
+        "sha256": "3e5d524dc78294e50c10b7869c1635075815dbc68ae1e12381f12efc42cea262"
       }
     }
   ],
-  "version": "0.2.21"
+  "version": "0.2.22"
 }
