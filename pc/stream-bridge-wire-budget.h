@@ -39,9 +39,14 @@ public:
         return {bits,static_cast<std::uint32_t>(std::min<std::uint64_t>(initial,bits))};
     }
     static std::uint32_t videoRate(std::uint32_t requested,std::uint32_t metadata)noexcept {
-        // Bounded quality floor. If metadata alone exceeds the budget, report
-        // that pressure; never discard coverage or invent an opaque success.
-        return requested-std::min(metadata,requested-(requested/4+(requested%4!=0)));
+        // A proportional 25% quality floor overfills the actual wire budget
+        // when coverage takes most of it (e.g. 297 Mb/s total, 273 Mb/s mask).
+        // Keep a small encoder floor instead, leaving every other available
+        // bit for video. Extremely small caller budgets retain the old floor.
+        // Metadata that alone exceeds the target is still reported as pressure;
+        // never discard exact coverage or claim an impossible total fits.
+        const auto floor=std::min<std::uint32_t>(1000000,requested/4+(requested%4!=0));
+        return requested-std::min(metadata,requested-floor);
     }
 private:
     std::uint64_t authority_=0,sum_=0;

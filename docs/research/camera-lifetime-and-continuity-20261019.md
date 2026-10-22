@@ -94,3 +94,26 @@ old-picture rejection, fresh pool admission and immediate channel-loss revocatio
 They use signed metadata and real shared leases/IPC; hardware continuity and
 GloomhavenVR pictures still require a headset test. The PC binary, selector,
 shader and camera helper are unchanged in this Frame-only update.
+
+## Packet loss under mask-heavy producer load (2026-10-22, PC 0.2.19)
+
+The 13:55:32 Battlemarked capture contains a real SVLFEC backtrack-window
+failure, too many missing packets to retransmit and repeated sender resets.
+At 13:55:30 the source reports a requested total of 297,107,904 bit/s and
+272,604,240 bit/s reserved metadata, yet passes 74,276,976 bit/s video. The
+25% proportional video floor therefore exceeds the available total by about
+50 Mbit/s precisely when the metadata reservation is most needed.
+
+Replace that floor with at most 1 Mbit/s (retaining the old proportional floor
+for extremely small requests). Every remaining bit is still available to video;
+when lossless metadata fits the target, the former proportional floor cannot
+force a larger combined stream. If metadata alone exceeds the total, the
+existing pressure diagnostics remain explicit. This cannot guarantee delivery
+over arbitrary packet loss or make an impossible fixed bitrate fit.
+
+Only the opted-in v2 producer rate policy changes. Gloomhaven's v1 native QoS
+pointer/configuration forwarding, masks, image association, resolution and FPS
+remain unchanged. The actual NVENC boundary fixture reproduces high mask
+pressure and checks both total rate and complete-frame VBV. The Frame binary
+remains the already published 0.2.15; no Frame change is required for this PC
+update when that version is installed.

@@ -225,6 +225,11 @@ void run(){
     augmentBytes=75000;p=sendFrame();release();
     check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_SUCCESS&&receivedRate==28000000,
         "one scene-transition metadata spike reserves its full peak at the next native QoS call");
+    augmentBytes=100000;p=sendFrame();release();
+    check(table.nvEncReconfigureEncoder(handle,&qos)==NV_ENC_SUCCESS&&receivedRate==4000000,
+        "mask-heavy Demeo output uses the actual four remaining Mb/s instead of overshooting total budget with a 25 Mb/s quality floor");
+    check(std::uint64_t(receivedBuffer)+100000*8<=100000000/120,
+        "near-saturated metadata and video VBV still fit one complete native frame budget");
     augmentBytes=70000;for(unsigned n=0;n<128;++n){p=sendFrame();release();}
     codecConfig.rcParams.vbvBufferSize=codecConfig.rcParams.vbvInitialDelay=0;
     table.nvEncReconfigureEncoder(handle,&qos);
@@ -280,7 +285,7 @@ void run(){
     ++pic.inputTimeStamp;table.nvEncEncodePicture(handle,&pic);p=get();check(!observed.exactInput&&p.bitstreamBufferPtr==au.data(),"QoS never resurrects a resource unregistered by the native callback");release();
     table.nvEncRegisterResource(handle,&rr);table.nvEncMapInputResource(handle,&mp);
     p=sendFrame();check(observed.exactInput&&observed.coverageSessionAuthorized,"native re-registration gets fresh valid input after QoS");release();
-    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==21&&qosStats.preservedRejected==3,"cold QoS counters distinguish successes from rejected attempts");
+    const auto qosStats=bridge.reconfigureStats();check(qosStats.preservedSuccessful==22&&qosStats.preservedRejected==3,"cold QoS counters distinguish successes from rejected attempts");
     check(qosStats.overlappingInputs==1&&qosStats.overlappingOutputs==2,"cold counters identify exact completions across both QoS overlap schedules");
     const auto paddingStart=offsetof(NV_ENC_INITIALIZE_PARAMS,privDataSize)+sizeof qos.reInitEncodeParams.privDataSize;
     const auto paddingEnd=offsetof(NV_ENC_INITIALIZE_PARAMS,privData);

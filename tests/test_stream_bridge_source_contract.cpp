@@ -56,7 +56,12 @@ void run(){
  check(WireBudget::boundVbv(100000000,32800000,120,1,1000000,800000).bits==273333,"explicit native VBV is scaled and capped to one video-frame budget");
  check(!WireBudget::boundVbv(0,1,90,1,0,0).bits&&!WireBudget::boundVbv(100,101,90,1,0,0).bits,"invalid rate inputs cannot create a new encoder buffer");
  check(WireBudget::boundVbv(UINT32_MAX,UINT32_MAX,1,1000000,0,0).bits==UINT32_MAX,"large frame periods saturate rather than truncate buffer size");
- check(WireBudget::videoRate(100000000,UINT32_MAX)==25000000,"excessive metadata remains bounded without removing any exact coverage");
+ check(WireBudget::videoRate(100000000,UINT32_MAX)==1000000,"excessive metadata remains bounded without removing any exact coverage");
+ check(WireBudget::videoRate(297107904,272604240)==24503664,"observed Battlemarked mask peak leaves only the actual remaining total bandwidth for video");
+ for(std::uint32_t target:{10000000u,100000000u,300000000u})for(unsigned percent=0;percent<=98;++percent){
+  const auto mask=std::uint32_t(std::uint64_t(target)*percent/100);
+  if(target-mask>=1000000)check(std::uint64_t(WireBudget::videoRate(target,mask))+mask<=target,"fitting high mask pressure never overshoots requested total through a proportional video floor");
+ }
  check(WireBudget::videoRate(0,UINT32_MAX)==0&&WireBudget::videoRate(1,UINT32_MAX)==1,"small and zero native budgets never underflow to an invalid large rate");
  accounting.reset();check(!accounting.reserve(budget+1,90,1),"encoder reset clears all rate samples");
  SourceContract exhausted(UINT32_MAX-1);check(exhausted.publish(1)&&exhausted.snapshot(1),"last nonwrapping declaration epoch is usable");
