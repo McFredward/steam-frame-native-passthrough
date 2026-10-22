@@ -1,7 +1,7 @@
 {
   "archive": {
-    "bytes": 18336516,
-    "sha256": "280ee38c3968a3f914d5cbc014c4fa1ed9fb99b9d8d63c13af4a0e6d7d15ca55"
+    "bytes": 18336650,
+    "sha256": "04552195b4f39bb4fa01b4a62d96ea56eb753116c6681f93c4d2c938c4e7efa8"
   },
   "artifacts": {
     "frame_layer": {
@@ -29,7 +29,7 @@
   "result": "PASS",
   "runtime_profile": {
     "bytes": 9894,
-    "sha256": "6943307271770cc366873e122ff21a91eae718c5ec160710c824e7d65714d04e"
+    "sha256": "3c069a6333f1d0a58d343644efd0434631e07a992c6a0412027b6c84ce644889"
   },
   "schema": "sfnp-stream-bridge-packaging-result-v1",
   "source_pins": {
@@ -43,7 +43,7 @@
     },
     "VERSION": {
       "bytes": 7,
-      "sha256": "3fa69719d0146f620eac46461ac7f66c9113fcab8daf858dc7ac4a6dcc5f599d"
+      "sha256": "d8f3e6b0f7817c4ad634608dc673833c04c255c7ad2ef87ece9a443579553d25"
     },
     "packaging/setup-openssh.json": {
       "bytes": 1029,
@@ -118,8 +118,8 @@
       "sha256": "3298d94454b63f1067a6add2496ed8754135751dd19d6e5c8f4ebbcab409173d"
     },
     "setup/steam_link_setup_ui.py": {
-      "bytes": 82058,
-      "sha256": "49214d8704e5e0dda007ef13c176daad54d4065a049dda3f39182d55bfff9fc7"
+      "bytes": 82008,
+      "sha256": "bfe583d14f3b517d217df9b8e52d32b68dd8c4b73a0f47d3e4192db3bb829b55"
     },
     "setup/steam_link_setup_vendor.py": {
       "bytes": 2108,
@@ -130,8 +130,8 @@
       "sha256": "06dcc953d97bdea5aad9740e2513514ab7ee6cf514ff336fd3bd72f81db45208"
     },
     "setup/stream_bridge_install.py": {
-      "bytes": 170037,
-      "sha256": "3c9ec95053cd50cd7695bd9ab3f120c10562c81f57f87efc52d9a26f69244512"
+      "bytes": 170359,
+      "sha256": "6aaf78675ee0dfc208b5a62ea6ac36b37e86ac445dec894384403b4d842d8255"
     },
     "third_party/lz4/LICENSE": {
       "bytes": 1311,
@@ -194,7 +194,7 @@
       "sha256": "8eec889523a0b0e203ae5ec3ccbaca560860ca6601f29774a3cbda8ec942b8e4"
     }
   },
-  "source_revision": "9645ed07d6118b6395620f05f02e429caf7ec548",
+  "source_revision": "8f60a79ae19e42d03210e886614adb92d492e038",
   "temporary_contract_tree_removed": true,
   "validation_receipts": [
     {
@@ -212,9 +212,9 @@
       "hardware_verified": false,
       "pin": {
         "bytes": 7074,
-        "sha256": "3bcf3eaed85f365a80a9641f4b3d2f876ab05fe4ef5b1766f444a522ddd82075"
+        "sha256": "2561a6f8dbb5cf0bdbe2b3c3556650c7360c478bb4c9648a58e844b161ef6b6d"
       }
     }
   ],
-  "version": "0.2.18"
+  "version": "0.2.19"
 }
