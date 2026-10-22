@@ -73,3 +73,24 @@ without intermittent opaque frames, standby/resume without reconnecting the
 stream, menu transitions and intact resolution. A software pass alone cannot
 establish these pictures. An actual unscoped proof loss still fails opaque;
 never hide it by reusing a previous frame's mask or guessing another eye.
+
+## Battlemarked pool replacement (2026-10-22, Frame 0.2.15)
+
+Read-only captures for the 12:20–12:21 test show helper IPC closure at
+12:21:16, followed by XRService pausing the physical passthrough cameras and
+resuming them with a newly initialized helper at 12:21:17. No decoder reset
+is logged at that point. The compositor reports retired shared pool epochs.
+
+The camera's acknowledged native settings belong to the authenticated stream,
+not to one decoded buffer pool. Retiring a pool now drops its obsolete lease
+mapping without closing the helper, disabling the camera, or clearing the
+last decoded coverage demand. This never admits that pool's images: all exact
+lease, source/frame/eye and GPU publication gates still reject retired storage.
+A new decoded None withdraws demand normally, as do source/session changes,
+channel loss and consumer shutdown. There is no timer or stale-mask fallback.
+
+Actual process tests assert uninterrupted helper commands across pool renewal,
+old-picture rejection, fresh pool admission and immediate channel-loss revocation.
+They use signed metadata and real shared leases/IPC; hardware continuity and
+GloomhavenVR pictures still require a headset test. The PC binary, selector,
+shader and camera helper are unchanged in this Frame-only update.

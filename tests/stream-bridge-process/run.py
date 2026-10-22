@@ -61,8 +61,8 @@ def main():
                             "future signed None certificate cannot revoke camera from the current exact decoded active picture"),
         "early-none": (b"const bool wanted=p.cameraPeer&&(p.cameraDemand||activePicture);", b"const bool wanted=p.cameraPeer&&p.cameraDemand;",
                        "decoded opaque picture defers global camera withdrawal while an exact active native buffer is still current"),
-        "old-epoch": (b"requestCamera(p,false,Flow::CameraLease);p.currentLeases.reset();", b"requestCamera(p,false,Flow::CameraLease);",
-                      "actual source epoch loss revokes once and clears the obsolete epoch observation"),
+        "old-epoch": (b"count(p,Flow::CameraLease);p.currentLeases.reset();", b"count(p,Flow::CameraLease);",
+                      "decoded pool replacement keeps acknowledged physical camera warm without retaining its obsolete lease mapping"),
     }
     if args.camera_control:
         old, new, _ = camera_controls[args.camera_control]

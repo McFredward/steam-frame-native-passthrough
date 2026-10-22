@@ -73,7 +73,7 @@ void reportFlowCold(Process& p){
         p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::ReadyQueued),get(Flow::ReadyReceived),get(Flow::HandoffWait),get(Flow::HandoffReady),get(Flow::HandoffTimeout),get(Flow::HandoffUnavailable));
     std::fprintf(stderr,"[Steam Link Native Passthrough] paired handoff latency %s: max-us=%llu; over-11ms/22ms/50ms=%llu/%llu/%llu; decoder callback only, not end-to-end latency\n",
         p.kind==ProcessKind::Vrlink?"video":"compositor",static_cast<unsigned long long>(p.handoffMaxMicros.load(std::memory_order_relaxed)),get(Flow::HandoffOverFrame),get(Flow::HandoffOverTwoFrames),get(Flow::HandoffOver50ms));
-    std::fprintf(stderr,"[Steam Link Native Passthrough] camera demand %s: active/none=%llu/%llu; revoked source/channel/lease=%llu/%llu/%llu; opaque deferred=%llu\n",
+    std::fprintf(stderr,"[Steam Link Native Passthrough] camera demand %s: active/none=%llu/%llu; revoked source/channel=%llu/%llu; retired pool epoch=%llu; opaque deferred=%llu\n",
         p.kind==ProcessKind::Vrlink?"video":"compositor",get(Flow::CameraActive),get(Flow::CameraNone),get(Flow::CameraSource),get(Flow::CameraChannel),get(Flow::CameraLease),get(Flow::CameraDeferred));
 }
 Process* process() noexcept{
@@ -301,7 +301,13 @@ void workCycle(Process& p,local::State& previous) noexcept{
         }
         if(p.kind==ProcessKind::Compositor){
             if(p.currentLeases&&!p.currentLeases->epochCurrent(p.cameraEpoch)){
-                p.cameraPeer=false;p.cameraDemand=false;p.cameraDeferred=false;requestCamera(p,false,Flow::CameraLease);p.currentLeases.reset();
+                // A decoded-buffer epoch is not the authenticated source
+                // session. Keep its already acknowledged physical camera warm
+                // across pool replacement; stale pictures still fail their
+                // exact shared lease in every consumer/submit path. A fresh
+                // decoded None, signed source change or channel loss withdraws
+                // demand normally. Never restart the helper for a pool reset.
+                count(p,Flow::CameraLease);p.currentLeases.reset();
             }
             bool activePicture=false;
             if(p.cameraPeer&&!p.cameraDemand)for(std::size_t n=0;n<p.pictures.size();++n){const auto& picture=p.pictures[n];

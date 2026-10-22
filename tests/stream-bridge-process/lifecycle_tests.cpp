@@ -279,7 +279,8 @@ void cameraHandoff(){
     auto requeue=decoded.lease.capture;requeue.kind=native::CaptureKind::Requeue;f.source.writer.captureEvent(requeue);f.cycle();
     check(f.display.camera.ready(),"ordinary requeue does not disable acknowledged global camera session");
     f.source.writer.invalidateCurrentEpoch();f.cycle();
-    check(!f.display.camera.ready(),"shared native source epoch loss atomically revokes cached settings readiness before restore");
+    check(f.display.camera.ready()&&!f.display.currentLeases,"decoded pool replacement keeps acknowledged physical camera warm without retaining its obsolete lease mapping");
+    check(!f.display.pictures[decoded.lease.slot].leases->current(decoded.lease),"pool replacement never makes a stale exact picture current");
 }
 void cameraPictureDemand(){
     HandoffFixture f;f.publication.ready=true;const auto active=f.queue();f.cycle();
@@ -297,11 +298,16 @@ void cameraPictureDemand(){
     auto ordinary=fresh.lease.capture;ordinary.kind=native::CaptureKind::Requeue;f.source.writer.captureEvent(ordinary);f.cycle();
     check(f.display.camera.ready(),"ordinary native requeue of latest active frame does not create a false opaque demand transition");
     f.source.writer.invalidateCurrentEpoch();f.cycle();
-    check(!f.display.camera.ready()&&f.display.flow[unsigned(renderer::Flow::CameraLease)]==1&&!f.display.currentLeases,"actual source epoch loss revokes once and clears the obsolete epoch observation");
+    check(f.display.camera.ready()&&f.display.flow[unsigned(renderer::Flow::CameraLease)]==1&&!f.display.currentLeases,"pool replacement retains camera but clears the obsolete epoch observation once");
+    const auto eventsBefore=sfnp_camera_fixture::events(f.directory.path);
+    check(!f.display.pictures[fresh.lease.slot].leases->current(fresh.lease),"retired pool picture cannot be admitted using the retained camera acknowledgment");
     const auto restored=f.queue();(void)restored;f.cycle();
     const auto restoredEnd=std::chrono::steady_clock::now()+std::chrono::seconds(3);
     while(!f.display.camera.ready()&&std::chrono::steady_clock::now()<restoredEnd){f.cycle();std::this_thread::yield();}
-    check(f.display.camera.ready()&&f.display.cameraDemand,"same signed source can recover with a fresh exact decoded epoch instead of repeatedly revoking on its old mapping");
+    check(f.display.camera.ready()&&f.display.cameraDemand,"same authenticated source admits a fresh exact decoded pool without cycling camera settings");
+    check(sfnp_camera_fixture::events(f.directory.path)==eventsBefore,"pool replacement never sends disable/enable to the physical camera helper");
+    f.display.channel.stop();f.cycle();
+    check(!f.display.camera.ready(),"real local channel loss still revokes camera authority immediately");
 }
 }
-int main(int argc,char** argv){try{const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();decodedDispatch();}exactHandoff();noneAndBurst();interruptedHandoff();unavailableHandoff();cameraHandoff();cameraPictureDemand();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
+int main(int argc,char** argv){try{stream_bridge::logging::current.store(stream_bridge::logging::Level::Debug);const bool handoffOnly=argc==2&&std::strcmp(argv[1],"handoff")==0;if(!handoffOnly){noConsumers();consumerAdmission();sourceLossReconnect();telemetry();decodedDispatch();}exactHandoff();noneAndBurst();interruptedHandoff();unavailableHandoff();cameraHandoff();cameraPictureDemand();std::printf("%u actual process lifecycle and exact handoff checks passed\n",checks);return 0;}catch(const std::exception& error){std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}
