@@ -184,7 +184,7 @@ AuthStatus frameHeaderTag(const Secret& key,Bytes header,AuthTag& tag) noexcept 
 }
 bool frameHeaderShape(Bytes header) noexcept {
     return header.data&&header.size==FrameSignedHeaderBytes&&
-        !std::memcmp(header.data,"SFV1",4)&&header.data[4]==1&&header.data[5]<=3&&
+        !std::memcmp(header.data,"SFV1",4)&&header.data[4]==1&&header.data[5]<=std::uint8_t(CoverageEncoding::RleZstd)&&
         get(header.data+6,2)==FrameCertificateBytes;
 }
 }

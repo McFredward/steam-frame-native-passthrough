@@ -1,4 +1,5 @@
 #include "stream-bridge-sender-provider-coverage.h"
+#include "bridge/stream_bridge_log.h"
 #include "stream-bridge-sender-provider-coverage-render.h"
 #include "stream-bridge-source-alpha-probe.h"
 #include "stream-bridge-sender-provider-coverage-stages.h"
@@ -126,6 +127,7 @@ struct SenderCoverage::Impl {
     ID3D11Multithread* multithread=nullptr;CoverageContextFacade facade;
     SourceContract sourceContract;
     SourceAlphaProbe sourceAlpha;
+    MaskContentPublication maskContent;
     ID3D11Texture2D* target=nullptr;ID3D11RenderTargetView* targetView=nullptr;ID3D11BlendState* blend=nullptr;
     std::uint32_t width=0,height=0;std::uint64_t activeSerial=0,activeEpoch=0;unsigned drawBits=0;std::uint64_t activeContract=0;bool invalid=false,poolReady=false;
     IUnknown* nativeOutput=nullptr;std::uint32_t activePid=0;
@@ -211,8 +213,17 @@ struct SenderCoverage::Impl {
         if(!pixels.empty()){
             std::vector<std::uint8_t> encoded;CoverageEncoding encoding=CoverageEncoding::None;
             const auto encodeStarted=clockMicros();
-            const bool encodedMask=encodeBestCoverage({pixels.data(),pixels.size()},e.compressedCoverageAuthorized,encoding,encoded);
+            const bool entropy=s.sourceContract.entropyCodecAllowed(maskContract,maskPid,e.entropyCoverageAuthorized);
+            const bool encodedMask=encodeBestCoverage({pixels.data(),pixels.size()},e.compressedCoverageAuthorized,encoding,encoded,entropy);
             const auto encodeUs=elapsedMicros(encodeStarted,clockMicros());
+            if(entropy&&encodedMask&&logging::debug()&&s.maskContent.due()){
+                MaskContentSample sample{};sample.pid=maskPid;sample.frame=descriptor.sourceFrame;
+                sample.encodedBytes=static_cast<std::uint32_t>(encoded.size());sample.encoding=static_cast<unsigned>(encoding);
+                if(encoding==CoverageEncoding::Rle)sample.rleBytes=sample.encodedBytes;
+                else if((encoding==CoverageEncoding::RleLz4||encoding==CoverageEncoding::RleZstd)&&encoded.size()>=4)
+                    for(unsigned i=0;i<4;++i)sample.rleBytes|=std::uint32_t(encoded[i])<<(8*i);
+                if(inspectMaskContent({pixels.data(),pixels.size()},e.width,e.height,sample))s.maskContent.publish(sample);
+            }
             if(!encodedMask)s.gates.refuse(CoverageGate::RleEncode);
             else if(!s.sourceCurrent(maskContract,maskPid))s.gates.refuse(CoverageGate::SourceRevoked);
             else if(!s.control.certifyAccessUnit(candidate,descriptor,encoding,{encoded.data(),encoded.size()},output))s.gates.refuse(CoverageGate::FrameCertificate);
@@ -493,6 +504,7 @@ CoverageGateStats SenderCoverage::gateStats()const noexcept{
     result.contextFacadeSlots=s.facade.slotCount();result.nativeDispatchMutations=s.facade.nativeMutationCount();
     result.nativeDeviceSame=s.device&&s.device==s.nativeDevicePointer;return result;
 }
+bool SenderCoverage::maskContent(MaskContentSample& sample)const noexcept{return impl_->maskContent.read(sample);}
 bool SenderCoverage::sourceAlpha(unsigned eye,SourceAlphaSample& sample)const noexcept{return impl_->sourceAlpha.read(eye,sample);}
 std::uint32_t SenderCoverage::sourceAlphaError()const noexcept{return impl_->sourceAlpha.error();}
 const char* SenderCoverage::stateName()const noexcept{

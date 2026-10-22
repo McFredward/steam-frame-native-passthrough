@@ -1,3 +1,14 @@
+# Pristine upstream amalgamation, compiled as C with private symbols.
+enable_language(C)
+add_library(sfnp_zstd OBJECT third_party/zstd/zstd.c)
+set_target_properties(sfnp_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+target_compile_definitions(sfnp_zstd PRIVATE ZSTD_DISABLE_ASM ZSTDLIB_VISIBILITY=)
+if(MSVC)
+    target_compile_options(sfnp_zstd PRIVATE /w)
+else()
+    target_compile_options(sfnp_zstd PRIVATE -w)
+endif()
+
 # These portable modules are deliberately not linked into the installed loader,
 # receiver, native renderer or a Steam process. Their explicit trust ports are
 # not proof of a live provider, authenticated peer or safe image composition.
@@ -11,6 +22,7 @@ add_library(sfnp_stream_bridge STATIC
     pc/stream-bridge-sender.cpp
     receiver/stream_bridge_receiver.cpp)
 target_include_directories(sfnp_stream_bridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_sources(sfnp_stream_bridge PRIVATE $<TARGET_OBJECTS:sfnp_zstd>)
 if(MSVC)
     target_compile_options(sfnp_stream_bridge PRIVATE /W4 /WX)
 else()
@@ -124,7 +136,7 @@ if(BUILD_TESTING)
     if(NOT CMAKE_CROSSCOMPILING)
         add_test(NAME native_image_contract COMMAND test_native_image_contract)
     endif()
-    foreach(suite stream_bridge_protocol stream_bridge_auth stream_bridge_capacity stream_bridge_authenticated stream_bridge_frame stream_bridge_compression stream_bridge_decode_cost hevc_bridge_sei stream_bridge_sender stream_bridge_receiver stream_bridge_source_contract stream_bridge_sender_provider_sourceipc)
+    foreach(suite stream_bridge_protocol stream_bridge_auth stream_bridge_capacity stream_bridge_authenticated stream_bridge_frame stream_bridge_compression stream_bridge_entropy stream_bridge_decode_cost hevc_bridge_sei stream_bridge_sender stream_bridge_receiver stream_bridge_source_contract stream_bridge_sender_provider_sourceipc)
         add_executable(test_${suite} tests/test_${suite}.cpp)
         target_link_libraries(test_${suite} PRIVATE sfnp_stream_bridge)
         if(NOT MSVC)

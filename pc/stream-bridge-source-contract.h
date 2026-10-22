@@ -35,6 +35,11 @@ public:
     std::uint64_t budgetAuthority(std::uint32_t pid)const noexcept {
         const auto value=snapshot(pid);return value&&budget_.load(std::memory_order_acquire)==value?value:0;
     }
+    // Optional codec policy only. Never authorizes a picture or mask association.
+    // Legacy/Gloomhaven producers do not own this v2 metadata-budget lease.
+    bool entropyCodecAllowed(std::uint64_t receipt,std::uint32_t pid,bool negotiated)const noexcept {
+        return receipt&&negotiated&&budgetAuthority(pid)==receipt;
+    }
     bool current(std::uint64_t receipt,std::uint32_t pid) const noexcept {
         return inspect(receipt,pid).current();
     }

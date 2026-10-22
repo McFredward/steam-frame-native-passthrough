@@ -174,7 +174,7 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
         if(!settings)return false;
         vr::EVRSettingsError e=vr::VRSettingsError_None;constexpr auto section="driver_steam_link_native_passthrough";
         if(!settings->GetBool(section,"enableStreamBridge",&e)||e!=vr::VRSettingsError_None){report("bridge disabled; ordinary video");return true;}
-        request_.role=stream_bridge::Role::Producer;request_.buildId=712;request_.offered=request_.required=stream_bridge::KnownCapabilities;
+        request_.role=stream_bridge::Role::Producer;request_.buildId=712;request_.offered=stream_bridge::KnownCapabilities;request_.required=stream_bridge::NativeRequiredCapabilities;
         settings->GetString(section,"controlListenAddress",request_.address.data(),static_cast<std::uint32_t>(request_.address.size()),&e);
         if(e!=vr::VRSettingsError_None){report("explicit listen address missing; ordinary video",stream_bridge::logging::Level::Warning);return false;}
         const auto port=settings->GetInt32(section,"controlPort",&e);
@@ -354,6 +354,15 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
             // independently of the native shader's output alpha. A coherent
             // sample contains its own PID/present/eye/extent/CB metadata; it is
             // diagnostic evidence only, never an activation/frame certificate.
+            stream_bridge::sender::MaskContentSample mask{};
+            static std::uint64_t lastMask=0;static unsigned maskReports=0;
+            if(coverage_.maskContent(mask)&&mask.sequence!=lastMask&&(final||maskReports<32)){
+                lastMask=mask.sequence;++maskReports;char detail[416]{};
+                std::snprintf(detail,sizeof detail,"mask content sample: pid=%u, source-frame=%llu, extent=%ux%u, encoding=%u, bytes=%u, rle-bytes=%u; sampled scene/real/fractional=%u/%u/%u of %u; distinct=%u, horizontal/vertical changes=%u/%u; statistics only, no frame permission",
+                    mask.pid,static_cast<unsigned long long>(mask.frame),mask.width,mask.height,mask.encoding,mask.encodedBytes,mask.rleBytes,
+                    mask.scene,mask.real,mask.fractional,mask.samples,mask.distinct,mask.horizontal,mask.vertical);
+                report(detail,stream_bridge::logging::Level::Debug);
+            }
             stream_bridge::sender::SourceAlphaSample alpha[2]{};
             const bool haveAlpha[2]{coverage_.sourceAlpha(0,alpha[0]),coverage_.sourceAlpha(1,alpha[1])};
             const auto observedPid=haveAlpha[0]?alpha[0].source.pid:haveAlpha[1]?alpha[1].source.pid:0;
@@ -443,9 +452,9 @@ class Provider final:public vr::IServerTrackedDeviceProvider {
                 static_cast<unsigned long long>(stats.certifiedMasks),static_cast<unsigned long long>(stats.maskedVideoBytes),
                 static_cast<unsigned long long>(stats.maskRleBytes),static_cast<unsigned long long>(stats.maskedWireBytes),static_cast<unsigned long long>(stats.maxMaskedWireBytes));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
-                "coverage encoding: raw-mask-bytes=%llu, encoded-coverage-bytes=%llu; frames raw/rle/lz4=%llu/%llu/%llu; encode-us=%llu/max%llu; lossless, approximate counters",
+                "coverage encoding: raw-mask-bytes=%llu, encoded-coverage-bytes=%llu; frames raw/rle/lz4/zstd=%llu/%llu/%llu/%llu; encode-us=%llu/max%llu; lossless, approximate counters",
                 static_cast<unsigned long long>(stats.maskRawBytes),static_cast<unsigned long long>(stats.maskEncodedBytes),
-                static_cast<unsigned long long>(stats.maskEncodingFrames[1]),static_cast<unsigned long long>(stats.maskEncodingFrames[2]),static_cast<unsigned long long>(stats.maskEncodingFrames[3]),
+                static_cast<unsigned long long>(stats.maskEncodingFrames[1]),static_cast<unsigned long long>(stats.maskEncodingFrames[2]),static_cast<unsigned long long>(stats.maskEncodingFrames[3]),static_cast<unsigned long long>(stats.maskEncodingFrames[4]),
                 static_cast<unsigned long long>(stats.lastEncodeUs),static_cast<unsigned long long>(stats.maxEncodeUs));report(text,stream_bridge::logging::Level::Debug);
             std::snprintf(text,sizeof text,
                 "coverage lifecycle refusals: render-lock=%llu, copy-pair=%llu, stage-full=%llu, input=%llu, stage=%llu, session=%llu, source=%llu/%llu, rle=%llu, certificate=%llu",

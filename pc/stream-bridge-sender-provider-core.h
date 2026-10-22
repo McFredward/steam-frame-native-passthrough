@@ -22,6 +22,7 @@ struct NvencOutputEvidence {
     // A separate negotiated capability: knowing ordinary RLE does not prove
     // the receiver can decode an independent lossless LZ4/RLE mask.
     bool compressedCoverageAuthorized=false;
+    bool entropyCoverageAuthorized=false;
 };
 struct DeviceObserver {
     // Successful actual public Open session. Device is borrowed native identity;

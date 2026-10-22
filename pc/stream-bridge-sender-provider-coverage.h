@@ -4,6 +4,7 @@
 #include "stream-bridge-sender-provider-core.h"
 #include "stream-bridge-source-contract.h"
 #include "stream-bridge-source-alpha-stats.h"
+#include "stream-bridge-mask-content.h"
 #include "bridge/stream_bridge_control.h"
 #include <memory>
 #include <limits>
@@ -60,7 +61,7 @@ struct CoverageGateStats {
     std::uint32_t lastQueryResult=0,lastReadbackResult=0;
     std::uint64_t maskedVideoBytes=0,maskedWireBytes=0,maskRleBytes=0,maxMaskedWireBytes=0;
     std::uint64_t maskEncodedBytes=0,maskRawBytes=0,lastEncodeUs=0,maxEncodeUs=0;
-    std::array<std::uint64_t,4> maskEncodingFrames{};
+    std::array<std::uint64_t,5> maskEncodingFrames{};
     std::array<std::uint64_t,static_cast<unsigned>(SourceContractStatus::Count)> sourceRefusals{},sourceProcessPairs{};
     std::uint32_t sourceCauses=0;
     bool contextTableReadable=false,contextTableStable=false,nativeDeviceSame=false;
@@ -146,7 +147,7 @@ private:
     std::atomic<std::uint64_t> submittedReadbacks_{},queryReady_{},queryPending_{},queryErrors_{},queryAge_{},maxQueryAge_{};
     std::atomic<std::uint64_t> maskedVideoBytes_{},maskedWireBytes_{},maskRleBytes_{},maxMaskedWireBytes_{};
     std::atomic<std::uint64_t> maskEncodedBytes_{},maskRawBytes_{},encodeDuration_{},maxEncodeDuration_{};
-    std::array<std::atomic<std::uint64_t>,4> maskEncodingFrames_{};
+    std::array<std::atomic<std::uint64_t>,5> maskEncodingFrames_{};
     // Contention can lose diagnostic samples; snapshots are intentionally not
     // coherent frame proofs. No caller may use them to authorize rendering.
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(CoverageSignal::Count)> signals_{};
@@ -209,6 +210,7 @@ public:
     bool operational(std::uint32_t processId)const noexcept;
     CoverageGateStats gateStats()const noexcept; // Cold, approximate diagnostics only.
     bool sourceAlpha(unsigned eye,SourceAlphaSample&)const noexcept;
+    bool maskContent(MaskContentSample&)const noexcept;
     std::uint32_t sourceAlphaError()const noexcept;
     const char* stateName()const noexcept; // Bounded cold-worker status, no identifiers/secrets.
 private:

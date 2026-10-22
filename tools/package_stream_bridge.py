@@ -49,7 +49,7 @@ def required_sources(root=ROOT):
                    'setup/steam_link_setup_session.py','setup/steam_link_setup_log.py',
                    'setup/steam_link_setup_pc.py','setup/steam_link_setup_frame.py',
                    'setup/steam_link_setup_checkpoint.py','setup/steam_link_setup_workflow.py','setup/steam_link_setup_legacy.py',
-                   'setup/patch-steam-link.cmd','setup/patch-steam-link.sh','LICENSE','third_party/lz4/LICENSE',
+                   'setup/patch-steam-link.cmd','setup/patch-steam-link.sh','LICENSE','third_party/lz4/LICENSE','third_party/zstd/LICENSE',
                    'pc/stream-bridge-sender-provider.vrdrivermanifest',
                    'tools/package_stream_bridge.py','tools/package_stream_link_setup.py',
                    'tools/package_setup_dependencies.py','tools/package_setup_textual.py',
@@ -178,7 +178,8 @@ def build(pc_provider,frame_layer,frame_selector,runtime_profile,python_zip,open
            'patch-steam-link.cmd':source_bytes['setup/patch-steam-link.cmd'],
            'patch-steam-link.sh':source_bytes['setup/patch-steam-link.sh'],
            'LICENSE':source_bytes['LICENSE'],
-           'third_party/lz4/LICENSE':source_bytes['third_party/lz4/LICENSE']}
+           'third_party/lz4/LICENSE':source_bytes['third_party/lz4/LICENSE'],
+           'third_party/zstd/LICENSE':source_bytes['third_party/zstd/LICENSE']}
     for name in ('steam_link_setup_auth.py','steam_link_setup_askpass_client.py','steam-link-askpass.sh'):
         files['setup/'+name]=source_bytes['setup/'+name]
     engine.require(askpass_exe is not None,'The included Windows sign-in helper is required.')

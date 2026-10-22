@@ -21,6 +21,8 @@ for name,expected in {
   raise SystemExit('Explicit SDK header does not match the reviewed pin: '+name)
 PY
 mkdir -p -- "$sender_output"
+x86_64-w64-mingw32-gcc -std=c99 -O2 -w -DZSTD_DISABLE_ASM -DZSTDLIB_VISIBILITY= \
+  -c "$sender_protocol/third_party/zstd/zstd.c" -o "$sender_output/sfnp-zstd.o"
 x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
   -I"$sender_repo" -I"$sender_protocol" -isystem "$sender_sdk" \
   "$sender_repo/pc/stream-bridge-sender-provider.cpp" \
@@ -40,6 +42,7 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
   "$sender_protocol/bridge/stream_bridge_control.cpp" \
   "$sender_protocol/receiver/stream_bridge_receiver.cpp" \
   "$sender_protocol/bridge/hevc_bridge_sei.cpp" \
+  "$sender_output/sfnp-zstd.o" \
   -shared -s -Wl,--no-insert-timestamp -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic \
   -lwintrust -lcrypt32 -lbcrypt -lws2_32 -ladvapi32 -lole32 -lshell32 -ld3d11 -ldxgi -luuid -o "$sender_output/driver_steam_link_native_passthrough.dll"
 cp -- "$sender_repo/pc/stream-bridge-sender-provider.vrdrivermanifest" "$sender_output/driver.vrdrivermanifest"

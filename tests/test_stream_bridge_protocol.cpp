@@ -73,6 +73,17 @@ void compressedCoverageNegotiation(){
     for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){relay(p,r,kind);relay(r,p,kind);}
     require(p.confirmed()&&r.confirmed()&&(p.negotiatedCapabilities()&CapRleLz4),"compressed coverage needs a complete mutually confirmed capability exchange");
 }
+void entropyNegotiation(){
+    auto modern=config(Role::Producer);modern.offered=KnownCapabilities;modern.required=NativeRequiredCapabilities;
+    auto legacy=config(Role::Receiver);legacy.offered=legacy.required=63;
+    Handshake p,r;require(p.begin(modern,channel())==Status::Ok&&r.begin(legacy,channel())==Status::Ok,"optional entropy config and original peer accepted");
+    for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){relay(p,r,kind);relay(r,p,kind);}
+    require(p.confirmed()&&r.confirmed()&&p.negotiatedCapabilities()==63,"old Frame or PC keeps its exact original capability set; no codec upgrade is required");
+    auto receiver=config(Role::Receiver);receiver.offered=KnownCapabilities;receiver.required=NativeRequiredCapabilities;
+    Handshake a,b;require(a.begin(modern,channel())==Status::Ok&&b.begin(receiver,channel())==Status::Ok,"new peers configure entropy as optional");
+    for(const auto kind:{Kind::Hello,Kind::Ack,Kind::Commit}){relay(a,b,kind);relay(b,a,kind);}
+    require(a.confirmed()&&b.confirmed()&&(a.negotiatedCapabilities()&CapRleZstd),"entropy mode is enabled only after mutually confirmed capability exchange");
+}
 void probe(){
     Handshake p,r;ProbeTracker t;ProbeMessage request;require(t.begin(p,7,nonce(90),request)==Status::OutOfOrder,"probe needs mutual handshake");confirmed(p,r);require(t.begin(r,7,nonce(90),request)==Status::RoleMismatch,"only producer sends probe");require(t.begin(p,7,nonce(90),request)==Status::Ok&&!t.observed(),"fresh probe prepared");
     std::array<std::uint8_t,ProbeBytes> payload{};require(encodeProbe(request,payload)==Status::Ok,"encode probe");
@@ -84,4 +95,4 @@ void probe(){
     auto bad=payload;bad[72]=1;const auto saved=decoded;require(decodeProbe(view(bad),decoded)==Status::Malformed&&decoded.sequence==saved.sequence&&decoded.freshToken==saved.freshToken,"reserved probe bytes no output change");p.reset();require(t.acceptEcho(p,view(payload),channel())!=Status::Ok,"disconnect revokes old echo authority");t.reset();require(!t.observed(),"probe reset");
 }
 }
-int main(){try{goldens();invalidState();compressedCoverageNegotiation();probe();std::cout<<checks<<" stream bridge checks passed\n";return EXIT_SUCCESS;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return EXIT_FAILURE;}}
+int main(){try{goldens();invalidState();compressedCoverageNegotiation();entropyNegotiation();probe();std::cout<<checks<<" stream bridge checks passed\n";return EXIT_SUCCESS;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return EXIT_FAILURE;}}

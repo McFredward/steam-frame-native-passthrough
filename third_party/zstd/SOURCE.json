@@ -1,0 +1,13 @@
+{
+  "upstream": "https://github.com/facebook/zstd",
+  "version": "1.5.7",
+  "commit": "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+  "license": "BSD-3-Clause (selected from upstream dual license)",
+  "generation": "cd build/single_file_libs && ./create_single_file_library.sh",
+  "files": {
+    "zstd.c": "208e110a1f052d007242d4eef6ed20a03ab1dc6e13eb2c4ff8d158112120ba8e",
+    "zstd.h": "9b4bc8245565c98ccfc61c07749928b57e7c0f6fddb0530c4f6aa1971893d88b",
+    "LICENSE": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8",
+    "zstd_errors.h": "66a8c3f71d12ea6e797e4f622f31f3f8f81c41b36f48cad4f5de7d8bfb6aac0a"
+  }
+}

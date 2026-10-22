@@ -97,7 +97,7 @@ void capabilities(){
     req.offered=req.required=sb::KnownCapabilities;
     check(runtime.prepare(req)==sb::ControlStatus::Listening,"actual full image capabilities configured");
     sb::LocalConfig local;check(runtime.configuredLocal(local)&&local.offered==sb::KnownCapabilities&&local.required==sb::KnownCapabilities,"capabilities retained through real configuration");
-    req.offered|=64;check(runtime.prepare(req)==sb::ControlStatus::AddressRefused,"unknown runtime capability refused");
+    req.offered|=(std::uint64_t(1)<<63);check(runtime.prepare(req)==sb::ControlStatus::AddressRefused,"unknown runtime capability refused");
     req.offered=sb::RequiredCapabilities;req.required=sb::KnownCapabilities;
     check(runtime.prepare(req)==sb::ControlStatus::AddressRefused,"required capability must be offered");
 }

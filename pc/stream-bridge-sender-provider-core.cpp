@@ -322,6 +322,8 @@ NVENCSTATUS NVENCAPI NvencBoundary::lock(void* encoder,NV_ENC_LOCK_BITSTREAM* pa
             &&(s->adapter.handshake().negotiatedCapabilities()&CapExplicitCoverage)!=0;
         evidence.compressedCoverageAuthorized=evidence.coverageSessionAuthorized
             &&(s->adapter.handshake().negotiatedCapabilities()&CapRleLz4)!=0;
+        evidence.entropyCoverageAuthorized=evidence.coverageSessionAuthorized
+            &&(s->adapter.handshake().negotiatedCapabilities()&CapRleZstd)!=0;
     }else count(self.outputStats_.unmatched);
     const Bytes original{static_cast<const std::uint8_t*>(params->bitstreamBufferPtr),params->bitstreamSizeInBytes};
     std::uint64_t ticket=0;

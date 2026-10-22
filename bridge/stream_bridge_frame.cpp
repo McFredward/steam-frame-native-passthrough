@@ -79,6 +79,7 @@ bool coverageValid(const FrameDescriptor& d,CoverageEncoding encoding,Bytes b){
     const auto size=std::size_t(d.codedWidth)*d.codedHeight;
     if(encoding==CoverageEncoding::Raw)return b.size==size;
     if(encoding==CoverageEncoding::RleLz4){std::vector<std::uint8_t> rle;return decompressCoverageRle(b,size,rle);}
+    if(encoding==CoverageEncoding::RleZstd){std::vector<std::uint8_t> rle;return decompressCoverageRleZstd(b,size,rle);}
     if(encoding!=CoverageEncoding::Rle||b.size%2)return false;
     std::size_t decoded=0;for(std::size_t i=0;i<b.size;i+=2){if(!b.data[i]||b.data[i]>size-decoded)return false;decoded+=b.data[i];}return decoded==size;
 }
@@ -135,7 +136,7 @@ FrameStatus inspectMetadata(Bytes payload,AuthSession& auth,CertifiedAccessUnit&
     if(!payload.data||payload.size>MaximumAccessUnitBytes)return FrameStatus::InvalidArgument;
     if(payload.size<FrameCertificateBytes)return FrameStatus::Malformed;
     const auto* h=payload.data;
-    if(std::memcmp(h,"SFV1",4)||h[4]!=1||h[5]>3||get(h+6,2)!=FrameCertificateBytes)return FrameStatus::Malformed;
+    if(std::memcmp(h,"SFV1",4)||h[4]!=1||h[5]>std::uint8_t(CoverageEncoding::RleZstd)||get(h+6,2)!=FrameCertificateBytes)return FrameStatus::Malformed;
     for(unsigned i=72;i<80;++i)if(h[i])return FrameStatus::Malformed;
     CertifiedAccessUnit result;result.descriptor={get(h+40,8),get(h+48,8),std::uint16_t(get(h+64,2)),std::uint16_t(get(h+66,2))};
     const auto& d=result.descriptor;result.coverageEncoding=CoverageEncoding(h[5]);
@@ -177,14 +178,19 @@ bool encodeCoverageRle(Bytes raw,std::vector<std::uint8_t>& output){
         result.push_back(std::uint8_t(count));result.push_back(raw.data[at]);at+=count;}
     output.swap(result);return true;
 }
-bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,std::vector<std::uint8_t>& output){
+bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,std::vector<std::uint8_t>& output,bool allowRleZstd){
     if(!raw.data||!raw.size||raw.size>MaximumCoverageBytes)return false;
-    std::vector<std::uint8_t> rle,compressed;
+    std::vector<std::uint8_t> rle,compressed,zstd;
     const bool haveRle=encodeCoverageRle(raw,rle);
     CoverageEncoding selected=CoverageEncoding::Raw;Bytes best=raw;
     if(haveRle&&rle.size()<best.size){best={rle.data(),rle.size()};selected=CoverageEncoding::Rle;}
     if(allowRleLz4&&haveRle&&compressCoverageRle({rle.data(),rle.size()},compressed)&&compressed.size()<best.size){best={compressed.data(),compressed.size()};selected=CoverageEncoding::RleLz4;}
-    if(selected==CoverageEncoding::RleLz4)output.swap(compressed);
+    // Skip already tiny payloads. The new complete encoding must beat the
+    // existing winner; otherwise retain its exact legacy bytes.
+    if(allowRleZstd&&haveRle&&rle.size()<=MaximumEntropyRleBytes&&best.size>=4096&&compressCoverageRleZstd({rle.data(),rle.size()},best.size-1,zstd)
+        &&zstd.size()<best.size){best={zstd.data(),zstd.size()};selected=CoverageEncoding::RleZstd;}
+    if(selected==CoverageEncoding::RleZstd)output.swap(zstd);
+    else if(selected==CoverageEncoding::RleLz4)output.swap(compressed);
     else if(selected==CoverageEncoding::Rle)output.swap(rle);
     else {std::vector<std::uint8_t> result(raw.data,raw.data+raw.size);output.swap(result);}
     encoding=selected;return true;
@@ -198,6 +204,9 @@ bool decodeCertifiedCoverage(const CertifiedAccessUnit& frame,std::vector<std::u
     std::vector<std::uint8_t> rle;
     if(frame.coverageEncoding==CoverageEncoding::RleLz4){
         if(!decompressCoverageRle(b,std::size_t(d.codedWidth)*d.codedHeight,rle))return false;
+        b={rle.data(),rle.size()};
+    }else if(frame.coverageEncoding==CoverageEncoding::RleZstd){
+        if(!decompressCoverageRleZstd(b,std::size_t(d.codedWidth)*d.codedHeight,rle))return false;
         b={rle.data(),rle.size()};
     }else if(!coverageValid(d,frame.coverageEncoding,b))return false;
     std::vector<std::uint8_t> result;result.reserve(std::size_t(d.codedWidth)*d.codedHeight);

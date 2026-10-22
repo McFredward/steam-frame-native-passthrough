@@ -2,6 +2,7 @@
 #include "stream_bridge_frame.h"
 #include <algorithm>
 #include <climits>
+#include "../third_party/zstd/zstd.h"
 
 // Keep the pristine upstream implementation private. Neither injected
 // library exports/interposes another process's LZ4.
@@ -53,6 +54,36 @@ bool decompressCoverageRle(Bytes encoded,std::size_t maskBytes,std::vector<std::
     std::vector<std::uint8_t> result(length);
     const auto count=LZ4_decompress_safe(reinterpret_cast<const char*>(encoded.data+4),reinterpret_cast<char*>(result.data()),static_cast<int>(encoded.size-4),static_cast<int>(length));
     if(count<0||static_cast<std::size_t>(count)!=length)return false;
+    std::size_t pixels=0;
+    for(std::size_t i=0;i<length;i+=2){if(!result[i]||result[i]>maskBytes-pixels)return false;pixels+=result[i];}
+    if(pixels!=maskBytes)return false;
+    output.swap(result);return true;
+}
+// Optional independent frames: no dictionary or previous mask is consulted.
+// One-shot decompression has fixed context memory; allocation and advertised
+// content size must both match descriptor-derived RLE bounds.
+bool compressCoverageRleZstd(Bytes rle,std::size_t maximum,std::vector<std::uint8_t>& output){
+    if(!rle.data||!rle.size||rle.size%2||rle.size>MaximumEntropyRleBytes||maximum<=5)return false;
+    maximum=std::min(maximum,std::min(MaximumCoverageBytes,rle.size-1));
+    if(maximum<=5)return false;
+    std::vector<std::uint8_t> result(maximum);
+    const auto count=ZSTD_compress(result.data()+4,result.size()-4,rle.data,rle.size,1);
+    if(ZSTD_isError(count))return false;
+    for(unsigned i=0;i<4;++i)result[i]=static_cast<std::uint8_t>(rle.size>>(8*i));
+    result.resize(4+count);output.swap(result);return true;
+}
+bool decompressCoverageRleZstd(Bytes encoded,std::size_t maskBytes,std::vector<std::uint8_t>& output){
+    if(!encoded.data||encoded.size<=4||encoded.size>MaximumCoverageBytes||!maskBytes||maskBytes>MaximumCoverageBytes)return false;
+    std::size_t length=0;for(unsigned i=0;i<4;++i)length|=std::size_t(encoded.data[i])<<(8*i);
+    const auto minimum=2*((maskBytes+254)/255),maximum=std::min(MaximumCoverageBytes,maskBytes*2);
+    if(!length||length%2||length<minimum||length>maximum||length>MaximumEntropyRleBytes)return false;
+    const auto* block=encoded.data+4;const auto size=encoded.size-4;
+    if(ZSTD_getFrameContentSize(block,size)!=length||ZSTD_getDictID_fromFrame(block,size)!=0)return false;
+    const auto frameSize=ZSTD_findFrameCompressedSize(block,size);
+    if(ZSTD_isError(frameSize)||frameSize!=size)return false;
+    std::vector<std::uint8_t> result(length);
+    const auto count=ZSTD_decompress(result.data(),result.size(),block,size);
+    if(ZSTD_isError(count)||count!=length)return false;
     std::size_t pixels=0;
     for(std::size_t i=0;i<length;i+=2){if(!result[i]||result[i]>maskBytes-pixels)return false;pixels+=result[i];}
     if(pixels!=maskBytes)return false;

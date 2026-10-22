@@ -120,7 +120,7 @@ struct ReceiverWorker::Impl {
         if(!provider.random(source.stream.connection.data(),source.stream.connection.size(),provider.context)||!nonzero(source.stream.connection)){
             blocked=true;notice(RuntimeState::SourceRefused,RuntimeReason::RandomRefused);return false;}
         stream_bridge::ControlRequest config{};config.explicitlyEnabled=true;config.role=stream_bridge::Role::Receiver;
-        config.offered=config.required=stream_bridge::KnownCapabilities;
+        config.offered=stream_bridge::KnownCapabilities;config.required=stream_bridge::NativeRequiredCapabilities;
         config.nativeAccessUnitCapacity=static_cast<std::uint32_t>(std::min<std::size_t>(fact.bufferCapacity,MaxCodedBytes));
         config.buildId=request.buildId;config.pairingsDirectory=request.pairingsDirectory;
         config.address=request.producerAddress;config.port=request.producerPort;config.video=source.stream;

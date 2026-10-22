@@ -18,7 +18,7 @@ unsigned little-endian. Its dedicated `user_data_unregistered` SEI UUID is
 |---:|---:|---|
 | 0 | 4 | ASCII `SFV1` |
 | 4 | 1 | Version 1 |
-| 5 | 1 | Coverage encoding: None 0, Raw 1, RLE 2, RLE+LZ4 3 |
+| 5 | 1 | Coverage encoding: None 0, Raw 1, RLE 2, RLE+LZ4 3, optional RLE+Zstd 4 |
 | 6 | 2 | Header length 176 |
 | 8 | 16 | Authenticated pair identity |
 | 24 | 16 | Current session binding |
@@ -83,3 +83,21 @@ never chooses an earlier or latest mask. The decoder handoff, camera grant and
 native submit checks remain independent. See the
 [continuity record](../development/FRAME-CONTINUITY.md) for publication order,
 failure handling, measured runs and hardware limits.
+
+## Optional RLE/Zstd encoding 4
+
+Bit64 must be mutually negotiated before an opt-in v2 producer uses encoding4.
+The four-byte little-endian prefix is the exact RLE byte count, followed by one
+independent Zstandard 1.5.7 frame. Its content size must equal the prefix; no
+external dictionary, trailing data, skippable or concatenated frames are allowed.
+The RLE uses the existing count/value pairs and reconstructs exactly the signed
+coded extent, preserving all 256 transmittance values. Existing binding, MAC,
+coverage hash and exact video/frame/eye/selected-image checks are unchanged.
+
+The encoder tries this mode only for RLE up to 1MiB when the existing winning
+payload is at least 4096 bytes; the complete new payload must be strictly smaller.
+Otherwise the exact old representation wins. The decoder also enforces the 1MiB
+RLE ceiling before allocation. Compression is level1, independent per frame,
+without temporal prediction or an inter-frame dictionary. One-shot decompression
+uses bounded context storage and the descriptor-bounded output allocation.
+Legacy/v1 producers keep the original selector byte-for-byte, including Gloomhaven.

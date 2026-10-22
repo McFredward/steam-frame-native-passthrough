@@ -15,7 +15,7 @@ struct FrameDescriptor {
     std::uint64_t sourceFrame=0,encoderGeneration=0;
     std::uint16_t codedWidth=0,codedHeight=0;
 };
-enum class CoverageEncoding:std::uint8_t { None=0,Raw=1,Rle=2,RleLz4=3 };
+enum class CoverageEncoding:std::uint8_t { None=0,Raw=1,Rle=2,RleLz4=3,RleZstd=4 };
 struct CertifiedAccessUnit {
     FrameDescriptor descriptor{};
     Nonce binding{};
@@ -46,7 +46,7 @@ bool encodeCoverageRle(Bytes raw,std::vector<std::uint8_t>& output);
 // New encoding is opt-in only after mutual capability negotiation. All modes
 // preserve every fractional-alpha sample; the smallest complete form wins.
 // Compression/decompression runs on cold workers, never a compositor thread.
-bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,std::vector<std::uint8_t>& output);
+bool encodeBestCoverage(Bytes raw,bool allowRleLz4,CoverageEncoding& encoding,std::vector<std::uint8_t>& output,bool allowRleZstd=false);
 bool decodeCertifiedCoverage(const CertifiedAccessUnit&,std::vector<std::uint8_t>& output);
 bool decodeCertifiedCoverage(const CertifiedAccessUnit&,std::vector<std::uint8_t>& output,CoverageRange&);
 } // namespace stream_bridge
