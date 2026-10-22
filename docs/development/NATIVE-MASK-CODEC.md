@@ -107,3 +107,31 @@ native workflow stalled while installing apt dependencies. Its full local180-tes
 counterpart passed; do not label the hosted workflow successful from that result.
 The setup workflow's individual job steps completed successfully while its API
 still reported in_progress. Hardware verification remains false.
+
+## October22 regression: wrapper and pre-main worker lifetime
+
+The18:37 capture on PC0.2.20/Frame0.2.16 entered camera-only recovery on the
+first exact source. The real Vulkan wrapper still required a mask descriptor
+whenever control set2 was present. Its own rejection marked device tracking lost,
+which removed the admitted renderer and closed the local receiver channel at
+18:37:54. The game later correctly reported no operational companion. This was
+an integration bug missed by the isolated Renderer/Pool and offscreen GPU tests.
+The new wrapper regression fails on the shipped code, checks indexed/ordinary
+native draws with only set2, original pipeline restoration and subsequent exact
+set1/set2 recovery. Negative controls reinstate the erroneous mask requirement
+and bind a null recovery mask; each must fail its intended assertion. Incomplete
+controlled draws still refuse the optional route.
+
+The same capture also records a shutdown SEGV in ReceiverWorker::stop while the
+main thread frees receiver state. A real process-entry fixture starts the worker
+in constructor priority200, before ordinary TU initialization; the old global
+worker/thread ownership reproducibly segfaults. Worker ownership, condition
+variable and synchronization now initialize together on first use. An ordered
+exit guard joins the worker before deleting it/restoring imports. One bounded
+process-lifetime control object remains valid for late native wake callbacks.
+The fixture also exercises16 explicit stop/restart cycles and automatic exit.
+
+Frame0.2.17 contains both corrections. PC remains byte-identical at0.2.20; no
+codec, coverage precision, native shader output or game-specific route changes.
+Installer0.2.21 carries the new Frame artifact. No device write/restart was
+performed during investigation; headset verification remains pending.

@@ -74,6 +74,13 @@ if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test(NAME stream_bridge_control COMMAND test_stream_bridge_control)
     endif()
 
+    add_executable(test_stream_bridge_receiver_lifetime
+        tests/stream-bridge-receiver-lifetime/fixture.cpp receiver/stream_bridge_native_runtime.cpp)
+    target_link_libraries(test_stream_bridge_receiver_lifetime PRIVATE sfnp_stream_bridge_control)
+    target_compile_options(test_stream_bridge_receiver_lifetime PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    if(NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME stream_bridge_receiver_lifetime COMMAND test_stream_bridge_receiver_lifetime)
+    endif()
     add_executable(test_stream_bridge_native_runtime
         tests/stream_bridge_native_runtime_test.cpp
         receiver/stream_bridge_native_runtime.cpp receiver/stream_bridge_native_decode.cpp

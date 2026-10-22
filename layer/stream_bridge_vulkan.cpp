@@ -221,8 +221,9 @@ VKAPI_ATTR void VKAPI_CALL cmdBindPipeline(VkCommandBuffer command,VkPipelineBin
 VKAPI_ATTR void VKAPI_CALL cmdBindDescriptorSets(VkCommandBuffer command,VkPipelineBindPoint point,VkPipelineLayout layout,uint32_t first,uint32_t count,const VkDescriptorSet* sets,uint32_t dynamicCount,const uint32_t* offsets){auto* d=device(command);d->renderer.setsBound(command,point,first,count,sets,dynamicCount);d->CmdBindDescriptorSets(command,point,layout,first,count,sets,dynamicCount,offsets);}
 bool bindDraw(Device& d,VkCommandBuffer command,const sbg::Draw& draw){
     if(!d.tracking.load(std::memory_order_acquire)||!draw.ready)return false;
+    // Camera-only recovery owns control set2 and intentionally has no mask set1.
     const bool coverage=draw.coverage||draw.control;
-    if(!draw.original||!draw.replacement||(coverage&&(!draw.layout||!draw.coverage||!draw.control))){lost(d);return false;}
+    if(!draw.original||!draw.replacement||(coverage&&(!draw.layout||!draw.control))){lost(d);return false;}
     d.CmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.replacement);
     if(coverage){
         if(draw.coverage)d.CmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.layout,1,1,&draw.coverage,0,nullptr);

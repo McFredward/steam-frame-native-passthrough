@@ -73,6 +73,20 @@ class Wrapper(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(expected, result.stdout)
 
+    def test_camera_only_causal_controls(self):
+        controls = [
+            ("mask-required-for-recovery", "(coverage&&(!draw.layout||!draw.control))", "(coverage&&(!draw.layout||!draw.coverage||!draw.control))",
+             "camera-only companion without mask preserves device tracking"),
+            ("bind-absent-recovery-mask", "if(draw.coverage)d.CmdBindDescriptorSets", "d.CmdBindDescriptorSets",
+             "camera-only draw binds control set2 and never an absent mask set1"),
+        ]
+        for name, old, new, expected in controls:
+            with self.subTest(control=name):
+                self.assertEqual(self.source.count(old), 1)
+                result = self.run_fixture(self.build(name, self.source.replace(old, new)))
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(expected, result.stdout)
+
     def test_destroy_dispatch_causal_control(self):
         old = "owned=remove(r.devices,dispatch);"
         self.assertEqual(self.source.count(old), 1)

@@ -394,9 +394,26 @@ void ReceiverWorker::stop() noexcept{
 RuntimeNotice ReceiverWorker::status()const noexcept{return impl_->current;}
 bool ReceiverWorker::immediateWorkPending()const noexcept{return impl_->enabled&&impl_->backlog;}
 namespace {
-std::mutex lifetime;std::unique_ptr<ReceiverWorker> worker;std::thread thread;
-std::atomic<bool> running{false};std::atomic<std::uint64_t> wakeGeneration{0};std::condition_variable wake;std::mutex sleepMutex;
-struct StopAtExit {~StopAtExit(){stopPinnedReceiver();}} stopAtExit;
+struct PinnedLifetime {
+    std::mutex gate;std::unique_ptr<ReceiverWorker> worker;std::thread thread;
+    std::atomic<bool> running{false};std::atomic<std::uint64_t> wakeGeneration{0};
+    std::condition_variable wake;std::mutex sleepMutex;
+    void stop() noexcept {
+        std::lock_guard<std::mutex> lock(gate);running.store(false,std::memory_order_release);wake.notify_all();
+        if(thread.joinable())thread.join();
+        worker.reset();restorePinnedDecodeImports();
+    }
+};
+PinnedLifetime* lifetimeState() noexcept {
+    // The installed pre-main constructor can run before other TU initializers.
+    // Construct all worker ownership and synchronization together on first use.
+    // Keep this one bounded control object alive for late native wake callbacks;
+    // the exit guard joins/deletes the worker before restoring native imports.
+    static auto* const state=[]() noexcept -> PinnedLifetime* {try{return new PinnedLifetime;}catch(...){return nullptr;}}();
+    struct Exit {PinnedLifetime* state;~Exit(){if(state)state->stop();}};
+    static Exit exit{state};
+    return state;
+}
 bool poll(Observation& out,std::uint8_t* bytes,std::size_t n,void*) noexcept{return pollPinnedProcess(out,bytes,n);}
 bool capture(CaptureObservation& out,void*) noexcept{return pollPinnedCapture(out);}
 SnapshotStats stats(void*) noexcept{return pinnedSnapshotStats();}
@@ -405,34 +422,30 @@ bool random(void* out,std::size_t n,void*) noexcept{return stream_bridge::bridge
 void observed(void*) noexcept{wakePinnedReceiver();}
 }
 void wakePinnedReceiver() noexcept{
-    // This mutex protects only the condition-variable check/enqueue boundary,
-    // never worker processing or provider/control state. Publishing without it
-    // can lose notify between a false predicate and entering the wait.
-    {std::lock_guard<std::mutex> lock(sleepMutex);wakeGeneration.fetch_add(1,std::memory_order_release);}
-    wake.notify_one();
+    auto* state=lifetimeState();if(!state)return;
+    // Pair notification with the worker's check/enqueue boundary, not its work.
+    {std::lock_guard<std::mutex> lock(state->sleepMutex);state->wakeGeneration.fetch_add(1,std::memory_order_release);}
+    state->wake.notify_one();
 }
 bool startPinnedReceiver(const RuntimeRequest& request) noexcept{
     if(!request.explicitlyEnabled)return true;
-    std::lock_guard<std::mutex> lock(lifetime);if(running.load(std::memory_order_acquire))return false;
+    auto* state=lifetimeState();if(!state)return false;
+    std::lock_guard<std::mutex> lock(state->gate);if(state->running.load(std::memory_order_acquire))return false;
     try{
         auto candidate=std::make_unique<ReceiverWorker>();
         if(!candidate->prepare(request,{poll,capture,stats,random,nullptr,nullptr,currentCapture})||!publishPinnedDecodeImports())return false;
         if(!setPinnedObservationWake(observed,nullptr)){restorePinnedDecodeImports();return false;}
-        worker=std::move(candidate);running.store(true,std::memory_order_release);
-        try{thread=std::thread([]{while(running.load(std::memory_order_acquire)){
-            const auto generation=wakeGeneration.load(std::memory_order_acquire);
-            worker->tick();if(worker->immediateWorkPending())continue;
-            std::unique_lock<std::mutex> lock(sleepMutex);
-            wake.wait_for(lock,std::chrono::milliseconds(2),[generation]{return !running.load(std::memory_order_acquire)||wakeGeneration.load(std::memory_order_acquire)!=generation;});}
-            worker->stop();});}
-        catch(...){running.store(false,std::memory_order_release);worker.reset();restorePinnedDecodeImports();return false;}
+        state->worker=std::move(candidate);state->running.store(true,std::memory_order_release);
+        try{state->thread=std::thread([state]{while(state->running.load(std::memory_order_acquire)){
+            const auto generation=state->wakeGeneration.load(std::memory_order_acquire);
+            state->worker->tick();if(state->worker->immediateWorkPending())continue;
+            std::unique_lock<std::mutex> lock(state->sleepMutex);
+            state->wake.wait_for(lock,std::chrono::milliseconds(2),[state,generation]{return !state->running.load(std::memory_order_acquire)||state->wakeGeneration.load(std::memory_order_acquire)!=generation;});}
+            state->worker->stop();});}
+        catch(...){state->running.store(false,std::memory_order_release);state->worker.reset();restorePinnedDecodeImports();return false;}
         return true;
     }catch(...){return false;}
 }
-void stopPinnedReceiver() noexcept{
-    std::lock_guard<std::mutex> lock(lifetime);running.store(false,std::memory_order_release);wake.notify_all();
-    if(thread.joinable()){thread.join();}
-    worker.reset();restorePinnedDecodeImports();
-}
-bool pinnedReceiverRunning() noexcept{return running.load(std::memory_order_acquire);}
+void stopPinnedReceiver() noexcept{if(auto* state=lifetimeState())state->stop();}
+bool pinnedReceiverRunning() noexcept{const auto* state=lifetimeState();return state&&state->running.load(std::memory_order_acquire);}
 }

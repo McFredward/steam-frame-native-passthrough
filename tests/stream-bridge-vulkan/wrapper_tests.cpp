@@ -153,6 +153,18 @@ int main(){
  VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};deviceInfo.pNext=&link;VkDevice unused{};
  auto physical=dispatchable<VkPhysicalDevice>(key(i));const auto createsBefore=nativeCreateDevices;
  check(createDevice(physical,&deviceInfo,nullptr,&unused)==VK_ERROR_OUT_OF_HOST_MEMORY&&nativeCreateDevices==createsBefore,"owned constructor exception cannot escape the Vulkan ABI or create an orphan device");state.throwConstructor=false;destroyDispatch(physical);
+ // Recovery intentionally has no mask set. It must not poison the device
+ // before the real game has supplied its first exact image.
+ d=makeDevice(i);p=makePool(d);cb=makeCommand(d,p);check(beginCommandBuffer(cb,&begin)==VK_SUCCESS,"camera-only wrapper control begins a real admitted command");
+ const auto recoveryLost=state.lost,recoveryDraws=nativeDraws;const auto recoverySets=sets.size(),recoveryBinds=binds.size();
+ sbg::fixtureDraw={scalar<VkPipeline>(10),scalar<VkPipeline>(21),scalar<VkPipelineLayout>(30),VK_NULL_HANDLE,scalar<VkDescriptorSet>(50),true};
+ cmdDraw(cb,3,1,0,0);cmdDrawIndexed(cb,3,1,0,0,0);
+ check(state.lost==recoveryLost&&nativeDraws==recoveryDraws+2,"camera-only companion without mask preserves device tracking and forwards both native draw forms");
+ check(binds.size()==recoveryBinds+4&&binds[recoveryBinds]==scalar<VkPipeline>(21)&&binds[recoveryBinds+1]==scalar<VkPipeline>(10)&&binds[recoveryBinds+2]==scalar<VkPipeline>(21)&&binds[recoveryBinds+3]==scalar<VkPipeline>(10),"camera-only draw restores the exact original pipeline for both draw forms");
+ check(sets.size()==recoverySets+2&&sets[recoverySets]==2&&sets[recoverySets+1]==2,"camera-only draw binds control set2 and never an absent mask set1");
+ sbg::fixtureDraw=coverageDraw;cmdDraw(cb,3,1,0,0);
+ check(state.lost==recoveryLost&&nativeDraws==recoveryDraws+3&&sets[sets.size()-2]==1&&sets.back()==2,"fresh exact game data resumes normal mask/control binding after camera-only recovery");
+ destroyCommandPool(d,p,nullptr);destroyDevice(d,nullptr);
  auto instanceKey=key(i);destroyInstance(i,nullptr);check(nativeDestroyInstances==1&&!lookup<Instance>(registry().instances,instanceKey),"instance destroy never dereferences freed native handle");
  for(auto handle:allocatedHandles)destroyDispatch(handle);
  std::printf("%u Vulkan wrapper checks passed\n",checks);
