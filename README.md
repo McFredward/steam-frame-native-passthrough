@@ -81,9 +81,15 @@ until setup finishes.
 Start your Steam Link stream and enable native Steam Link passthrough in the game.
 Run the same command again to **update, uninstall or restore the previous setup**.
 
+## Developers
+
+To integrate another game, start with the [integration guide](docs/development/GAME-INTEGRATION.md)
+and [lessons learned](docs/development/INTEGRATION-LESSONS.md).
+See the [developer documentation](docs/DEVELOPING.md) for architecture, protocols and build/test instructions.
+
 ## Credits
 
-Based on [Jake Lurie's steam-frame-chroma-key](https://github.com/spyjacob/steam-frame-chroma-key).
+Based on [spyjacob's steam-frame-chroma-key](https://github.com/spyjacob/steam-frame-chroma-key).
 Its history and [MIT license](LICENSE) are preserved; native transparency is
 developed here by McFredward and contributors.
 
