@@ -1,5 +1,23 @@
 # Production process and artifact boundaries
 
+## Current recovery and ordinary-picture additions
+
+The fixture also exercises signed camera-recovery policies through actual
+Process instances. Active MR recovery keeps the camera warm during decoded
+None/game-data gaps; explicit withdrawal and genuine local channel loss remain
+independent revocations. Decoder renewal invalidates old image/mask proof.
+
+Negotiated policy3 is retained from the authenticated certificate and joined
+only to its exact decoded-image lease. It authorizes ordinary desktop/video
+without mask publication, while keeping recovery intent active. Future desktop
+metadata, different content and stale leases cannot reclassify a selected game
+image. Desktop-to-game return again requires exact game coverage. These cases
+are part of the normal runner, including sanitized execution; they do not add
+a game-name exception. See [desktop recovery](../../docs/development/DESKTOP-RECOVERY.md).
+
+The earlier camera-demand controls below still cover decoded-picture lifetime;
+None without active recovery intent is distinct from a signed active-MR gap.
+
 `run.py` exercises the actual process worker cycle and its authenticated local
 image-route lifecycle. It does not start the background worker or a Steam process.
 

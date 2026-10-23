@@ -81,9 +81,15 @@ und lass sie bis zum Abschluss eingeschaltet.
 Starte deinen Steam-Link-Stream und aktiviere natives Steam-Link-Passthrough im Spiel.
 Dieselbe Zeile bietet später **Update, Deinstallation oder Rücknahme** an.
 
+## Für Entwickler
+
+Für die Integration weiterer Spiele gibt es einen [Leitfaden](docs/development/GAME-INTEGRATION.md)
+und [Erkenntnisse und Stolperfallen](docs/development/INTEGRATION-LESSONS.md).
+Die [Entwicklerdokumentation](docs/DEVELOPING.md) beschreibt Architektur, Protokolle sowie Build und Tests.
+
 ## Credits
 
-Auf Grundlage von [Jake Luries steam-frame-chroma-key](https://github.com/spyjacob/steam-frame-chroma-key).
+Auf Grundlage von [spyjacobs steam-frame-chroma-key](https://github.com/spyjacob/steam-frame-chroma-key).
 Die Vorgeschichte und [MIT-Lizenz](LICENSE) bleiben erhalten; native Transparenz
 wird hier von McFredward und Mitwirkenden entwickelt.
 

@@ -1,5 +1,9 @@
 # Working on Steam Link Native Passthrough
 
+- For a new game, start with `docs/DEVELOPING.md`, then
+  `docs/development/GAME-INTEGRATION.md` and `INTEGRATION-LESSONS.md` in that
+  directory. They describe the current ordinary-RGBA route and an agent handoff.
+  Dated investigations and atlas experiments are historical evidence.
 - Integrate and push only on `dev`. The maintainer's 2026-10-19 blackout-test
   instruction supersedes the previous publication authorization: do not update
   `main` until the maintainer explicitly approves another release. Keep upstream
@@ -34,7 +38,8 @@
   or the requirement to restore a running original Frame when Undo is selected.
 - A mask belongs to one source session, video frame, eye and extent. A compositor
   submit counter, approximate timestamp or latest received mask is not proof of
-  that association. Missing/invalid associations must retain opaque rendering.
+  that association. Missing/invalid associations never grant game composition;
+  the active-MR recovery rule below determines camera-only versus ordinary output.
 - The maintainer's 2026-10-22 ruling supersedes opaque recovery for an active,
   authenticated explicit-passthrough source: keep live camera-only output during
   missing/invalid game data or decoder recovery, and resume game rendering only
@@ -56,14 +61,17 @@
   frame's exact coverage mandatory. Routine mutex contention, snapshot bursts
   or known individual gaps must not repeatedly reset the whole paired session
   or make normal gameplay flash opaque. Fix availability/ownership rather than
-  substituting stale masks or weakening unknown-loss/frame/eye proof. A genuine
-  unscoped proof or connection failure retains the emergency opaque path.
+  substituting stale masks or weakening unknown-loss/frame/eye proof. The
+  camera-only rule above supersedes historical opaque recovery for an active
+  authenticated MR source. Connection/camera-grant loss cannot borrow an old
+  mask or stale camera authority.
 - Keep semantic versions and per-PC/Frame installation status, but do not create
   separate version-tagged GitHub Releases for routine candidates (2026-10-19).
-  Publish the stable repository installation line in both READMEs. The previous
-  release download channels are no longer present: deliver the validated archive
-  from an immutable repository commit with exact size/SHA256 in the bootstrap,
-  without recreating GitHub Releases.
+  Publish the stable repository installation line in both READMEs. Deliver the
+  validated archive from an immutable repository commit with exact size/SHA256
+  in the bootstrap; the installer does not depend on GitHub Releases. The
+  maintainer explicitly requested stable release 0.2.22 on 2026-10-22. That does
+  not authorize future releases or routine candidate tags without a new request.
 - The maintainer's 2026-10-21 PC-only update instruction requires unchanged
   Frame components, settings and services to remain untouched. Such an update,
   its failure recovery and interrupted-run continuation must not restart the

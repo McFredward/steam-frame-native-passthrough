@@ -1,10 +1,12 @@
 # Setup and recovery reference
 
 User installation is described in the [README](../README.md#installation).
-This reference documents setup operations and recovery for the current route: an **experimental paired PC and
-Frame companion**, carrying transparency alongside the original colour video.
-Final headset sharpness and simultaneous game/menu composition are still being
-validated. The former [Frame-only atlas receiver](history/ATLAS-RECEIVER.md) is
+This reference documents setup operations and recovery for the current paired
+PC and Frame companions, carrying transparency alongside original colour video.
+The October22 stable release and confirmed desktop/game observations are in
+[current compatibility](COMPATIBILITY.md#current-evidence). A controlled sharpness
+benchmark and new runtime/game tests remain separate. The former
+[Frame-only atlas receiver](history/ATLAS-RECEIVER.md) is
 retired; archived downloads are not an alternative installation route.
 
 ## Before you begin
@@ -12,11 +14,11 @@ retired; archived downloads are not an alternative installation route.
 - The tested Frame runtime is **SteamVR 2.18.2, build 1791331621**. Other runtime
   versions can be installed after a separate warning and confirmation. The patch
   is enabled for testing after that confirmation; compatibility is not guaranteed.
-- The installable sender preview requires **Windows, NVIDIA and HEVC**. Other
+- The installable sender requires **Windows, NVIDIA and HEVC**. Other
   codecs are not admitted for paired passthrough. Linux can inspect the setup
   and maintain the Frame; installing a native Linux sender is not supported yet.
   A Windows game running through Proton still uses a Linux SteamVR driver host.
-- Your game needs an integration explicitly supporting this preview. See the
+- Your game needs an integration explicitly supporting this route. See the
   [supported-games table](../README.md#supported-games); an old game-side
   integration cannot be upgraded by installing the companions alone.
 - Keep the Frame awake, connected to the same network, and stop the VR stream.
@@ -101,7 +103,7 @@ Run the same command again. The assistant inspects the current files and offers
 appropriate actions, including **Update**, **Repair**, **Uninstall** and
 **Restore previous setup** (Undo). A current installation needs no changes.
 
-Installer0.2.15 compares the complete Frame component independently of the
+The installer compares the complete Frame component independently of the
 whole download's hash. A different PC patch or installer version does not make
 unchanged Frame files stale. A changed Frame version/payload, damaged installed
 files, pending Frame recovery, changed runtime configuration, or a changed
@@ -112,8 +114,9 @@ Failure recovery and continuation after Ctrl+C restore/retry only the PC. They
 never enter Frame preparation, camera-setting, service-restart or Frame-journal
 cleanup operations. If only finalization remains, Retry clears the remaining
 PC records without replaying the update. Ctrl+C keeps these records until a
-later deliberate action. These are installer changes; PC0.2.13 and Frame0.2.12
-remain the exact same native artifacts, including Gloomhaven's working path.
+later deliberate action. An installer-only change does not invent a new native
+patch version; current target versions come from `VERSION` and
+`PATCH_VERSIONS.json`. Existing games keep their native source/rendering contracts.
 Changed or unknown files are preserved rather than silently replaced.
 The installer has its own version, separate from the PC and Frame patch versions.
 Updating only the installer does not propose reinstalling already-current patches.
